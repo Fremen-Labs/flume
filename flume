@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Flume CLI — Control the dashboard service
+#
+# Usage:
+#   flume start    — Start dashboard in background
+#   flume stop     — Stop dashboard
+#   flume restart  — Restart dashboard
+#   flume status   — Show dashboard status
+#   flume enable   — Start dashboard on login
+#   flume disable  — Don't start on login
+#   flume logs     — Tail dashboard logs
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLUME_ROOT="${SCRIPT_DIR}"
+SERVICE_NAME="flume-dashboard"
+UNIT_FILE="${HOME}/.config/systemd/user/${SERVICE_NAME}.service"
+
+# Detect layout
+if [ -f "${FLUME_ROOT}/install/setup/install-flume-service.sh" ]; then
+    INSTALL_SCRIPT="${FLUME_ROOT}/install/setup/install-flume-service.sh"
+elif [ -f "${FLUME_ROOT}/setup/install-flume-service.sh" ]; then
+    INSTALL_SCRIPT="${FLUME_ROOT}/setup/install-flume-service.sh"
+else
+    INSTALL_SCRIPT=""
+fi
+
+ensure_service_installed() {
+    if [ ! -f "${UNIT_FILE}" ] && [ -n "${INSTALL_SCRIPT}" ]; then
+        echo "Installing Flume dashboard service..."
+        bash "${INSTALL_SCRIPT}"
+        systemctl --user daemon-reload
+    fi
+}
+
+cmd_start() {
+    ensure_service_installed
+    if [ ! -f "${UNIT_FILE}" ]; then
+        echo "Error: Service not installed. Run setup.sh first."
+        exit 1
+    fi
+    systemctl --user daemon-reload
+    systemctl --user start "${SERVICE_NAME}"
+    echo "Flume dashboard started."
+    DASHBOARD_PORT=$(grep -E '^DASHBOARD_PORT=' "${FLUME_ROOT}/.env" 2>/dev/null | cut -d= -f2- || echo "8765")
+    echo "Open http://localhost:${DASHBOARD_PORT}"
+}
+
+cmd_stop() {
+    systemctl --user stop "${SERVICE_NAME}" 2>/dev/null || true
+    echo "Flume dashboard stopped."
+}
+
+cmd_restart() {
+    ensure_service_installed
+    systemctl --user daemon-reload
+    systemctl --user restart "${SERVICE_NAME}" 2>/dev/null || systemctl --user start "${SERVICE_NAME}"
+    echo "Flume dashboard restarted."
+}
+
+cmd_status() {
+    if [ ! -f "${UNIT_FILE}" ]; then
+        echo "Service not installed. Run: ./flume start (or setup.sh)"
+        exit 0
+    fi
+    systemctl --user status "${SERVICE_NAME}" 2>/dev/null || true
+}
+
+cmd_enable() {
+    ensure_service_installed
+    systemctl --user enable "${SERVICE_NAME}"
+    echo "Flume dashboard will start on login."
+}
+
+cmd_disable() {
+    systemctl --user disable "${SERVICE_NAME}" 2>/dev/null || true
+    echo "Flume dashboard will not start on login."
+}
+
+cmd_logs() {
+    journalctl --user -u "${SERVICE_NAME}" -f "${@}"
+}
+
+cmd_help() {
+    echo "Flume CLI — Control the dashboard service"
+    echo ""
+    echo "Usage: flume <command>"
+    echo ""
+    echo "Commands:"
+    echo "  start     Start dashboard in background"
+    echo "  stop      Stop dashboard"
+    echo "  restart   Restart dashboard"
+    echo "  status    Show dashboard status"
+    echo "  enable    Start dashboard automatically on login"
+    echo "  disable   Don't start dashboard on login"
+    echo "  logs      Tail dashboard logs (journalctl -f)"
+    echo ""
+}
+
+case "${1:-help}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    status)  cmd_status ;;
+    enable)  cmd_enable ;;
+    disable) cmd_disable ;;
+    logs)    shift; cmd_logs "$@" ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "Unknown command: $1"
+        cmd_help
+        exit 1
+        ;;
+esac

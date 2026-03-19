@@ -303,6 +303,16 @@ fi
 chmod +x "${WORKSPACE}/dashboard/run.sh" 2>/dev/null || true
 chmod +x "${WORKSPACE}/worker-manager/run.sh" 2>/dev/null || true
 
+# Install flume CLI and dashboard service (if flume script exists at root)
+SERVICE_INSTALLER=""
+[ -f "${SCRIPT_DIR}/setup/install-flume-service.sh" ] && SERVICE_INSTALLER="${SCRIPT_DIR}/setup/install-flume-service.sh"
+[ -z "${SERVICE_INSTALLER}" ] && [ -f "${WORKSPACE_ROOT}/setup/install-flume-service.sh" ] && SERVICE_INSTALLER="${WORKSPACE_ROOT}/setup/install-flume-service.sh"
+if [ -f "${WORKSPACE_ROOT}/flume" ] && [ -n "${SERVICE_INSTALLER}" ]; then
+    chmod +x "${WORKSPACE_ROOT}/flume" 2>/dev/null || true
+    bash "${SERVICE_INSTALLER}" 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+fi
+
 echo ""
 echo -e "${GREEN}Workspace ready.${NC}"
 
@@ -332,9 +342,17 @@ else
     WORKERS_CMD="bash worker-manager/run.sh # or bash src/worker-manager/run.sh"
 fi
 
-echo -e "${BOLD}Start the dashboard:${NC}"
+echo -e "${BOLD}Start the dashboard (background service):${NC}"
 echo "  cd ${WORKSPACE_ROOT}"
+echo "  ./flume start"
+echo ""
+echo -e "${BOLD}Or run in foreground:${NC}"
 echo "  ${DASHBOARD_CMD}"
+echo ""
+echo -e "${BOLD}Control the service:${NC}"
+echo "  ./flume stop     # Stop dashboard"
+echo "  ./flume restart  # Restart dashboard"
+echo "  ./flume status   # Check status"
 echo ""
 echo -e "${BOLD}Then open in your browser:${NC}"
 echo "  http://${DISPLAY_HOST}:${DASHBOARD_PORT_VAL:-8765}"

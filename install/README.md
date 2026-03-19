@@ -26,19 +26,28 @@ Path note:
 - Package: commands use `dashboard/run.sh` and `worker-manager/run.sh`.
 - Git clone: use `src/dashboard/run.sh` and `src/worker-manager/run.sh`.
 
-### After setup — start Flume
+### After setup — dashboard runs automatically
+
+`setup.sh` installs and starts the dashboard as a background service. Control it with the **flume** CLI:
 
 ```bash
-# Package:          Git clone:
-bash dashboard/run.sh     bash src/dashboard/run.sh
+./flume start     # Start dashboard in background
+./flume stop      # Stop dashboard
+./flume restart   # Restart dashboard
+./flume status    # Check status
+./flume logs      # View logs
+./flume enable    # Start on login
+./flume disable   # Don't start on login
 ```
 
-Open `http://<your-host>:8765`, then in another terminal:
+Open `http://<your-host>:8765`. Start workers in another terminal:
 
 ```bash
 # Package:                    Git clone:
 bash worker-manager/run.sh     bash src/worker-manager/run.sh
 ```
+
+Or run the dashboard in foreground: `bash dashboard/run.sh` (package) or `bash src/dashboard/run.sh` (git clone).
 
 ---
 

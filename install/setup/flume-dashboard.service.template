@@ -1,0 +1,13 @@
+[Unit]
+Description=Flume Dashboard
+After=network.target elasticsearch.service
+
+[Service]
+Type=simple
+WorkingDirectory=__FLUME_ROOT__
+ExecStart=__DASHBOARD_SCRIPT__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

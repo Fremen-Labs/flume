@@ -78,6 +78,34 @@ if [ -f "${ENV_FILE}" ] && [ -n "${BOOTSTRAP_SCRIPT}" ]; then
     fi
 fi
 
+# Install and start dashboard as background service
+if [ -f "flume" ]; then
+    chmod +x flume 2>/dev/null || true
+    if [ -f "install/setup/install-flume-service.sh" ]; then
+        echo ""
+        echo "Installing dashboard service..."
+        bash install/setup/install-flume-service.sh
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo ""
+        echo "Starting dashboard in background..."
+        ./flume start 2>/dev/null || bash flume start
+    elif [ -f "setup/install-flume-service.sh" ]; then
+        echo ""
+        echo "Installing dashboard service..."
+        bash setup/install-flume-service.sh
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo ""
+        echo "Starting dashboard in background..."
+        ./flume start 2>/dev/null || bash flume start
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}${BOLD}Setup complete.${NC}"
+echo ""
+echo "Dashboard is running in the background. Use the flume CLI to control it:"
+echo "  ./flume status   — Check status"
+echo "  ./flume stop     — Stop dashboard"
+echo "  ./flume restart  — Restart dashboard"
+echo "  ./flume logs     — View logs"
 echo ""

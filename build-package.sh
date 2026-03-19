@@ -217,11 +217,13 @@ fi
 echo -e "${BOLD}Copying install scaffolding...${NC}"
 cp "${SCRIPT_DIR}/install/install.sh"    "${STAGE}/install.sh"
 cp "${SCRIPT_DIR}/setup.sh"              "${STAGE}/setup.sh"
+cp "${SCRIPT_DIR}/flume"                 "${STAGE}/flume"
 cp "${SCRIPT_DIR}/install/.env.template" "${STAGE}/.env.template"
 cp "${SCRIPT_DIR}/install/README.md"     "${STAGE}/README.md"
 mkdir -p "${STAGE}/setup"
 cp "${SCRIPT_DIR}/install/setup/"*.sh   "${STAGE}/setup/"
-success "install.sh, setup.sh, .env.template, README.md, setup/"
+[ -f "${SCRIPT_DIR}/install/setup/flume-dashboard.service.template" ] && cp "${SCRIPT_DIR}/install/setup/flume-dashboard.service.template" "${STAGE}/setup/"
+success "install.sh, setup.sh, flume, .env.template, README.md, setup/"
 
 # =============================================================================
 # Write clean data files (no user data, no API keys)
@@ -269,6 +271,7 @@ success "Sensitive files removed"
 echo -e "${BOLD}Setting permissions...${NC}"
 chmod +x "${STAGE}/install.sh"
 chmod +x "${STAGE}/setup.sh"
+chmod +x "${STAGE}/flume"
 chmod +x "${STAGE}/setup/"*.sh
 chmod +x "${STAGE}/dashboard/run.sh"      2>/dev/null || true
 chmod +x "${STAGE}/worker-manager/run.sh" 2>/dev/null || true

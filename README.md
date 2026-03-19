@@ -9,13 +9,18 @@ cd ~/flume
 bash setup.sh
 ```
 
-`setup.sh` installs Elasticsearch, creates `.env` with valid credentials, builds the frontend, and creates indices. Then start:
+`setup.sh` installs Elasticsearch, creates `.env` with valid credentials, builds the frontend, creates indices, and **starts the dashboard as a background service**.
 
+Control the dashboard:
 ```bash
-bash src/dashboard/run.sh
+./flume start     # Start
+./flume stop      # Stop
+./flume restart   # Restart
+./flume status    # Status
+./flume logs      # View logs
 ```
 
-Open `http://<your-host>:8765`. In another terminal:
+Open `http://<your-host>:8765`. In another terminal, start workers:
 
 ```bash
 bash src/worker-manager/run.sh
