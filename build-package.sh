@@ -64,8 +64,47 @@ success "src/worker-manager/ present"
 [ -d "${SRC}/frontend/dist" ]  || warn "src/frontend/dist/ not found — UI will not be served without rebuild"
 
 [ -f "${SCRIPT_DIR}/install/install.sh" ] || error "install/install.sh not found"
-[ -f "${SCRIPT_DIR}/install/.env.template" ] || error "install/.env.template not found (restore this file before packaging)"
 [ -f "${SCRIPT_DIR}/install/README.md" ] || error "install/README.md not found"
+if [ ! -f "${SCRIPT_DIR}/install/.env.template" ]; then
+    warn "install/.env.template not found — generating a default template"
+    cat > "${SCRIPT_DIR}/install/.env.template" << 'EOF'
+# =============================================================================
+# Flume Configuration (auto-generated fallback)
+# =============================================================================
+ES_URL=https://localhost:9200
+ES_API_KEY=AUTO_GENERATED_BY_INSTALLER
+ES_VERIFY_TLS=false
+ES_INDEX_TASKS=agent-task-records
+ES_INDEX_HANDOFFS=agent-handoff-records
+ES_INDEX_FAILURES=agent-failure-records
+ES_INDEX_PROVENANCE=agent-provenance-records
+ES_INDEX_MEMORY=agent-memory-entries
+
+DASHBOARD_HOST=0.0.0.0
+DASHBOARD_PORT=8765
+
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://localhost:11434
+LLM_API_KEY=
+OPENAI_OAUTH_STATE_FILE=.openai-oauth.json
+OPENAI_OAUTH_TOKEN_URL=https://auth.openai.com/oauth/token
+LLM_MODEL=llama3.2
+
+GH_TOKEN=
+ADO_TOKEN=
+ADO_ORG_URL=
+
+OPENBAO_ADDR=
+OPENBAO_TOKEN=
+OPENBAO_MOUNT=secret
+OPENBAO_PATH=flume
+
+GIT_USER_NAME=Flume Agent
+GIT_USER_EMAIL=agent@flume.local
+EXECUTION_HOST=localhost
+WORKER_MANAGER_POLL_SECONDS=15
+EOF
+fi
 success "install/ scaffolding present"
 
 echo ""
