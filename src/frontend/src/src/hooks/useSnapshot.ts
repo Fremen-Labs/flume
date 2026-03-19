@@ -20,7 +20,8 @@ export function useSnapshot() {
   return useQuery<Snapshot>({
     queryKey: ['snapshot'],
     queryFn: fetchSnapshot,
-    refetchInterval: 5_000,
+    refetchInterval: (query) => (query.state.status === 'error' ? false : 5_000),
     staleTime: 3_000,
+    retry: false,
   });
 }

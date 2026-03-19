@@ -51,35 +51,91 @@ else
     exit 1
 fi
 
-# Fallback: if ES credentials still missing (e.g. password reset failed), run interactive bootstrap
+# =============================================================================
+# Ensure ES credentials (baked in — setup must not complete without valid ES)
+# =============================================================================
+es_credentials_valid() {
+    [ -f "${ENV_FILE}" ] || return 1
+    local key
+    key=$(grep -E '^ES_API_KEY=' "${ENV_FILE}" | cut -d= -f2- || true)
+    [ -n "${key}" ] && [ "${key}" != "AUTO_GENERATED_BY_INSTALLER" ]
+}
+
+ES_INSTALL_SCRIPT=""
 BOOTSTRAP_SCRIPT=""
 CREATE_INDICES_SCRIPT=""
-if [ -f "install/setup/bootstrap-es-credentials.sh" ]; then
+if [ -f "install/setup/install-elasticsearch.sh" ]; then
+    ES_INSTALL_SCRIPT="install/setup/install-elasticsearch.sh"
     BOOTSTRAP_SCRIPT="install/setup/bootstrap-es-credentials.sh"
     CREATE_INDICES_SCRIPT="install/setup/create-es-indices.sh"
-elif [ -f "setup/bootstrap-es-credentials.sh" ]; then
+    BOOTSTRAP_FILE="install/.es-bootstrap.env"
+elif [ -f "setup/install-elasticsearch.sh" ]; then
+    ES_INSTALL_SCRIPT="setup/install-elasticsearch.sh"
     BOOTSTRAP_SCRIPT="setup/bootstrap-es-credentials.sh"
     CREATE_INDICES_SCRIPT="setup/create-es-indices.sh"
-fi
-if [ -f "${ENV_FILE}" ] && [ -n "${BOOTSTRAP_SCRIPT}" ]; then
-    ES_KEY=$(grep -E '^ES_API_KEY=' "${ENV_FILE}" | cut -d= -f2- || true)
-    if [ -z "${ES_KEY}" ] || [ "${ES_KEY}" = "AUTO_GENERATED_BY_INSTALLER" ]; then
-        if curl -sk "https://localhost:9200/" &>/dev/null && [ -t 0 ]; then
-            echo ""
-            echo -e "${YELLOW}Elasticsearch credentials could not be auto-generated.${NC}"
-            echo "Enter the 'elastic' superuser password to generate an API key:"
-            echo ""
-            if bash "${BOOTSTRAP_SCRIPT}"; then
-                echo ""
-                echo "Creating Elasticsearch indices..."
-                ENV_FILE="${ENV_FILE}" bash "${CREATE_INDICES_SCRIPT}" || true
-            fi
-        fi
-    fi
+    BOOTSTRAP_FILE=".es-bootstrap.env"
 fi
 
-# Install and start dashboard as background service
-if [ -f "flume" ]; then
+while ! es_credentials_valid; do
+    if ! curl -sk "https://localhost:9200/" &>/dev/null; then
+        echo ""
+        echo -e "${YELLOW}Elasticsearch is not running. Start it and re-run setup.sh${NC}"
+        exit 1
+    fi
+    if [ -z "${ES_INSTALL_SCRIPT}" ]; then
+        echo ""
+        echo -e "${YELLOW}ES credentials missing and no installer found.${NC}"
+        exit 1
+    fi
+    echo ""
+    echo -e "${YELLOW}Ensuring Elasticsearch credentials...${NC}"
+    # Try install-elasticsearch (generates key via batch password reset)
+    sudo bash "${ES_INSTALL_SCRIPT}" 2>/dev/null || bash "${ES_INSTALL_SCRIPT}" 2>/dev/null || true
+    # Apply bootstrap if it was created
+    if [ -f "${BOOTSTRAP_FILE}" ]; then
+        BOOTSTRAP_KEY=$(grep -E '^ES_API_KEY=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)
+        if [ -n "${BOOTSTRAP_KEY}" ]; then
+            if grep -qE '^ES_API_KEY=' "${ENV_FILE}" 2>/dev/null; then
+                tmp=$(mktemp)
+                while IFS= read -r line; do
+                    if [[ "$line" == ES_API_KEY=* ]]; then
+                        echo "ES_API_KEY=${BOOTSTRAP_KEY}"
+                    else
+                        echo "$line"
+                    fi
+                done < "${ENV_FILE}" > "${tmp}"
+                mv "${tmp}" "${ENV_FILE}"
+            else
+                echo "ES_API_KEY=${BOOTSTRAP_KEY}" >> "${ENV_FILE}"
+            fi
+            echo -e "${GREEN}Applied ES credentials from bootstrap.${NC}"
+            break
+        fi
+    fi
+    # Interactive bootstrap as last resort
+    if ! es_credentials_valid && [ -t 0 ] && [ -n "${BOOTSTRAP_SCRIPT}" ]; then
+        echo ""
+        echo "Enter the 'elastic' superuser password to generate an API key:"
+        ELASTIC_PASSWORD="" bash "${BOOTSTRAP_SCRIPT}" || true
+    fi
+    if ! es_credentials_valid; then
+        echo ""
+        echo -e "${YELLOW}Could not obtain ES credentials automatically.${NC}"
+        echo "Run: ELASTIC_PASSWORD=yourpassword bash ${BOOTSTRAP_SCRIPT}"
+        exit 1
+    fi
+    break
+done
+
+# Create indices if we have credentials
+if es_credentials_valid && [ -n "${CREATE_INDICES_SCRIPT}" ]; then
+    echo ""
+    echo "Creating Elasticsearch indices..."
+    ENV_FILE="${ENV_FILE}" bash "${CREATE_INDICES_SCRIPT}" 2>/dev/null || true
+fi
+
+# Install and start dashboard as background service (only if ES is configured)
+if [ -f "flume" ] && es_credentials_valid; then
     chmod +x flume 2>/dev/null || true
     if [ -f "install/setup/install-flume-service.sh" ]; then
         echo ""
