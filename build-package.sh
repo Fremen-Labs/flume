@@ -64,6 +64,8 @@ success "src/worker-manager/ present"
 [ -d "${SRC}/frontend/dist" ]  || warn "src/frontend/dist/ not found — UI will not be served without rebuild"
 
 [ -f "${SCRIPT_DIR}/install/install.sh" ] || error "install/install.sh not found"
+[ -f "${SCRIPT_DIR}/install/.env.template" ] || error "install/.env.template not found (restore this file before packaging)"
+[ -f "${SCRIPT_DIR}/install/README.md" ] || error "install/README.md not found"
 success "install/ scaffolding present"
 
 echo ""
