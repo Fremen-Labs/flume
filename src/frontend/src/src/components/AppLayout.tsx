@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { SidebarNavItem } from '@/components/SidebarNavItem';
 import { MeshBackground } from '@/components/MeshBackground';
+import { SnapshotErrorBanner } from '@/components/SnapshotErrorBanner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTheme } from '@/hooks/useTheme';
 
@@ -97,6 +98,7 @@ export function AppLayout() {
 
       {/* Main */}
       <main className="flex-1 relative z-10 overflow-auto flex flex-col">
+        <SnapshotErrorBanner />
         <div className="flex-1">
           <Outlet />
         </div>

@@ -1447,6 +1447,11 @@ def load_repos():
 
 
 def load_snapshot():
+    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+        raise RuntimeError(
+            'Elasticsearch not configured. ES_API_KEY is missing or invalid in .env. '
+            'Run: ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh'
+        )
     tasks = es_search('agent-task-records', {
         'size': 300,
         'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
@@ -1635,8 +1640,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._json_response(200, load_snapshot())
             except Exception as e:
-                # Prevent connection drops / empty responses when ES is unreachable or unauthorized.
-                self._json_response(502, {'error': str(e)[:300]})
+                err_msg = str(e)[:400]
+                self._json_response(502, {'error': err_msg, 'code': 'ES_CONNECTION'})
             return
 
         if self.path == '/api/workflow/workers':

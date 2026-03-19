@@ -3,7 +3,16 @@ import type { Snapshot } from '@/types';
 
 async function fetchSnapshot(): Promise<Snapshot> {
   const res = await fetch('/api/snapshot');
-  if (!res.ok) throw new Error(`Snapshot fetch failed: ${res.status}`);
+  if (!res.ok) {
+    let msg = `Snapshot fetch failed: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.error) msg = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
   return res.json();
 }
 
