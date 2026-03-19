@@ -12,11 +12,16 @@
 #   4. Configures elasticsearch.yml for single-node with TLS
 #   5. Enables and starts the elasticsearch systemd service
 #   6. Resets the built-in 'elastic' password
-#   7. Generates a Flume API key and prints it
+#   7. Generates a Flume API key
+#   8. Writes bootstrap credentials to .es-bootstrap.env in the workspace
 #
-# After running this script, copy the printed API key into your .env file.
+# install.sh consumes .es-bootstrap.env to configure ES automatically.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BOOTSTRAP_ENV_FILE="${WORKSPACE_ROOT}/.es-bootstrap.env"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -200,12 +205,24 @@ if [ -z "$API_KEY_ENCODED" ]; then
     echo "    -d '{\"name\":\"flume\",\"role_descriptors\":{}}'"
     echo ""
 else
+    # Persist bootstrap credentials for install.sh to consume automatically.
+    {
+        echo "ES_URL=https://localhost:9200"
+        echo "ES_API_KEY=${API_KEY_ENCODED}"
+        echo "ES_VERIFY_TLS=false"
+        echo "ES_BOOTSTRAP_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${BOOTSTRAP_ENV_FILE}"
+    chmod 600 "${BOOTSTRAP_ENV_FILE}" 2>/dev/null || true
+
     echo ""
     echo "========================================"
     echo -e "${GREEN}  Installation complete!${NC}"
     echo "========================================"
     echo ""
-    echo "Add these values to your .env file:"
+    echo "Elasticsearch credentials were written to:"
+    echo -e "  ${YELLOW}${BOOTSTRAP_ENV_FILE}${NC}"
+    echo ""
+    echo "install.sh will auto-apply these values to .env:"
     echo ""
     echo -e "  ${YELLOW}ES_URL=https://localhost:9200${NC}"
     echo -e "  ${YELLOW}ES_API_KEY=${API_KEY_ENCODED}${NC}"

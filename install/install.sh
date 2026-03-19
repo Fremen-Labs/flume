@@ -71,6 +71,12 @@ prompt_value() {
     fi
 }
 
+replace_env_value() {
+    local KEY="$1"
+    local VALUE="$2"
+    sed -i "s|^${KEY}=.*|${KEY}=${VALUE}|" "$ENV_FILE"
+}
+
 banner
 
 echo "This installer will set up Flume on this machine."
@@ -118,7 +124,7 @@ if [ "$ES_RUNNING" = "false" ]; then
     else
         echo ""
         echo "Skipping Elasticsearch installation."
-        echo "Make sure ES is running and you have an API key before continuing."
+        echo "If you skip this step, ES credentials must already be available."
     fi
 fi
 
@@ -167,24 +173,29 @@ else
 fi
 
 echo ""
-echo "Now let's fill in the required values."
+echo "Applying default bootstrap configuration..."
 echo ""
 
-# ES_API_KEY
-CURRENT_KEY=$(grep -E '^ES_API_KEY=' "$ENV_FILE" | cut -d= -f2-)
-if [ "$CURRENT_KEY" = "PASTE_YOUR_ES_API_KEY_HERE" ] || [ -z "$CURRENT_KEY" ]; then
-    echo "You need an Elasticsearch API key."
-    echo "If you just ran install-elasticsearch.sh, it was printed at the end."
-    echo ""
-    ES_API_KEY=$(prompt_value "ES_API_KEY (paste your Elasticsearch API key)")
-    sed -i "s|^ES_API_KEY=.*|ES_API_KEY=${ES_API_KEY}|" "$ENV_FILE"
-    echo -e "  ${GREEN}ES_API_KEY set.${NC}"
+# Auto-apply ES credentials from bootstrap output when available.
+BOOTSTRAP_FILE="${SCRIPT_DIR}/.es-bootstrap.env"
+if [ -f "${BOOTSTRAP_FILE}" ]; then
+    BOOTSTRAP_ES_URL="$(grep -E '^ES_URL=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)"
+    BOOTSTRAP_ES_API_KEY="$(grep -E '^ES_API_KEY=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)"
+    BOOTSTRAP_ES_VERIFY_TLS="$(grep -E '^ES_VERIFY_TLS=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)"
+
+    if [ -n "${BOOTSTRAP_ES_URL}" ]; then replace_env_value "ES_URL" "${BOOTSTRAP_ES_URL}"; fi
+    if [ -n "${BOOTSTRAP_ES_API_KEY}" ]; then replace_env_value "ES_API_KEY" "${BOOTSTRAP_ES_API_KEY}"; fi
+    if [ -n "${BOOTSTRAP_ES_VERIFY_TLS}" ]; then replace_env_value "ES_VERIFY_TLS" "${BOOTSTRAP_ES_VERIFY_TLS}"; fi
+
+    echo -e "  ${GREEN}Applied Elasticsearch credentials from ${BOOTSTRAP_FILE}.${NC}"
+else
+    echo -e "  ${YELLOW}No ${BOOTSTRAP_FILE} found. Leaving ES credentials as-is in .env.${NC}"
 fi
 
 # ES_URL
 CURRENT_ES_URL=$(grep -E '^ES_URL=' "$ENV_FILE" | cut -d= -f2-)
 ES_URL=$(prompt_value "ES_URL" "${CURRENT_ES_URL:-https://localhost:9200}")
-sed -i "s|^ES_URL=.*|ES_URL=${ES_URL}|" "$ENV_FILE"
+replace_env_value "ES_URL" "${ES_URL}"
 
 # LLM_PROVIDER
 echo ""
@@ -206,10 +217,10 @@ case "${PROVIDER_CHOICE:-1}" in
     *) LLM_PROVIDER="ollama" ;;
 esac
 if [ "$LLM_PROVIDER" = "openai_oauth" ]; then
-    sed -i "s|^LLM_PROVIDER=.*|LLM_PROVIDER=openai|" "$ENV_FILE"
+    replace_env_value "LLM_PROVIDER" "openai"
     echo -e "  ${GREEN}LLM_PROVIDER=openai (OAuth mode)${NC}"
 else
-    sed -i "s|^LLM_PROVIDER=.*|LLM_PROVIDER=${LLM_PROVIDER}|" "$ENV_FILE"
+    replace_env_value "LLM_PROVIDER" "${LLM_PROVIDER}"
     echo -e "  ${GREEN}LLM_PROVIDER=${LLM_PROVIDER}${NC}"
 fi
 
@@ -217,63 +228,64 @@ fi
 if [ "$LLM_PROVIDER" = "ollama" ]; then
     CURRENT_BASE=$(grep -E '^LLM_BASE_URL=' "$ENV_FILE" | cut -d= -f2-)
     LLM_BASE_URL=$(prompt_value "Ollama base URL" "${CURRENT_BASE:-http://localhost:11434}")
-    sed -i "s|^LLM_BASE_URL=.*|LLM_BASE_URL=${LLM_BASE_URL}|" "$ENV_FILE"
+    replace_env_value "LLM_BASE_URL" "${LLM_BASE_URL}"
     LLM_MODEL=$(prompt_value "Ollama model name" "llama3.2")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
+    replace_env_value "LLM_API_KEY" ""
 
 elif [ "$LLM_PROVIDER" = "openai_compatible" ]; then
     LLM_BASE_URL=$(prompt_value "Provider base URL (e.g. https://api.groq.com/openai)")
-    sed -i "s|^LLM_BASE_URL=.*|LLM_BASE_URL=${LLM_BASE_URL}|" "$ENV_FILE"
-    LLM_API_KEY=$(prompt_value "API key for this provider")
-    sed -i "s|^LLM_API_KEY=.*|LLM_API_KEY=${LLM_API_KEY}|" "$ENV_FILE"
+    replace_env_value "LLM_BASE_URL" "${LLM_BASE_URL}"
+    replace_env_value "LLM_API_KEY" ""
+    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
     LLM_MODEL=$(prompt_value "Model name")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
 
 elif [ "$LLM_PROVIDER" = "openai" ]; then
-    LLM_API_KEY=$(prompt_value "OpenAI API key (sk-...)")
-    sed -i "s|^LLM_API_KEY=.*|LLM_API_KEY=${LLM_API_KEY}|" "$ENV_FILE"
+    replace_env_value "LLM_API_KEY" ""
+    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
     LLM_MODEL=$(prompt_value "Model name" "gpt-4o")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
 
 elif [ "$LLM_PROVIDER" = "openai_oauth" ]; then
-    sed -i "s|^LLM_API_KEY=.*|LLM_API_KEY=|" "$ENV_FILE"
-    sed -i "s|^OPENAI_OAUTH_STATE_FILE=.*|OPENAI_OAUTH_STATE_FILE=${SCRIPT_DIR}/.openai-oauth.json|" "$ENV_FILE"
-    sed -i "s|^OPENAI_OAUTH_TOKEN_URL=.*|OPENAI_OAUTH_TOKEN_URL=https://auth.openai.com/oauth/token|" "$ENV_FILE"
+    replace_env_value "LLM_API_KEY" ""
+    replace_env_value "OPENAI_OAUTH_STATE_FILE" "${SCRIPT_DIR}/.openai-oauth.json"
+    replace_env_value "OPENAI_OAUTH_TOKEN_URL" "https://auth.openai.com/oauth/token"
     LLM_MODEL=$(prompt_value "Model name" "gpt-4o")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
     echo ""
     echo "OpenAI OAuth selected. After install, run:"
     echo "  bash setup/openai-oauth.sh bootstrap"
     echo "This imports/refreshes tokens and updates .env."
 
 elif [ "$LLM_PROVIDER" = "anthropic" ]; then
-    LLM_API_KEY=$(prompt_value "Anthropic API key (sk-ant-...)")
-    sed -i "s|^LLM_API_KEY=.*|LLM_API_KEY=${LLM_API_KEY}|" "$ENV_FILE"
+    replace_env_value "LLM_API_KEY" ""
+    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
     LLM_MODEL=$(prompt_value "Model name" "claude-opus-4-5")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
 
 elif [ "$LLM_PROVIDER" = "gemini" ]; then
-    LLM_API_KEY=$(prompt_value "Google AI API key")
-    sed -i "s|^LLM_API_KEY=.*|LLM_API_KEY=${LLM_API_KEY}|" "$ENV_FILE"
+    replace_env_value "LLM_API_KEY" ""
+    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
     LLM_MODEL=$(prompt_value "Model name" "gemini-2.0-flash")
-    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=${LLM_MODEL}|" "$ENV_FILE"
+    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
 fi
 
 # Git identity
 echo ""
 GIT_USER_NAME=$(prompt_value "Git user name for agent commits" "Flume Agent")
 GIT_USER_EMAIL=$(prompt_value "Git user email for agent commits" "agent@flume.local")
-sed -i "s|^GIT_USER_NAME=.*|GIT_USER_NAME=${GIT_USER_NAME}|" "$ENV_FILE"
-sed -i "s|^GIT_USER_EMAIL=.*|GIT_USER_EMAIL=${GIT_USER_EMAIL}|" "$ENV_FILE"
+replace_env_value "GIT_USER_NAME" "${GIT_USER_NAME}"
+replace_env_value "GIT_USER_EMAIL" "${GIT_USER_EMAIL}"
 
 # EXECUTION_HOST
 HOSTNAME_DEFAULT=$(hostname -s 2>/dev/null || echo "localhost")
 EXECUTION_HOST=$(prompt_value "Execution host name (identifies this machine)" "$HOSTNAME_DEFAULT")
-sed -i "s|^EXECUTION_HOST=.*|EXECUTION_HOST=${EXECUTION_HOST}|" "$ENV_FILE"
+replace_env_value "EXECUTION_HOST" "${EXECUTION_HOST}"
 
 # Dashboard port
 DASHBOARD_PORT=$(prompt_value "Dashboard port" "8765")
-sed -i "s|^DASHBOARD_PORT=.*|DASHBOARD_PORT=${DASHBOARD_PORT}|" "$ENV_FILE"
+replace_env_value "DASHBOARD_PORT" "${DASHBOARD_PORT}"
 
 echo ""
 echo -e "${GREEN}.env configured at ${ENV_FILE}${NC}"

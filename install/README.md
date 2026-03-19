@@ -170,7 +170,8 @@ If you need to install Elasticsearch from scratch:
 sudo bash setup/install-elasticsearch.sh
 ```
 
-After installation, copy the printed `ES_API_KEY` value into your `.env` file.
+After installation, Flume writes bootstrap ES credentials to `.es-bootstrap.env`,
+and `install.sh` auto-applies them to your `.env`.
 
 To create the required indices:
 
@@ -193,6 +194,11 @@ After installation, verify:
 ```bash
 openbao version
 ```
+
+Recommended flow:
+- Keep long-lived API tokens in OpenBao.
+- Complete Flume install with defaults.
+- Add/update provider keys after install from the Settings page and/or your OpenBao sync process.
 
 ---
 
