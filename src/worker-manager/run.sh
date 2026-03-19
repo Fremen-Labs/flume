@@ -26,6 +26,16 @@ export LOOM_WORKSPACE="${WORKSPACE_ROOT}"
 export WORKER_MANAGER_POLL_SECONDS="${WORKER_MANAGER_POLL_SECONDS:-15}"
 set +a
 
+# Check ES_API_KEY before starting (manager.py would fail anyway)
+if [ -z "${ES_API_KEY:-}" ] || [ "${ES_API_KEY}" = "AUTO_GENERATED_BY_INSTALLER" ]; then
+    echo "ES_API_KEY is missing or invalid in .env"
+    echo ""
+    echo "Run the installer first:  bash install/install.sh"
+    echo "Or bootstrap credentials: ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh"
+    echo "(Get the elastic password from ES install, or reset: sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i)"
+    exit 1
+fi
+
 # Apply git identity from .env
 if [ -n "${GIT_USER_NAME:-}" ]; then
     git config --global user.name "${GIT_USER_NAME}" 2>/dev/null || true

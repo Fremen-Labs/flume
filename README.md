@@ -2,37 +2,24 @@
 
 An AI-powered agent workflow platform: plan, implement, test, and review code changes using a coordinated team of LLM agents, with a real-time dashboard to monitor everything.
 
-## Start Dashboard (from this repo clone)
-
-If you are running Flume directly from a git clone (like `~/flume`), use this exact sequence:
+## Quick Start (one command)
 
 ```bash
 cd ~/flume
-cp -n install/.env.template .env
+bash setup.sh
+```
 
-# Build frontend assets required by the dashboard UI
-cd src/frontend/src
-npm install
-npm run build
+`setup.sh` installs Elasticsearch, creates `.env` with valid credentials, builds the frontend, and creates indices. Then start:
 
-# Start dashboard
-cd ~/flume
+```bash
 bash src/dashboard/run.sh
 ```
 
-Then open:
-- `http://<your-host>:8765`
-
-In another terminal, start workers:
+Open `http://<your-host>:8765`. In another terminal:
 
 ```bash
-cd ~/flume
 bash src/worker-manager/run.sh
 ```
-
-Why this is needed:
-- `src/dashboard/run.sh` serves UI files from `src/frontend/dist`.
-- Your build output showed `src/frontend/dist/` was missing, so the UI must be built first.
 
 ## Dependencies (what gets installed)
 

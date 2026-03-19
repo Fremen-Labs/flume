@@ -7,38 +7,37 @@ using a coordinated team of LLM agents, with a real-time dashboard to monitor ev
 
 ## Quick Start
 
+**One command to set up everything:**
+
 ```bash
+# From extracted package:
 tar -xzf flume-<VERSION>.tar.gz
 cd flume-<VERSION>/
-bash install.sh
+bash setup.sh
+
+# Or from git clone:
+cd ~/flume
+bash setup.sh
 ```
 
-The installer is designed to work out-of-the-box with defaults and does not require manual `.env` editing.
+`setup.sh` installs Elasticsearch, creates `.env` with valid credentials, builds the frontend (git clone only), and creates indices. No manual configuration needed.
 
 Path note:
-- This document assumes you are inside an extracted package directory (`flume-<VERSION>/`), so commands use `dashboard/run.sh`.
-- If you are running from a git clone (`~/flume`), use `src/dashboard/run.sh` and `src/worker-manager/run.sh` instead.
+- Package: commands use `dashboard/run.sh` and `worker-manager/run.sh`.
+- Git clone: use `src/dashboard/run.sh` and `src/worker-manager/run.sh`.
 
-### Running from a git clone (developer mode)
-
-If you are running from a source checkout (not an extracted package), run the installer first — it will install Elasticsearch, create `.env` with valid credentials, and set up indices:
+### After setup — start Flume
 
 ```bash
-cd ~/flume
-bash install/install.sh
+# Package:          Git clone:
+bash dashboard/run.sh     bash src/dashboard/run.sh
 ```
 
-Then build the frontend (if needed) and start:
+Open `http://<your-host>:8765`, then in another terminal:
 
 ```bash
-cd src/frontend/src && npm install && npm run build && cd ~/flume
-bash src/dashboard/run.sh
-```
-
-Open `http://<your-host>:8765`, then in another terminal run:
-
-```bash
-bash src/worker-manager/run.sh
+# Package:                    Git clone:
+bash worker-manager/run.sh     bash src/worker-manager/run.sh
 ```
 
 ---
@@ -47,7 +46,8 @@ bash src/worker-manager/run.sh
 
 ```
 flume/
-├── install.sh              ← Run this first
+├── setup.sh                ← One-command setup (run this first)
+├── install.sh              ← Called by setup.sh
 ├── .env.template           ← Configuration template
 ├── README.md               ← This file
 ├── dashboard/
@@ -91,6 +91,13 @@ flume/
 
 All configuration lives in a single `.env` file at the root of the Flume directory.
 The installer creates and manages it from `.env.template` automatically.
+
+**If you see "ES_API_KEY is required"** — Elasticsearch is running but `.env` has no valid key. Run:
+```bash
+ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh
+```
+Use the `elastic` superuser password (from ES install). To reset it:
+`sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i`
 
 To reconfigure after installation (optional):
 ```bash
