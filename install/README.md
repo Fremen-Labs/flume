@@ -21,15 +21,17 @@ Path note:
 
 ### Running from a git clone (developer mode)
 
-If you are running from a source checkout (not an extracted package), start with:
+If you are running from a source checkout (not an extracted package), run the installer first — it will install Elasticsearch, create `.env` with valid credentials, and set up indices:
 
 ```bash
 cd ~/flume
-cp -n install/.env.template .env
-cd src/frontend/src
-npm install
-npm run build
-cd ~/flume
+bash install/install.sh
+```
+
+Then build the frontend (if needed) and start:
+
+```bash
+cd src/frontend/src && npm install && npm run build && cd ~/flume
 bash src/dashboard/run.sh
 ```
 

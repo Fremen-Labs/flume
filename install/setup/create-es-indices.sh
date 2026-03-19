@@ -16,8 +16,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TEMPLATES_DIR="${WORKSPACE_ROOT}/memory/es/index_templates"
+# Support both package layout (memory at root) and git clone (memory under src/)
+if [ -n "${ENV_FILE:-}" ] && [ -f "${ENV_FILE}" ]; then
+    WORKSPACE_ROOT="$(cd "$(dirname "${ENV_FILE}")" && pwd)"
+else
+    WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+if [ -d "${WORKSPACE_ROOT}/memory/es/index_templates" ]; then
+    TEMPLATES_DIR="${WORKSPACE_ROOT}/memory/es/index_templates"
+elif [ -d "${WORKSPACE_ROOT}/src/memory/es/index_templates" ]; then
+    TEMPLATES_DIR="${WORKSPACE_ROOT}/src/memory/es/index_templates"
+else
+    TEMPLATES_DIR="${WORKSPACE_ROOT}/memory/es/index_templates"
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,10 +41,16 @@ warn()    { echo -e "  ${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "  ${RED}[ERROR]\033[0m $*"; exit 1; }
 
 # Load .env if not already set
-if [ -z "${ES_API_KEY:-}" ] && [ -f "${WORKSPACE_ROOT}/.env" ]; then
-    set -a
-    source "${WORKSPACE_ROOT}/.env"
-    set +a
+if [ -z "${ES_API_KEY:-}" ]; then
+    if [ -n "${ENV_FILE:-}" ] && [ -f "${ENV_FILE}" ]; then
+        set -a
+        source "${ENV_FILE}"
+        set +a
+    elif [ -f "${WORKSPACE_ROOT}/.env" ]; then
+        set -a
+        source "${WORKSPACE_ROOT}/.env"
+        set +a
+    fi
 fi
 
 # Validate required vars

@@ -18,6 +18,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Detect layout: package (install.sh at root) vs git clone (install.sh in install/)
+if [ -d "${SCRIPT_DIR}/../src" ]; then
+    WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    APP_WORKSPACE="${WORKSPACE_ROOT}/src"
+else
+    WORKSPACE_ROOT="${SCRIPT_DIR}"
+    APP_WORKSPACE="${WORKSPACE_ROOT}"
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -80,7 +89,7 @@ replace_env_value() {
 banner
 
 echo "This installer will set up Flume on this machine."
-echo "Install location: ${SCRIPT_DIR}"
+echo "Install location: ${WORKSPACE_ROOT}"
 echo ""
 echo "Starting non-interactive setup with sane defaults."
 
@@ -110,8 +119,18 @@ if curl -sk "https://localhost:9200/" &>/dev/null 2>&1; then
     echo -e "${GREEN}Elasticsearch appears to already be running at https://localhost:9200.${NC}"
 fi
 
+# Run ES install/bootstrap when: ES not running, OR we don't have credentials yet
+BOOTSTRAP_FILE="${SCRIPT_DIR}/.es-bootstrap.env"
+NEED_ES_BOOTSTRAP=false
 if [ "$ES_RUNNING" = "false" ]; then
+    NEED_ES_BOOTSTRAP=true
     echo "Elasticsearch not detected; installing automatically."
+elif [ ! -f "${BOOTSTRAP_FILE}" ] || ! grep -qE '^ES_API_KEY=.+' "${BOOTSTRAP_FILE}" 2>/dev/null; then
+    NEED_ES_BOOTSTRAP=true
+    echo "Elasticsearch is running but credentials are missing; generating API key."
+fi
+
+if [ "$NEED_ES_BOOTSTRAP" = "true" ]; then
     if [ "$EUID" -ne 0 ]; then
         echo ""
         echo "Elasticsearch installation requires root privileges."
@@ -143,8 +162,12 @@ fi
 # =============================================================================
 step 4 "Configure .env"
 
-ENV_FILE="${SCRIPT_DIR}/.env"
-TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
+ENV_FILE="${WORKSPACE_ROOT}/.env"
+if [ -f "${SCRIPT_DIR}/.env.template" ]; then
+    TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
+else
+    TEMPLATE_FILE="${WORKSPACE_ROOT}/.env.template"
+fi
 
 if [ ! -f "$ENV_FILE" ]; then
     cp "$TEMPLATE_FILE" "$ENV_FILE"
@@ -158,7 +181,6 @@ echo "Applying default bootstrap configuration..."
 echo ""
 
 # Auto-apply ES credentials from bootstrap output when available.
-BOOTSTRAP_FILE="${SCRIPT_DIR}/.es-bootstrap.env"
 if [ -f "${BOOTSTRAP_FILE}" ]; then
     BOOTSTRAP_ES_URL="$(grep -E '^ES_URL=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)"
     BOOTSTRAP_ES_API_KEY="$(grep -E '^ES_API_KEY=' "${BOOTSTRAP_FILE}" | cut -d= -f2- || true)"
@@ -204,7 +226,7 @@ step 5 "Create Elasticsearch Indices"
 
 echo "Creating the required Elasticsearch indices automatically..."
 echo ""
-bash "${SCRIPT_DIR}/setup/create-es-indices.sh" || {
+ENV_FILE="${ENV_FILE}" bash "${SCRIPT_DIR}/setup/create-es-indices.sh" || {
     echo ""
     echo -e "${YELLOW}Index creation encountered errors. You can re-run it manually:${NC}"
     echo "  bash ${SCRIPT_DIR}/setup/create-es-indices.sh"
@@ -218,7 +240,7 @@ step 6 "Set Up Workspace"
 echo "Creating required directories and initializing clean state files..."
 echo ""
 
-WORKSPACE="${SCRIPT_DIR}"
+WORKSPACE="${APP_WORKSPACE}"
 
 # =============================================================================
 # Scrub any accidentally-included user project repositories
@@ -293,10 +315,10 @@ fi
 
 echo -e "${GREEN}${BOLD}Flume is ready to run!${NC}"
 echo ""
-if [ -f "${SCRIPT_DIR}/dashboard/run.sh" ] && [ -f "${SCRIPT_DIR}/worker-manager/run.sh" ]; then
+if [ -f "${WORKSPACE_ROOT}/dashboard/run.sh" ] && [ -f "${WORKSPACE_ROOT}/worker-manager/run.sh" ]; then
     DASHBOARD_CMD="bash dashboard/run.sh"
     WORKERS_CMD="bash worker-manager/run.sh"
-elif [ -f "${SCRIPT_DIR}/src/dashboard/run.sh" ] && [ -f "${SCRIPT_DIR}/src/worker-manager/run.sh" ]; then
+elif [ -f "${WORKSPACE_ROOT}/src/dashboard/run.sh" ] && [ -f "${WORKSPACE_ROOT}/src/worker-manager/run.sh" ]; then
     DASHBOARD_CMD="bash src/dashboard/run.sh"
     WORKERS_CMD="bash src/worker-manager/run.sh"
 else
@@ -305,14 +327,14 @@ else
 fi
 
 echo -e "${BOLD}Start the dashboard:${NC}"
-echo "  cd ${SCRIPT_DIR}"
+echo "  cd ${WORKSPACE_ROOT}"
 echo "  ${DASHBOARD_CMD}"
 echo ""
 echo -e "${BOLD}Then open in your browser:${NC}"
 echo "  http://${DISPLAY_HOST}:${DASHBOARD_PORT_VAL:-8765}"
 echo ""
 echo -e "${BOLD}Start the agent workers (in a separate terminal):${NC}"
-echo "  cd ${SCRIPT_DIR}"
+echo "  cd ${WORKSPACE_ROOT}"
 echo "  ${WORKERS_CMD}"
 echo ""
 echo -e "${BOLD}Or start both from the dashboard:${NC}"
