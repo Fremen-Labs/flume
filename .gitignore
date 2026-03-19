@@ -1,0 +1,21 @@
+# Secrets / local config
+.env
+.env.*
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.DS_Store
+
+# Optional: generated build artifacts
+*.tar.gz
+*.sha256
+

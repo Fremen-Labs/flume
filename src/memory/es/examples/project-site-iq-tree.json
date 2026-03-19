@@ -1,0 +1,29 @@
+{
+  "id": "feature-site-iq-next",
+  "type": "feature",
+  "title": "Project-Site-IQ next work",
+  "status": "planned",
+  "children": [
+    {
+      "id": "story-runtime-followup",
+      "type": "story",
+      "title": "Runtime follow-up",
+      "status": "planned",
+      "children": [
+        {
+          "id": "task-verify-database-url",
+          "type": "task",
+          "title": "Verify DATABASE_URL formatting and env hygiene",
+          "status": "ready"
+        },
+        {
+          "id": "task-prisma-config-migration",
+          "type": "task",
+          "title": "Migrate deprecated package.json prisma config to prisma.config.ts",
+          "status": "planned",
+          "depends_on": ["task-verify-database-url"]
+        }
+      ]
+    }
+  ]
+}

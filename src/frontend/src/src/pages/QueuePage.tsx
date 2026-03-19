@@ -1,0 +1,125 @@
+import { motion } from 'framer-motion';
+import { Loader2, AlertCircle, GitBranch } from 'lucide-react';
+import { useSnapshot } from '@/hooks/useSnapshot';
+import { StatusBadge } from '@/components/StatusBadge';
+
+const stages: { id: string; label: string }[] = [
+  { id: 'planned', label: 'Planned' },
+  { id: 'ready', label: 'Ready' },
+  { id: 'running', label: 'Running' },
+  { id: 'done', label: 'Done' },
+  { id: 'blocked', label: 'Blocked' },
+];
+
+const typeColors: Record<string, string> = {
+  epic: 'bg-primary/10 text-primary',
+  feature: 'bg-purple-500/10 text-purple-400',
+  story: 'bg-cyan-500/10 text-cyan-400',
+  task: 'bg-muted text-muted-foreground',
+};
+
+function timeAgo(ts?: string) {
+  if (!ts) return '';
+  const diff = Date.now() - new Date(ts).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+export default function QueuePage() {
+  const { data: snapshot, isLoading, error } = useSnapshot();
+  const tasks = snapshot?.tasks ?? [];
+  const workers = snapshot?.workers ?? [];
+
+  return (
+    <div className="p-6 lg:p-8 max-w-[1800px] mx-auto space-y-6 relative">
+
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Work Queue</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
+        </p>
+      </motion.div>
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-20 gap-3 text-muted-foreground">
+          <Loader2 className="w-5 h-5 animate-spin" />
+        </div>
+      )}
+
+      {error && (
+        <div className="flex items-center gap-3 p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          Failed to connect to backend.
+        </div>
+      )}
+
+      {!isLoading && !error && (
+        <div className="flex gap-4 overflow-x-auto pb-4 relative z-10">
+          {stages.map((stage, stageIdx) => {
+            const items = tasks.filter(t => t.status === stage.id);
+            return (
+              <motion.div
+                key={stage.id}
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: stageIdx * 0.05 }}
+                className="flex-shrink-0 w-[280px]"
+              >
+                <div className="flex items-center justify-between mb-3 px-1">
+                  <div className="flex items-center gap-2">
+                    <StatusBadge status={stage.id} />
+                    <span className="text-[10px] text-muted-foreground">({items.length})</span>
+                  </div>
+                </div>
+
+                <div className="space-y-2 min-h-[200px]">
+                  {items.map((item, i) => {
+                    const worker = workers.find(w => w.current_task_id === item.id);
+                    return (
+                      <motion.div
+                        key={item._id}
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: stageIdx * 0.05 + i * 0.03 }}
+                        whileHover={{ y: -2, transition: { duration: 0.15 } }}
+                        className="glass-card p-3 hover-lift"
+                      >
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.item_type ?? 'task']}`}>
+                            {(item.item_type ?? 'task').toUpperCase()}
+                          </span>
+                          <StatusBadge status={item.priority} />
+                        </div>
+                        <p className="text-xs text-foreground font-medium truncate">{item.title}</p>
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-[10px] text-muted-foreground truncate">{item.repo}</span>
+                          {worker && (
+                            <span className="text-[10px] text-primary truncate ml-2">{worker.name}</span>
+                          )}
+                        </div>
+                        {item.branch && (
+                          <div className="flex items-center gap-1 mt-1">
+                            <GitBranch className="w-2.5 h-2.5 text-primary/50" />
+                            <code className="text-[9px] text-muted-foreground truncate">{item.branch}</code>
+                          </div>
+                        )}
+                        <div className="text-[9px] text-muted-foreground/50 mt-1">{timeAgo(item.last_update || item.updated_at)}</div>
+                      </motion.div>
+                    );
+                  })}
+                  {items.length === 0 && (
+                    <div className="glass-surface p-4 text-center text-xs text-muted-foreground">Empty</div>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

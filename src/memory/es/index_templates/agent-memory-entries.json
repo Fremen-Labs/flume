@@ -1,0 +1,28 @@
+{
+  "index_patterns": ["agent-memory-entries*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "id": { "type": "keyword" },
+        "scope": { "type": "keyword" },
+        "type": { "type": "keyword" },
+        "title": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "statement": { "type": "text" },
+        "summary": { "type": "text" },
+        "project": { "type": "keyword" },
+        "repo": { "type": "keyword" },
+        "tags": { "type": "keyword" },
+        "confidence": { "type": "keyword" },
+        "active": { "type": "boolean" },
+        "source_ref": { "type": "keyword" },
+        "created_at": { "type": "date" },
+        "updated_at": { "type": "date" }
+      }
+    }
+  }
+}

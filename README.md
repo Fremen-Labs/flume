@@ -1,0 +1,121 @@
+# Flume
+
+An AI-powered agent workflow platform: plan, implement, test, and review code changes using a coordinated team of LLM agents, with a real-time dashboard to monitor everything.
+
+## Dependencies (what gets installed)
+
+Flume's installer verifies system dependencies first, then can optionally install Elasticsearch and OpenBao for you.
+
+- Installed by `install.sh`:
+  - Creates/updates local workspace files (`.env`, `projects.json`, `sequence_counters.json`, `worker-manager/state.json`)
+  - Creates runtime directories (`plan-sessions/`, `worker-manager/`)
+  - Sets executable bits on Flume run/setup scripts
+- Optionally installed by `setup/install-elasticsearch.sh` (if you choose this step):
+  - `elasticsearch` 8.x package
+  - OS package prerequisites for Elasticsearch repo setup (for Debian/Ubuntu: `wget`, `gnupg`, `apt-transport-https`)
+- Optionally installed by `setup/install-openbao.sh` (if you choose this step):
+  - `openbao` CLI binary installed to `/usr/local/bin/openbao`
+
+Required preinstalled system tools (verified, not auto-installed by `install.sh`):
+
+- `python3` 3.9+
+- `git`
+- `pgrep` (procps)
+- `curl`
+
+Optional tools:
+
+- `gh` (GitHub CLI) for pull request creation from Flume
+- `node` for rebuilding the frontend from source
+- OpenBao server (optional, separate from the CLI installer) if you want full secret management infrastructure
+
+## What’s included
+
+Once installed, the Flume workspace contains:
+
+- `dashboard/` (Python HTTP server + Settings UI integration)
+- `worker-manager/` (agent dispatcher/execution)
+- `agents/` (system prompts for multiple agent roles)
+- `memory/es/` (Elasticsearch scripts + index templates)
+- `install.sh` + `.env.template` + `setup/` helpers
+
+## Install (recommended: package tarball)
+
+1. Build a distributable package from source:
+```bash
+cd /path/to/your/flume-github
+bash build-package.sh
+```
+
+### Where the installation package is located
+
+When you run `bash build-package.sh`, Flume writes the package into the repository's `dist/` folder.
+
+- Package directory: `flume-github/dist/`
+- Main artifact: `flume-github/dist/flume-<VERSION>.tar.gz`
+- Checksum file: `flume-github/dist/flume-<VERSION>.tar.gz.sha256`
+
+`<VERSION>` is either:
+- The current date (default format: `YYYYMMDD`) if no version is passed
+- A custom version string if you pass one, for example:
+
+```bash
+bash build-package.sh 1.0.0
+```
+
+This will produce:
+- `dist/flume-1.0.0.tar.gz`
+- `dist/flume-1.0.0.tar.gz.sha256`
+
+To confirm exactly which files were created:
+
+```bash
+ls -lah dist/
+```
+
+2. Extract the generated tarball:
+```bash
+tar -xzf dist/flume-<VERSION>.tar.gz
+cd flume-<VERSION>/
+```
+
+3. Run the interactive installer:
+```bash
+bash install.sh
+```
+
+## Run
+
+1. Start the dashboard:
+```bash
+bash dashboard/run.sh
+```
+
+2. Open in your browser:
+- `http://<your-host>:8765`
+
+3. Start workers (separate terminal):
+```bash
+bash worker-manager/run.sh
+```
+
+## Configure
+
+Flume configuration lives in a single `.env` file in the installed workspace root (created/edited by `install.sh`).
+
+Common LLM configuration:
+- `LLM_PROVIDER` (e.g. `ollama`, `openai`, `openai_compatible`, `anthropic`, `gemini`, `openai_oauth`)
+- `LLM_BASE_URL` (for local/network or OpenAI-compatible providers)
+- `LLM_API_KEY` (for providers that require an API key)
+- Optional OpenAI OAuth settings (`OPENAI_OAUTH_STATE_FILE`, `OPENAI_OAUTH_TOKEN_URL`)
+
+After changing `.env`, restart:
+```bash
+bash dashboard/run.sh
+bash worker-manager/run.sh
+```
+
+## Development / rebuilding the UI
+
+The package includes pre-built frontend assets by default. If you want to rebuild the React UI from source, see the frontend directory documentation in `src/frontend/src/`.
+

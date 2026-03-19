@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/load_env.sh"
+
+if [[ $# -lt 4 ]]; then
+  echo "usage: task_create.sh <id> <title> <objective> <repo> [owner] [priority] [risk]" >&2
+  exit 1
+fi
+
+id="$1"
+title="$2"
+objective="$3"
+repo="$4"
+owner="${5:-planner}"
+priority="${6:-normal}"
+risk="${7:-medium}"
+
+python3 - <<PY | "${SCRIPT_DIR}/write_task.py"
+import json
+print(json.dumps({
+  "id": ${id@Q},
+  "title": ${title@Q},
+  "objective": ${objective@Q},
+  "repo": ${repo@Q},
+  "owner": ${owner@Q},
+  "status": "inbox",
+  "priority": ${priority@Q},
+  "acceptance_criteria": [],
+  "artifacts": [],
+  "needs_human": False,
+  "risk": ${risk@Q}
+}))
+PY

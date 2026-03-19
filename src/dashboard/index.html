@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Work Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background:#0b1020; color:#e8ecf3; }
+    h1,h2 { margin: 0 0 12px; }
+    .toolbar { display:flex; gap:12px; margin: 12px 0 20px; flex-wrap:wrap; }
+    select,input { background:#151c31; color:#e8ecf3; border:1px solid #2b3557; border-radius:8px; padding:8px 10px; }
+    .tabs { display:flex; gap:10px; margin: 0 0 20px; flex-wrap:wrap; }
+    .tab { padding:8px 12px; border:1px solid #2b3557; border-radius:999px; cursor:pointer; background:#151c31; }
+    .tab.active { background:#2a3d70; }
+    .grid { display:grid; grid-template-columns: 2.1fr 1fr; gap:20px; }
+    .card { background:#151c31; border:1px solid #2b3557; border-radius:12px; padding:16px; }
+    .tree details { margin-left: 14px; }
+    .row { padding:10px 0; border-bottom:1px solid #243050; }
+    .meta { color:#9fb0d1; font-size:12px; margin-top:4px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; margin-right:6px; background:#26345e; }
+    .epic{background:#4d2f88}.feature{background:#1f6f8b}.story{background:#2d7d46}.task{background:#6b5b1e}.bug{background:#8b2f3a}
+    .status-done{background:#215d36}.status-blocked{background:#7a2831}.status-running{background:#8b6a1b}.status-review{background:#385a8a}.status-ready{background:#2e6a6a}.status-planned{background:#4b5672}.status-claimed{background:#6c5a2a}.status-idle{background:#555}
+    code { color:#a9d3ff; }
+    .small { font-size: 11px; color:#9fb0d1; }
+  </style>
+</head>
+<body>
+  <h1>Agent Work Dashboard</h1>
+  <div class="card" style="margin-bottom:20px;">
+    <h2>Active Workers</h2>
+    <div id="workers"></div>
+  </div>
+  <div class="toolbar">
+    <input id="q" placeholder="Search title/id/repo" />
+    <select id="projectFilter"><option value="">All projects</option></select>
+    <select id="statusFilter"><option value="">All statuses</option><option>inbox</option><option>planned</option><option>ready</option><option>running</option><option>review</option><option>blocked</option><option>done</option></select>
+  </div>
+  <div class="tabs">
+    <div class="tab active" data-view="all">All</div>
+    <div class="tab" data-view="backlog">Backlog</div>
+    <div class="tab" data-view="active">Active</div>
+    <div class="tab" data-view="blocked">Blocked</div>
+    <div class="tab" data-view="review">Review</div>
+    <div class="tab" data-view="done">Done</div>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>Backlog / Work Items</h2>
+      <div id="tree" class="tree"></div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:20px;"><h2>Recent Reviews</h2><div id="reviews"></div></div>
+      <div class="card" style="margin-bottom:20px;"><h2>Recent Failures</h2><div id="failures"></div></div>
+      <div class="card"><h2>Recent Provenance</h2><div id="provenance"></div></div>
+    </div>
+  </div>
+<script>
+let SNAPSHOT=null, ACTIVE_VIEW='all';
+const $=id=>document.getElementById(id);
+function norm(v){return (v||'').toString().toLowerCase();}
+function itemType(t){return t.work_item_type||'task';}
+function parentId(t){return t.parent_id||null;}
+function visibleByView(t){const s=t.status||''; if(ACTIVE_VIEW==='all') return true; if(ACTIVE_VIEW==='backlog') return ['inbox','planned','ready'].includes(s); if(ACTIVE_VIEW==='active') return ['running'].includes(s); if(ACTIVE_VIEW==='blocked') return ['blocked'].includes(s); if(ACTIVE_VIEW==='review') return ['review'].includes(s); if(ACTIVE_VIEW==='done') return ['done'].includes(s); return true;}
+function rowHtml(t){const type=itemType(t), status=t.status||'unknown', artifacts=(t.artifacts||[]).length; return `<div class="row"><span class="pill ${type}">${type}</span><span class="pill status-${status}">${status}</span><strong>${t.title||t.id}</strong><div class="meta">project=${t.project||'-'} · repo=${t.repo||'-'} · owner=${t.owner||t.assigned_agent_role||'-'} · model=${t.preferred_model||'-'} · host=${t.execution_host||'-'} · priority=${t.priority||'-'}</div><div class="small">id=<code>${t.id||t._id}</code> ${artifacts?`· artifacts=${artifacts}`:''}</div></div>`;}
+function renderTree(tasks){const byParent=new Map(); for(const t of tasks){const pid=parentId(t)||'__root__'; if(!byParent.has(pid)) byParent.set(pid,[]); byParent.get(pid).push(t);} for(const arr of byParent.values()) arr.sort((a,b)=>(a.title||'').localeCompare(b.title||'')); function subtreeVisible(t){if(visibleByView(t)) return true; const kids=byParent.get(t.id)||[]; return kids.some(subtreeVisible);} function renderNode(t){const kids=(byParent.get(t.id)||[]).filter(subtreeVisible); const header=rowHtml(t); return kids.length?`<details open><summary>${header}</summary>${kids.map(renderNode).join('')}</details>`:`<div>${header}</div>`;} const roots=(byParent.get('__root__')||[]).filter(subtreeVisible); return roots.map(renderNode).join('')||'<div class="meta">No items</div>';}
+function renderList(el, items, fn){el.innerHTML=items.slice(0,12).map(fn).join('')||'<div class="meta">None</div>';}
+function applyFilters(){if(!SNAPSHOT) return; const q=norm($('q').value), pf=$('projectFilter').value, sf=$('statusFilter').value; let tasks=(SNAPSHOT.tasks||[]).filter(t=>{const hay=`${t.title||''} ${t.id||''} ${t.repo||''} ${t.project||''}`.toLowerCase(); if(q&&!hay.includes(q)) return false; if(pf&&(t.project||'')!==pf) return false; if(sf&&(t.status||'')!==sf) return false; return true;}); $('tree').innerHTML=renderTree(tasks);}
+fetch('/api/snapshot').then(r=>r.json()).then(data=>{SNAPSHOT=data; const projects=[...new Set((data.tasks||[]).map(t=>t.project).filter(Boolean))].sort(); for(const p of projects){const o=document.createElement('option'); o.value=p; o.textContent=p; $('projectFilter').appendChild(o);} $('q').addEventListener('input',applyFilters); $('projectFilter').addEventListener('change',applyFilters); $('statusFilter').addEventListener('change',applyFilters); document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active')); tab.classList.add('active'); ACTIVE_VIEW=tab.dataset.view; applyFilters();})); applyFilters(); renderList($('workers'), data.workers||[], w=>`<div class="row"><span class="pill">${w.role}</span><span class="pill status-${w.status||'idle'}">${w.status||'idle'}</span><strong>${w.name}</strong><div class="meta">model=${w.model||w.preferred_model||'-'} · host=${w.execution_host||'-'} · task=${w.current_task_id||'-'}</div></div>`); renderList($('reviews'), data.reviews||[], r=>`<div class="row"><span class="pill">${r.verdict||'review'}</span><strong>${r.task_id||r.review_id}</strong><div class="meta">${r.summary||''}</div></div>`); renderList($('failures'), data.failures||[], f=>`<div class="row"><strong>${f.task_id||f.id}</strong><div class="meta">${f.error_class||''} · ${f.summary||''}</div></div>`); renderList($('provenance'), data.provenance||[], p=>`<div class="row"><strong>${p.task_id||p.id}</strong><div class="meta">role=${p.agent_role||'-'} · verdict=${p.review_verdict||'-'} · repo=${p.repo||'-'}</div></div>`);});
+</script>
+</body>
+</html>

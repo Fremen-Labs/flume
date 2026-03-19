@@ -1,0 +1,12 @@
+{
+  "event_type": "task.created",
+  "task_id": "task-byrds-002",
+  "project": "openclaw",
+  "repo": "workspace",
+  "role": "planner",
+  "title": "Example Byrds-created task",
+  "objective": "Demonstrate Byrds event ingestion into Elasticsearch task records.",
+  "summary": "Planner created a new task",
+  "priority": "high",
+  "risk": "medium"
+}

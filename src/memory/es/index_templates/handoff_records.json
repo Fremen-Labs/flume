@@ -1,0 +1,21 @@
+{
+  "index_patterns": ["agent-handoff-records*"],
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "id": {"type": "keyword"},
+      "from_agent": {"type": "keyword"},
+      "to_agent": {"type": "keyword"},
+      "task_id": {"type": "keyword"},
+      "reason": {"type": "text"},
+      "created_at": {"type": "date"},
+      "updated_at": {"type": "date"},
+      "status": {"type": "keyword"},
+      "notes": {"type": "text"},
+      "related_ids": {"type": "keyword"}
+    }
+  }
+}

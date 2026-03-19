@@ -1,0 +1,30 @@
+{
+  "index_patterns": ["agent-task-records*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "id": { "type": "keyword" },
+        "title": { "type": "text" },
+        "objective": { "type": "text" },
+        "repo": { "type": "keyword" },
+        "worktree": { "type": "keyword" },
+        "owner": { "type": "keyword" },
+        "status": { "type": "keyword" },
+        "priority": { "type": "keyword" },
+        "depends_on": { "type": "keyword" },
+        "acceptance_criteria": { "type": "text" },
+        "artifacts": { "type": "keyword" },
+        "needs_human": { "type": "boolean" },
+        "risk": { "type": "keyword" },
+        "last_update": { "type": "date" },
+        "created_at": { "type": "date" },
+        "updated_at": { "type": "date" }
+      }
+    }
+  }
+}

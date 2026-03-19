@@ -1,0 +1,31 @@
+{
+  "id": "feature-agent-expansion",
+  "type": "feature",
+  "title": "Build active agent pickup system",
+  "children": [
+    {
+      "id": "story-agent-starters",
+      "type": "story",
+      "title": "Agent starters and role entrypoints",
+      "children": [
+        {
+          "id": "task-starter-scripts",
+          "type": "task",
+          "title": "Add runnable starter scripts for each agent role"
+        }
+      ]
+    },
+    {
+      "id": "story-dispatch-routing",
+      "type": "story",
+      "title": "Dispatch and routing behavior",
+      "children": [
+        {
+          "id": "task-route-model-policy",
+          "type": "task",
+          "title": "Route work by role and preferred model"
+        }
+      ]
+    }
+  ]
+}

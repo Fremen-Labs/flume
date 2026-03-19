@@ -1,0 +1,11 @@
+{
+  "event_type": "job.succeeded",
+  "event_id": "job-event-002",
+  "job_id": "job-002",
+  "task_id": "task-byrds-002",
+  "project": "openclaw",
+  "repo": "workspace",
+  "role": "executor",
+  "summary": "Background execution completed successfully",
+  "review_verdict": "pending"
+}
