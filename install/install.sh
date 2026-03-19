@@ -135,9 +135,15 @@ if [ "$NEED_ES_BOOTSTRAP" = "true" ]; then
         echo ""
         echo "Elasticsearch installation requires root privileges."
         echo "Re-running installer step with sudo..."
-        sudo bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
+        sudo bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh" || true
     else
-        bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
+        bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh" || true
+    fi
+    # If bootstrap still missing (e.g. password reset failed), try interactive bootstrap
+    if [ ! -f "${BOOTSTRAP_FILE}" ] && [ -t 0 ] && curl -sk "https://localhost:9200/" &>/dev/null; then
+        echo ""
+        echo "Auto-generation did not complete. Generating API key with your elastic password..."
+        ELASTIC_PASSWORD="" bash "${SCRIPT_DIR}/setup/bootstrap-es-credentials.sh" || true
     fi
 fi
 

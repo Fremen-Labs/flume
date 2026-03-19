@@ -213,6 +213,11 @@ else
         echo "ES_BOOTSTRAP_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "${BOOTSTRAP_ENV_FILE}"
     chmod 600 "${BOOTSTRAP_ENV_FILE}" 2>/dev/null || true
+    # Ensure the user who ran sudo can read it (install.sh runs as that user)
+    if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+        chown "${SUDO_UID}:${SUDO_GID}" "${BOOTSTRAP_ENV_FILE}" 2>/dev/null || true
+    fi
+    chmod 644 "${BOOTSTRAP_ENV_FILE}" 2>/dev/null || true
 
     echo ""
     echo "========================================"
