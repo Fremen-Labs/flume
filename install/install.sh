@@ -189,7 +189,7 @@ echo -e "  ${YELLOW}Provider/API tokens remain blank and can be added later from
 
 # Apply non-interactive defaults for runtime identity/settings.
 HOSTNAME_DEFAULT=$(hostname -s 2>/dev/null || echo "localhost")
-replace_env_value "GIT_USER_NAME" "Flume Agent"
+replace_env_value "GIT_USER_NAME" "FlumeAgent"
 replace_env_value "GIT_USER_EMAIL" "agent@flume.local"
 replace_env_value "EXECUTION_HOST" "${HOSTNAME_DEFAULT}"
 replace_env_value "DASHBOARD_PORT" "8765"
