@@ -171,14 +171,17 @@ fi
 success "Elasticsearch service is running."
 
 # ----------------------------------------------------------------
-# Reset elastic password
+# Reset elastic password (batch mode: auto-generates, no old password needed)
 # ----------------------------------------------------------------
 info "Resetting the 'elastic' superuser password..."
-ES_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
-/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i --force << EOF
-${ES_PASSWORD}
-${ES_PASSWORD}
-EOF
+RESET_OUTPUT=$(/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -b 2>&1) || true
+# Parse "New value: <password>" from output (batch mode prints the new password)
+ES_PASSWORD=$(echo "$RESET_OUTPUT" | grep "New value:" | sed 's/.*New value:[[:space:]]*//' | tr -d '\n\r' | head -c 256)
+if [ -z "$ES_PASSWORD" ]; then
+    warn "Batch reset did not return password. Trying interactive mode with random password..."
+    ES_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+    echo -e "${ES_PASSWORD}\n${ES_PASSWORD}" | /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i --force 2>/dev/null || true
+fi
 success "elastic password set."
 
 # ----------------------------------------------------------------
