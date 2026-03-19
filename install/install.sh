@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Flume Interactive Installer
+# Flume Installer
 #
 # Guides you through a complete Flume setup:
 #   Step 1: Verify dependencies
-#   Step 2: Install Elasticsearch (optional)
-#   Step 3: Install OpenBao (optional)
+#   Step 2: Install Elasticsearch (automatic when missing)
+#   Step 3: Install OpenBao CLI (best-effort)
 #   Step 4: Configure .env
 #   Step 5: Create Elasticsearch indices
 #   Step 6: Set up workspace directories
@@ -82,8 +82,7 @@ banner
 echo "This installer will set up Flume on this machine."
 echo "Install location: ${SCRIPT_DIR}"
 echo ""
-echo "Press Enter to continue or Ctrl+C to abort."
-read -r
+echo "Starting non-interactive setup with sane defaults."
 
 # =============================================================================
 # Step 1: Verify dependencies
@@ -112,42 +111,30 @@ if curl -sk "https://localhost:9200/" &>/dev/null 2>&1; then
 fi
 
 if [ "$ES_RUNNING" = "false" ]; then
-    if prompt_yn "Install Elasticsearch natively on this machine?" "y"; then
-        if [ "$EUID" -ne 0 ]; then
-            echo ""
-            echo "Elasticsearch installation requires root privileges."
-            echo "Re-running installer step with sudo..."
-            sudo bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
-        else
-            bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
-        fi
-    else
+    echo "Elasticsearch not detected; installing automatically."
+    if [ "$EUID" -ne 0 ]; then
         echo ""
-        echo "Skipping Elasticsearch installation."
-        echo "If you skip this step, ES credentials must already be available."
+        echo "Elasticsearch installation requires root privileges."
+        echo "Re-running installer step with sudo..."
+        sudo bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
+    else
+        bash "${SCRIPT_DIR}/setup/install-elasticsearch.sh"
     fi
 fi
 
 # =============================================================================
 # Step 3: Install OpenBao (optional)
 # =============================================================================
-step 3 "OpenBao (Optional)"
+step 3 "OpenBao CLI"
 
 if command -v openbao >/dev/null 2>&1; then
     echo -e "${GREEN}OpenBao already installed:${NC} $(openbao version 2>/dev/null | head -n 1 || echo 'openbao')"
 else
-    echo "OpenBao is optional, but recommended if you want to use secrets management."
-    if prompt_yn "Install OpenBao CLI on this machine?" "n"; then
-        if [ "$EUID" -ne 0 ]; then
-            echo ""
-            echo "OpenBao installation requires root privileges."
-            echo "Re-running installer step with sudo..."
-            sudo bash "${SCRIPT_DIR}/setup/install-openbao.sh"
-        else
-            bash "${SCRIPT_DIR}/setup/install-openbao.sh"
-        fi
+    echo "Installing OpenBao CLI (best-effort)."
+    if [ "$EUID" -ne 0 ]; then
+        sudo bash "${SCRIPT_DIR}/setup/install-openbao.sh" || echo -e "${YELLOW}OpenBao install skipped (continuing).${NC}"
     else
-        echo "Skipping OpenBao installation."
+        bash "${SCRIPT_DIR}/setup/install-openbao.sh" || echo -e "${YELLOW}OpenBao install skipped (continuing).${NC}"
     fi
 fi
 
@@ -159,17 +146,11 @@ step 4 "Configure .env"
 ENV_FILE="${SCRIPT_DIR}/.env"
 TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
 
-if [ -f "$ENV_FILE" ]; then
-    echo -e "${YELLOW}.env already exists at ${ENV_FILE}.${NC}"
-    if ! prompt_yn "Overwrite it?" "n"; then
-        echo "Keeping existing .env."
-    else
-        cp "$TEMPLATE_FILE" "$ENV_FILE"
-        echo "Copied .env.template → .env"
-    fi
-else
+if [ ! -f "$ENV_FILE" ]; then
     cp "$TEMPLATE_FILE" "$ENV_FILE"
     echo "Copied .env.template → .env"
+else
+    echo -e "${GREEN}Using existing .env at ${ENV_FILE}.${NC}"
 fi
 
 echo ""
@@ -192,100 +173,26 @@ else
     echo -e "  ${YELLOW}No ${BOOTSTRAP_FILE} found. Leaving ES credentials as-is in .env.${NC}"
 fi
 
-# ES_URL
-CURRENT_ES_URL=$(grep -E '^ES_URL=' "$ENV_FILE" | cut -d= -f2-)
-ES_URL=$(prompt_value "ES_URL" "${CURRENT_ES_URL:-https://localhost:9200}")
-replace_env_value "ES_URL" "${ES_URL}"
-
-# LLM_PROVIDER
-echo ""
-echo "Select your LLM provider:"
-echo "  1) ollama           (local, no API key needed)"
-echo "  2) openai           (OpenAI API)"
-echo "  3) openai_compatible (Groq, Together, Mistral, Azure, etc.)"
-echo "  4) anthropic        (Claude API)"
-echo "  5) gemini           (Google Gemini API)"
-echo "  6) openai_oauth     (OpenAI OAuth via refresh token)"
-echo ""
-read -r -p "$(echo -e "${YELLOW}?${NC} Choose provider [1-6, default 1]: ")" PROVIDER_CHOICE
-case "${PROVIDER_CHOICE:-1}" in
-    2) LLM_PROVIDER="openai" ;;
-    3) LLM_PROVIDER="openai_compatible" ;;
-    4) LLM_PROVIDER="anthropic" ;;
-    5) LLM_PROVIDER="gemini" ;;
-    6) LLM_PROVIDER="openai_oauth" ;;
-    *) LLM_PROVIDER="ollama" ;;
-esac
-if [ "$LLM_PROVIDER" = "openai_oauth" ]; then
-    replace_env_value "LLM_PROVIDER" "openai"
-    echo -e "  ${GREEN}LLM_PROVIDER=openai (OAuth mode)${NC}"
-else
-    replace_env_value "LLM_PROVIDER" "${LLM_PROVIDER}"
-    echo -e "  ${GREEN}LLM_PROVIDER=${LLM_PROVIDER}${NC}"
+# Ensure ES URL has a default value
+CURRENT_ES_URL=$(grep -E '^ES_URL=' "$ENV_FILE" | cut -d= -f2- || true)
+if [ -z "${CURRENT_ES_URL}" ]; then
+    replace_env_value "ES_URL" "https://localhost:9200"
 fi
 
-# Provider-specific settings
-if [ "$LLM_PROVIDER" = "ollama" ]; then
-    CURRENT_BASE=$(grep -E '^LLM_BASE_URL=' "$ENV_FILE" | cut -d= -f2-)
-    LLM_BASE_URL=$(prompt_value "Ollama base URL" "${CURRENT_BASE:-http://localhost:11434}")
-    replace_env_value "LLM_BASE_URL" "${LLM_BASE_URL}"
-    LLM_MODEL=$(prompt_value "Ollama model name" "llama3.2")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-    replace_env_value "LLM_API_KEY" ""
+# Keep default local model config and blank tokens (Settings/OpenBao fills secrets later).
+replace_env_value "LLM_PROVIDER" "ollama"
+replace_env_value "LLM_BASE_URL" "http://localhost:11434"
+replace_env_value "LLM_MODEL" "llama3.2"
+replace_env_value "LLM_API_KEY" ""
+echo -e "  ${GREEN}Using default LLM config (ollama / llama3.2).${NC}"
+echo -e "  ${YELLOW}Provider/API tokens remain blank and can be added later from Settings/OpenBao.${NC}"
 
-elif [ "$LLM_PROVIDER" = "openai_compatible" ]; then
-    LLM_BASE_URL=$(prompt_value "Provider base URL (e.g. https://api.groq.com/openai)")
-    replace_env_value "LLM_BASE_URL" "${LLM_BASE_URL}"
-    replace_env_value "LLM_API_KEY" ""
-    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
-    LLM_MODEL=$(prompt_value "Model name")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-
-elif [ "$LLM_PROVIDER" = "openai" ]; then
-    replace_env_value "LLM_API_KEY" ""
-    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
-    LLM_MODEL=$(prompt_value "Model name" "gpt-4o")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-
-elif [ "$LLM_PROVIDER" = "openai_oauth" ]; then
-    replace_env_value "LLM_API_KEY" ""
-    replace_env_value "OPENAI_OAUTH_STATE_FILE" "${SCRIPT_DIR}/.openai-oauth.json"
-    replace_env_value "OPENAI_OAUTH_TOKEN_URL" "https://auth.openai.com/oauth/token"
-    LLM_MODEL=$(prompt_value "Model name" "gpt-4o")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-    echo ""
-    echo "OpenAI OAuth selected. After install, run:"
-    echo "  bash setup/openai-oauth.sh bootstrap"
-    echo "This imports/refreshes tokens and updates .env."
-
-elif [ "$LLM_PROVIDER" = "anthropic" ]; then
-    replace_env_value "LLM_API_KEY" ""
-    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
-    LLM_MODEL=$(prompt_value "Model name" "claude-opus-4-5")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-
-elif [ "$LLM_PROVIDER" = "gemini" ]; then
-    replace_env_value "LLM_API_KEY" ""
-    echo -e "  ${YELLOW}LLM_API_KEY left blank. Add it later from Settings/OpenBao.${NC}"
-    LLM_MODEL=$(prompt_value "Model name" "gemini-2.0-flash")
-    replace_env_value "LLM_MODEL" "${LLM_MODEL}"
-fi
-
-# Git identity
-echo ""
-GIT_USER_NAME=$(prompt_value "Git user name for agent commits" "Flume Agent")
-GIT_USER_EMAIL=$(prompt_value "Git user email for agent commits" "agent@flume.local")
-replace_env_value "GIT_USER_NAME" "${GIT_USER_NAME}"
-replace_env_value "GIT_USER_EMAIL" "${GIT_USER_EMAIL}"
-
-# EXECUTION_HOST
+# Apply non-interactive defaults for runtime identity/settings.
 HOSTNAME_DEFAULT=$(hostname -s 2>/dev/null || echo "localhost")
-EXECUTION_HOST=$(prompt_value "Execution host name (identifies this machine)" "$HOSTNAME_DEFAULT")
-replace_env_value "EXECUTION_HOST" "${EXECUTION_HOST}"
-
-# Dashboard port
-DASHBOARD_PORT=$(prompt_value "Dashboard port" "8765")
-replace_env_value "DASHBOARD_PORT" "${DASHBOARD_PORT}"
+replace_env_value "GIT_USER_NAME" "Flume Agent"
+replace_env_value "GIT_USER_EMAIL" "agent@flume.local"
+replace_env_value "EXECUTION_HOST" "${HOSTNAME_DEFAULT}"
+replace_env_value "DASHBOARD_PORT" "8765"
 
 echo ""
 echo -e "${GREEN}.env configured at ${ENV_FILE}${NC}"
@@ -295,16 +202,13 @@ echo -e "${GREEN}.env configured at ${ENV_FILE}${NC}"
 # =============================================================================
 step 5 "Create Elasticsearch Indices"
 
-echo "This will create the 6 required indices in your Elasticsearch instance."
+echo "Creating the required Elasticsearch indices automatically..."
 echo ""
-
-if prompt_yn "Create Elasticsearch indices now?" "y"; then
-    bash "${SCRIPT_DIR}/setup/create-es-indices.sh" || {
-        echo ""
-        echo -e "${YELLOW}Index creation encountered errors. You can re-run it manually:${NC}"
-        echo "  bash ${SCRIPT_DIR}/setup/create-es-indices.sh"
-    }
-fi
+bash "${SCRIPT_DIR}/setup/create-es-indices.sh" || {
+    echo ""
+    echo -e "${YELLOW}Index creation encountered errors. You can re-run it manually:${NC}"
+    echo "  bash ${SCRIPT_DIR}/setup/create-es-indices.sh"
+}
 
 # =============================================================================
 # Step 6: Set up workspace directories

@@ -84,10 +84,12 @@ tar -xzf dist/flume-<VERSION>.tar.gz
 cd flume-<VERSION>/
 ```
 
-3. Run the interactive installer:
+3. Run the installer:
 ```bash
 bash install.sh
 ```
+
+The installer is non-interactive by default and uses sane defaults, so no `.env` editing is required to get started.
 
 ## Run
 
@@ -106,7 +108,7 @@ bash worker-manager/run.sh
 
 ## Configure
 
-Flume configuration lives in a single `.env` file in the installed workspace root (created/edited by `install.sh`).
+Flume configuration lives in a single `.env` file in the installed workspace root (created/managed by `install.sh`).
 
 Common LLM configuration:
 - `LLM_PROVIDER` (e.g. `ollama`, `openai`, `openai_compatible`, `anthropic`, `gemini`, `openai_oauth`)
@@ -114,7 +116,7 @@ Common LLM configuration:
 - `LLM_API_KEY` (for providers that require an API key)
 - Optional OpenAI OAuth settings (`OPENAI_OAUTH_STATE_FILE`, `OPENAI_OAUTH_TOKEN_URL`)
 
-After changing `.env`, restart:
+You can run Flume without touching `.env`. If you later change settings or secrets, restart:
 ```bash
 bash dashboard/run.sh
 bash worker-manager/run.sh

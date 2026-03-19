@@ -13,7 +13,7 @@ cd flume-<VERSION>/
 bash install.sh
 ```
 
-The interactive installer will walk you through every step.
+The installer is designed to work out-of-the-box with defaults and does not require manual `.env` editing.
 
 ---
 
@@ -64,9 +64,9 @@ flume/
 ## Configuration
 
 All configuration lives in a single `.env` file at the root of the Flume directory.
-The installer creates it from `.env.template`.
+The installer creates and manages it from `.env.template` automatically.
 
-To reconfigure after installation:
+To reconfigure after installation (optional):
 ```bash
 nano .env          # edit values
 bash dashboard/run.sh   # restart dashboard to pick up changes
