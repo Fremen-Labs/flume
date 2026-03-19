@@ -429,6 +429,11 @@ export default function SettingsPage() {
                     Restart the dashboard and worker manager for changes to take effect.
                   </p>
                 )}
+                {data?.openbaoInstalled === false && (
+                  <p className="text-xs text-destructive">
+                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
+                  </p>
+                )}
               </div>
             </AccordionContent>
           </AccordionItem>
@@ -500,6 +505,11 @@ export default function SettingsPage() {
                 {repoData?.restartRequired && (
                   <p className="text-xs text-muted-foreground">
                     Restart the dashboard and worker manager for changes to take effect.
+                  </p>
+                )}
+                {data?.openbaoInstalled === false && (
+                  <p className="text-xs text-destructive">
+                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
                   </p>
                 )}
               </div>

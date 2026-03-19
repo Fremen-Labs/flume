@@ -13,7 +13,7 @@ import urllib.parse
 import uuid
 from datetime import datetime
 
-from llm_settings import load_env_pairs
+from llm_settings import load_effective_pairs
 
 ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -2482,7 +2482,7 @@ class Handler(BaseHTTPRequestHandler):
                 # If we have a GitHub token configured, inject it into HTTPS clone URLs so
                 # `git clone` doesn't attempt interactive username/password prompts.
                 git_url = repo_url
-                gh_token = load_env_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
+                gh_token = load_effective_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
                 if (gh_token.startswith('"') and gh_token.endswith('"')) or (gh_token.startswith("'") and gh_token.endswith("'")):
                     gh_token = gh_token[1:-1].strip()
                 if gh_token and repo_url.startswith('https://github.com/'):

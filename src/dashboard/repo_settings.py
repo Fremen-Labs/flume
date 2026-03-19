@@ -6,8 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-# Reuse the same .env helpers as llm_settings.py
-from llm_settings import load_env_pairs, _update_env_keys  # type: ignore
+# Reuse the same settings helpers from llm_settings.py
+from llm_settings import load_effective_pairs, _update_env_keys  # type: ignore
 
 MASK = "***"
 
@@ -51,7 +51,7 @@ def validate_repo_settings(payload: dict[str, Any], workspace_root: Path) -> tup
 
 
 def get_repo_settings_response(workspace_root: Path) -> dict[str, Any]:
-    pairs = load_env_pairs(workspace_root)
+    pairs = load_effective_pairs(workspace_root)
 
     return {
         "settings": {

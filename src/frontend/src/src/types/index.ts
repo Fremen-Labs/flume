@@ -131,6 +131,7 @@ export interface LlmSettingsResponse {
   settings: LlmSettings;
   oauthStatus: LlmOAuthStatus;
   restartRequired: boolean;
+  openbaoInstalled?: boolean;
 }
 
 export type LlmSettingsCatalogItem = LlmProviderCatalogEntry;

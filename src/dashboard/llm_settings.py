@@ -5,6 +5,8 @@ import json
 import os
 import re
 import time
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -114,6 +116,7 @@ PROVIDER_CATALOG = [
 
 VALID_PROVIDERS = {p["id"] for p in PROVIDER_CATALOG}
 OAUTH_PROVIDERS = {"openai"}  # Only OpenAI supports OAuth Codex flow
+SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN"}
 
 # ─── .env load/save ────────────────────────────────────────────────────────────
 
@@ -136,6 +139,100 @@ def load_env_pairs(workspace_root: Path) -> dict[str, str]:
     return out
 
 
+def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
+    pairs = load_env_pairs(workspace_root)
+    if not shutil.which("openbao"):
+        return False, pairs
+    addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
+    token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
+    if not addr or not token:
+        return False, pairs
+    return True, pairs
+
+
+def is_openbao_installed() -> bool:
+    return bool(shutil.which("openbao"))
+
+
+def _openbao_secret_ref(pairs: dict[str, str]) -> str:
+    mount = str(pairs.get("OPENBAO_MOUNT", "secret") or "secret").strip().strip("/")
+    path = str(pairs.get("OPENBAO_PATH", "flume") or "flume").strip().strip("/")
+    return f"{mount}/{path}"
+
+
+def _openbao_env(pairs: dict[str, str]) -> dict[str, str]:
+    env = dict(os.environ)
+    addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
+    token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
+    # Keep compatibility with both OpenBao/Hashi-style env names.
+    env["BAO_ADDR"] = addr
+    env["BAO_TOKEN"] = token
+    env["VAULT_ADDR"] = addr
+    env["VAULT_TOKEN"] = token
+    return env
+
+
+def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
+    enabled, pairs = _openbao_enabled(workspace_root)
+    if not enabled:
+        return {}
+    try:
+        secret_ref = _openbao_secret_ref(pairs)
+        proc = subprocess.run(
+            ["openbao", "kv", "get", "-format=json", secret_ref],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_openbao_env(pairs),
+        )
+        if proc.returncode != 0:
+            return {}
+        payload = json.loads(proc.stdout or "{}")
+        data = payload.get("data", {}).get("data", {})
+        return {str(k): str(v) for k, v in data.items() if v is not None}
+    except Exception:
+        return {}
+
+
+def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
+    enabled, pairs = _openbao_enabled(workspace_root)
+    if not enabled:
+        return False
+    try:
+        existing = _openbao_get_all(workspace_root)
+        merged = dict(existing)
+        merged.update(updates)
+        secret_ref = _openbao_secret_ref(pairs)
+        cmd = ["openbao", "kv", "put", secret_ref]
+        for k, v in merged.items():
+            cmd.append(f"{k}={v}")
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=_openbao_env(pairs),
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
+    """
+    Load settings with OpenBao values overlaying .env for sensitive keys.
+    Non-sensitive settings always come from .env.
+    """
+    pairs = load_env_pairs(workspace_root)
+    bao_vals = _openbao_get_all(workspace_root)
+    if not bao_vals:
+        return pairs
+    for key in SENSITIVE_KEYS:
+        if key in bao_vals and str(bao_vals.get(key, "")).strip():
+            pairs[key] = str(bao_vals[key]).strip()
+    return pairs
+
+
 def save_env_key(workspace_root: Path, key: str, value: str, *, create: bool = True) -> None:
     path = _env_file_path(workspace_root)
     lines = path.read_text().splitlines() if path.exists() else []
@@ -155,8 +252,14 @@ def save_env_key(workspace_root: Path, key: str, value: str, *, create: bool = T
 
 
 def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
-    pairs = load_env_pairs(workspace_root)
-    pairs.update(updates)
+    sensitive_updates = {k: v for k, v in updates.items() if k in SENSITIVE_KEYS}
+    non_sensitive_updates = {k: v for k, v in updates.items() if k not in SENSITIVE_KEYS}
+
+    # Prefer OpenBao for sensitive keys. If persisted there, clear .env values.
+    if sensitive_updates and _openbao_put_many(workspace_root, sensitive_updates):
+        for k in sensitive_updates.keys():
+            non_sensitive_updates[k] = ""
+
     path = _env_file_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Preserve order and comments by reading, then rewriting
@@ -170,12 +273,12 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
             continue
         if "=" in stripped:
             k = stripped.split("=")[0].strip()
-            if k in updates:
-                new_lines.append(f"{k}={updates[k]}")
+            if k in non_sensitive_updates:
+                new_lines.append(f"{k}={non_sensitive_updates[k]}")
                 seen.add(k)
                 continue
         new_lines.append(line)
-    for k, v in updates.items():
+    for k, v in non_sensitive_updates.items():
         if k not in seen:
             new_lines.append(f"{k}={v}")
     path.write_text("\n".join(new_lines) + "\n")
@@ -299,7 +402,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     Refresh OAuth token and update .env with new access token.
     Returns (ok, message, optional_state).
     """
-    pairs = load_env_pairs(workspace_root)
+    pairs = load_effective_pairs(workspace_root)
     state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
     if not state_file:
         state_path = workspace_root / ".openai-oauth.json"
@@ -368,7 +471,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
 
 
 def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
-    pairs = load_env_pairs(workspace_root)
+    pairs = load_effective_pairs(workspace_root)
     state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
     if not state_file:
         state_path = workspace_root / ".openai-oauth.json"
@@ -402,7 +505,7 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
 
 def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
     """Build full GET /api/settings/llm response: catalog, current settings, oauth status."""
-    pairs = load_env_pairs(workspace_root)
+    pairs = load_effective_pairs(workspace_root)
     provider = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
     model = pairs.get("LLM_MODEL", "llama3.2").strip()
     base_url = pairs.get("LLM_BASE_URL", "").strip()
@@ -446,4 +549,5 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
         },
         "oauthStatus": oauth_status,
         "restartRequired": True,
+        "openbaoInstalled": is_openbao_installed(),
     }
