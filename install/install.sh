@@ -293,16 +293,27 @@ fi
 
 echo -e "${GREEN}${BOLD}Flume is ready to run!${NC}"
 echo ""
+if [ -f "${SCRIPT_DIR}/dashboard/run.sh" ] && [ -f "${SCRIPT_DIR}/worker-manager/run.sh" ]; then
+    DASHBOARD_CMD="bash dashboard/run.sh"
+    WORKERS_CMD="bash worker-manager/run.sh"
+elif [ -f "${SCRIPT_DIR}/src/dashboard/run.sh" ] && [ -f "${SCRIPT_DIR}/src/worker-manager/run.sh" ]; then
+    DASHBOARD_CMD="bash src/dashboard/run.sh"
+    WORKERS_CMD="bash src/worker-manager/run.sh"
+else
+    DASHBOARD_CMD="bash dashboard/run.sh   # or bash src/dashboard/run.sh"
+    WORKERS_CMD="bash worker-manager/run.sh # or bash src/worker-manager/run.sh"
+fi
+
 echo -e "${BOLD}Start the dashboard:${NC}"
 echo "  cd ${SCRIPT_DIR}"
-echo "  bash dashboard/run.sh"
+echo "  ${DASHBOARD_CMD}"
 echo ""
 echo -e "${BOLD}Then open in your browser:${NC}"
 echo "  http://${DISPLAY_HOST}:${DASHBOARD_PORT_VAL:-8765}"
 echo ""
 echo -e "${BOLD}Start the agent workers (in a separate terminal):${NC}"
 echo "  cd ${SCRIPT_DIR}"
-echo "  bash worker-manager/run.sh"
+echo "  ${WORKERS_CMD}"
 echo ""
 echo -e "${BOLD}Or start both from the dashboard:${NC}"
 echo "  Use the 'Start Workers' button on the Workers page."

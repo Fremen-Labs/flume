@@ -15,6 +15,30 @@ bash install.sh
 
 The installer is designed to work out-of-the-box with defaults and does not require manual `.env` editing.
 
+Path note:
+- This document assumes you are inside an extracted package directory (`flume-<VERSION>/`), so commands use `dashboard/run.sh`.
+- If you are running from a git clone (`~/flume`), use `src/dashboard/run.sh` and `src/worker-manager/run.sh` instead.
+
+### Running from a git clone (developer mode)
+
+If you are running from a source checkout (not an extracted package), start with:
+
+```bash
+cd ~/flume
+cp -n install/.env.template .env
+cd src/frontend/src
+npm install
+npm run build
+cd ~/flume
+bash src/dashboard/run.sh
+```
+
+Open `http://<your-host>:8765`, then in another terminal run:
+
+```bash
+bash src/worker-manager/run.sh
+```
+
 ---
 
 ## What's Included
