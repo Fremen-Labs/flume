@@ -1060,6 +1060,8 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         doc['assigned_agent_role'] = owner
     if needs_human is not None:
         doc['needs_human'] = bool(needs_human)
+    if status == 'ready':
+        doc['implementer_consecutive_llm_failures'] = 0
     es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
     return {'_id': es_id, 'id': task_id, **doc}
 

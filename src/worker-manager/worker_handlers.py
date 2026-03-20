@@ -536,13 +536,63 @@ def _implementer_clear_claim_fields() -> dict:
     return {'active_worker': None, 'queue_state': 'queued'}
 
 
-def _implementer_requeue_after_llm_failure(es_id: str, task_id: str) -> None:
-    """Reset task to ready and clear claim fields after LLM gave no usable output."""
+def _implementer_max_llm_failures_cap() -> int:
+    """
+    Stop infinite ready→running loops when the LLM never returns a usable response.
+    After this many consecutive failures the task is blocked for human attention.
+    Set FLUME_IMPLEMENTER_MAX_LLM_FAILURES=0 to disable (previous behavior).
+    """
+    raw = os.environ.get('FLUME_IMPLEMENTER_MAX_LLM_FAILURES', '3').strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 3
+    return max(0, n)
+
+
+def _parse_implementer_llm_failure_count(task: dict) -> int:
+    v = task.get('implementer_consecutive_llm_failures')
+    try:
+        return max(0, int(v)) if v is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> None:
+    """After LLM gave no usable output: re-queue, or block if failure cap is reached."""
+    prev = _parse_implementer_llm_failure_count(task)
+    next_n = prev + 1
+    cap = _implementer_max_llm_failures_cap()
+
+    if cap > 0 and next_n >= cap:
+        append_agent_note(
+            es_id,
+            f'Blocked: implementer hit {next_n} consecutive LLM failures (cap={cap}, '
+            'FLUME_IMPLEMENTER_MAX_LLM_FAILURES). Fix LLM on the worker host '
+            '(see worker_handlers.log), or set cap to 0 to retry indefinitely. '
+            'Transition this task to **ready** after fixing to reset the failure counter.',
+        )
+        update_task_doc(
+            es_id,
+            {
+                'status': 'blocked',
+                'needs_human': True,
+                'owner': 'implementer',
+                'assigned_agent_role': 'implementer',
+                'implementer_consecutive_llm_failures': next_n,
+                **_implementer_clear_claim_fields(),
+            },
+        )
+        log(f"implementer: task={task_id} blocked after {next_n} LLM failures (cap={cap})")
+        return
+
+    cap_hint = f' (attempt {next_n}/{cap})' if cap > 0 else f' (attempt {next_n})'
     append_agent_note(
         es_id,
         'Re-queued: LLM returned no usable response. On the host running worker_handlers.py, '
         'check LLM_PROVIDER / LLM_BASE_URL / LLM_API_KEY, that the model exists (e.g. `ollama pull <model>`), '
-        'and worker_handlers.log for HTTP errors.',
+        'and worker_handlers.log for HTTP errors.'
+        + cap_hint,
     )
     update_task_doc(
         es_id,
@@ -551,10 +601,11 @@ def _implementer_requeue_after_llm_failure(es_id: str, task_id: str) -> None:
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
             'needs_human': False,
+            'implementer_consecutive_llm_failures': next_n,
             **_implementer_clear_claim_fields(),
         },
     )
-    log(f"implementer failed to complete task={task_id} (LLM error/fallback) — re-queued for retry")
+    log(f"implementer failed to complete task={task_id} (LLM error/fallback) — re-queued for retry ({next_n}/{cap if cap > 0 else '∞'})")
 
 
 def handle_implementer_worker(task, es_id):
@@ -593,7 +644,7 @@ def handle_implementer_worker(task, es_id):
         implementer_model = task.get('preferred_model') or 'qwen3-coder:30b'
 
         if result.metadata.get('source') == 'llm_no_response':
-            _implementer_requeue_after_llm_failure(es_id, task_id)
+            _implementer_handle_llm_failure(es_id, task, task_id)
             released = True
             return True
 
@@ -676,6 +727,7 @@ def handle_implementer_worker(task, es_id):
                 'worktree': repo_path or task.get('worktree'),
                 'commit_sha': commit_sha,
                 'commit_message': commit_message,
+                'implementer_consecutive_llm_failures': 0,
                 **_implementer_clear_claim_fields(),
             })
             log(f"implementer completed task={task_id} branch={branch} sha={commit_sha[:8] if commit_sha else 'n/a'} -> tester")
@@ -704,6 +756,7 @@ def handle_implementer_worker(task, es_id):
                 'status': 'done',
                 'owner': 'implementer',
                 'assigned_agent_role': 'implementer',
+                'implementer_consecutive_llm_failures': 0,
                 **_implementer_clear_claim_fields(),
             })
             write_doc(HANDOFF_INDEX, {
@@ -725,7 +778,7 @@ def handle_implementer_worker(task, es_id):
 
         # ── Path C: agent failed to complete at all ────────────────────────────
         # Fallback / LLM error — re-queue so it can be retried automatically.
-        _implementer_requeue_after_llm_failure(es_id, task_id)
+        _implementer_handle_llm_failure(es_id, task, task_id)
         released = True
         return True
 
