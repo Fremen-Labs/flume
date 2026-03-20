@@ -160,17 +160,29 @@ def check_dashboard_port():
 def append_to_env(port):
     env_path = os.path.join(os.path.dirname(__file__), '.env')
     try:
+        es_url = "https://localhost:9200"
+        try:
+            with urllib.request.urlopen("http://localhost:9200", timeout=1) as resp:
+                es_url = "http://localhost:9200"
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                es_url = "http://localhost:9200"
+        except Exception:
+            pass
+
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
                 lines = f.readlines()
-            lines = [line for line in lines if not line.startswith('DASHBOARD_PORT=')]
+            lines = [line for line in lines if not line.startswith('DASHBOARD_PORT=') and not line.startswith('ES_URL=')]
             lines.append(f"DASHBOARD_PORT={port}\n")
+            lines.append(f"ES_URL={es_url}\n")
             with open(env_path, 'w') as f:
                 f.writelines(lines)
         else:
             with open(env_path, 'w') as f:
                 f.write(f"DASHBOARD_PORT={port}\n")
-        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port}.{NC}")
+                f.write(f"ES_URL={es_url}\n")
+        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port} and OpenSearch TLS settings.{NC}")
     except Exception as e:
         sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
 
