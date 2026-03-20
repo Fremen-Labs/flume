@@ -122,13 +122,15 @@ create_index() {
 
     RESPONSE=$(curl -s -o /tmp/es_create_response.json -w "%{http_code}" \
         ${CURL_TLS_OPT} \
-        -X PUT "${ES_URL}/${INDEX_NAME}" \
+        -X PUT "${ES_URL}/_template/${INDEX_NAME}" \
         -H "Content-Type: application/json" \
         -H "Authorization: ApiKey ${ES_API_KEY}" \
         -d "@${TEMPLATE_FILE}")
 
     if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "201" ]; then
-        success "${INDEX_NAME} created."
+        success "${INDEX_NAME} template created."
+        # Force explicitly initialize the index geometry immediately after template mapping
+        curl -s -o /dev/null ${CURL_TLS_OPT} -X PUT "${ES_URL}/${INDEX_NAME}" -H "Authorization: ApiKey ${ES_API_KEY}"
     else
         echo -e "  ${RED}[FAIL]${NC}  ${INDEX_NAME} — HTTP ${RESPONSE}"
         cat /tmp/es_create_response.json 2>/dev/null && echo ""

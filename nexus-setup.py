@@ -160,17 +160,29 @@ def check_dashboard_port():
 def append_to_env(port):
     env_path = os.path.join(os.path.dirname(__file__), '.env')
     try:
+        es_url = "https://localhost:9200"
+        try:
+            with urllib.request.urlopen("http://localhost:9200", timeout=1) as resp:
+                es_url = "http://localhost:9200"
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                es_url = "http://localhost:9200"
+        except Exception as e:
+            sys.stderr.write(f"\\n\\033[93m[LOG] OpenSearch Probe Context: {e}\\033[0m\\n")
+
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
                 lines = f.readlines()
-            lines = [line for line in lines if not line.startswith('DASHBOARD_PORT=')]
+            lines = [line for line in lines if not line.startswith('DASHBOARD_PORT=') and not line.startswith('ES_URL=')]
             lines.append(f"DASHBOARD_PORT={port}\n")
+            lines.append(f"ES_URL={es_url}\n")
             with open(env_path, 'w') as f:
                 f.writelines(lines)
         else:
             with open(env_path, 'w') as f:
                 f.write(f"DASHBOARD_PORT={port}\n")
-        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port}.{NC}")
+                f.write(f"ES_URL={es_url}\n")
+        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port} and OpenSearch TLS settings.{NC}")
     except Exception as e:
         sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
 
@@ -188,13 +200,13 @@ def inject_elastic_credentials(infra):
         type_text(f"{RED}[ERROR] Blank token supplied. Neural upload aborted.{NC}")
         sys.exit(1)
 
-    sys.stdout.write(f"{CYAN}[SYS]{NC} Transmitting token to OpenBao vault (secret/flume_elastic)... ")
+    sys.stdout.write(f"{CYAN}[SYS]{NC} Transmitting token to OpenBao vault (secret/flume)... ")
     sys.stdout.flush()
     time.sleep(0.5)
 
     try:
         proc = subprocess.run(
-            ["openbao", "kv", "put", "-format=json", "secret/flume_elastic", f"ES_API_KEY={es_key}"],
+            ["openbao", "kv", "put", "-format=json", "secret/flume", f"ES_API_KEY={es_key}"],
             capture_output=True,
             text=True,
             timeout=10
@@ -202,6 +214,27 @@ def inject_elastic_credentials(infra):
         if proc.returncode == 0:
             print(f"{GREEN}[SECURED]{NC}")
             type_text(f"{GREEN}Elasticsearch credentials locked permanently into the OpenBao hive.{NC}")
+            
+            # Formally authorize Flume Daemons
+            home_dir = os.path.expanduser("~")
+            flume_conf_dir = os.path.join(home_dir, ".config", "flume")
+            os.makedirs(flume_conf_dir, exist_ok=True)
+            token_path = os.path.join(flume_conf_dir, "openbao.token")
+            
+            # Clone current root Vault Token
+            vault_token_path = os.path.join(home_dir, ".vault-token")
+            if os.path.exists(vault_token_path):
+                shutil.copy2(vault_token_path, token_path)
+                os.chmod(token_path, 0o600)
+                type_text(f"{CYAN}[SYS] Neural Vault tokens securely mirrored for Flume internal APIs.{NC}")
+            
+            # Map configuration structure if absent
+            config_target = os.path.join(os.path.dirname(__file__), "flume.config.json")
+            config_template = os.path.join(os.path.dirname(__file__), "install", "flume.config.example.json")
+            if not os.path.exists(config_target) and os.path.exists(config_template):
+                shutil.copy2(config_template, config_target)
+                type_text(f"{CYAN}[SYS] Flume configuration geometry synthesized natively.{NC}")
+
         else:
             print(f"{RED}[FAILED]{NC}")
             sys.stderr.write(f"\\n\\033[91m[LOG] OpenBao KV Error: {proc.stderr}\\033[0m\\n")
