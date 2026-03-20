@@ -290,7 +290,7 @@ OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not a
    ./flume restart --all
    ```
 
-   Current Flume also sends **`resource=https://api.openai.com`** (RFC 8707) on authorize + token exchange so tokens are bound to the **Platform API** — often required for **`api.responses.write`**.
+   **Note:** `auth.openai.com` does **not** accept a `resource` parameter on **token refresh** (it returns `unknown_parameter`). Flume only adds optional `resource=` to the **authorize** URL if you set **`OPENAI_OAUTH_RESOURCE`** in `.env`.
 
    Run this on a machine where your **browser can reach `http://127.0.0.1:<port>`** (or use SSH port-forwarding from your laptop to that port). The script prints the exact URL.
 
@@ -358,7 +358,7 @@ bash install/setup/openai-oauth.sh refresh
 
 - **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
 - **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh + **`login-browser`** authorize URL (defaults include `api.responses.write`; empty string omits `scope` from device/refresh only).
-- **`OPENAI_OAUTH_RESOURCE`** — RFC 8707 **`resource`** sent on **`login-browser`** authorize + token exchange and on **refresh** (default `https://api.openai.com` when unset). Helps auth.openai.com mint tokens valid for **`api.openai.com`** / **`/v1/responses`**. Set **`OPENAI_OAUTH_RESOURCE=`** (empty) in `.env` to omit if your IdP rejects the parameter.
+- **`OPENAI_OAUTH_RESOURCE`** — Optional. If set (non-empty), appended as **`resource`** on **`login-browser`** `/oauth/authorize` only. **Not** sent to `/oauth/token` — OpenAI’s token endpoint returns **`unknown_parameter`** for `resource` on refresh and code exchange.
 - **`OPENAI_OAUTH_ORIGINATOR`** — `originator` query param for **`login-browser`** (default `codex_cli_rs`, matches Codex CLI).
 - State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).
 

@@ -10,7 +10,6 @@ restarting the process (e.g. after Settings save, `flume codex-oauth`, or editin
   LLM_MODEL      : Default model name
   OPENAI_OAUTH_STATE_FILE / OPENAI_OAUTH_TOKEN_URL : OpenAI ChatGPT OAuth refresh
   OPENAI_OAUTH_SCOPES       : Optional; space-separated scopes for refresh (defaults below)
-  OPENAI_OAUTH_RESOURCE     : RFC 8707 resource for token minting (default https://api.openai.com)
 """
 
 from __future__ import annotations
@@ -42,13 +41,6 @@ def _openai_oauth_refresh_scopes() -> str | None:
     if raw is None:
         return _DEFAULT_OPENAI_OAUTH_SCOPES
     s = str(raw).strip()
-    return s or None
-
-
-def _openai_oauth_resource_param() -> str | None:
-    if 'OPENAI_OAUTH_RESOURCE' not in os.environ:
-        return 'https://api.openai.com'
-    s = os.getenv('OPENAI_OAUTH_RESOURCE', '').strip()
     return s or None
 
 
@@ -234,9 +226,8 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if e.code == 401 and 'openai.com' in (url or '').lower():
             if 'Missing scopes' in body or 'api.responses.write' in body:
                 msg += (
-                    ' Hint: Pull latest Flume, run ./flume codex-oauth login-browser (adds resource='
-                    'https://api.openai.com), then ./flume restart --all. Or: codex login then '
-                    './flume codex-oauth import. Check Settings → LLM for JWT scope list.'
+                    ' Hint: Run ./flume codex-oauth login-browser, then ./flume restart --all. '
+                    'Or: codex login then ./flume codex-oauth import. Check Settings → LLM for JWT scopes.'
                 )
             else:
                 msg += (
@@ -300,9 +291,6 @@ def _refresh_oauth_access_token(rt: dict) -> str:
     scp = _openai_oauth_refresh_scopes()
     if scp:
         form['scope'] = scp
-    res = _openai_oauth_resource_param()
-    if res:
-        form['resource'] = res
     data = _post_urlencoded(token_url, form, timeout=30)
     new_access = str(data.get('access_token') or '').strip()
     if not new_access:

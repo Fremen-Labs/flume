@@ -443,7 +443,7 @@ export default function SettingsPage() {
                       <code className="rounded bg-background px-1 py-0.5 text-[11px]">
                         ./flume codex-oauth login-browser
                       </code>{' '}
-                      (browser + localhost callback; binds tokens to the Platform API). Device-code{' '}
+                      (browser + localhost callback). Device-code{' '}
                       <code className="text-[11px]">login</code> often yields “Missing scopes”. Alternatively:{' '}
                       <code className="text-[11px]">codex login</code> then{' '}
                       <code className="text-[11px]">./flume codex-oauth import</code>. Then save and{' '}
@@ -489,9 +489,10 @@ export default function SettingsPage() {
                             data.oauthStatus.hasApiResponsesWrite === false && (
                             <p className="text-destructive">
                               Missing <code className="text-[11px]">api.responses.write</code> — run{' '}
-                              <code className="text-[11px]">./flume codex-oauth login-browser</code> again (latest Flume
-                              sends <code className="text-[11px]">resource=https://api.openai.com</code> on authorize +
-                              token).
+                              <code className="text-[11px]">./flume codex-oauth login-browser</code> or{' '}
+                              <code className="text-[11px]">codex login</code> then{' '}
+                              <code className="text-[11px]">./flume codex-oauth import</code>, then{' '}
+                              <code className="text-[11px]">./flume restart --all</code>.
                             </p>
                           )}
                         </div>

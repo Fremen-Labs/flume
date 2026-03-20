@@ -34,14 +34,6 @@ def _openai_oauth_refresh_scopes() -> str | None:
     return s or None
 
 
-def _openai_oauth_resource_param() -> str | None:
-    """RFC 8707 resource for auth.openai.com token calls (default Platform API)."""
-    if 'OPENAI_OAUTH_RESOURCE' not in os.environ:
-        return 'https://api.openai.com'
-    s = os.getenv('OPENAI_OAUTH_RESOURCE', '').strip()
-    return s or None
-
-
 def _jwt_access_token_scopes(access_token: str) -> tuple[list[str], str]:
     """Decode JWT `scp` and `aud` without verifying signature (debug / UI only)."""
     t = (access_token or '').strip()
@@ -568,9 +560,6 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     scp = _openai_oauth_refresh_scopes()
     if scp:
         form['scope'] = scp
-    res = _openai_oauth_resource_param()
-    if res:
-        form['resource'] = res
     req = urllib.request.Request(
         token_url,
         data=urllib.parse.urlencode(form).encode(),

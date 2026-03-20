@@ -146,12 +146,6 @@ form = {
 }
 if scope:
     form["scope"] = scope
-if "OPENAI_OAUTH_RESOURCE" not in os.environ:
-    _res = "https://api.openai.com"
-else:
-    _res = os.getenv("OPENAI_OAUTH_RESOURCE", "").strip()
-if _res:
-    form["resource"] = _res
 req = urllib.request.Request(
     token_url,
     data=urllib.parse.urlencode(form).encode(),
