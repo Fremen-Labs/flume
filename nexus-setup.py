@@ -120,11 +120,66 @@ def ask_choice(prompt, options):
             return int(choice)
         print(f"{RED}Invalid override sequence. Specify a valid numerical trajectory.{NC}")
 
-def deploy_flume(mode):
+def check_dashboard_port():
+    DEFAULT_PORT = 8765
+    type_text(f"\n{CYAN}--- ORBITAL PORT CHECK ---{NC}")
+    sys.stdout.write(f"{CYAN}[SCAN]{NC} Sweeping comms port {DEFAULT_PORT}... ")
+    sys.stdout.flush()
+    time.sleep(0.5)
+    
+    if check_port('127.0.0.1', DEFAULT_PORT):
+        print(f"{RED}[COLLISION DETECTED]{NC}")
+        type_text(f"\n{YELLOW}[CRITICAL ANOMALY] Port {DEFAULT_PORT} is monopolized by a rogue process.{NC}")
+        choice = ask_choice(f"PORT OVERRIDE PROTOCOL:", [
+            f"{GREEN}AUTO-ASSIGN{NC} -> Calculate available fallback subspace frequency",
+            f"{CYAN}MANUAL{NC}      -> Enter custom port authorization override"
+        ])
+        if choice == 1:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                new_port = s.getsockname()[1]
+            type_text(f"{GREEN}[SUCCESS] Subspace frequency securely calculated on Port {new_port}{NC}")
+            return new_port
+        else:
+            while True:
+                user_port = input(f"\n{YELLOW}root@flume-cortex:~# Enter override port (1024-65535): {NC}").strip()
+                if user_port.isdigit() and 1024 <= int(user_port) <= 65535:
+                    if not check_port('127.0.0.1', int(user_port)):
+                        type_text(f"{GREEN}[ACCEPTED] Port {user_port} manually locked.{NC}")
+                        return int(user_port)
+                    else:
+                        print(f"{RED}[ERROR] Port {user_port} is also monopolized. Try another frequency.{NC}")
+                else:
+                    print(f"{RED}[ERROR] Invalid sequence. Must be between 1024 and 65535.{NC}")
+    else:
+        print(f"{GREEN}[CLEAR]{NC}")
+        type_text(f"{GREEN}Port {DEFAULT_PORT} is available for Flume Hive bindings.{NC}")
+        return DEFAULT_PORT
+
+def append_to_env(port):
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                lines = f.readlines()
+            lines = [line for line in lines if not line.startswith('DASHBOARD_PORT=')]
+            lines.append(f"DASHBOARD_PORT={port}\n")
+            with open(env_path, 'w') as f:
+                f.writelines(lines)
+        else:
+            with open(env_path, 'w') as f:
+                f.write(f"DASHBOARD_PORT={port}\n")
+        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port}.{NC}")
+    except Exception as e:
+        sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
+
+def deploy_flume(mode, selected_port):
     type_text(f"\n{BOLD}{CYAN}>>> DEPLOYING FLUME CORE IN [{mode}] MODE... <<<{NC}")
     
-    # Delegate to the legacy setup.sh but inject our resolved parameters
+    append_to_env(selected_port)
     env = os.environ.copy()
+    env["DASHBOARD_PORT"] = str(selected_port)
+    
     if mode == "ASSIMILATION":
         env["FLUME_SKIP_ELASTIC_INSTALL"] = "true"
         env["FLUME_EXT_OPENBAO"] = "true"
@@ -160,11 +215,13 @@ def main():
         if choice == 1:
             type_text(f"\n{GREEN}[ACKNOWLEDGED] Trajectory: ASSIMILATION.{NC}")
             type_text(f"Synchronizing current host daemons into the Flume neural net...")
-            deploy_flume("ASSIMILATION")
+            assigned_port = check_dashboard_port()
+            deploy_flume("ASSIMILATION", assigned_port)
         elif choice == 2:
             type_text(f"\n{CYAN}[ACKNOWLEDGED] Trajectory: ISOLATION.{NC}")
             type_text(f"Spawning completely isolated dockerized swarm instances...")
-            deploy_flume("ISOLATION")
+            assigned_port = check_dashboard_port()
+            deploy_flume("ISOLATION", assigned_port)
         else:
             type_text(f"\n{RED}Installation Aborted. Jacking out of the matrix.{NC}")
             sys.exit(0)
@@ -176,7 +233,8 @@ def main():
         ])
         
         if choice == 1:
-            deploy_flume("FRESH")
+            assigned_port = check_dashboard_port()
+            deploy_flume("FRESH", assigned_port)
         else:
             sys.exit(0)
 
