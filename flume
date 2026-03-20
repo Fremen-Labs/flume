@@ -306,7 +306,9 @@ cmd_codex_app_server() {
                 exit 1
             fi
             if ! { [ -x "${bin}" ] || command -v "${bin}" >/dev/null 2>&1; }; then
-                echo "Error: codex binary not found (${bin}). Install @openai/codex or set CODEX_BIN." >&2
+                echo "Error: codex binary not found (${bin})." >&2
+                echo "  Install the Codex CLI, e.g.:  npm install -g @openai/codex" >&2
+                echo "  Then re-run, or set CODEX_BIN to the full path to the codex executable." >&2
                 exit 1
             fi
             exec "${bin}" app-server --listen "${listen}" "$@"

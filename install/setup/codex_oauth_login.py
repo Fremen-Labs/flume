@@ -261,7 +261,24 @@ def _exchange_localhost_authorization_code(
     return body
 
 
-def _oauth_localhost_callback(expected_state: str) -> tuple[HTTPServer, str, dict[str, str]]:
+def _resolve_oauth_callback_port(cli_port: int | None) -> int:
+    """
+    Port for http://localhost:PORT/auth/callback.
+
+    Must match OpenAI's allowlist for client app_EMoamEEZ73f0CkXaXp7hrann — the official Codex CLI
+    uses 1455 (codex-rs/login). Binding to port 0 / random ports often yields auth.openai.com unknown_error.
+    """
+    if cli_port is not None:
+        if not (1024 <= cli_port <= 65535):
+            raise SystemExit("--port must be between 1024 and 65535")
+        return cli_port
+    try:
+        return int(os.environ.get("FLUME_OAUTH_PASTE_PORT", "1455"))
+    except ValueError:
+        return 1455
+
+
+def _oauth_localhost_callback(expected_state: str, port: int) -> tuple[HTTPServer, str, dict[str, str]]:
     result: dict[str, str] = {}
 
     class CallbackHandler(BaseHTTPRequestHandler):
@@ -315,8 +332,16 @@ def _oauth_localhost_callback(expected_state: str) -> tuple[HTTPServer, str, dic
                 b"<p>Success. You can close this window and return to the terminal.</p>"
             )
 
-    httpd = HTTPServer(("127.0.0.1", 0), CallbackHandler)
-    port = httpd.server_address[1]
+    try:
+        httpd = HTTPServer(("127.0.0.1", port), CallbackHandler)
+    except OSError as e:
+        raise SystemExit(
+            f"Could not bind OAuth callback server on 127.0.0.1:{port}: {e}\n\n"
+            "Port 1455 is the official Codex CLI default and must match OpenAI's redirect allowlist.\n"
+            "Free the port (or stop the other process), then retry.\n"
+            "For headless SSH: ssh -L 1455:127.0.0.1:1455 you@server then open the authorize URL on your laptop.\n"
+            "Using a non-default port can cause auth.openai.com to show unknown_error on sign-in."
+        ) from e
     # Match openai/codex redirect_uri shape (localhost, not 127.0.0.1 — IdP allowlists differ).
     redirect_uri = f"http://localhost:{port}/auth/callback"
     httpd.timeout = 2.0
@@ -667,9 +692,10 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
+    port = _resolve_oauth_callback_port(args.port)
     oauth_state = _random_oauth_state()
     code_verifier, code_challenge = _generate_pkce()
-    httpd, redirect_uri, callback_box = _oauth_localhost_callback(oauth_state)
+    httpd, redirect_uri, callback_box = _oauth_localhost_callback(oauth_state, port)
     scope = _browser_authorize_scopes()
     auth_url = _build_browser_authorize_url(
         issuer, client_id, redirect_uri, code_challenge, oauth_state, scope
@@ -683,8 +709,12 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
         "OpenAI rejects model.request on /oauth/authorize — device-code login uses different scope rules."
     )
     print()
-    print("Remote server: the browser must reach THIS host’s loopback on the printed port,")
-    print("  e.g.  ssh -L <port>:127.0.0.1:<port> you@this-host  then open the authorize URL on your laptop.")
+    print(
+        f"Callback port {port} — same default as the official Codex CLI (1455). "
+        "OpenAI rejects many other redirect ports (browser may show unknown_error)."
+    )
+    print("Remote server: the browser (or SSH tunnel) must reach THIS host’s loopback on that port,")
+    print(f"  e.g.  ssh -L {port}:127.0.0.1:{port} you@this-host  then open the authorize URL on your laptop.")
     print()
     print(f"Listening on {redirect_uri}")
     _ores = _optional_authorize_resource()
@@ -722,6 +752,12 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
             msg += (
                 "\n\nTip: /oauth/authorize only allows Codex connector scopes (see Flume DEFAULT_BROWSER_AUTHORIZE_SCOPES). "
                 "Unset OPENAI_OAUTH_AUTHORIZE_SCOPES if you pointed it at model.request / api.responses.write."
+            )
+        if err in ("unknown_error", "server_error") or "unknown_error" in detail_plain.lower():
+            msg += (
+                "\n\nTip: If you used a non-allowlisted redirect port, OpenAI often fails before redirect. "
+                "Use default port 1455 (do not pass a random port). "
+                "Free 1455 or set FLUME_OAUTH_PASTE_PORT=1455, then retry login-browser."
             )
         raise SystemExit(msg)
 
@@ -769,16 +805,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
-    port = args.port
-    if port is None:
-        # Must match OpenAI allowlist for client app_EMoamEEZ73f0CkXaXp7hrann — Codex CLI uses 1455
-        # (codex-rs/login/src/server.rs DEFAULT_PORT). Other ports often yield auth.openai.com unknown_error.
-        try:
-            port = int(os.environ.get("FLUME_OAUTH_PASTE_PORT", "1455"))
-        except ValueError:
-            port = 1455
-    if not (1024 <= port <= 65535):
-        raise SystemExit("--port must be between 1024 and 65535")
+    port = _resolve_oauth_callback_port(args.port)
 
     redirect_uri = f"http://localhost:{port}/auth/callback"
     oauth_state = _random_oauth_state()
@@ -973,6 +1000,13 @@ def main() -> None:
         "--no-browser",
         action="store_true",
         help="Do not try to open a browser (print URL only)",
+    )
+    pb.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Local callback http://localhost:N/auth/callback (default: FLUME_OAUTH_PASTE_PORT or 1455, Codex/OpenAI allowlist)",
     )
     pb.add_argument(
         "--no-sync-env",
