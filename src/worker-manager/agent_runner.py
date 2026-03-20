@@ -8,9 +8,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+HERE = Path(__file__).resolve().parent
+BASE = Path(os.environ.get('LOOM_WORKSPACE', str(HERE.parent)))
+# Ensure worker-manager-local modules win over dashboard siblings with the same names.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+    sys.path.insert(1, str(BASE))
 import llm_credentials_store as lcs  # noqa: E402
 
 AGENTS_ROOT = BASE / 'agents'
