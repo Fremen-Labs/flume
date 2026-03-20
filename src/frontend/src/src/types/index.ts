@@ -263,13 +263,34 @@ export interface GithubTokenActionPayload {
   token?: string;
 }
 
+export interface AdoCredentialPublic {
+  id: string;
+  label: string;
+  /** Org URL stored with this PAT (e.g. https://dev.azure.com/myorg). */
+  orgUrl: string;
+  tokenSuffix: string;
+  hasToken: boolean;
+}
+
+export interface AdoTokenActionPayload {
+  action: 'upsert' | 'delete' | 'setActive';
+  id?: string;
+  label?: string;
+  token?: string;
+  orgUrl?: string;
+}
+
 export interface RepoSettings {
   /** Masked; mirrors whether the active GitHub PAT is set. */
   ghToken: string;
   githubTokens: GithubTokenPublic[];
   activeGithubTokenId: string;
+  /** Masked; mirrors whether the active ADO PAT is set. */
   adoToken: string;
+  /** Organization URL for the active ADO credential. */
   adoOrgUrl: string;
+  adoCredentials: AdoCredentialPublic[];
+  activeAdoCredentialId: string;
 }
 
 export interface RepoSettingsResponse {
@@ -281,8 +302,10 @@ export interface RepoSettingsPayload {
   /** @deprecated Prefer githubTokenAction + store; still accepted for legacy saves. */
   ghToken?: string;
   githubTokenAction?: GithubTokenActionPayload;
+  /** @deprecated Prefer adoTokenAction + store; still accepted for legacy saves. */
   adoToken?: string;
   adoOrgUrl?: string;
+  adoTokenAction?: AdoTokenActionPayload;
 }
 
 // ─── Per-role agent models (worker manager) ─────────────────────────────────

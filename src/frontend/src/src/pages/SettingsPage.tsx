@@ -23,6 +23,7 @@ import type {
   RepoSettingsResponse,
   RepoSettingsPayload,
   GithubTokenActionPayload,
+  AdoTokenActionPayload,
 } from '@/types';
 
 async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
@@ -74,17 +75,6 @@ async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
   const res = await fetch('/api/settings/repos');
   if (!res.ok) throw new Error(`Repo settings fetch failed: ${res.status}`);
   return res.json();
-}
-
-async function saveRepoSettings(payload: RepoSettingsPayload): Promise<{ ok: boolean; restartRequired: boolean }> {
-  const res = await fetch('/api/settings/repos', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
-  return data;
 }
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
@@ -161,22 +151,8 @@ export default function SettingsPage() {
     staleTime: 15_000,
   });
 
-  const [repoForm, setRepoForm] = useState<Partial<RepoSettingsPayload>>({});
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
   const [repoSaveSuccess, setRepoSaveSuccess] = useState(false);
-
-  const saveRepoMutation = useMutation({
-    mutationFn: saveRepoSettings,
-    onSuccess: () => {
-      setRepoSaveError(null);
-      setRepoSaveSuccess(true);
-      queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
-      setTimeout(() => setRepoSaveSuccess(false), 3000);
-    },
-    onError: (e: Error) => {
-      setRepoSaveError(e.message);
-    },
-  });
 
   const effectiveSettings = { ...data?.settings, ...form };
   const providerId = effectiveSettings.provider ?? 'ollama';
@@ -259,17 +235,26 @@ export default function SettingsPage() {
     }
   };
 
-  const effectiveRepo = { ...repoData?.settings, ...repoForm };
   const githubTokens = repoData?.settings?.githubTokens ?? [];
   const activeGithubId = repoData?.settings?.activeGithubTokenId ?? '';
   const hasGhToken = githubTokens.some((t) => t.hasToken);
-  const hasAdoToken = Boolean(effectiveRepo.adoToken);
+  const adoCredentials = repoData?.settings?.adoCredentials ?? [];
+  const activeAdoId = repoData?.settings?.activeAdoCredentialId ?? '';
+  const hasAdoToken = adoCredentials.some((t) => t.hasToken);
 
   const [newGithubLabel, setNewGithubLabel] = useState('');
   const [newGithubToken, setNewGithubToken] = useState('');
   const [ghRename, setGhRename] = useState<Record<string, string>>({});
   const [ghReplaceToken, setGhReplaceToken] = useState<Record<string, string>>({});
   const [ghBusy, setGhBusy] = useState<string | null>(null);
+
+  const [newAdoLabel, setNewAdoLabel] = useState('');
+  const [newAdoOrgUrl, setNewAdoOrgUrl] = useState('');
+  const [newAdoToken, setNewAdoToken] = useState('');
+  const [adoRename, setAdoRename] = useState<Record<string, string>>({});
+  const [adoReplaceToken, setAdoReplaceToken] = useState<Record<string, string>>({});
+  const [adoReplaceOrg, setAdoReplaceOrg] = useState<Record<string, string>>({});
+  const [adoBusy, setAdoBusy] = useState<string | null>(null);
 
   const runGithubTokenAction = async (body: GithubTokenActionPayload, busyKey: string): Promise<boolean> => {
     setGhBusy(busyKey);
@@ -294,15 +279,27 @@ export default function SettingsPage() {
     }
   };
 
-  const handleSaveRepos = () => {
+  const runAdoTokenAction = async (body: AdoTokenActionPayload, busyKey: string): Promise<boolean> => {
+    setAdoBusy(busyKey);
     setRepoSaveError(null);
-    const payload: RepoSettingsPayload = {
-      adoToken: repoForm.adoToken ?? effectiveRepo.adoToken ?? '',
-      adoOrgUrl: repoForm.adoOrgUrl ?? effectiveRepo.adoOrgUrl ?? '',
-    };
-    if (payload.adoToken === '***') delete (payload as Record<string, unknown>).adoToken;
-    if (payload.adoOrgUrl === '***') delete (payload as Record<string, unknown>).adoOrgUrl;
-    saveRepoMutation.mutate(payload);
+    try {
+      const res = await fetch('/api/settings/repos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adoTokenAction: body } satisfies RepoSettingsPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
+      setRepoSaveSuccess(true);
+      setTimeout(() => setRepoSaveSuccess(false), 3000);
+      return true;
+    } catch (e) {
+      setRepoSaveError(e instanceof Error ? e.message : 'ADO credential action failed');
+      return false;
+    } finally {
+      setAdoBusy(null);
+    }
   };
 
   if (isLoading || error) {
@@ -1165,36 +1162,230 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Azure DevOps (ADO) PAT</Label>
-                  <Input
-                    type="password"
-                    placeholder={effectiveRepo.adoToken === '***' ? '••••••••' : 'ado_pat_...'}
-                    value={repoForm.adoToken ?? (effectiveRepo.adoToken === '***' ? '' : effectiveRepo.adoToken ?? '')}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, adoToken: e.target.value }))}
-                  />
-                </div>
+                <div className="space-y-4 pt-2 border-t border-border/40">
+                  <div>
+                    <Label>Azure DevOps</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Each entry keeps a <strong>PAT and org URL together</strong>. The <strong>active</strong> pair is written to{' '}
+                      <code className="text-[10px]">ADO_TOKEN</code> and <code className="text-[10px]">ADO_ORG_URL</code>.
+                    </p>
+                  </div>
 
-                <div className="space-y-2">
-                  <Label>ADO Org URL (optional)</Label>
-                  <Input
-                    placeholder="https://dev.azure.com/<org>"
-                    value={repoForm.adoOrgUrl ?? effectiveRepo.adoOrgUrl ?? ''}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, adoOrgUrl: e.target.value }))}
-                  />
+                  <div className="rounded-md border border-border/60 bg-muted/20 p-4 space-y-3">
+                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add credential</div>
+                    <div className="grid gap-2">
+                      <Input
+                        placeholder="Label (e.g. Contoso prod)"
+                        value={newAdoLabel}
+                        onChange={(e) => setNewAdoLabel(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        placeholder="https://dev.azure.com/yourorg"
+                        value={newAdoOrgUrl}
+                        onChange={(e) => setNewAdoOrgUrl(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        type="password"
+                        placeholder="ADO PAT"
+                        value={newAdoToken}
+                        onChange={(e) => setNewAdoToken(e.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!!adoBusy}
+                      onClick={() => {
+                        const label = newAdoLabel.trim();
+                        const orgUrl = newAdoOrgUrl.trim();
+                        const token = newAdoToken.trim();
+                        if (!label || !orgUrl || !token) {
+                          setRepoSaveError('Label, organization URL, and PAT are required to add an ADO credential.');
+                          return;
+                        }
+                        void runAdoTokenAction({ action: 'upsert', label, orgUrl, token }, 'ado-add').then((ok) => {
+                          if (ok) {
+                            setNewAdoLabel('');
+                            setNewAdoOrgUrl('');
+                            setNewAdoToken('');
+                          }
+                        });
+                      }}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add credential
+                    </Button>
+                  </div>
+
+                  {adoCredentials.length > 0 && (
+                    <ul className="space-y-4">
+                      {adoCredentials.map((t) => {
+                        const isActive = t.id === activeAdoId;
+                        const renameVal = adoRename[t.id] ?? '';
+                        const replaceTok = adoReplaceToken[t.id] ?? '';
+                        const replaceOrg = adoReplaceOrg[t.id] ?? '';
+                        return (
+                          <li
+                            key={t.id}
+                            className="rounded-md border border-border/60 p-4 space-y-3"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-foreground">{t.label}</span>
+                              {t.orgUrl ? (
+                                <span className="text-xs text-muted-foreground truncate max-w-[min(100%,280px)]" title={t.orgUrl}>
+                                  {t.orgUrl}
+                                </span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">No org URL</span>
+                              )}
+                              {t.hasToken ? (
+                                <span className="text-xs text-muted-foreground">···{t.tokenSuffix}</span>
+                              ) : (
+                                <span className="text-xs text-amber-600 dark:text-amber-400">No PAT stored</span>
+                              )}
+                              {isActive && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 text-primary px-2 py-0.5 text-xs font-medium">
+                                  <Star className="h-3 w-3" aria-hidden />
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={!!adoBusy || isActive || !t.hasToken}
+                                onClick={() => void runAdoTokenAction({ action: 'setActive', id: t.id }, `ado-act-${t.id}`)}
+                              >
+                                Use as active
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                disabled={!!adoBusy}
+                                onClick={() => {
+                                  if (!confirm(`Remove ADO credential “${t.label}”?`)) return;
+                                  void runAdoTokenAction({ action: 'delete', id: t.id }, `ado-del-${t.id}`).then(() => {
+                                    setAdoRename((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                    setAdoReplaceToken((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                    setAdoReplaceOrg((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4 mr-1" />
+                                Remove
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Rename</Label>
+                                <Input
+                                  placeholder={t.label}
+                                  value={renameVal}
+                                  onChange={(e) => setAdoRename((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !renameVal.trim()}
+                                onClick={() => {
+                                  const label = renameVal.trim();
+                                  if (!label) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, label }, `ado-ren-${t.id}`).then((ok) => {
+                                    if (ok) setAdoRename((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Save label
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace org URL</Label>
+                                <Input
+                                  placeholder={t.orgUrl || 'https://dev.azure.com/…'}
+                                  value={replaceOrg}
+                                  onChange={(e) => setAdoReplaceOrg((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !replaceOrg.trim()}
+                                onClick={() => {
+                                  const orgUrl = replaceOrg.trim();
+                                  if (!orgUrl) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, orgUrl }, `ado-org-${t.id}`).then((ok) => {
+                                    if (ok) setAdoReplaceOrg((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update URL
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace PAT</Label>
+                                <Input
+                                  type="password"
+                                  placeholder="New PAT"
+                                  value={replaceTok}
+                                  onChange={(e) => setAdoReplaceToken((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="new-password"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !replaceTok.trim()}
+                                onClick={() => {
+                                  const token = replaceTok.trim();
+                                  if (!token) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, token }, `ado-tok-${t.id}`).then((ok) => {
+                                    if (ok) setAdoReplaceToken((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update PAT
+                              </Button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 pt-4">
-                  <Button onClick={handleSaveRepos} disabled={saveRepoMutation.isPending}>
-                    {saveRepoMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Save className="h-4 w-4" />
-                    )}
-                    Save
-                  </Button>
                   {repoSaveError && <span className="text-sm text-destructive">{repoSaveError}</span>}
-                  {repoSaveSuccess && <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>}
+                  {repoSaveSuccess && (
+                    <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>
+                  )}
                 </div>
 
                 {repoData?.restartRequired && (

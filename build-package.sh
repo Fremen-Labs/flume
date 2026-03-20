@@ -138,6 +138,10 @@ if [ -f "${SRC}/github_tokens_store.py" ]; then
     cp "${SRC}/github_tokens_store.py" "${STAGE}/"
     success "github_tokens_store.py (labeled GitHub PATs)"
 fi
+if [ -f "${SRC}/ado_tokens_store.py" ]; then
+    cp "${SRC}/ado_tokens_store.py" "${STAGE}/"
+    success "ado_tokens_store.py (labeled ADO PAT + org URL)"
+fi
 
 # Copy dashboard
 # =============================================================================
