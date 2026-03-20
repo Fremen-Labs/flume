@@ -1788,6 +1788,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
             return
 
+        if self.path == '/api/codex-app-server/status':
+            try:
+                import codex_app_server
+                self._json_response(200, codex_app_server.get_codex_app_server_status())
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+            return
+
         queue_match = re.match(r'^/api/queue/([^/]+)$', self.path)
         if queue_match:
             repo_id = queue_match.group(1)

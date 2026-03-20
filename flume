@@ -6,6 +6,7 @@
 #   flume build-ui                    # compile React → src/frontend/dist (required after UI git pulls)
 #   flume restart [--all] [--build-ui]
 #   flume codex-oauth login | import | refresh | status
+#   flume codex-app-server [run]  — Codex JSON-RPC app-server (OAuth via ~/.codex/auth.json)
 
 set -euo pipefail
 
@@ -266,6 +267,58 @@ cmd_logs() {
     journalctl --user -u "${SERVICE_NAME}" -f "${@}"
 }
 
+cmd_codex_app_server_help() {
+    echo "Codex app-server — use ChatGPT/Codex OAuth for agent coding & review (JSON-RPC)"
+    echo ""
+    echo "The official Codex CLI runs a local app-server (stdio or WebSocket). Flume does not"
+    echo "replace your LLM HTTP path yet; this command starts the same server the VS Code"
+    echo "extension uses, authenticated with ~/.codex/auth.json (or CODEX_HOME)."
+    echo ""
+    echo "Prerequisites:"
+    echo "  - Install Codex CLI (e.g. npm i -g @openai/codex) or set CODEX_BIN to the binary."
+    echo "  - Sign in: ./flume codex-oauth login-browser   OR   codex login   then import."
+    echo ""
+    echo "Usage:"
+    echo "  flume codex-app-server [run] [extra args passed to: codex app-server ...]"
+    echo ""
+    echo "Environment:"
+    echo "  FLUME_CODEX_APP_SERVER_LISTEN   WebSocket listen URL (default: ws://127.0.0.1:4500)"
+    echo "  CODEX_BIN                       Path or name of codex executable (default: codex)"
+    echo ""
+    echo "Docs: https://developers.openai.com/codex/app-server"
+    echo ""
+}
+
+cmd_codex_app_server() {
+    local listen="${FLUME_CODEX_APP_SERVER_LISTEN:-ws://127.0.0.1:4500}"
+    local bin="${CODEX_BIN:-codex}"
+    local sub="${1:-run}"
+    if [ "$#" -ge 1 ]; then
+        shift
+    fi
+    case "${sub}" in
+        help|-h|--help)
+            cmd_codex_app_server_help
+            ;;
+        run)
+            if [ -z "${bin}" ]; then
+                echo "Error: CODEX_BIN is empty." >&2
+                exit 1
+            fi
+            if ! { [ -x "${bin}" ] || command -v "${bin}" >/dev/null 2>&1; }; then
+                echo "Error: codex binary not found (${bin}). Install @openai/codex or set CODEX_BIN." >&2
+                exit 1
+            fi
+            exec "${bin}" app-server --listen "${listen}" "$@"
+            ;;
+        *)
+            echo "Unknown codex-app-server command: ${sub}" >&2
+            cmd_codex_app_server_help
+            exit 1
+            ;;
+    esac
+}
+
 cmd_codex_oauth_help() {
     echo "ChatGPT / Codex OAuth for Flume (OpenAI provider, subscription session)"
     echo ""
@@ -358,6 +411,10 @@ cmd_help() {
     echo "  codex-oauth [login|login-browser|login-paste|import|bootstrap|refresh|status]"
     echo "  Run \"flume codex-oauth help\" for details."
     echo ""
+    echo "Codex app-server (OAuth agent surface — JSON-RPC):"
+    echo "  codex-app-server [run]   Start: codex app-server --listen \$FLUME_CODEX_APP_SERVER_LISTEN"
+    echo "  Run \"flume codex-app-server help\" for details."
+    echo ""
 }
 
 case "${1:-help}" in
@@ -375,6 +432,10 @@ case "${1:-help}" in
     codex-oauth)
         shift
         cmd_codex_oauth "$@"
+        ;;
+    codex-app-server)
+        shift
+        cmd_codex_app_server "$@"
         ;;
     help|--help|-h) cmd_help ;;
     *)

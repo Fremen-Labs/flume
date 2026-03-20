@@ -379,6 +379,24 @@ codex login            # or: codex login --device-auth
 
 Imports **`~/.codex/auth.json`** (or **`$CODEX_HOME/auth.json`**) into Flume’s OAuth state file.
 
+### Codex app-server (OAuth-backed coding & code review)
+
+OpenAI’s **[Codex app-server](https://developers.openai.com/codex/app-server)** is the JSON-RPC surface the Codex VS Code extension uses: threads, turns, streamed agent events, approvals, and **`review/start`**. It is **not** the same path as Flume’s HTTP **`llm_client`** (`/v1/chat/completions`). Use it when you want **Codex-native** behavior with **ChatGPT/Codex OAuth** (via **`~/.codex/auth.json`** / **`codex login`** / **`./flume codex-oauth import`**).
+
+1. Install the [Codex CLI](https://github.com/openai/codex) (`npm i -g @openai/codex` or your package manager).
+2. Ensure OAuth: **`./flume codex-oauth login-browser`** (or **`codex login`**, then **`./flume codex-oauth import`**).
+3. Start the server (WebSocket is convenient for local tools):
+
+   ```bash
+   # Optional: override listen URL (default ws://127.0.0.1:4500)
+   export FLUME_CODEX_APP_SERVER_LISTEN=ws://127.0.0.1:4500
+   ./flume codex-app-server
+   ```
+
+4. **Settings → Codex app-server** shows whether the configured port is accepting TCP connections and whether the `codex` binary is on `PATH`.
+
+**Next steps (integration):** connect your client or IDE to the same WebSocket URL, send **`initialize`** / **`initialized`**, then **`thread/start`**, **`turn/start`**, etc., per the [protocol docs](https://developers.openai.com/codex/app-server). Future Flume work may add a dashboard proxy or dedicated UI on top of this transport.
+
 ### Bootstrap (Codex session cache + fallbacks)
 
 ```bash

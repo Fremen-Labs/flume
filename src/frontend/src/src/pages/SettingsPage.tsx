@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon } from 'lucide-react';
+import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal } from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,6 +18,7 @@ import type {
   LlmSettingsResponse,
   LlmSettingsPayload,
   LlmCredentialActionPayload,
+  CodexAppServerStatusResponse,
   RepoSettingsResponse,
   RepoSettingsPayload,
 } from '@/types';
@@ -48,6 +49,12 @@ async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
   return data;
+}
+
+async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
+  const res = await fetch('/api/codex-app-server/status');
+  if (!res.ok) throw new Error(`Codex app-server status failed: ${res.status}`);
+  return res.json();
 }
 
 async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
@@ -139,6 +146,17 @@ export default function SettingsPage() {
     queryKey: ['settings', 'repos'],
     queryFn: fetchRepoSettings,
     staleTime: 30_000,
+  });
+
+  const {
+    data: codexAppData,
+    isLoading: codexAppLoading,
+    error: codexAppError,
+    refetch: refetchCodexApp,
+  } = useQuery<CodexAppServerStatusResponse>({
+    queryKey: ['settings', 'codex-app-server'],
+    queryFn: fetchCodexAppServerStatus,
+    staleTime: 15_000,
   });
 
   const [repoForm, setRepoForm] = useState<Partial<RepoSettingsPayload>>({});
@@ -803,6 +821,93 @@ export default function SettingsPage() {
                     OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
                   </p>
                 )}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          <AccordionItem value="codex-app-server">
+            <AccordionTrigger>
+              <div className="flex items-center justify-between w-full">
+                <span className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  Codex app-server
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {codexAppLoading
+                    ? '…'
+                    : codexAppData?.parseError
+                      ? 'config'
+                      : codexAppData?.tcpReachable
+                        ? 'port open'
+                        : 'port closed'}
+                </span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-4 pt-4 text-sm">
+                <p className="text-muted-foreground">
+                  Run the official <strong>Codex app-server</strong> on this host to use{' '}
+                  <strong>ChatGPT/Codex OAuth</strong> for agent coding and review (JSON-RPC — not Flume&apos;s HTTP LLM
+                  path). See{' '}
+                  <a
+                    href={codexAppData?.docsUrl ?? 'https://developers.openai.com/codex/app-server'}
+                    className="text-primary underline-offset-2 hover:underline"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    OpenAI docs
+                  </a>
+                  .
+                </p>
+                {codexAppLoading && (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking status…
+                  </div>
+                )}
+                {codexAppError && (
+                  <p className="text-destructive">{String(codexAppError)}</p>
+                )}
+                {codexAppData && (
+                  <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envFlumeListen}</span>={codexAppData.listenUrl}
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envCodexBin}</span>={codexAppData.codexBinary}
+                      {codexAppData.codexResolvedPath ? (
+                        <span className="text-muted-foreground"> ({codexAppData.codexResolvedPath})</span>
+                      ) : null}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">codex on PATH:</span>{' '}
+                      {codexAppData.codexOnPath ? 'yes' : 'no'}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
+                      {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
+                    </div>
+                    {codexAppData.parseError ? (
+                      <p className="text-amber-700 dark:text-amber-400">{codexAppData.parseError}</p>
+                    ) : (
+                      <div>
+                        <span className="font-medium text-foreground">TCP (listen port):</span>{' '}
+                        {codexAppData.tcpReachable ? (
+                          <span className="text-green-600 dark:text-green-400">reachable</span>
+                        ) : (
+                          <span className="text-amber-700 dark:text-amber-400">not listening (start ./flume codex-app-server)</span>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-muted-foreground pt-2 font-sans text-[11px]">
+                      TCP check only — it does not validate JSON-RPC. Default listen is {codexAppData.defaultListenUrl}.
+                    </p>
+                  </div>
+                )}
+                <Button type="button" variant="outline" size="sm" onClick={() => refetchCodexApp()}>
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                  Recheck
+                </Button>
               </div>
             </AccordionContent>
           </AccordionItem>

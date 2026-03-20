@@ -209,6 +209,21 @@ export interface LlmCredentialActionPayload {
   baseUrl?: string;
 }
 
+/** GET /api/codex-app-server/status */
+export interface CodexAppServerStatusResponse {
+  listenUrl: string;
+  defaultListenUrl: string;
+  codexBinary: string;
+  codexResolvedPath: string | null;
+  codexOnPath: boolean;
+  tcpReachable: boolean | null;
+  parseError: string | null;
+  codexAuthFilePresent: boolean;
+  docsUrl: string;
+  envFlumeListen: string;
+  envCodexBin: string;
+}
+
 // ─── Repo Settings API ─────────────────────────────────────────────────────
 
 export interface RepoSettings {
