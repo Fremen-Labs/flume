@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -71,5 +72,9 @@ def update_repo_settings(workspace_root: Path, payload: dict[str, Any]) -> tuple
         # Nothing to update; still considered ok.
         return True, ""
     _update_env_keys(workspace_root, updates)
+    # Align process env so git clone / same-request API see the new token (mirrors LLM save).
+    fresh = load_effective_pairs(workspace_root)
+    for key in (ENV_GH_TOKEN, ENV_ADO_TOKEN, ENV_ADO_ORG_URL):
+        os.environ[key] = str(fresh.get(key) or "")
     return True, ""
 

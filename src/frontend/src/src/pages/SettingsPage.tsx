@@ -968,10 +968,10 @@ export default function SettingsPage() {
           <AccordionItem value="repo-tokens">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
-                <span>Repo Credentials</span>
+                <span>Repo credentials</span>
                 <span className="text-xs text-muted-foreground">
-                  {hasGhToken ? '✓' : ''}
-                  {hasAdoToken ? (hasGhToken ? ' / ADO ✓' : 'ADO ✓') : ''}
+                  {hasGhToken ? 'GitHub classic ✓' : ''}
+                  {hasAdoToken ? (hasGhToken ? ' · ADO ✓' : 'ADO ✓') : ''}
                 </span>
               </div>
             </AccordionTrigger>
@@ -988,7 +988,11 @@ export default function SettingsPage() {
                 )}
 
                 <div className="space-y-2">
-                  <Label>GitHub personal access token</Label>
+                  <Label>Classic GitHub personal access token</Label>
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    Classic PAT with <strong>repo</strong> scope (prefix <code className="text-[10px]">ghp_</code>). Used for{' '}
+                    <code className="text-[10px]">git clone</code> over HTTPS.
+                  </p>
                   <Input
                     type="password"
                     placeholder={effectiveRepo.ghToken === '***' ? '••••••••' : 'ghp_...'}

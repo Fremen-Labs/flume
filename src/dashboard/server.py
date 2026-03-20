@@ -1760,6 +1760,28 @@ def restart_flume_services() -> dict:
         return {'ok': False, 'error': str(e)[:400]}
 
 
+def _github_https_clone_url(repo_url: str, gh_token: str) -> str:
+    """
+    Embed a GitHub PAT for non-interactive HTTPS clone.
+
+    GitHub documents https://x-access-token:<token>@github.com/... for both classic
+    and fine-grained PATs; raw https://<token>@github.com/... can fail for some tokens.
+    """
+    if not gh_token or not repo_url.startswith('https://github.com/'):
+        return repo_url
+    if '://' not in repo_url:
+        return repo_url
+    host_and_rest = repo_url.split('://', 1)[1]
+    if '@' in host_and_rest.split('/', 1)[0]:
+        return repo_url
+    enc = urllib.parse.quote(gh_token, safe='')
+    return re.sub(
+        r'^https://github\.com/',
+        f'https://x-access-token:{enc}@github.com/',
+        repo_url,
+    )
+
+
 def maybe_auto_start_workers():
     """
     Start worker manager + handlers when the dashboard starts (same as POST /api/workflow/agents/start).
@@ -1943,7 +1965,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── Repo branches ─────────────────────────────────────────────────────────
         _parsed_path = urllib.parse.urlparse(self.path)
-        repo_branches_match = re.match(r'^/api/repos/([^/]+)/branches$', _parsed_path.path)
+        repo_branches_match = re.match(r'^/api/repos/([^/]+)/branches$', p)
         if repo_branches_match:
             repo_id = urllib.parse.unquote(repo_branches_match.group(1))
             registry = load_projects_registry()
@@ -1953,7 +1975,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
             if not (repo_path / '.git').exists():
-                self._json_response(404, {'error': 'Not a git repository'})
+                self._json_response(200, {
+                    'default': '',
+                    'branches': [],
+                    'gitAvailable': False,
+                    'message': (
+                        'This project folder is not a Git repository. Create the project with a '
+                        'repository URL to clone, or run git init in the project directory.'
+                    ),
+                })
                 return
             try:
                 default_branch = resolve_default_branch(
@@ -1968,13 +1998,17 @@ class Handler(BaseHTTPRequestHandler):
                 if default_branch in branches:
                     branches.remove(default_branch)
                     branches.insert(0, default_branch)
-                self._json_response(200, {'default': default_branch, 'branches': branches})
+                self._json_response(200, {
+                    'default': default_branch,
+                    'branches': branches,
+                    'gitAvailable': True,
+                })
             except subprocess.CalledProcessError as exc:
                 self._json_response(500, {'error': str(exc)})
             return
 
         # ── Repo file tree ────────────────────────────────────────────────────────
-        repo_tree_match = re.match(r'^/api/repos/([^/]+)/tree$', _parsed_path.path)
+        repo_tree_match = re.match(r'^/api/repos/([^/]+)/tree$', p)
         if repo_tree_match:
             repo_id = urllib.parse.unquote(repo_tree_match.group(1))
             qs = dict(urllib.parse.parse_qsl(_parsed_path.query))
@@ -1985,7 +2019,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
             if not (repo_path / '.git').exists():
-                self._json_response(404, {'error': 'Not a git repository'})
+                self._json_response(200, {
+                    'branch': '',
+                    'entries': [],
+                    'error': 'Not a git repository',
+                    'message': (
+                        'This project folder is not a Git repository. Create the project with a '
+                        'repository URL to clone, or run git init in the project directory.'
+                    ),
+                })
                 return
             branch = qs.get('branch') or resolve_default_branch(
                 repo_path, proj.get('gitflow', {}).get('defaultBranch')
@@ -2020,7 +2062,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ── Repo single file ──────────────────────────────────────────────────────
-        repo_file_match = re.match(r'^/api/repos/([^/]+)/file$', _parsed_path.path)
+        repo_file_match = re.match(r'^/api/repos/([^/]+)/file$', p)
         if repo_file_match:
             repo_id = urllib.parse.unquote(repo_file_match.group(1))
             qs = dict(urllib.parse.parse_qsl(_parsed_path.query))
@@ -2036,7 +2078,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
             if not (repo_path / '.git').exists():
-                self._json_response(404, {'error': 'Not a git repository'})
+                self._json_response(400, {'error': 'Not a git repository'})
                 return
             try:
                 content_bytes = subprocess.check_output(
@@ -2060,7 +2102,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ── Repo branch diff ──────────────────────────────────────────────────────
-        repo_diff_match = re.match(r'^/api/repos/([^/]+)/diff$', _parsed_path.path)
+        repo_diff_match = re.match(r'^/api/repos/([^/]+)/diff$', p)
         if repo_diff_match:
             repo_id = urllib.parse.unquote(repo_diff_match.group(1))
             qs = dict(urllib.parse.parse_qsl(_parsed_path.query))
@@ -2076,7 +2118,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
             if not (repo_path / '.git').exists():
-                self._json_response(404, {'error': 'Not a git repository'})
+                self._json_response(200, {
+                    'base': base_branch,
+                    'head': head_branch,
+                    'files': [],
+                    'diff': '',
+                    'truncated': False,
+                    'identical': False,
+                    'error': 'Not a git repository',
+                })
                 return
             try:
                 MAX_DIFF_LINES = 3000
@@ -2722,27 +2772,39 @@ class Handler(BaseHTTPRequestHandler):
 
                 # If we have a GitHub token configured, inject it into HTTPS clone URLs so
                 # `git clone` doesn't attempt interactive username/password prompts.
-                git_url = repo_url
                 gh_token = load_effective_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
                 if (gh_token.startswith('"') and gh_token.endswith('"')) or (gh_token.startswith("'") and gh_token.endswith("'")):
                     gh_token = gh_token[1:-1].strip()
-                if gh_token and repo_url.startswith('https://github.com/'):
-                    # Transform:
-                    #   https://github.com/org/repo -> https://<token>@github.com/org/repo
-                    # (Avoid re-injecting if credentials are already present.)
-                    if '://' in repo_url and '@' not in repo_url.split('://', 1)[1].split('/', 1)[0]:
-                        git_url = re.sub(r'^https://github\.com/', f'https://{gh_token}@github.com/', repo_url)
+                git_url = _github_https_clone_url(repo_url, gh_token)
+                clone_env = dict(os.environ)
+                clone_env.setdefault('GIT_TERMINAL_PROMPT', '0')
                 try:
                     result = subprocess.run(
-                        ['git', 'clone', git_url, str(target_path)],
-                        capture_output=True, text=True, timeout=120,
+                        [
+                            'git',
+                            '-c',
+                            'credential.helper=',
+                            'clone',
+                            git_url,
+                            str(target_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=clone_env,
                     )
                 except subprocess.TimeoutExpired:
                     self._json_response(504, {'error': 'Clone timed out after 120 seconds'})
                     return
 
                 if result.returncode != 0:
-                    stderr_lc = result.stderr.lower()
+                    stdout_txt = (result.stdout or '').strip()
+                    stderr_txt = (result.stderr or '').strip()
+                    combined = '\n'.join(x for x in (stderr_txt, stdout_txt) if x)
+                    out_lc = combined.lower()
+                    detail = combined[:400]
+                    if gh_token:
+                        detail = detail.replace(gh_token, '***')
                     access_keywords = [
                         'authentication failed', 'permission denied',
                         'could not read password', 'repository not found',
@@ -2751,9 +2813,6 @@ class Handler(BaseHTTPRequestHandler):
                         'the requested url returned error: 401',
                         'could not read username', 'terminal prompts disabled',
                     ]
-                    detail = result.stderr.strip()[:400]
-                    if gh_token:
-                        detail = detail.replace(gh_token, '***')
 
                     # Prevent repeated attempts from immediately failing on "directory exists".
                     # Safe because `safe_id` sanitization constrains this to `WORKSPACE_ROOT/<safe_id>`.
@@ -2763,11 +2822,22 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-                    if any(k in stderr_lc for k in access_keywords):
-                        self._json_response(403, {
+                    if any(k in out_lc for k in access_keywords):
+                        err_body: dict = {
                             'error': 'Access denied — cannot clone repository.',
                             'detail': detail,
-                        })
+                        }
+                        if not gh_token:
+                            err_body['hint'] = (
+                                'No GitHub token is configured. Add a personal access token under '
+                                'Settings → Repo credentials, save, then restart the dashboard (or make the repo public).'
+                            )
+                        else:
+                            err_body['hint'] = (
+                                'Check that the token can read this repo (classic PAT: repo scope; '
+                                'fine-grained: Contents read for this repository). For org repos, authorize the token for SSO.'
+                            )
+                        self._json_response(403, err_body)
                     else:
                         self._json_response(422, {
                             'error': 'Failed to clone repository.',

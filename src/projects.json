@@ -1,3 +1,15 @@
 {
-  "projects": []
+  "projects": [
+    {
+      "id": "initial-test",
+      "name": "initial-test",
+      "repoUrl": "",
+      "path": "/home/howezies/code/flume/src/initial-test",
+      "created_at": "2026-03-20T07:07:59.335714Z",
+      "gitflow": {
+        "autoPrOnApprove": true,
+        "defaultBranch": null
+      }
+    }
+  ]
 }
