@@ -78,13 +78,16 @@ def discover_bootstrap_paths(workspace_root: Path) -> list[Path]:
 
 
 def load_merged_bootstrap(workspace_root: Path) -> dict[str, Any]:
+    import logging
+    logger = logging.getLogger("flume_secrets")
     merged: dict[str, Any] = {}
     for p in discover_bootstrap_paths(workspace_root):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 merged.update(data)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Failed to read/parse bootstrap config {p}: {e}")
             continue
     return merged
 
@@ -151,7 +154,10 @@ def _bao_subprocess_env(addr: str, token: str) -> dict[str, str]:
 
 
 def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, str]:
+    import logging
+    logger = logging.getLogger("flume_secrets")
     if not shutil.which("openbao"):
+        logger.warning("openbao CLI is not installed or not in PATH.")
         return {}
     secret_ref = f"{mount}/{path}"
     try:
@@ -163,13 +169,16 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
             env=_bao_subprocess_env(addr, token),
         )
         if proc.returncode != 0:
+            logger.error(f"openbao lookup failed (code {proc.returncode}): {proc.stderr}")
             return {}
         payload = json.loads(proc.stdout or "{}")
         data = payload.get("data", {}).get("data", {})
         if not isinstance(data, dict):
+            logger.warning("OpenBao returned invalid data payload layout.")
             return {}
         return {str(k): "" if v is None else str(v) for k, v in data.items()}
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError) as e:
+        logger.error(f"Critical OpenBao fetch exception: {e}")
         return {}
 
 
@@ -210,7 +219,9 @@ def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
             continue
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as e:
+            import logging
+            logging.getLogger("flume_secrets").debug(f"Missing legacy env file {candidate}: {e}")
             continue
         for raw in text.splitlines():
             _apply_dotenv_line(raw)
