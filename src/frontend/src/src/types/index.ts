@@ -218,6 +218,10 @@ export interface CodexAppServerStatusResponse {
   codexBinary: string;
   codexResolvedPath: string | null;
   codexOnPath: boolean;
+  npxOnPath?: boolean;
+  npxResolvedPath?: string | null;
+  /** True when ./flume codex-app-server will use npx @openai/codex (no global codex). */
+  flumeWillUseNpxFallback?: boolean;
   tcpReachable: boolean | null;
   parseError: string | null;
   codexAuthFilePresent: boolean;

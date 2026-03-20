@@ -82,12 +82,20 @@ def get_codex_app_server_status() -> dict[str, Any]:
     else:
         which = shutil.which(bin_name)
 
+    npx_path = shutil.which("npx")
+    # ./flume codex-app-server falls back to npx when CODEX_BIN is unset and codex is missing.
+    explicit_codex_bin = bool((os.environ.get("CODEX_BIN") or "").strip())
+    npx_fallback_ok = bool(npx_path) and not explicit_codex_bin and not which
+
     return {
         "listenUrl": listen_url,
         "defaultListenUrl": DEFAULT_LISTEN,
         "codexBinary": bin_name,
         "codexResolvedPath": which,
         "codexOnPath": bool(which),
+        "npxOnPath": bool(npx_path),
+        "npxResolvedPath": npx_path,
+        "flumeWillUseNpxFallback": npx_fallback_ok,
         "tcpReachable": tcp_reachable,
         "parseError": parse_error,
         "codexAuthFilePresent": _codex_auth_present(),

@@ -851,7 +851,9 @@ export default function SettingsPage() {
                       ? 'config'
                       : codexAppData?.tcpReachable
                         ? 'port open'
-                        : 'port closed'}
+                        : codexAppData?.flumeWillUseNpxFallback
+                          ? 'start: npx'
+                          : 'port closed'}
                 </span>
               </div>
             </AccordionTrigger>
@@ -895,6 +897,17 @@ export default function SettingsPage() {
                       <span className="font-medium text-foreground">codex on PATH:</span>{' '}
                       {codexAppData.codexOnPath ? 'yes' : 'no'}
                     </div>
+                    <div>
+                      <span className="font-medium text-foreground">npx on PATH:</span>{' '}
+                      {codexAppData.npxOnPath ? `yes${codexAppData.npxResolvedPath ? ` (${codexAppData.npxResolvedPath})` : ''}` : 'no'}
+                    </div>
+                    {codexAppData.flumeWillUseNpxFallback ? (
+                      <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
+                        <strong>./flume codex-app-server</strong> will run{' '}
+                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
+                        <code className="text-[10px]">codex</code> required).
+                      </p>
+                    ) : null}
                     <div>
                       <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
                       {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}

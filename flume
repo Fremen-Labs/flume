@@ -284,6 +284,7 @@ cmd_codex_app_server_help() {
     echo "Environment:"
     echo "  FLUME_CODEX_APP_SERVER_LISTEN   WebSocket listen URL (default: ws://127.0.0.1:4500)"
     echo "  CODEX_BIN                       Path or name of codex executable (default: codex)"
+    echo "  FLUME_CODEX_APP_SERVER_VIA_NPX  Set to 1 to always use: npx --yes @openai/codex"
     echo ""
     echo "Docs: https://developers.openai.com/codex/app-server"
     echo ""
@@ -305,13 +306,34 @@ cmd_codex_app_server() {
                 echo "Error: CODEX_BIN is empty." >&2
                 exit 1
             fi
-            if ! { [ -x "${bin}" ] || command -v "${bin}" >/dev/null 2>&1; }; then
-                echo "Error: codex binary not found (${bin})." >&2
-                echo "  Install the Codex CLI, e.g.:  npm install -g @openai/codex" >&2
-                echo "  Then re-run, or set CODEX_BIN to the full path to the codex executable." >&2
+            # Force npx path (optional)
+            if [ "${FLUME_CODEX_APP_SERVER_VIA_NPX:-0}" = "1" ] || [ "${FLUME_CODEX_APP_SERVER_VIA_NPX:-}" = "true" ]; then
+                if ! command -v npx >/dev/null 2>&1; then
+                    echo "Error: FLUME_CODEX_APP_SERVER_VIA_NPX=1 but npx not found. Install Node.js (includes npm/npx)." >&2
+                    exit 1
+                fi
+                echo "Flume: starting Codex via npx @openai/codex (first run may download the package)." >&2
+                exec npx --yes @openai/codex app-server --listen "${listen}" "$@"
+            fi
+            if { [ -x "${bin}" ] || command -v "${bin}" >/dev/null 2>&1; }; then
+                exec "${bin}" app-server --listen "${listen}" "$@"
+            fi
+            # CODEX_BIN was set explicitly but missing
+            if [ -n "${CODEX_BIN}" ]; then
+                echo "Error: CODEX_BIN=${bin} not found or not executable." >&2
                 exit 1
             fi
-            exec "${bin}" app-server --listen "${listen}" "$@"
+            # Default: try npx when global 'codex' is not installed (Node present)
+            if command -v npx >/dev/null 2>&1; then
+                echo "Flume: 'codex' not in PATH; using npx @openai/codex (install globally with: npm i -g @openai/codex)." >&2
+                exec npx --yes @openai/codex app-server --listen "${listen}" "$@"
+            fi
+            echo "Error: neither 'codex' nor 'npx' found." >&2
+            echo "  Install Node.js, then either:" >&2
+            echo "    npm install -g @openai/codex   # adds codex to PATH" >&2
+            echo "  or re-run this command — if npx exists, Flume will use it automatically." >&2
+            echo "  Or set CODEX_BIN to the full path to the codex executable." >&2
+            exit 1
             ;;
         *)
             echo "Unknown codex-app-server command: ${sub}" >&2

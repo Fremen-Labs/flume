@@ -387,7 +387,7 @@ Imports **`~/.codex/auth.json`** (or **`$CODEX_HOME/auth.json`**) into Flume’s
 
 OpenAI’s **[Codex app-server](https://developers.openai.com/codex/app-server)** is the JSON-RPC surface the Codex VS Code extension uses: threads, turns, streamed agent events, approvals, and **`review/start`**. It is **not** the same path as Flume’s HTTP **`llm_client`** (`/v1/chat/completions`). Use it when you want **Codex-native** behavior with **ChatGPT/Codex OAuth** (via **`~/.codex/auth.json`** / **`codex login`** / **`./flume codex-oauth import`**).
 
-1. Install the [Codex CLI](https://github.com/openai/codex) (`npm i -g @openai/codex` or your package manager).
+1. Install **Node.js** (includes `npx`). Optionally install the [Codex CLI](https://github.com/openai/codex) globally: **`npm i -g @openai/codex`** (adds `codex` to your `PATH`).
 2. Ensure OAuth: **`./flume codex-oauth login-browser`** (or **`codex login`**, then **`./flume codex-oauth import`**).
 3. Start the server (WebSocket is convenient for local tools):
 
@@ -397,7 +397,9 @@ OpenAI’s **[Codex app-server](https://developers.openai.com/codex/app-server)*
    ./flume codex-app-server
    ```
 
-4. **Settings → Codex app-server** shows whether the configured port is accepting TCP connections and whether the `codex` binary is on `PATH`.
+   If **`codex`** is not on `PATH`, **`./flume codex-app-server`** falls back to **`npx --yes @openai/codex`** (first run may download the package). To force that path: **`FLUME_CODEX_APP_SERVER_VIA_NPX=1`**. To use a specific binary: **`CODEX_BIN=/path/to/codex`**.
+
+4. **Settings → Codex app-server** shows whether the configured port is accepting TCP connections and whether **`codex`** is on `PATH` (or use **`npx`** as above).
 
 **Next steps (integration):** connect your client or IDE to the same WebSocket URL, send **`initialize`** / **`initialized`**, then **`thread/start`**, **`turn/start`**, etc., per the [protocol docs](https://developers.openai.com/codex/app-server). Future Flume work may add a dashboard proxy or dedicated UI on top of this transport.
 
