@@ -1,0 +1,3 @@
+# Optional: WebSocket proxy for dashboard Codex chat (codex_ws_proxy.py).
+#   python3 -m pip install --user -r requirements-codex-proxy.txt
+websockets>=12.0

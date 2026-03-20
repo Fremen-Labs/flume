@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon } from 'lucide-react';
+import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal } from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,6 +19,7 @@ import type {
   LlmSettingsResponse,
   LlmSettingsPayload,
   LlmCredentialActionPayload,
+  CodexAppServerStatusResponse,
   RepoSettingsResponse,
   RepoSettingsPayload,
 } from '@/types';
@@ -48,6 +50,12 @@ async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
   return data;
+}
+
+async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
+  const res = await fetch('/api/codex-app-server/status');
+  if (!res.ok) throw new Error(`Codex app-server status failed: ${res.status}`);
+  return res.json();
 }
 
 async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
@@ -139,6 +147,17 @@ export default function SettingsPage() {
     queryKey: ['settings', 'repos'],
     queryFn: fetchRepoSettings,
     staleTime: 30_000,
+  });
+
+  const {
+    data: codexAppData,
+    isLoading: codexAppLoading,
+    error: codexAppError,
+    refetch: refetchCodexApp,
+  } = useQuery<CodexAppServerStatusResponse>({
+    queryKey: ['settings', 'codex-app-server'],
+    queryFn: fetchCodexAppServerStatus,
+    staleTime: 15_000,
   });
 
   const [repoForm, setRepoForm] = useState<Partial<RepoSettingsPayload>>({});
@@ -282,7 +301,7 @@ export default function SettingsPage() {
       <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
 
       <div className="glass-card p-6">
-        <Accordion type="single" collapsible defaultValue="appearance">
+        <Accordion type="single" collapsible>
           <AccordionItem value="appearance">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
@@ -652,18 +671,21 @@ export default function SettingsPage() {
                 )}
 
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
-                  <div className="space-y-4 p-4 rounded-lg bg-muted/50">
+                  <div className="space-y-4 p-4 rounded-lg bg-muted/50 border border-amber-500/25">
+                    <p className="text-xs text-amber-800 dark:text-amber-200/95 leading-relaxed font-medium">
+                      <strong>Plan New Work</strong> (text planning) auto-routes through the <strong>Codex CLI</strong>{' '}
+                      (<code className="text-[11px]">codex app-server</code> on stdio) so you can use{' '}
+                      <strong>ChatGPT/Codex subscription OAuth</strong> without a platform <code className="text-[11px]">sk-</code>{' '}
+                      key. Install Node, <code className="text-[11px]">npm i -g @openai/codex</code> or <code className="text-[11px]">npx</code>, run{' '}
+                      <code className="text-[11px]">codex login</code> so <code className="text-[11px]">~/.codex/auth.json</code>{' '}
+                      exists (Flume&apos;s <code className="text-[11px]">.openai-oauth.json</code> is not read by Codex).
+                    </p>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — good for Codex-style sessions.{' '}
-                      <strong className="text-foreground">Plan New Work and hosted GPT via api.openai.com</strong> need an
-                      OpenAI <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>): switch{' '}
-                      <strong>Auth mode</strong> to <strong>API Key</strong> or add the key from{' '}
-                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>. Codex browser OAuth tokens
-                      do not receive <code className="text-[11px]">model.request</code> on authorize, but{' '}
-                      <code className="text-[11px]">/v1/chat/completions</code> still requires it — so OAuth alone often
-                      cannot run the planner. Optional: <code className="text-[11px]">./flume codex-oauth login-paste</code>{' '}
-                      / <code className="text-[11px]">login-browser</code> / Codex import for other uses; then{' '}
-                      <code className="text-[11px]">./flume restart --all</code>.
+                      <strong>Worker agents</strong> that use OpenAI-style <strong>tool calling</strong> still hit{' '}
+                      <code className="text-[11px]">api.openai.com</code> today — use a platform <code className="text-[11px]">sk-</code>,{' '}
+                      switch Auth to <strong>API Key</strong>, or use <strong>Ollama</strong> for those roles until full Codex
+                      bridge support. <code className="text-[11px]">./flume codex-oauth</code> syncs tokens into Flume for UI refresh;
+                      subscription limits still apply per OpenAI/Codex.
                       <span className="block mt-1">
                         <strong>Refresh token</strong> only renews the same consent — it cannot add API product scopes
                         OpenAI did not grant.
@@ -704,6 +726,14 @@ export default function SettingsPage() {
                             OAuth scopes look OK for <code className="text-[11px]">api.responses.write</code>.
                           </p>
                         )}
+                        {data.oauthStatus.accessTokenJwtParsed &&
+                          data.oauthStatus.hasModelRequestScope === false && (
+                            <p className="text-amber-700 dark:text-amber-400">
+                              JWT has no <code className="text-[11px]">model.request</code> —{' '}
+                              <code className="text-[11px]">/v1/chat/completions</code> (Plan New Work) will return 401
+                              unless you use a platform <code className="text-[11px]">sk-</code> key.
+                            </p>
+                          )}
                         {data.oauthStatus.oauthScopeStatus === 'no_token' && (
                           <p className="text-amber-600 dark:text-amber-500">
                             No access token in the OAuth state file. Click <strong>Refresh token</strong> or complete
@@ -803,6 +833,110 @@ export default function SettingsPage() {
                     OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
                   </p>
                 )}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          <AccordionItem value="codex-app-server">
+            <AccordionTrigger>
+              <div className="flex items-center justify-between w-full">
+                <span className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  Codex app-server
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {codexAppLoading
+                    ? '…'
+                    : codexAppData?.parseError
+                      ? 'config'
+                      : codexAppData?.tcpReachable
+                        ? 'port open'
+                        : codexAppData?.flumeWillUseNpxFallback
+                          ? 'start: npx'
+                          : 'port closed'}
+                </span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-4 pt-4 text-sm">
+                <p className="text-muted-foreground">
+                  Run the official <strong>Codex app-server</strong> on this host to use{' '}
+                  <strong>ChatGPT/Codex OAuth</strong> for agent coding and review (JSON-RPC — not Flume&apos;s HTTP LLM
+                  path). See{' '}
+                  <a
+                    href={codexAppData?.docsUrl ?? 'https://developers.openai.com/codex/app-server'}
+                    className="text-primary underline-offset-2 hover:underline"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    OpenAI docs
+                  </a>
+                  . For an in-dashboard WebSocket client (with optional approval replies), open{' '}
+                  <Link to="/codex" className="text-primary underline-offset-2 hover:underline">
+                    Codex
+                  </Link>{' '}
+                  (requires <code className="text-[10px]">websockets</code> and the dashboard proxy — see install docs).
+                </p>
+                {codexAppLoading && (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking status…
+                  </div>
+                )}
+                {codexAppError && (
+                  <p className="text-destructive">{String(codexAppError)}</p>
+                )}
+                {codexAppData && (
+                  <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envFlumeListen}</span>={codexAppData.listenUrl}
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envCodexBin}</span>={codexAppData.codexBinary}
+                      {codexAppData.codexResolvedPath ? (
+                        <span className="text-muted-foreground"> ({codexAppData.codexResolvedPath})</span>
+                      ) : null}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">codex on PATH:</span>{' '}
+                      {codexAppData.codexOnPath ? 'yes' : 'no'}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">npx on PATH:</span>{' '}
+                      {codexAppData.npxOnPath ? `yes${codexAppData.npxResolvedPath ? ` (${codexAppData.npxResolvedPath})` : ''}` : 'no'}
+                    </div>
+                    {codexAppData.flumeWillUseNpxFallback ? (
+                      <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
+                        <strong>./flume codex-app-server</strong> will run{' '}
+                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
+                        <code className="text-[10px]">codex</code> required).
+                      </p>
+                    ) : null}
+                    <div>
+                      <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
+                      {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
+                    </div>
+                    {codexAppData.parseError ? (
+                      <p className="text-amber-700 dark:text-amber-400">{codexAppData.parseError}</p>
+                    ) : (
+                      <div>
+                        <span className="font-medium text-foreground">TCP (listen port):</span>{' '}
+                        {codexAppData.tcpReachable ? (
+                          <span className="text-green-600 dark:text-green-400">reachable</span>
+                        ) : (
+                          <span className="text-amber-700 dark:text-amber-400">not listening (start ./flume codex-app-server)</span>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-muted-foreground pt-2 font-sans text-[11px]">
+                      TCP check only — it does not validate JSON-RPC. Default listen is {codexAppData.defaultListenUrl}.
+                    </p>
+                  </div>
+                )}
+                <Button type="button" variant="outline" size="sm" onClick={() => refetchCodexApp()}>
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                  Recheck
+                </Button>
               </div>
             </AccordionContent>
           </AccordionItem>
