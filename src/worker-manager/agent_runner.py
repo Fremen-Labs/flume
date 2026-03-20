@@ -7,6 +7,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+import importlib.util
 
 HERE = Path(__file__).resolve().parent
 BASE = Path(os.environ.get('LOOM_WORKSPACE', str(HERE.parent)))
@@ -230,15 +231,30 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR running shell command: {e}'
 
 
+_LLM_CLIENT = None
+
+
+def _load_llm_client():
+    global _LLM_CLIENT
+    if _LLM_CLIENT and getattr(_LLM_CLIENT, '__file__', '') == str(HERE / 'llm_client.py'):
+        return _LLM_CLIENT
+    path = HERE / 'llm_client.py'
+    spec = importlib.util.spec_from_file_location('worker_manager_llm_client', path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+    _LLM_CLIENT = mod
+    return mod
+
+
 def _call_ollama_tools(
     messages: list,
     tools: list,
     model: str,
     task: Optional[dict[str, Any]] = None,
 ) -> Optional[dict]:
-    import sys
-    import llm_client
     try:
+        llm_client = _load_llm_client()
         kw = _task_llm_kw(task)
         return llm_client.chat_with_tools(
             messages,
