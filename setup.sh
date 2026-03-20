@@ -139,13 +139,6 @@ if es_credentials_valid && [ -n "${CREATE_INDICES_SCRIPT}" ]; then
     ENV_FILE="${ENV_FILE}" bash "${CREATE_INDICES_SCRIPT}" 2>/dev/null || true
 fi
 
-# Seed initial dashboard analytics
-if es_credentials_valid && [ -f "src/dashboard/seed_telemetry.py" ]; then
-    echo ""
-    echo "Seeding native Elasticsearch telemetry..."
-    python3 src/dashboard/seed_telemetry.py || true
-fi
-
 # Install and start dashboard as background service (only if ES is configured)
 if [ -f "flume" ] && es_credentials_valid; then
     chmod +x flume 2>/dev/null || true
