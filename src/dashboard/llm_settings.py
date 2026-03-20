@@ -124,7 +124,17 @@ SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "ES_API_KEY"}
 
 
 def _env_file_path(workspace_root: Path) -> Path:
-    return workspace_root / ".env"
+    """
+    File we mutate on Settings save.
+
+    load_env_pairs merges workspace .env then repo-root .env with **parent winning** on duplicate
+    keys. Writing only workspace/.env would leave repo-root LLM_* (e.g. llama3.2) overriding saves.
+    """
+    wr = workspace_root.resolve()
+    parent_env = wr.parent / ".env"
+    if parent_env.is_file():
+        return parent_env
+    return wr / ".env"
 
 
 def _parse_env_lines(text: str) -> dict[str, str]:
@@ -231,7 +241,17 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
     try:
         existing = _openbao_get_all(workspace_root)
         merged = dict(existing)
-        merged.update(updates)
+        oauth_path_set = str(updates.get("OPENAI_OAUTH_STATE_FILE", "") or "").strip()
+        for k, v in updates.items():
+            # OAuth form saves send LLM_API_KEY=""; do not wipe an existing Codex access token in KV.
+            # When switching to API key mode, OPENAI_OAUTH_STATE_FILE is cleared — then allow "".
+            if (
+                k == "LLM_API_KEY"
+                and not str(v or "").strip()
+                and oauth_path_set
+            ):
+                continue
+            merged[k] = v
         secret_ref = _openbao_secret_ref(pairs)
         cmd = ["openbao", "kv", "put", secret_ref]
         for k, v in merged.items():
