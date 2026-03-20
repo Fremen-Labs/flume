@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -31,6 +32,40 @@ def _openai_oauth_refresh_scopes() -> str | None:
         return _DEFAULT_OPENAI_OAUTH_SCOPES
     s = str(raw).strip()
     return s or None
+
+
+def _openai_oauth_resource_param() -> str | None:
+    """RFC 8707 resource for auth.openai.com token calls (default Platform API)."""
+    if 'OPENAI_OAUTH_RESOURCE' not in os.environ:
+        return 'https://api.openai.com'
+    s = os.getenv('OPENAI_OAUTH_RESOURCE', '').strip()
+    return s or None
+
+
+def _jwt_access_token_scopes(access_token: str) -> tuple[list[str], str]:
+    """Decode JWT `scp` and `aud` without verifying signature (debug / UI only)."""
+    t = (access_token or '').strip()
+    if t.count('.') < 2:
+        return [], ''
+    try:
+        payload_b64 = t.split('.')[1]
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
+        aud = payload.get('aud')
+        aud_s = ''
+        if isinstance(aud, str):
+            aud_s = aud
+        elif isinstance(aud, list) and aud:
+            aud_s = str(aud[0])
+        scp_raw = payload.get('scp')
+        scopes: list[str] = []
+        if isinstance(scp_raw, str):
+            scopes = [x for x in scp_raw.split() if x]
+        elif isinstance(scp_raw, list):
+            scopes = [str(x) for x in scp_raw if x]
+        return scopes, aud_s
+    except Exception:
+        return [], ''
 
 # ─── Provider/model catalog (all major public frontier) ────────────────────────
 
@@ -533,6 +568,9 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     scp = _openai_oauth_refresh_scopes()
     if scp:
         form['scope'] = scp
+    res = _openai_oauth_resource_param()
+    if res:
+        form['resource'] = res
     req = urllib.request.Request(
         token_url,
         data=urllib.parse.urlencode(form).encode(),
@@ -596,12 +634,19 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     expires = int(state.get("expires") or 0)
     now_ms = int(time.time() * 1000)
     expires_in_sec = max(0, (expires - now_ms) // 1000) if expires else 0
+    access = str(state.get("access") or "").strip()
+    scopes, aud = _jwt_access_token_scopes(access)
+    requested = str(state.get("oauth_scopes_requested") or "").strip()
 
     return {
         "configured": has_refresh and client_id,
         "hasAccessToken": has_access,
         "clientId": client_id[:20] + "..." if len(client_id) > 20 else client_id,
         "expiresInSeconds": expires_in_sec,
+        "accessTokenScopes": scopes,
+        "accessTokenAudience": (aud[:120] + "...") if len(aud) > 120 else aud,
+        "hasApiResponsesWrite": "api.responses.write" in scopes,
+        "oauthScopesRequested": requested[:200] if requested else "",
     }
 
 

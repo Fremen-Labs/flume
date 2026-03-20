@@ -439,13 +439,15 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — on the machine running Flume, open a terminal in your
-                      Flume install directory and run{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume codex-oauth login</code>
-                      . If you already use the official Codex CLI, run{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume codex-oauth import</code>{' '}
-                      after <code className="text-[11px]">codex login</code>. Then save settings here and run{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume restart</code>.
+                      <strong>ChatGPT / Codex OAuth</strong> — for <strong>/v1/responses</strong> you usually need{' '}
+                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">
+                        ./flume codex-oauth login-browser
+                      </code>{' '}
+                      (browser + localhost callback; binds tokens to the Platform API). Device-code{' '}
+                      <code className="text-[11px]">login</code> often yields “Missing scopes”. Alternatively:{' '}
+                      <code className="text-[11px]">codex login</code> then{' '}
+                      <code className="text-[11px]">./flume codex-oauth import</code>. Then save and{' '}
+                      <code className="text-[11px]">./flume restart --all</code>.
                     </p>
                     <div className="space-y-2">
                       <Label>OAuth state file</Label>
@@ -475,6 +477,25 @@ export default function SettingsPage() {
                         </span>
                       )}
                     </div>
+                    {data?.oauthStatus?.configured &&
+                      Array.isArray(data.oauthStatus.accessTokenScopes) &&
+                      data.oauthStatus.accessTokenScopes.length > 0 && (
+                        <div className="text-xs space-y-1">
+                          <p className="text-muted-foreground font-medium">Access token scopes (from JWT)</p>
+                          <p className="font-mono break-all text-[11px]">
+                            {data.oauthStatus.accessTokenScopes.join(' ')}
+                          </p>
+                          {data.oauthStatus.accessTokenScopes.length > 0 &&
+                            data.oauthStatus.hasApiResponsesWrite === false && (
+                            <p className="text-destructive">
+                              Missing <code className="text-[11px]">api.responses.write</code> — run{' '}
+                              <code className="text-[11px]">./flume codex-oauth login-browser</code> again (latest Flume
+                              sends <code className="text-[11px]">resource=https://api.openai.com</code> on authorize +
+                              token).
+                            </p>
+                          )}
+                        </div>
+                      )}
                     {refreshError && (
                       <p className="text-sm text-destructive">{refreshError}</p>
                     )}

@@ -17,6 +17,8 @@ Environment:
   OPENAI_OAUTH_SCOPES      Space-separated OAuth scopes (default includes api.responses.write).
                            Set to empty to omit scope from device/token requests (legacy).
   OPENAI_OAUTH_ORIGINATOR  Browser authorize URL (default: codex_cli_rs)
+  OPENAI_OAUTH_RESOURCE    RFC 8707 resource for Platform API tokens (default: https://api.openai.com).
+                           Set to empty in .env to omit the resource parameter.
   SSL_CERT_FILE            Optional corporate CA bundle
 """
 from __future__ import annotations
@@ -56,6 +58,17 @@ def _oauth_scopes_for_request() -> str | None:
     if raw is None:
         return DEFAULT_OAUTH_SCOPES
     s = str(raw).strip()
+    return s or None
+
+
+def _oauth_resource_for_openai_api() -> str | None:
+    """
+    Bind tokens to the OpenAI HTTP API (RFC 8707). Without this, auth.openai.com may issue tokens
+    that lack api.responses.write for api.openai.com even when scopes are requested.
+    """
+    if "OPENAI_OAUTH_RESOURCE" not in os.environ:
+        return "https://api.openai.com"
+    s = os.getenv("OPENAI_OAUTH_RESOURCE", "").strip()
     return s or None
 
 
@@ -102,6 +115,9 @@ def _build_browser_authorize_url(
         ("state", state),
         ("originator", originator),
     ]
+    res = _oauth_resource_for_openai_api()
+    if res:
+        params.append(("resource", res))
     qs = urllib.parse.urlencode(params)
     return f"{issuer.rstrip('/')}/oauth/authorize?{qs}"
 
@@ -121,6 +137,9 @@ def _exchange_localhost_authorization_code(
         "client_id": client_id,
         "code_verifier": code_verifier,
     }
+    res = _oauth_resource_for_openai_api()
+    if res:
+        form["resource"] = res
     url = f"{issuer.rstrip('/')}/oauth/token"
     code, body = _http_json("POST", url, form_body=form, timeout=60)
     if code != 200 or not isinstance(body, dict):
@@ -307,6 +326,9 @@ def _exchange_authorization_code(
     scp = _oauth_scopes_for_request()
     if scp:
         form["scope"] = scp
+    res = _oauth_resource_for_openai_api()
+    if res:
+        form["resource"] = res
     url = f"{issuer.rstrip('/')}/oauth/token"
     code, body = _http_json("POST", url, form_body=form, timeout=60)
     if code != 200 or not isinstance(body, dict):
@@ -439,7 +461,7 @@ def cmd_login(args: argparse.Namespace) -> None:
 def cmd_login_browser(args: argparse.Namespace) -> None:
     """
     Full browser OAuth with localhost redirect (openai/codex login server pattern).
-    Puts API scopes on /oauth/authorize — required for /v1/responses when device tokens lack them.
+    Sends API scopes on /oauth/authorize and RFC 8707 resource=https://api.openai.com on authorize + token.
     """
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
@@ -468,6 +490,12 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     print("  e.g.  ssh -L <port>:127.0.0.1:<port> you@this-host  then open the authorize URL on your laptop.")
     print()
     print(f"Listening on {redirect_uri}")
+    _res = _oauth_resource_for_openai_api()
+    print(
+        f"RFC 8707 resource: {_res!r}"
+        if _res
+        else "RFC 8707 resource: (disabled — empty OPENAI_OAUTH_RESOURCE in env)"
+    )
     print()
     print(f"Sign in here:\n\n  {auth_url}\n")
     if not args.no_browser:

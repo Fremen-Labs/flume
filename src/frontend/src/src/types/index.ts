@@ -127,6 +127,11 @@ export interface LlmOAuthStatus {
   hasAccessToken?: boolean;
   clientId?: string;
   expiresInSeconds?: number;
+  /** JWT scp claim (decoded for display only) */
+  accessTokenScopes?: string[];
+  accessTokenAudience?: string;
+  hasApiResponsesWrite?: boolean;
+  oauthScopesRequested?: string;
 }
 
 export interface LlmSettingsResponse {
