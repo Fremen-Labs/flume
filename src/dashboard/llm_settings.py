@@ -292,8 +292,17 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
     sensitive_updates = {k: v for k, v in updates.items() if k in SENSITIVE_KEYS}
     non_sensitive_updates = {k: v for k, v in updates.items() if k not in SENSITIVE_KEYS}
 
-    # Prefer OpenBao for sensitive keys. If persisted there, clear .env values.
-    if sensitive_updates and _openbao_put_many(workspace_root, sensitive_updates):
+    # When OpenBao is enabled, load_effective_pairs applies KV *after* .env and process env,
+    # so KV wins for every key present. We must merge the full settings payload into KV
+    # (not only SENSITIVE_KEYS); otherwise LLM_MODEL / LLM_PROVIDER / OAuth paths saved to
+    # .env are ignored on the next request and stale values (e.g. llama3.2) reappear.
+    ob_enabled, _ = _openbao_enabled(workspace_root)
+    if ob_enabled and updates:
+        if _openbao_put_many(workspace_root, updates):
+            for k in sensitive_updates.keys():
+                non_sensitive_updates[k] = ""
+
+    elif sensitive_updates and _openbao_put_many(workspace_root, sensitive_updates):
         for k in sensitive_updates.keys():
             non_sensitive_updates[k] = ""
 
@@ -495,6 +504,13 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
 
     save_env_key(workspace_root, "LLM_API_KEY", new_access)
     save_env_key(workspace_root, "LLM_PROVIDER", "openai")
+
+    ob_enabled, _ = _openbao_enabled(workspace_root)
+    if ob_enabled:
+        _openbao_put_many(
+            workspace_root,
+            {"LLM_API_KEY": new_access, "LLM_PROVIDER": "openai"},
+        )
 
     return True, "Token refreshed", {
         "access": new_access[:20] + "...",
