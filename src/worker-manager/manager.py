@@ -215,6 +215,8 @@ def save_state(state):
 
 
 def cycle():
+    # Re-merge .env + OpenBao so LLM_MODEL / LLM_PROVIDER track Settings without restarting.
+    apply_runtime_config(_WS)
     workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:

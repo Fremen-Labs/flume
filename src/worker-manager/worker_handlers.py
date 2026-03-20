@@ -901,6 +901,7 @@ def main():
     log('worker handlers starting')
     while True:
         try:
+            apply_runtime_config(_WS)
             state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':

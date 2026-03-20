@@ -10,8 +10,10 @@ from typing import Any, Optional
 BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
 AGENTS_ROOT = BASE / 'agents'
 
-LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434').rstrip('/')
-LLM_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
+
+def _current_llm_model() -> str:
+    """Read from env each call so worker_handlers' periodic apply_runtime_config() takes effect."""
+    return (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
 
 
 @dataclass
@@ -56,7 +58,7 @@ def _call_ollama(
         kw = _task_llm_kw(task)
         content = llm_client.chat(
             messages,
-            model=model or LLM_MODEL,
+            model=model or _current_llm_model(),
             temperature=0.2,
             max_tokens=2048,
             **kw,
@@ -237,7 +239,7 @@ def run_implementer(
     on_progress: Optional[Any] = None,
 ) -> AgentResult:
     system_prompt = _load_system_prompt('implementer')
-    model = task.get('preferred_model') or LLM_MODEL
+    model = task.get('preferred_model') or _current_llm_model()
 
     def _progress(note: str) -> None:
         if on_progress:
@@ -365,7 +367,7 @@ def run_tester(task: dict[str, Any]) -> AgentResult:
             ),
             'task': task,
         },
-        model=task.get('preferred_model') or LLM_MODEL,
+        model=task.get('preferred_model') or _current_llm_model(),
         task=task,
     )
     if response and isinstance(response, dict):
@@ -389,7 +391,7 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
             'instruction': 'Return JSON: {"verdict":"approved|changes_requested|blocked","summary":"..."}',
             'task': task,
         },
-        model=task.get('preferred_model') or LLM_MODEL,
+        model=task.get('preferred_model') or _current_llm_model(),
         task=task,
     )
     if response and isinstance(response, dict):
@@ -416,7 +418,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             'instruction': 'Return JSON: {"action":"compute_ready","summary":"..."}',
             'task': task or {},
         },
-        model=(task or {}).get('preferred_model') or LLM_MODEL,
+        model=(task or {}).get('preferred_model') or _current_llm_model(),
         task=task,
     )
     if response and isinstance(response, dict):
