@@ -162,6 +162,34 @@ def _jwt_scope_list(access_token: str) -> list[str] | None:
         return None
 
 
+def _openai_chat_should_use_codex_app_server(rt: dict) -> bool:
+    """
+    When True, route chat() through `codex app-server` stdio instead of api.openai.com.
+
+    ChatGPT/Codex OAuth tokens lack model.request; the hosted /v1/chat/completions path 401s.
+    Codex CLI uses ~/.codex/auth.json and subscription/session routing.
+
+    FLUME_OPENAI_USE_CODEX_APP_SERVER:
+      auto (default) — for non-sk- OpenAI bearer, use Codex when JWT omits model.request or JWT unknown
+      1 / true — always (still skips sk- keys)
+      0 / false — never; use HTTP only
+    """
+    raw = (os.environ.get("FLUME_OPENAI_USE_CODEX_APP_SERVER") or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off", "never"):
+        return False
+    if (rt.get("provider") or "").lower() != "openai":
+        return False
+    key = _openai_bearer_for_request(rt)
+    if _looks_like_openai_platform_api_key(key):
+        return False
+    if raw in ("1", "true", "yes", "on", "force", "always"):
+        return True
+    scopes = _jwt_scope_list(key)
+    if scopes is None:
+        return True
+    return "model.request" not in scopes
+
+
 def _openai_bearer_uses_responses_api(rt: dict) -> bool:
     """
     Platform API keys use /v1/chat/completions.
@@ -440,6 +468,26 @@ def _openai_headers(rt: dict):
 
 
 def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
+    if _openai_chat_should_use_codex_app_server(rt):
+        try:
+            from codex_app_server_stdio import chat_via_codex_app_server
+
+            cwd = os.environ.get("LOOM_WORKSPACE", os.getcwd())
+            return chat_via_codex_app_server(
+                messages,
+                model,
+                cwd=cwd,
+                temperature=temperature,
+                timeout_sec=None,
+            ).strip()
+        except Exception as e:
+            raise RuntimeError(
+                "OpenAI chat via Codex app-server failed (OAuth-friendly path). "
+                "Install Node + Codex (`npm i -g @openai/codex` or npx), run `codex login` so "
+                "~/.codex/auth.json exists (Flume's .openai-oauth.json is not used by the Codex binary). "
+                f"Details: {e} "
+                "Or use a platform API key and FLUME_OPENAI_USE_CODEX_APP_SERVER=0."
+            ) from e
     if _openai_bearer_uses_responses_api(rt):
         return _openai_responses_chat(messages, model, temperature, max_tokens, rt)
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'

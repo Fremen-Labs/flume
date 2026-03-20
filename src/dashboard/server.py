@@ -311,10 +311,15 @@ def _planner_llm_error_hint(err: str) -> str:
     if '401' in err or 'Unauthorized' in err:
         if 'model.request' in err:
             return (
-                ' ChatGPT/Codex **browser OAuth** tokens do not include **model.request** (OpenAI does not allow '
-                'that scope on /oauth/authorize for the Codex client), but **/v1/chat/completions** still requires it. '
-                'Plan New Work and similar calls need an OpenAI **platform API key** (sk-…): Settings → LLM → '
-                'Auth mode → API Key, from https://platform.openai.com/api-keys — OAuth alone cannot satisfy this API.'
+                ' Typical **Codex OAuth** tokens lack **model.request**, so **api.openai.com** `/v1/chat/completions` rejects them. '
+                'Current Flume defaults to **Codex CLI app-server** (stdio) for text chat when OAuth is active — install Node, '
+                '`codex login` (~/.codex/auth.json), and ensure `npx` or global `codex` is on PATH. '
+                'If you intentionally use HTTP only, add a platform **sk-** key: Settings → LLM → API Key.'
+            )
+        if 'codex app-server' in err.lower() or 'codex cli' in err.lower():
+            return (
+                ' Plan New Work is trying the **Codex app-server** path. Run `codex login` (or copy session into ~/.codex), '
+                'install `@openai/codex`, and `./flume restart --all`. See install/README — **OpenAI + OAuth + Plan New Work**.'
             )
         if 'api.responses.write' in err:
             return (

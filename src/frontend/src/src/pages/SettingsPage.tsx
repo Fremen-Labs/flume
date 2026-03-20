@@ -672,20 +672,19 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50 border border-amber-500/25">
                     <p className="text-xs text-amber-800 dark:text-amber-200/95 leading-relaxed font-medium">
-                      Codex / ChatGPT <strong>OAuth is not enough</strong> for Plan New Work or agents calling{' '}
-                      <code className="text-[11px]">api.openai.com</code> — OpenAI requires{' '}
-                      <code className="text-[11px]">model.request</code> on{' '}
-                      <code className="text-[11px]">/v1/chat/completions</code>, and the Codex OAuth app cannot grant
-                      that scope. Add a <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>):{' '}
-                      switch <strong>Auth mode</strong> to <strong>API Key</strong> (or use a saved key as default) from{' '}
-                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>, then{' '}
-                      <code className="text-[11px]">./flume restart --all</code>.
+                      <strong>Plan New Work</strong> (text planning) auto-routes through the <strong>Codex CLI</strong>{' '}
+                      (<code className="text-[11px]">codex app-server</code> on stdio) so you can use{' '}
+                      <strong>ChatGPT/Codex subscription OAuth</strong> without a platform <code className="text-[11px]">sk-</code>{' '}
+                      key. Install Node, <code className="text-[11px]">npm i -g @openai/codex</code> or <code className="text-[11px]">npx</code>, run{' '}
+                      <code className="text-[11px]">codex login</code> so <code className="text-[11px]">~/.codex/auth.json</code>{' '}
+                      exists (Flume&apos;s <code className="text-[11px]">.openai-oauth.json</code> is not read by Codex).
                     </p>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> remains useful for{' '}
-                      <strong className="text-foreground">Codex CLI / app-server</strong> and connector flows — not the
-                      same as the HTTP API key path. Optional: <code className="text-[11px]">./flume codex-oauth</code>{' '}
-                      for those tools.
+                      <strong>Worker agents</strong> that use OpenAI-style <strong>tool calling</strong> still hit{' '}
+                      <code className="text-[11px]">api.openai.com</code> today — use a platform <code className="text-[11px]">sk-</code>,{' '}
+                      switch Auth to <strong>API Key</strong>, or use <strong>Ollama</strong> for those roles until full Codex
+                      bridge support. <code className="text-[11px]">./flume codex-oauth</code> syncs tokens into Flume for UI refresh;
+                      subscription limits still apply per OpenAI/Codex.
                       <span className="block mt-1">
                         <strong>Refresh token</strong> only renews the same consent — it cannot add API product scopes
                         OpenAI did not grant.

@@ -301,14 +301,13 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     enabled: open,
   });
 
-  /** OpenAI + OAuth (typical Codex token) cannot call /v1/chat/completions — Plan New Work needs sk- or another provider. */
-  const plannerLikelyBlockedByOAuth = useMemo(() => {
+  /** OpenAI + OAuth: hosted /v1/chat/completions needs sk-; Flume auto-routes planning via Codex CLI when possible. */
+  const plannerOAuthReminder = useMemo(() => {
     const s = llmSettings?.settings;
     if (!s || s.provider !== 'openai') return false;
     if (s.authMode !== 'oauth') return false;
     const st = llmSettings.oauthStatus;
-    if (!st?.hasAccessToken) return true;
-    if (st.accessTokenJwtParsed && st.hasModelRequestScope === true) return false;
+    if (st?.accessTokenJwtParsed && st.hasModelRequestScope === true) return false;
     return true;
   }, [llmSettings]);
 
@@ -460,13 +459,16 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
             </DialogPrimitive.Close>
           </div>
 
-          {plannerLikelyBlockedByOAuth && (
+          {plannerOAuthReminder && (
             <div className="px-5 py-2.5 border-b border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-100 leading-snug shrink-0">
-              <strong className="text-amber-50">OpenAI is set to OAuth (Codex / ChatGPT).</strong> Plan New Work calls{' '}
-              <code className="text-[10px] opacity-90">/v1/chat/completions</code>, which requires{' '}
-              <code className="text-[10px] opacity-90">model.request</code> — that scope is{' '}
-              <strong>not</strong> available on Codex browser OAuth. Use a <strong>platform API key</strong> (
-              <code className="text-[10px] opacity-90">sk-…</code>) in{' '}
+              <strong className="text-amber-50">OpenAI + OAuth:</strong> Plan New Work does not use pay-per-token{' '}
+              <code className="text-[10px] opacity-90">api.openai.com</code> chat for typical Codex tokens. Flume{' '}
+              <strong>auto-runs the Codex CLI</strong> (<code className="text-[10px] opacity-90">codex app-server</code> via
+              stdio) so planning uses your <strong>ChatGPT/Codex session</strong>. Install Node, then{' '}
+              <code className="text-[10px] opacity-90">npm i -g @openai/codex</code> (or rely on{' '}
+              <code className="text-[10px] opacity-90">npx</code>), run <code className="text-[10px] opacity-90">codex login</code>{' '}
+              so <code className="text-[10px] opacity-90">~/.codex/auth.json</code> exists. Alternatively use a platform{' '}
+              <code className="text-[10px] opacity-90">sk-</code> key in{' '}
               <button
                 type="button"
                 className="underline font-semibold text-amber-50 hover:text-white"
@@ -477,8 +479,8 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
               >
                 Settings → LLM
               </button>
-              , then <code className="text-[10px] opacity-90">./flume restart --all</code>. Codex OAuth is still fine for
-              the Codex CLI / app-server path.
+              . <strong>Agent workers</strong> that use tools still need <code className="text-[10px] opacity-90">sk-</code> or
+              a local model until full Codex bridge support.
             </div>
           )}
 

@@ -154,7 +154,7 @@ success "dashboard/ (${DASHBOARD_FILES} files)"
 # =============================================================================
 echo -e "${BOLD}Copying worker-manager...${NC}"
 mkdir -p "${STAGE}/worker-manager"
-for f in manager.py worker_handlers.py agent_runner.py llm_client.py run.sh; do
+for f in manager.py worker_handlers.py agent_runner.py llm_client.py codex_app_server_stdio.py run.sh; do
     if [ -f "${SRC}/worker-manager/${f}" ]; then
         cp "${SRC}/worker-manager/${f}" "${STAGE}/worker-manager/"
         success "worker-manager/${f}"

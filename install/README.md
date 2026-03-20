@@ -273,7 +273,11 @@ ENV_FILE=/path/to/flume/.env bash install/setup/create-es-indices.sh
 
 Flume can store a **ChatGPT (Codex) OAuth session** (same flows as the [Codex CLI](https://github.com/openai/codex)) or use an OpenAI **platform API key** (`sk-…`).
 
-**Important — Plan New Work / `gpt-*` via `api.openai.com`:** Codex **browser** OAuth tokens only get **connector** scopes (`api.connectors.*`). OpenAI’s **`/v1/chat/completions`** and **`/v1/responses`** both enforce **`model.request`** / **`api.responses.write`** in ways Codex authorize **does not grant** together. In practice, **hosted model calls from Flume need a platform `sk-` API key** (Settings → LLM → API Key). ChatGPT OAuth remains useful for other Codex-style tooling, but not for this API pair on current OpenAI behavior.
+**Plan New Work (text planning) without a platform `sk-` key:** Codex **browser** OAuth tokens usually lack **`model.request`**, so posting that bearer to **`api.openai.com`** **`/v1/chat/completions`** returns **401**. Flume therefore **defaults** (`FLUME_OPENAI_USE_CODEX_APP_SERVER=auto`) to driving **text chat** (including the intake planner) through the **Codex CLI** **`codex app-server`** over **stdio**, using **`~/.codex/auth.json`** — the same session as **`codex login`**. That path is intended for **ChatGPT/Codex subscription** usage rather than pay-per-token **platform** billing. Install **Node.js**, then **`npm i -g @openai/codex`** (or rely on **`npx`**), run **`codex login`** on the Flume host, and **`./flume restart --all`**. Flume’s **`.openai-oauth.json`** is **not** read by the Codex subprocess; keep **`~/.codex/auth.json`** in sync (e.g. login with Codex, or copy `auth.json` from a machine where you already signed in).
+
+**Worker agents (tool-calling loop)** still use **`llm_client.chat_with_tools`** → **`api.openai.com`** today. For those roles, use a **platform `sk-`**, **Ollama**, or another provider until a full Codex app-server tool bridge exists.
+
+Set **`FLUME_OPENAI_USE_CODEX_APP_SERVER=0`** to force legacy HTTP-only OpenAI chat (will 401 on typical Codex OAuth). Set **`1`** to force the Codex path even for unusual tokens.
 
 If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (e.g. `http://127.0.0.1:11434`), older builds could POST your OAuth bearer to the wrong host and get **401**. Current Flume ignores localhost / `:11434` bases for official OpenAI; you can also **clear `LLM_BASE_URL`** in `.env` when using hosted OpenAI.
 
@@ -286,7 +290,7 @@ The [Codex CLI](https://github.com/openai/codex) uses **browser OAuth** by defau
 | **GUI on same machine** | `codex login` opens browser → localhost callback | `./flume codex-oauth login-browser` |
 | **No browser on the server** | Open authorize URL on another device; still need the **localhost** redirect URL to complete PKCE | `./flume codex-oauth login-paste` (paste full `http://localhost:1455/auth/callback?...` back into SSH) |
 | **SSH tunnel** | Forward the random/high port to the server | `ssh -L <port>:127.0.0.1:<port> user@host` then open the printed URL on your laptop |
-| **Device code** | `codex login --device-auth` (code + URL on any browser) | `./flume codex-oauth login` — weak scopes; **Plan New Work** needs **`sk-` API key** (see above) |
+| **Device code** | `codex login --device-auth` (code + URL on any browser) | `./flume codex-oauth login` — may have weaker scopes; prefer **`login-browser`** + **`codex login`** for **`~/.codex`** |
 | **Login on a laptop, run Flume on a server** | Copy **`~/.codex/auth.json`** (e.g. `scp`) | Run **`codex login`** locally, then **`./flume codex-oauth import`** on the server (or copy `auth.json` and import) |
 | **No ChatGPT OAuth** | Platform **API key** | **Settings → LLM → API Key** (`sk-…`); uses **`/v1/chat/completions`**, not the ChatGPT OAuth bearer path |
 
