@@ -1057,6 +1057,23 @@ def main():
             state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':
+                    # Safety: if a task is stuck in running with no agent_log, release it
+                    try:
+                        task_id = worker.get('current_task_id')
+                        if task_id and worker.get('role') == 'implementer':
+                            es_id, task = fetch_task_doc(task_id)
+                            if es_id and task and not task.get('agent_log'):
+                                update_task_doc(es_id, {
+                                    'status': 'ready',
+                                    'owner': 'implementer',
+                                    'assigned_agent_role': 'implementer',
+                                    'needs_human': False,
+                                    **_implementer_clear_claim_fields(),
+                                })
+                                log(f"implementer: released task={task_id} (no agent_log)")
+                                continue
+                    except Exception:
+                        pass
                     run_worker(worker)
             time.sleep(POLL_SECONDS)
         except Exception as e:
