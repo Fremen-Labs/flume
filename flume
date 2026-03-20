@@ -3,6 +3,8 @@
 #
 # Usage:
 #   flume start | stop | restart | status | enable | disable | logs
+#   flume build-ui                    # compile React → src/frontend/dist (required after UI git pulls)
+#   flume restart [--all] [--build-ui]
 #   flume codex-oauth login | import | refresh | status
 
 set -euo pipefail
@@ -146,13 +148,78 @@ _workers_bounce() {
     echo "Workers started in background. Logs: ${wr}/worker-manager/manager.nohup.log and handlers.nohup.log"
 }
 
+# Dashboard serves pre-built JS from src/frontend/dist (see LOOM_FRONTEND_DIST). Git pull of .tsx files is not enough.
+_warn_if_frontend_bundle_stale() {
+    local fe dist
+    fe=""
+    if [ -d "${FLUME_ROOT}/src/frontend/src" ]; then
+        fe="${FLUME_ROOT}/src/frontend/src"
+        dist="${FLUME_ROOT}/src/frontend/dist"
+    elif [ -d "${FLUME_ROOT}/frontend/src" ]; then
+        fe="${FLUME_ROOT}/frontend/src"
+        dist="${FLUME_ROOT}/frontend/dist"
+    fi
+    if [ -z "${fe}" ] || [ ! -d "${fe}/src" ]; then
+        return 0
+    fi
+    if [ ! -f "${dist}/index.html" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  No built UI at ${dist}/index.html"
+        echo "  The dashboard serves compiled JS from dist — run:"
+        echo "    ./flume build-ui && ./flume restart"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        return 0
+    fi
+    # Any .ts/.tsx under the app newer than the served bundle → user forgot to rebuild
+    if find "${fe}/src" \( -name '*.tsx' -o -name '*.ts' \) -newer "${dist}/index.html" 2>/dev/null | grep -q .; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Dashboard UI source is NEWER than ${dist}/ (git pull does not rebuild JS)."
+        echo "  Run:"
+        echo "    ./flume build-ui && ./flume restart"
+        echo "  Or one command:"
+        echo "    ./flume restart --build-ui"
+        echo "  Then hard-refresh the browser (Ctrl+Shift+R)."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+}
+
+cmd_build_ui() {
+    local fe dist_parent
+    fe=""
+    if [ -f "${FLUME_ROOT}/src/frontend/src/package.json" ]; then
+        fe="${FLUME_ROOT}/src/frontend/src"
+    elif [ -f "${FLUME_ROOT}/frontend/src/package.json" ]; then
+        fe="${FLUME_ROOT}/frontend/src"
+    fi
+    if [ -z "${fe}" ]; then
+        echo "Error: frontend not found (expected ${FLUME_ROOT}/src/frontend/src/package.json)."
+        exit 1
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "Error: npm not found. Install Node.js (LTS), then run:  ./flume build-ui"
+        exit 1
+    fi
+    dist_parent="$(cd "${fe}/.." && pwd)"
+    echo "Building dashboard UI (vite → ${dist_parent}/dist)..."
+    ( cd "${fe}" && npm install && npm run build )
+    echo "Build finished. Restart the dashboard:  ./flume restart"
+    echo "Tip: hard-refresh the browser (Ctrl+Shift+R) so the new JS is not cached."
+}
+
 cmd_restart() {
-    local opt_all=false
+    local opt_all=false opt_build_ui=false
     for arg in "$@"; do
-        if [ "${arg}" = "--all" ]; then
-            opt_all=true
-        fi
+        case "${arg}" in
+            --all) opt_all=true ;;
+            --build-ui) opt_build_ui=true ;;
+        esac
     done
+    if [ "${opt_build_ui}" = true ]; then
+        cmd_build_ui
+        echo ""
+    fi
     ensure_service_installed
     systemctl --user daemon-reload
     systemctl --user restart "${SERVICE_NAME}" 2>/dev/null || systemctl --user start "${SERVICE_NAME}"
@@ -162,6 +229,9 @@ cmd_restart() {
         exit 1
     fi
     echo "Flume dashboard restarted."
+    if [ "${opt_build_ui}" != true ]; then
+        _warn_if_frontend_bundle_stale
+    fi
     if [ "${opt_all}" = true ]; then
         echo ""
         _workers_bounce || true
@@ -277,7 +347,8 @@ cmd_help() {
     echo "Dashboard (systemd user service):"
     echo "  start     Start dashboard in background"
     echo "  stop      Stop dashboard"
-    echo "  restart [--all]  Restart dashboard; add --all to also restart worker manager + handlers"
+    echo "  build-ui  Run npm install + vite build (updates src/frontend/dist — needed after UI changes from git)"
+    echo "  restart [--all] [--build-ui]  Restart dashboard; --all = workers too; --build-ui = build first"
     echo "  status    Show dashboard status"
     echo "  enable    Start dashboard automatically on login"
     echo "  disable   Don't start dashboard on login"
@@ -292,6 +363,7 @@ cmd_help() {
 case "${1:-help}" in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
+    build-ui) cmd_build_ui ;;
     restart)
         shift
         cmd_restart "$@"

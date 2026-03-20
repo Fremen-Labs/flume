@@ -355,6 +355,17 @@ Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or rely on the
 
 **`./flume restart` only restarts the dashboard (systemd).** Worker manager + worker handlers keep running until you run **`./flume restart --all`** (or stop/start them manually). Use **`--all`** after LLM, OAuth, or worker code changes so **Agent Operations** picks up the new model.
 
+**Dashboard UI (React) is not rebuilt by `git pull` or `./flume restart`.** The server serves **`src/frontend/dist`** (bundled JS). After pulling changes under **`src/frontend/src/`** (pages, components), run:
+
+```bash
+./flume build-ui              # npm install + vite build → src/frontend/dist
+./flume restart               # or: ./flume restart --build-ui
+```
+
+Then **hard-refresh** the browser (**Ctrl+Shift+R** / **Cmd+Shift+R**) so cached assets are not used.
+
+**Troubleshooting:** If Agents / Settings look unchanged after `git pull` + `./flume restart`, you did not rebuild the bundle. Run **`./flume build-ui`** (or **`./flume restart --build-ui`**). After **`./flume restart`**, Flume prints a **boxed warning** when any `src/frontend/src/**/*.tsx` is newer than `src/frontend/dist/index.html`.
+
 **Package tarball** (extracted root): same commands — `./flume` lives next to `setup/`.
 
 ### Already use the official Codex CLI?

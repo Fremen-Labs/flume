@@ -1,14 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-
-const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
-const OLLAMA_CREDENTIAL_ID = '__ollama__';
-const OPENAI_OAUTH_CREDENTIAL_ID = '__openai_oauth__';
 import { motion } from 'framer-motion';
 import { Bot, Loader2, AlertCircle, Settings2, Info, ChevronRight } from 'lucide-react';
-
-/** Change this when verifying the Agents page bundle deployed to your environment. */
-const AGENTS_UI_BUILD_STAMP = '2026-03-19';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
@@ -40,6 +33,12 @@ import agentAvatar1 from '@/assets/agents/agent-1.png';
 import agentAvatar2 from '@/assets/agents/agent-2.png';
 import agentAvatar3 from '@/assets/agents/agent-3.png';
 import agentAvatar4 from '@/assets/agents/agent-4.png';
+
+const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
+const OLLAMA_CREDENTIAL_ID = '__ollama__';
+const OPENAI_OAUTH_CREDENTIAL_ID = '__openai_oauth__';
+/** Shown in the UI only after you run `./flume build-ui` (git pull is not enough). Bump when verifying deploys. */
+const AGENTS_UI_BUILD_STAMP = '2026-03-20';
 
 const agentAvatars = [agentAvatar1, agentAvatar2, agentAvatar3, agentAvatar4];
 
