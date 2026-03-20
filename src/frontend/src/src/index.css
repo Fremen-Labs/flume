@@ -1,4 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -142,6 +144,147 @@
     --grid-line-color: rgba(0, 0, 0, 0.03);
     --mesh-base: 0 0% 98%;
   }
+
+  /* ─── RETRO SKIN (dark) – OpenClaw-style: navy, #161625 panels, neon orange/purple/teal, gold nav ─── */
+  [data-skin='retro'] {
+    --retro-neon-1: #ff8c00;
+    --retro-neon-2: #a020f0;
+    --retro-neon-3: #22d4bf;
+    --retro-gold: 51 100% 50%;
+
+    --background: 240 33% 6%;
+    --foreground: 210 25% 92%;
+
+    --card: 240 25% 12%;
+    --card-foreground: 210 25% 92%;
+
+    --popover: 240 25% 12%;
+    --popover-foreground: 210 25% 92%;
+
+    /* Orange neon – stats, icons, primary actions (not cyan) */
+    --primary: 33 100% 50%;
+    --primary-foreground: 240 33% 6%;
+
+    --secondary: 276 88% 53%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 22% 16%;
+    --muted-foreground: 215 18% 58%;
+
+    --accent: 240 25% 18%;
+    --accent-foreground: 210 25% 92%;
+
+    --destructive: 0 85% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 106 100% 54%;
+    --success-foreground: 240 33% 6%;
+
+    --warning: 45 100% 52%;
+    --warning-foreground: 240 33% 6%;
+
+    --border: 240 18% 20%;
+    --input: 240 22% 14%;
+    --ring: 51 100% 50%;
+
+    --sidebar-background: 240 35% 5%;
+    --sidebar-foreground: 215 18% 65%;
+    --sidebar-primary: 51 100% 50%;
+    --sidebar-primary-foreground: 240 33% 6%;
+    --sidebar-accent: 240 22% 14%;
+    --sidebar-accent-foreground: 210 25% 92%;
+    --sidebar-border: 276 50% 30% / 0.35;
+    --sidebar-ring: 51 100% 50%;
+
+    --glass-bg: 240 25% 12%;
+    --glass-border: 240 18% 22%;
+    --glass-glow: 276 88% 53% / 0.35;
+
+    --glass-reflection: linear-gradient(
+      180deg,
+      rgba(255, 140, 0, 0.04) 0%,
+      transparent 35%,
+      transparent 65%,
+      rgba(160, 32, 240, 0.03) 100%
+    );
+
+    --glass-card-bg: rgba(22, 22, 37, 0.94);
+    --glass-card-border: rgba(255, 255, 255, 0.09);
+    --glass-card-shadow: rgba(0, 0, 0, 0.65);
+    --glass-card-inset: rgba(255, 255, 255, 0.05);
+    --glass-sidebar-bg: rgba(10, 10, 20, 0.96);
+    --glass-sidebar-border: rgba(160, 32, 240, 0.22);
+    --grid-line-color: rgba(140, 100, 200, 0.07);
+    --mesh-base: 240 33% 6%;
+    --radius: 0;
+  }
+
+  /* ─── RETRO SKIN (light) – same vibe, paper terminal ─── */
+  [data-skin='retro'].light {
+    --retro-neon-1: #ea580c;
+    --retro-neon-2: #7c3aed;
+    --retro-neon-3: #0d9488;
+    --retro-gold: 45 100% 48%;
+
+    --background: 45 30% 96%;
+    --foreground: 240 30% 12%;
+
+    --card: 40 25% 99%;
+    --card-foreground: 240 30% 12%;
+
+    --popover: 40 25% 99%;
+    --popover-foreground: 240 30% 12%;
+
+    --primary: 28 95% 42%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 271 70% 45%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 40 20% 90%;
+    --muted-foreground: 240 15% 38%;
+
+    --accent: 40 22% 92%;
+    --accent-foreground: 240 30% 12%;
+
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 76% 28%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 35 92% 45%;
+    --warning-foreground: 240 30% 12%;
+
+    --border: 240 15% 82%;
+    --input: 240 12% 88%;
+    --ring: 45 100% 48%;
+
+    --sidebar-background: 40 25% 98%;
+    --sidebar-foreground: 240 20% 35%;
+    --sidebar-primary: 45 100% 48%;
+    --sidebar-primary-foreground: 240 30% 12%;
+    --sidebar-accent: 40 22% 92%;
+    --sidebar-accent-foreground: 240 30% 12%;
+    --sidebar-border: 271 40% 80%;
+    --sidebar-ring: 45 100% 48%;
+
+    --glass-bg: 40 25% 99%;
+    --glass-border: 240 15% 85%;
+    --glass-glow: 271 70% 45% / 0.2;
+
+    --glass-reflection: none;
+
+    --glass-card-bg: rgba(255, 252, 248, 0.96);
+    --glass-card-border: rgba(124, 58, 237, 0.2);
+    --glass-card-shadow: rgba(60, 40, 80, 0.08);
+    --glass-card-inset: rgba(255, 255, 255, 0.85);
+    --glass-sidebar-bg: rgba(255, 253, 250, 0.98);
+    --glass-sidebar-border: rgba(124, 58, 237, 0.18);
+    --grid-line-color: rgba(124, 58, 237, 0.1);
+    --mesh-base: 45 30% 96%;
+    --radius: 0;
+  }
 }
 
 @layer base {
@@ -152,6 +295,82 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  /* ─── RETRO SKIN: OpenClaw-style pixel / CRT ─── */
+  [data-skin='retro'] body {
+    font-family: 'VT323', 'Press Start 2P', 'Courier New', monospace;
+    font-size: 18px;
+    line-height: 1.35;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+  }
+
+  [data-skin='retro'] h1,
+  [data-skin='retro'] h2,
+  [data-skin='retro'] h3 {
+    font-family: 'Press Start 2P', 'VT323', monospace;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+  }
+
+  [data-skin='retro'] .glass-card,
+  [data-skin='retro'] .glass-card-glow,
+  [data-skin='retro'] .glass-card-sweep,
+  [data-skin='retro'] .glass-panel,
+  [data-skin='retro'] .glass-surface {
+    border-radius: 0 !important;
+    border-width: 1px;
+    box-shadow:
+      0 0 24px rgba(160, 32, 240, 0.12),
+      0 8px 32px var(--glass-card-shadow),
+      inset 0 1px 0 0 var(--glass-card-inset);
+  }
+
+  [data-skin='retro'] .glass-card:hover,
+  [data-skin='retro'] .glass-card-glow:hover {
+    box-shadow:
+      0 0 32px rgba(255, 140, 0, 0.15),
+      0 12px 40px var(--glass-card-shadow),
+      inset 0 1px 0 0 var(--glass-card-inset);
+  }
+
+  [data-skin='retro'] [class*='rounded'] {
+    border-radius: 0 !important;
+  }
+
+  [data-skin='retro'] button[class*='rounded'],
+  [data-skin='retro'] a[class*='rounded'],
+  [data-skin='retro'] input,
+  [data-skin='retro'] select {
+    border-radius: 0 !important;
+  }
+
+  [data-skin='retro'] svg {
+    stroke-linecap: square;
+    stroke-linejoin: miter;
+  }
+
+  /* Sidebar: gold border + glow on active route (React Router NavLink) */
+  [data-skin='retro'] a[aria-current='page'] {
+    border: 1px solid hsl(var(--retro-gold)) !important;
+    box-shadow:
+      0 0 12px hsl(var(--retro-gold) / 0.35),
+      inset 0 0 20px hsl(var(--retro-gold) / 0.06);
+    background: hsl(var(--retro-gold) / 0.08) !important;
+    color: hsl(var(--retro-gold)) !important;
+  }
+
+  [data-skin='retro'] a[aria-current='page'] svg {
+    color: hsl(var(--retro-gold)) !important;
+    filter: drop-shadow(0 0 6px hsl(var(--retro-gold) / 0.7));
+  }
+
+  [data-skin='retro'].light a[aria-current='page'] {
+    color: hsl(28 95% 35%) !important;
+    border-color: hsl(45 100% 42%) !important;
+    box-shadow: 0 0 10px hsl(45 100% 48% / 0.25);
   }
 }
 
@@ -221,6 +440,57 @@
     animation: lightSweep 8s ease-in-out infinite;
     pointer-events: none;
     z-index: 2;
+  }
+
+  /* Retro: neon gradient top edge (OpenClaw-style); replace sweep on stats bar */
+  [data-skin='retro'] .glass-card-sweep::after {
+    animation: none;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    top: 0;
+    transform: none;
+    background: linear-gradient(
+      90deg,
+      var(--retro-neon-1),
+      var(--retro-neon-2),
+      var(--retro-neon-3)
+    );
+  }
+
+  [data-skin='retro'] .glass-card:not(.glass-card-sweep)::after,
+  [data-skin='retro'] .glass-card-glow::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      var(--retro-neon-1),
+      var(--retro-neon-2),
+      var(--retro-neon-3)
+    );
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  [data-skin='retro'] .glass-panel::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      var(--retro-neon-1),
+      var(--retro-neon-2),
+      var(--retro-neon-3)
+    );
+    pointer-events: none;
+    z-index: 4;
   }
 
   .glass-surface {
@@ -446,6 +716,10 @@
   /* ─── ACTIVE ICON GLOW ─── */
   .icon-glow-active {
     filter: drop-shadow(0 0 6px hsl(var(--primary) / 0.5));
+  }
+
+  [data-skin='retro'] .icon-glow-active {
+    filter: drop-shadow(0 0 8px hsl(33 100% 50% / 0.55)) drop-shadow(0 0 4px hsl(276 88% 53% / 0.35));
   }
 
   /* ─── HOVER LIFT ─── */

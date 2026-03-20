@@ -5,6 +5,7 @@ After=network.target elasticsearch.service
 [Service]
 Type=simple
 WorkingDirectory=__FLUME_ROOT__
+EnvironmentFile=__ENV_FILE__
 ExecStart=__DASHBOARD_SCRIPT__
 Restart=on-failure
 RestartSec=5

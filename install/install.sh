@@ -83,7 +83,19 @@ prompt_value() {
 replace_env_value() {
     local KEY="$1"
     local VALUE="$2"
-    sed -i "s|^${KEY}=.*|${KEY}=${VALUE}|" "$ENV_FILE"
+    local tmp
+    tmp=$(mktemp)
+    local found=0
+    while IFS= read -r line; do
+        if [[ "$line" == "$KEY"=* ]]; then
+            echo "${KEY}=${VALUE}"
+            found=1
+        else
+            echo "$line"
+        fi
+    done < "${ENV_FILE}" > "${tmp}"
+    [ "$found" -eq 0 ] && echo "${KEY}=${VALUE}" >> "${tmp}"
+    mv "${tmp}" "${ENV_FILE}"
 }
 
 banner

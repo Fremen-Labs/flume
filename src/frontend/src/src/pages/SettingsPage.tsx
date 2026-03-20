@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle } from 'lucide-react';
+import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon } from 'lucide-react';
+import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -65,8 +66,14 @@ async function saveRepoSettings(payload: RepoSettingsPayload): Promise<{ ok: boo
   return data;
 }
 
+const SKINS: { id: Skin; name: string; description: string }[] = [
+  { id: 'default', name: 'Default', description: 'Modern glass-morphism with blue accents' },
+  { id: 'retro', name: 'Retro', description: 'OpenClaw-style: navy panels, neon orange/purple/teal accents, gold active nav' },
+];
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
+  const { theme, skin, toggleTheme, setSkin } = useTheme();
   const { data, isLoading, error } = useQuery<LlmSettingsResponse>({
     queryKey: ['settings', 'llm'],
     queryFn: fetchLlmSettings,
@@ -211,7 +218,64 @@ export default function SettingsPage() {
       <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
 
       <div className="glass-card p-6">
-        <Accordion type="single" collapsible>
+        <Accordion type="single" collapsible defaultValue="appearance">
+          <AccordionItem value="appearance">
+            <AccordionTrigger>
+              <div className="flex items-center justify-between w-full">
+                <span className="flex items-center gap-2">
+                  <Palette className="h-4 w-4" />
+                  Appearance
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {SKINS.find((s) => s.id === skin)?.name ?? skin} · {theme === 'dark' ? 'Dark' : 'Light'}
+                </span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-6 pt-4">
+                <div className="space-y-2">
+                  <Label>Skin</Label>
+                  <Select value={skin} onValueChange={(v: Skin) => setSkin(v)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SKINS.map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          <div>
+                            <div className="font-medium">{s.name}</div>
+                            <div className="text-xs text-muted-foreground">{s.description}</div>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Theme</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      variant={theme === 'dark' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => theme !== 'dark' && toggleTheme()}
+                    >
+                      <Moon className="h-4 w-4 mr-1" />
+                      Dark
+                    </Button>
+                    <Button
+                      variant={theme === 'light' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => theme !== 'light' && toggleTheme()}
+                    >
+                      <Sun className="h-4 w-4 mr-1" />
+                      Light
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
           <AccordionItem value="llm-provider">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
