@@ -1,6 +1,7 @@
 # Secrets / local config
 .env
 .env.*
+!.env.template
 
 # Logs
 *.log
