@@ -496,11 +496,25 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
+    # Ensure tool_calls in prior assistant messages include type/id for OpenAI
+    norm_messages = []
+    for m in messages:
+        if isinstance(m, dict) and m.get('tool_calls'):
+            tc_norm = []
+            for idx, tc in enumerate(m.get('tool_calls') or []):
+                tc = dict(tc)
+                tc.setdefault('id', f'call_{idx}')
+                tc.setdefault('type', 'function')
+                tc_norm.append(tc)
+            m = dict(m)
+            m['tool_calls'] = tc_norm
+        norm_messages.append(m)
+
     data = _post(
         url,
         {
             'model': model,
-            'messages': messages,
+            'messages': norm_messages,
             'tools': tools,
             'temperature': temperature,
             'max_tokens': max_tokens,
