@@ -142,7 +142,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'tester':
         must = [
-            {'term': {'status': 'review'}},
+            {'term': {'status': 'ready'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'tester'}},
                 {'term': {'owner': 'tester'}},
@@ -150,7 +150,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'reviewer':
         must = [
-            {'term': {'status': 'review'}},
+            {'term': {'status': 'ready'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'reviewer'}},
                 {'term': {'owner': 'reviewer'}},
