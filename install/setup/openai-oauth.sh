@@ -2,29 +2,65 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${WORKSPACE_ROOT}/.env"
-STATE_FILE="${OPENAI_OAUTH_STATE_FILE:-${WORKSPACE_ROOT}/.openai-oauth.json}"
+CODEX_OAUTH_PY="${SCRIPT_DIR}/codex_oauth_login.py"
+
+# Flume repo / package root (NOT install/ — fixes .env and state file paths).
+detect_flume_root() {
+  if [ -n "${FLUME_ROOT:-}" ]; then
+    cd "${FLUME_ROOT}" && pwd
+    return
+  fi
+  if [ -d "${SCRIPT_DIR}/../../src/dashboard" ] || [ -d "${SCRIPT_DIR}/../../src" ]; then
+    cd "${SCRIPT_DIR}/../.." && pwd
+    return
+  fi
+  cd "${SCRIPT_DIR}/.." && pwd
+}
+
+FLUME_ROOT="$(detect_flume_root)"
+ENV_FILE="${FLUME_ROOT}/.env"
+
+if [ -n "${OPENAI_OAUTH_STATE_FILE:-}" ]; then
+  if [[ "${OPENAI_OAUTH_STATE_FILE}" = /* ]]; then
+    STATE_FILE="${OPENAI_OAUTH_STATE_FILE}"
+  else
+    STATE_FILE="${FLUME_ROOT}/${OPENAI_OAUTH_STATE_FILE}"
+  fi
+else
+  STATE_FILE="${FLUME_ROOT}/.openai-oauth.json"
+fi
+
 TOKEN_URL="${OPENAI_OAUTH_TOKEN_URL:-https://auth.openai.com/oauth/token}"
 OPENCLAW_DIR_DEFAULT="${HOME}/.open""claw"
 OPENCLAW_AUTH_DEFAULT="${OPENCLAW_AUTH_FILE:-${OPENCLAW_DIR_DEFAULT}/agents/main/agent/auth-profiles.json}"
 PROFILE_DEFAULT="${OPENCLAW_AUTH_PROFILE:-openai-codex:default}"
+CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 
 usage() {
-    cat <<'EOF'
-OpenAI OAuth helper for Flume.
+    cat <<EOF
+OpenAI ChatGPT / Codex OAuth helper for Flume (Flume root: ${FLUME_ROOT})
 
 Usage:
-  bash setup/openai-oauth.sh bootstrap
-  bash setup/openai-oauth.sh import-openclaw [auth_file] [profile]
-  bash setup/openai-oauth.sh refresh
-  bash setup/openai-oauth.sh status
+  bash install/setup/openai-oauth.sh login
+  bash install/setup/openai-oauth.sh import-codex [codex_home]
+  bash install/setup/openai-oauth.sh bootstrap
+  bash install/setup/openai-oauth.sh import-openclaw [auth_file] [profile]
+  bash install/setup/openai-oauth.sh refresh
+  bash install/setup/openai-oauth.sh status
 
 Commands:
-  bootstrap        Import from OpenClaw (if present), refresh token, and sync .env.
-  import-openclaw  Copy oauth access/refresh/client_id from OpenClaw profile.
+  login            Standalone device-code login (same flow as: codex login --device-auth).
+                   No OpenClaw and no Codex CLI required. Updates .openai-oauth.json + .env.
+  import-codex     Import tokens from official Codex CLI (${CODEX_HOME}/auth.json).
+  bootstrap        Try import-codex first, then OpenClaw; then refresh + sync .env.
+  import-openclaw  Copy oauth from OpenClaw auth-profiles.json (optional third-party).
   refresh          Refresh access token from saved refresh token.
   status           Show token metadata (never prints full tokens).
+
+Environment:
+  FLUME_ROOT                  Override Flume repository / package root directory
+  OPENAI_OAUTH_STATE_FILE     Override state file path
+  OPENAI_OAUTH_CLIENT_ID      Advanced: override OAuth client id (default matches Codex CLI)
 EOF
 }
 
@@ -145,7 +181,7 @@ lines = env_path.read_text().splitlines()
 updates = {
     "LLM_PROVIDER": "openai",
     "LLM_API_KEY": access,
-    "OPENAI_OAUTH_STATE_FILE": str(state_path),
+    "OPENAI_OAUTH_STATE_FILE": str(state_path.resolve()),
     "OPENAI_OAUTH_TOKEN_URL": str(state.get("token_url") or "https://auth.openai.com/oauth/token"),
 }
 seen = set()
@@ -192,14 +228,37 @@ PY
 
 cmd="${1:-}"
 case "$cmd" in
+    login)
+        [ -f "${CODEX_OAUTH_PY}" ] || { echo "Missing ${CODEX_OAUTH_PY}" >&2; exit 1; }
+        python3 "${CODEX_OAUTH_PY}" login --flume-root "${FLUME_ROOT}"
+        ;;
+    import-codex)
+        [ -f "${CODEX_OAUTH_PY}" ] || { echo "Missing ${CODEX_OAUTH_PY}" >&2; exit 1; }
+        python3 "${CODEX_OAUTH_PY}" import-codex --codex-home "${2:-${CODEX_HOME}}" --flume-root "${FLUME_ROOT}"
+        ;;
     bootstrap)
-        import_openclaw "${2:-$OPENCLAW_AUTH_DEFAULT}" "${3:-$PROFILE_DEFAULT}" || {
-            echo "OpenClaw import failed. Run import-openclaw manually or provide state file."
-            exit 1
-        }
-        refresh_token
-        sync_env
-        echo "Bootstrap complete. Restart Flume services."
+        if [ -f "${CODEX_OAUTH_PY}" ] && [ -f "${CODEX_HOME}/auth.json" ]; then
+            echo "Using official Codex CLI session at ${CODEX_HOME}/auth.json"
+            python3 "${CODEX_OAUTH_PY}" import-codex --codex-home "${CODEX_HOME}" --flume-root "${FLUME_ROOT}"
+            refresh_token
+            sync_env
+            echo "Bootstrap complete. Restart Flume dashboard/workers."
+            exit 0
+        fi
+        auth_try="${2:-$OPENCLAW_AUTH_DEFAULT}"
+        if [ -f "${auth_try}" ] && import_openclaw "${auth_try}" "${3:-$PROFILE_DEFAULT}"; then
+            refresh_token
+            sync_env
+            echo "Bootstrap complete (OpenClaw). Restart Flume dashboard/workers."
+            exit 0
+        fi
+        echo "No usable OAuth source found."
+        echo "  • Official Codex CLI: run  codex login  or  codex login --device-auth"
+        echo "    then:  bash install/setup/openai-oauth.sh import-codex"
+        echo "  • Standalone (no Codex/OpenClaw):"
+        echo "    python3 install/setup/codex_oauth_login.py login --flume-root ${FLUME_ROOT}"
+        echo "  • OpenClaw (optional): place auth file at ${OPENCLAW_AUTH_DEFAULT} then re-run bootstrap"
+        exit 1
         ;;
     import-openclaw)
         import_openclaw "${2:-$OPENCLAW_AUTH_DEFAULT}" "${3:-$PROFILE_DEFAULT}"

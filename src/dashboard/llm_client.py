@@ -85,10 +85,16 @@ def _save_json(path: Path, data: dict):
 def _oauth_state_path():
     if not _OPENAI_OAUTH_STATE_FILE:
         return None
+    loom = os.environ.get('LOOM_WORKSPACE', '').strip()
+    if loom:
+        try:
+            from flume_secrets import resolve_oauth_state_path
+
+            return resolve_oauth_state_path(Path(loom), _OPENAI_OAUTH_STATE_FILE)
+        except ImportError:
+            pass
     p = Path(_OPENAI_OAUTH_STATE_FILE)
-    if not p.is_absolute():
-        p = Path.cwd() / p
-    return p
+    return p.resolve() if p.is_absolute() else (Path.cwd() / p).resolve()
 
 
 def _refresh_oauth_access_token() -> str:

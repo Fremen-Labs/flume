@@ -8,6 +8,8 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
+
+from flume_secrets import resolve_oauth_state_path
 from typing import Any, Optional
 
 import urllib.request
@@ -418,7 +420,7 @@ def validate_llm_settings(payload: dict[str, Any], workspace_root: Path) -> tupl
         updates["LLM_API_KEY"] = ""  # Will be filled by refresh
         state_file = str(payload.get("oauthStateFile") or "").strip()
         if not state_file:
-            state_file = str(workspace_root / ".openai-oauth.json")
+            state_file = str(resolve_oauth_state_path(workspace_root, ""))
         updates["OPENAI_OAUTH_STATE_FILE"] = state_file
         token_url = str(payload.get("oauthTokenUrl") or "https://auth.openai.com/oauth/token").strip()
         updates["OPENAI_OAUTH_TOKEN_URL"] = token_url
@@ -439,12 +441,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     """
     pairs = load_effective_pairs(workspace_root)
     state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
-    if not state_file:
-        state_path = workspace_root / ".openai-oauth.json"
-    else:
-        state_path = Path(state_file)
-        if not state_path.is_absolute():
-            state_path = workspace_root / state_path
+    state_path = resolve_oauth_state_path(workspace_root, state_file)
 
     if not state_path.exists():
         return False, "OAuth state file not found", None
@@ -508,12 +505,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
 def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     pairs = load_effective_pairs(workspace_root)
     state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
-    if not state_file:
-        state_path = workspace_root / ".openai-oauth.json"
-    else:
-        state_path = Path(state_file)
-        if not state_path.is_absolute():
-            state_path = workspace_root / state_path
+    state_path = resolve_oauth_state_path(workspace_root, state_file)
 
     if not state_path.exists():
         return {"configured": False, "message": "OAuth state file not found"}
@@ -579,7 +571,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             "port": port,
             "basePath": base_path,
             "apiKey": "***" if api_key_set and auth_mode == "api_key" else "",
-            "oauthStateFile": oauth_state or str(workspace_root / ".openai-oauth.json"),
+            "oauthStateFile": oauth_state or str(resolve_oauth_state_path(workspace_root, "")),
             "oauthTokenUrl": oauth_token_url,
         },
         "oauthStatus": oauth_status,

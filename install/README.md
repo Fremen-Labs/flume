@@ -119,6 +119,7 @@ flume/
 │       ├── install-openbao.sh
 │       ├── install-gh.sh
 │       ├── hydrate-openbao-env.py
+│       ├── codex_oauth_login.py
 │       ├── sync-bootstrap-to-openbao.sh
 │       ├── bootstrap-es-credentials.sh
 │       ├── create-es-indices.sh
@@ -218,7 +219,7 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 | OpenAI-compatible | `openai_compatible` | Custom `LLM_BASE_URL` |
 | Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys |
 
-OAuth helper: `bash setup/openai-oauth.sh bootstrap` (see section below).
+ChatGPT/Codex OAuth: `python3 install/setup/codex_oauth_login.py login` or `bash install/setup/openai-oauth.sh login` (see **OpenAI ChatGPT / Codex OAuth**).
 
 After changes, **restart** dashboard and workers.
 
@@ -266,17 +267,56 @@ ENV_FILE=/path/to/flume/.env bash install/setup/create-es-indices.sh
 
 ---
 
-## OpenAI OAuth
+## OpenAI ChatGPT / Codex OAuth
+
+Flume can call OpenAI using a **ChatGPT (Codex) OAuth session** instead of a platform API key. This uses the **same OAuth client and device flow** as the official [Codex CLI](https://github.com/openai/codex) (`codex login --device-auth`) — **OpenClaw is optional**, not required.
+
+### Recommended: standalone login (no Codex CLI, no OpenClaw)
+
+From the **Flume repository root**:
+
+```bash
+python3 install/setup/codex_oauth_login.py login
+# or:
+bash install/setup/openai-oauth.sh login
+```
+
+Follow the browser URL and enter the one-time code. This writes **`<flume-root>/.openai-oauth.json`** and merges **`LLM_PROVIDER`**, **`LLM_API_KEY`** (access token), and **`OPENAI_OAUTH_STATE_FILE`** (absolute path) into **`.env`**.
+
+Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or keep the updated `.env`) and **restart** the dashboard and workers.
+
+### Already use the official Codex CLI?
+
+```bash
+codex login            # or: codex login --device-auth
+bash install/setup/openai-oauth.sh import-codex
+bash install/setup/openai-oauth.sh refresh
+```
+
+Reads **`~/.codex/auth.json`** (or **`$CODEX_HOME/auth.json`**) and imports refresh/access tokens into Flume’s state file.
+
+### Bootstrap (try Codex cache, then optional OpenClaw)
 
 ```bash
 # Git clone:
 bash install/setup/openai-oauth.sh bootstrap
-bash install/setup/openai-oauth.sh refresh
 
 # Package root:
 bash setup/openai-oauth.sh bootstrap
-bash setup/openai-oauth.sh refresh
 ```
+
+If **`~/.codex/auth.json`** exists, it is used first. Otherwise, if an OpenClaw **`auth-profiles.json`** path exists, that legacy path is tried.
+
+### Refresh access token
+
+```bash
+bash install/setup/openai-oauth.sh refresh
+```
+
+### Advanced
+
+- **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
+- State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).
 
 Updates `.env` (and can sync sensitive fields to OpenBao via Settings when OpenBao is enabled).
 

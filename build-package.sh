@@ -230,6 +230,7 @@ cp "${SCRIPT_DIR}/install/README.md"     "${STAGE}/README.md"
 mkdir -p "${STAGE}/setup"
 cp "${SCRIPT_DIR}/install/setup/"*.sh   "${STAGE}/setup/"
 [ -f "${SCRIPT_DIR}/install/setup/hydrate-openbao-env.py" ] && cp "${SCRIPT_DIR}/install/setup/hydrate-openbao-env.py" "${STAGE}/setup/"
+[ -f "${SCRIPT_DIR}/install/setup/codex_oauth_login.py" ] && cp "${SCRIPT_DIR}/install/setup/codex_oauth_login.py" "${STAGE}/setup/"
 [ -f "${SCRIPT_DIR}/install/flume.config.example.json" ] && cp "${SCRIPT_DIR}/install/flume.config.example.json" "${STAGE}/flume.config.example.json"
 [ -f "${SCRIPT_DIR}/install/setup/flume-dashboard.service.template" ] && cp "${SCRIPT_DIR}/install/setup/flume-dashboard.service.template" "${STAGE}/setup/"
 success "install.sh, setup.sh, flume, .env.template, README.md, setup/"
@@ -283,6 +284,7 @@ chmod +x "${STAGE}/setup.sh"
 chmod +x "${STAGE}/flume"
 chmod +x "${STAGE}/setup/"*.sh
 chmod +x "${STAGE}/setup/hydrate-openbao-env.py" 2>/dev/null || true
+chmod +x "${STAGE}/setup/codex_oauth_login.py" 2>/dev/null || true
 chmod +x "${STAGE}/dashboard/run.sh"      2>/dev/null || true
 chmod +x "${STAGE}/worker-manager/run.sh" 2>/dev/null || true
 chmod +x "${STAGE}/memory/es/scripts/"*.sh 2>/dev/null || true

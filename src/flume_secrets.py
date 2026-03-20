@@ -253,6 +253,26 @@ def apply_runtime_config(workspace_root: Path) -> bool:
     return True
 
 
+def resolve_oauth_state_path(workspace_root: Path, configured: str) -> Path:
+    """
+    Resolve ``OPENAI_OAUTH_STATE_FILE`` for git layout (workspace = ``src/``).
+
+    Relative paths check **repo root** (``workspace_root.parent``) first, then
+    ``workspace_root``, so ``.openai-oauth.json`` at the Flume root matches
+    installer defaults and ``codex_oauth_login.py`` output.
+    """
+    raw = (configured or "").strip()
+    rel = Path(raw) if raw else Path(".openai-oauth.json")
+    if rel.is_absolute():
+        return rel
+    wr = workspace_root.resolve()
+    for base in (wr.parent, wr):
+        cand = (base / rel).resolve()
+        if cand.is_file():
+            return cand
+    return (wr.parent / rel).resolve()
+
+
 def has_openbao_bootstrap(workspace_root: Path) -> bool:
     """True if flume.config.json exists or OPENBAO_ADDR is set."""
     if os.environ.get("OPENBAO_ADDR", "").strip():
