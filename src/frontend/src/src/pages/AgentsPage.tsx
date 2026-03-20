@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
+const OLLAMA_CREDENTIAL_ID = '__ollama__';
 import { motion } from 'framer-motion';
-import { Bot, Loader2, AlertCircle, Settings2 } from 'lucide-react';
+import { Bot, Loader2, AlertCircle, Settings2, Info } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
@@ -13,7 +15,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -97,9 +98,54 @@ function timeAgo(ts?: string) {
   return `${Math.floor(mins / 60)}h ago`;
 }
 
+async function fetchAgentModelsOverview(): Promise<AgentModelsResponse> {
+  const res = await fetch('/api/settings/agent-models');
+  if (!res.ok) throw new Error(`agent-models: ${res.status}`);
+  return res.json();
+}
+
+function credentialShortName(cfg: AgentModelsResponse, credId?: string): string {
+  const cid = credId || '';
+  if (!cid || cid === SETTINGS_DEFAULT_CREDENTIAL_ID) return 'Settings default';
+  if (cid === OLLAMA_CREDENTIAL_ID) return 'Ollama';
+  const g = cfg.availableCredentials?.find((c) => c.credentialId === cid);
+  return g?.shortLabel || g?.label || cid;
+}
+
 export default function AgentsPage() {
+  const queryClient = useQueryClient();
   const { data: snapshot, isLoading, error } = useSnapshot();
   const workers = snapshot?.workers ?? [];
+
+  const {
+    data: modelsOverview,
+    isLoading: modelsOverviewLoading,
+    error: modelsOverviewError,
+  } = useQuery({
+    queryKey: ['settings', 'agent-models'],
+    queryFn: fetchAgentModelsOverview,
+    staleTime: 20_000,
+  });
+
+  const perRoleSummary = useMemo(() => {
+    if (!modelsOverview?.roleIds?.length) return null;
+    const rows = modelsOverview.roleIds
+      .map((id) => {
+        const e = modelsOverview.effective[id];
+        if (!e) return null;
+        return { roleId: id, ...e };
+      })
+      .filter(Boolean) as (AgentModelsRoleEffective & { roleId: string })[];
+    if (rows.length < 2) return { rows, allSame: false };
+    const f = rows[0];
+    const allSame = rows.every(
+      (r) =>
+        r.provider === f.provider &&
+        r.model === f.model &&
+        (r.credentialId || SETTINGS_DEFAULT_CREDENTIAL_ID) === (f.credentialId || SETTINGS_DEFAULT_CREDENTIAL_ID),
+    );
+    return { rows, allSame };
+  }, [modelsOverview]);
 
   const [configOpen, setConfigOpen] = useState(false);
   const [agentCfg, setAgentCfg] = useState<AgentModelsResponse | null>(null);
@@ -280,6 +326,7 @@ export default function AgentsPage() {
       }
       setSaveMsg('Saved. Worker manager picks this up on its next cycle (no restart).');
       await loadAgentModels();
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'agent-models'] });
     } catch (e) {
       setSaveMsg(e instanceof Error ? e.message : 'Save failed');
     } finally {
@@ -292,8 +339,8 @@ export default function AgentsPage() {
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
-      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-foreground">Agent Operations</h1>
             <p className="text-sm text-muted-foreground mt-1">
@@ -302,21 +349,113 @@ export default function AgentsPage() {
                 : `${activeCount} active · ${idleCount} idle · ${workers.length} total`}
             </p>
           </div>
-          <Dialog open={configOpen} onOpenChange={setConfigOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="shrink-0 gap-2">
-                <Settings2 className="w-4 h-4" />
-                Configure agent models
-              </Button>
-            </DialogTrigger>
+        </div>
+
+        <div className="rounded-xl border-2 border-primary/50 bg-gradient-to-br from-primary/15 via-primary/8 to-transparent dark:from-primary/25 dark:via-primary/12 p-4 sm:p-5 shadow-md ring-2 ring-primary/10">
+          <div className="flex flex-col lg:flex-row lg:items-center gap-4 lg:gap-8">
+            <div className="flex-1 min-w-0 space-y-2">
+              <p className="text-base sm:text-lg font-semibold text-foreground tracking-tight">
+                Configure each agent&apos;s model, provider &amp; API key
+              </p>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Each worker (e.g. <code className="text-xs bg-background/60 px-1 py-0.5 rounded">intake-worker-1</code>)
+                maps to one <strong>role</strong>. Open the editor to set them <strong>independently</strong> — not from
+                the cards below. Cards update after the worker manager&apos;s next poll.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="lg"
+              className="w-full lg:w-auto shrink-0 gap-2.5 h-12 sm:h-14 px-6 sm:px-8 text-base font-semibold shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98] transition-all"
+              onClick={() => setConfigOpen(true)}
+            >
+              <Settings2 className="w-5 h-5 sm:w-6 sm:h-6" aria-hidden />
+              Configure agent models
+            </Button>
+          </div>
+        </div>
+
+        <div>
+            {modelsOverviewLoading && (
+              <p className="text-xs text-muted-foreground mt-2 flex items-center gap-2">
+                <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                Loading saved per-role LLM…
+              </p>
+            )}
+            {modelsOverviewError && (
+              <p className="text-xs text-destructive/90 mt-2">
+                Could not load per-role configuration ({modelsOverviewError instanceof Error ? modelsOverviewError.message : 'error'}).
+              </p>
+            )}
+            {perRoleSummary && perRoleSummary.rows.length > 0 && (
+              <div className="mt-4 space-y-3 max-w-4xl">
+                {perRoleSummary.allSame && (
+                  <div className="flex gap-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
+                    <Info className="h-4 w-4 shrink-0 opacity-80 mt-0.5" />
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
+                      <p className="min-w-0 flex-1">
+                        <strong>Every role is identical</strong> (same provider, model, and key profile). Set each row
+                        differently — e.g. Intake = <code className="text-[10px]">gpt-4o-mini</code>, PM ={' '}
+                        <code className="text-[10px]">gpt-4o</code>, or different <strong>vendors</strong> via saved
+                        keys.
+                      </p>
+                      <Button type="button" size="sm" className="shrink-0" onClick={() => setConfigOpen(true)}>
+                        Open editor
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <div className="rounded-lg border border-border/40 bg-muted/5 overflow-hidden">
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-border/30 bg-muted/10">
+                    <span className="text-xs font-medium text-foreground">Saved LLM per role</span>
+                    <Button type="button" size="sm" className="h-8 text-xs font-medium" onClick={() => setConfigOpen(true)}>
+                      Configure…
+                    </Button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-muted-foreground border-b border-border/30">
+                          <th className="px-3 py-2 font-medium">Role</th>
+                          <th className="px-3 py-2 font-medium">Provider</th>
+                          <th className="px-3 py-2 font-medium">Model</th>
+                          <th className="px-3 py-2 font-medium">Key / profile</th>
+                          <th className="px-3 py-2 font-medium">Host</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {perRoleSummary.rows.map((r) => (
+                          <tr key={r.roleId} className="border-b border-border/20 last:border-0">
+                            <td className="px-3 py-2 font-medium text-foreground">
+                              {roleLabels[r.roleId] ?? r.roleId}
+                            </td>
+                            <td className="px-3 py-2 capitalize">{r.provider}</td>
+                            <td className="px-3 py-2 font-mono text-[11px]">{r.model}</td>
+                            <td className="px-3 py-2 text-muted-foreground">
+                              {modelsOverview ? credentialShortName(modelsOverview, r.credentialId) : '—'}
+                            </td>
+                            <td className="px-3 py-2 text-muted-foreground">{r.executionHost || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+        <Dialog open={configOpen} onOpenChange={setConfigOpen}>
             <DialogContent className="max-w-4xl w-[95vw] max-h-[88vh] flex flex-col gap-0 p-0 overflow-hidden">
               <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                 <DialogTitle>Agent models & hosts</DialogTitle>
                 <DialogDescription>
-                  Each <strong>row</strong> is one agent <strong>role</strong> (intake, implementer, …). Pick a{' '}
-                  <strong>vendor</strong>, then a <strong>saved API key</strong> (labeled in Settings → LLM), then a{' '}
-                  <strong>model</strong>. Roles can use different keys; the worker manager applies this on every cycle
-                  (no restart). The cards below show which key each worker is using.
+                  Each <strong>row</strong> is one <strong>role</strong> (matches{' '}
+                  <code className="text-[10px]">intake-worker-1</code>, <code className="text-[10px]">pm-worker-1</code>, …).
+                  You can set a <strong>different model and vendor</strong> for every role: choose vendor + saved key, then
+                  model. To mix OpenAI and Gemini, add both keys in Settings → LLM and pick the right key per row. Save —
+                  the worker manager applies changes on its next cycle. Worker cards below show live model/provider after
+                  that poll.
                 </DialogDescription>
               </DialogHeader>
               <div className="px-6 flex-1 min-h-0 overflow-y-auto py-2 space-y-4">
@@ -550,8 +689,7 @@ export default function AgentsPage() {
                 </Button>
               </DialogFooter>
             </DialogContent>
-          </Dialog>
-        </div>
+        </Dialog>
       </motion.div>
 
       {isLoading && (
