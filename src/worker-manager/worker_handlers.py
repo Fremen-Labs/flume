@@ -367,15 +367,19 @@ def compute_ready_for_repo(repo):
     """
     if not repo:
         return 0
+    # Some deployments store `repo` only in _source (not indexed), so querying
+    # on repo may return 0 hits. Pull the task set and filter in-memory instead.
     res = es_request(
         f'/{TASK_INDEX}/_search',
-        {'size': 500, 'query': {'bool': {'must': [{'term': {'repo': repo}}], 'must_not': [{'term': {'status': 'archived'}}]}}},
+        {'size': 500, 'query': {'bool': {'must_not': [{'term': {'status': 'archived'}}]}}},
         method='POST',
     )
     hits = res.get('hits', {}).get('hits', [])
     by_id = {}
     for h in hits:
         src = h.get('_source', {})
+        if src.get('repo') != repo:
+            continue
         src['_es_id'] = h.get('_id')
         by_id[src.get('id')] = src
 
