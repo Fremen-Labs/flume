@@ -176,12 +176,30 @@ export default function SettingsPage() {
     [data?.credentials, providerId],
   );
 
+  /** Saved server profile (before you change the Provider dropdown). */
+  const persistedProvider = data?.settings?.provider ?? 'ollama';
+  /** Masked env key + active credential apply only when the form provider matches the saved profile. */
+  const showPersistedMaskedApiKey =
+    providerId === persistedProvider &&
+    (effectiveSettings.authMode ?? 'api_key') === 'api_key' &&
+    data?.settings?.apiKey === '***';
+
   const updateForm = useCallback((updates: Partial<LlmSettingsPayload>) => {
     setForm((prev) => ({ ...prev, ...updates }));
   }, []);
 
   const handleSave = () => {
     setSaveError(null);
+    let credentialId: string | undefined =
+      form.credentialId === ''
+        ? undefined
+        : (form.credentialId !== undefined ? form.credentialId : effectiveSettings.credentialId) || undefined;
+    if (
+      credentialId &&
+      !(data?.credentials ?? []).some((c) => c.provider === (effectiveSettings.provider ?? 'ollama') && c.id === credentialId)
+    ) {
+      credentialId = undefined;
+    }
     const payload: LlmSettingsPayload = {
       provider: effectiveSettings.provider ?? 'ollama',
       model: effectiveSettings.model ?? 'llama3.2',
@@ -195,10 +213,7 @@ export default function SettingsPage() {
       oauthStateFile: effectiveSettings.oauthStateFile,
       oauthTokenUrl: effectiveSettings.oauthTokenUrl,
       credentialLabel: form.credentialLabel ?? effectiveSettings.credentialLabel ?? undefined,
-      credentialId:
-        form.credentialId === ''
-          ? undefined
-          : (form.credentialId !== undefined ? form.credentialId : effectiveSettings.credentialId) || undefined,
+      credentialId,
     };
     if (payload.apiKey === '***') delete (payload as Record<string, unknown>).apiKey;
     saveMutation.mutate(payload);
@@ -339,8 +354,15 @@ export default function SettingsPage() {
                     onValueChange={(v) => {
                       const p = catalog.find((x: LlmSettingsCatalogItem) => x.id === v);
                       // Default to API key whenever provider changes to avoid OAuth getting "stuck".
-                      updateForm({ provider: v, authMode: 'api_key' });
-                      if (p?.models?.length) updateForm({ model: p.models[0].id });
+                      // Clear key/credential so another vendor's masked key is not reused.
+                      updateForm({
+                        provider: v,
+                        authMode: 'api_key',
+                        credentialId: '',
+                        credentialLabel: '',
+                        apiKey: '',
+                        ...(p?.models?.length ? { model: p.models[0].id } : {}),
+                      });
                     }}
                   >
                     <SelectTrigger>
@@ -590,16 +612,20 @@ export default function SettingsPage() {
                     </div>
                     <div className="space-y-2">
                       <Label>API Key</Label>
-                      {effectiveSettings.apiKey === '***' && (
+                      {showPersistedMaskedApiKey && (
                         <p className="text-xs text-emerald-600 dark:text-emerald-400">
                           Key is saved
-                          {effectiveSettings.keySuffix ? ` (ends with ···{effectiveSettings.keySuffix})` : ''}.
-                          Paste a new key only if you want to replace it.
+                          {data?.settings?.keySuffix
+                            ? ` (ends with ···${data.settings.keySuffix})`
+                            : ''}
+                          . Paste a new key only if you want to replace it.
                         </p>
                       )}
                       <Input
                         type="password"
-                        placeholder={effectiveSettings.apiKey === '***' ? 'Leave blank to keep saved key' : 'sk-… or paste key'}
+                        placeholder={
+                          showPersistedMaskedApiKey ? 'Leave blank to keep saved key' : 'sk-… or paste key'
+                        }
                         value={form.apiKey ?? (effectiveSettings.apiKey === '***' ? '' : effectiveSettings.apiKey ?? '')}
                         onChange={(e) => updateForm({ apiKey: e.target.value })}
                       />

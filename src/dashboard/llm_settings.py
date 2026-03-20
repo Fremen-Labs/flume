@@ -545,6 +545,11 @@ def validate_llm_settings(payload: dict[str, Any], workspace_root: Path) -> tupl
         if new_key:
             label = str(payload.get("credentialLabel") or "").strip() or f"{provider} · {model}"
             cid_in = str(payload.get("credentialId") or "").strip() or None
+            if cid_in:
+                row = llm_credentials_store.get_by_id(workspace_root, cid_in)
+                if not row or str(row.get("provider") or "").strip().lower() != provider:
+                    # Don't overwrite another vendor's row when switching provider in the UI.
+                    cid_in = None
             try:
                 nid = llm_credentials_store.upsert_credential(
                     workspace_root,
@@ -750,6 +755,16 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
     cred_list = llm_credentials_store.list_public_credentials(workspace_root)
     active_meta = next((c for c in cred_list if c.get("id") == active_cred), None)
     active_label = str(active_meta.get("label") or "") if active_meta else ""
+    am_prov = str(active_meta.get("provider") or "").strip().lower() if active_meta else ""
+
+    # Only expose global masked key / active credential edit target when it matches this profile's provider.
+    settings_credential_id = active_cred
+    settings_credential_label = active_label
+    if active_meta and am_prov != provider:
+        settings_credential_id = ""
+        settings_credential_label = ""
+        api_key_masked = ""
+        key_suffix_out = ""
 
     return {
         "catalog": PROVIDER_CATALOG,
@@ -764,8 +779,8 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             "basePath": base_path,
             "apiKey": api_key_masked,
             "keySuffix": key_suffix_out,
-            "credentialId": active_cred,
-            "credentialLabel": active_label,
+            "credentialId": settings_credential_id,
+            "credentialLabel": settings_credential_label,
             "oauthStateFile": oauth_state or str(resolve_oauth_state_path(workspace_root, "")),
             "oauthTokenUrl": oauth_token_url,
         },
