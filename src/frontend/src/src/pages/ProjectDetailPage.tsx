@@ -34,6 +34,22 @@ function timeAgo(ts?: string) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+async function fetchTaskApiJson<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  const data: unknown = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg =
+      typeof data === 'object' &&
+      data !== null &&
+      'error' in data &&
+      typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : `Request failed (${r.status})`;
+    throw new Error(msg);
+  }
+  return data as T;
+}
+
 // Build epic > feature > story > task hierarchy from flat list
 interface TaskNode extends ApiTask { children: TaskNode[]; }
 
@@ -479,22 +495,28 @@ export default function ProjectDetailPage() {
   const historyQuery = useQuery({
     queryKey: ['task-history', selectedTaskId],
     enabled: !!selectedTaskId,
-    queryFn: () => fetch(`/api/tasks/${selectedTaskId}/history`).then(r => r.json()),
+    queryFn: () =>
+      fetchTaskApiJson(`/api/tasks/${encodeURIComponent(selectedTaskId!)}/history`),
     refetchInterval: isRunning ? 3_000 : 10_000,
+    retry: 2,
   });
 
   const diffQuery = useQuery({
     queryKey: ['task-diff', selectedTaskId],
     enabled: !!selectedTaskId && !!selectedTask?.branch,
-    queryFn: () => fetch(`/api/tasks/${selectedTaskId}/diff`).then(r => r.json()),
+    queryFn: () =>
+      fetchTaskApiJson(`/api/tasks/${encodeURIComponent(selectedTaskId!)}/diff`),
     refetchInterval: 10_000,
+    retry: 2,
   });
 
   const commitsQuery = useQuery({
     queryKey: ['task-commits', selectedTaskId],
     enabled: !!selectedTaskId && !!selectedTask?.branch,
-    queryFn: () => fetch(`/api/tasks/${selectedTaskId}/commits`).then(r => r.json()),
+    queryFn: () =>
+      fetchTaskApiJson(`/api/tasks/${encodeURIComponent(selectedTaskId!)}/commits`),
     refetchInterval: 10_000,
+    retry: 2,
   });
 
   // Unblock a task
@@ -896,7 +918,13 @@ export default function ProjectDetailPage() {
                   )}
 
                   {historyQuery.isLoading && <div className="flex items-center gap-2 text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</div>}
-                  {historyQuery.data?.history?.length > 0
+                  {historyQuery.isError && (
+                    <div className="flex items-start gap-2 text-destructive text-xs">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{historyQuery.error instanceof Error ? historyQuery.error.message : 'Failed to load history'}</span>
+                    </div>
+                  )}
+                  {historyQuery.data?.history?.length
                     ? historyQuery.data.history.map((e: { ts: string; role: string; summary: string; type?: string }, i: number) => {
                         const isAgentNote = e.type === 'agent_note';
                         return (
@@ -912,7 +940,7 @@ export default function ProjectDetailPage() {
                           </div>
                         );
                       })
-                    : !historyQuery.isLoading && <p className="text-muted-foreground">No history yet.</p>}
+                    : !historyQuery.isLoading && !historyQuery.isError && <p className="text-muted-foreground">No history yet.</p>}
 
                   {/* Acceptance criteria */}
                   {selectedTask.acceptance_criteria && selectedTask.acceptance_criteria.length > 0 && (
@@ -934,6 +962,12 @@ export default function ProjectDetailPage() {
               {historyTab === 'diff' && (
                 <>
                   {diffQuery.isLoading && <div className="flex items-center gap-2 text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading diff…</div>}
+                  {diffQuery.isError && (
+                    <div className="flex items-start gap-2 text-destructive text-xs mb-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{diffQuery.error instanceof Error ? diffQuery.error.message : 'Failed to load diff'}</span>
+                    </div>
+                  )}
                   {diffQuery.data?.files?.length > 0 && (
                     <div className="space-y-1 mb-3">
                       {diffQuery.data.files.map((f: { path: string; insertions: number; deletions: number; status: string }) => (
@@ -952,7 +986,7 @@ export default function ProjectDetailPage() {
                         <div key={i} className={line.startsWith('+') && !line.startsWith('+++') ? 'text-success' : line.startsWith('-') && !line.startsWith('---') ? 'text-destructive' : line.startsWith('@@') ? 'text-primary/70' : 'text-foreground/60'}>{line}</div>
                       ))}
                     </pre>
-                  ) : !diffQuery.isLoading && <p className="text-muted-foreground">No changes vs default branch.</p>}
+                  ) : !diffQuery.isLoading && !diffQuery.isError && <p className="text-muted-foreground">No changes vs default branch.</p>}
                 </>
               )}
 
@@ -960,6 +994,12 @@ export default function ProjectDetailPage() {
               {historyTab === 'commits' && (
                 <>
                   {commitsQuery.isLoading && <div className="flex items-center gap-2 text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading commits…</div>}
+                  {commitsQuery.isError && (
+                    <div className="flex items-start gap-2 text-destructive text-xs mb-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{commitsQuery.error instanceof Error ? commitsQuery.error.message : 'Failed to load commits'}</span>
+                    </div>
+                  )}
                   {commitsQuery.data?.commits?.length > 0
                     ? commitsQuery.data.commits.map((c: { sha: string; message: string; author: string; date: string }) => (
                         <div key={c.sha} className="border-l-2 border-muted/30 pl-3 py-1">
@@ -971,7 +1011,7 @@ export default function ProjectDetailPage() {
                           <p className="text-[10px] text-muted-foreground">{c.author}</p>
                         </div>
                       ))
-                    : !commitsQuery.isLoading && <p className="text-muted-foreground">No commits ahead of default branch.</p>}
+                    : !commitsQuery.isLoading && !commitsQuery.isError && <p className="text-muted-foreground">No commits ahead of default branch.</p>}
                 </>
               )}
             </div>
