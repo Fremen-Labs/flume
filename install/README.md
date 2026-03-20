@@ -176,7 +176,7 @@ Then:
 ./flume logs     # optional
 ```
 
-Workers: `bash src/worker-manager/run.sh` (git) or `bash worker-manager/run.sh` (package).
+By default the **dashboard auto-starts** the worker manager and agent handlers when it launches (`FLUME_AUTO_START_WORKERS=1` in `.env`). To run workers only manually or on another host, set **`FLUME_AUTO_START_WORKERS=0`** and use `bash src/worker-manager/run.sh` (git) or `bash worker-manager/run.sh` (package).
 
 ---
 

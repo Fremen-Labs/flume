@@ -102,8 +102,8 @@ export function AppLayout() {
         <div className="flex-1">
           <Outlet />
         </div>
-        <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center">
-          <span>Project communication for service businesses that care about their client's experience.</span>
+        <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center text-center">
+          <span>Flume — multi-agent planning, implementation, and review.</span>
         </footer>
       </main>
     </div>

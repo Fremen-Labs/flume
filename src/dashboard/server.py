@@ -20,7 +20,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 
-from flume_secrets import apply_runtime_config  # noqa: E402
+from flume_secrets import apply_runtime_config, load_legacy_dotenv_into_environ  # noqa: E402
 
 # Merge .env (src then repo root, repo wins) + OpenBao KV; see flume_secrets.load_legacy_dotenv_into_environ
 apply_runtime_config(_SRC_ROOT)
@@ -234,8 +234,16 @@ RULES:
 
 def call_ollama(messages):
     """Call the configured LLM and return the assistant's response text."""
+    # Re-read .env so Settings / codex-oauth changes apply without restarting the server.
+    load_legacy_dotenv_into_environ(_SRC_ROOT)
     import llm_client
-    return llm_client.chat(messages, model=LLM_MODEL, temperature=0.3, max_tokens=8192)
+
+    return llm_client.chat(
+        messages,
+        model=os.environ.get('LLM_MODEL', LLM_MODEL),
+        temperature=0.3,
+        max_tokens=8192,
+    )
 
 def _strip_json_blocks(text: str) -> str:
     """Remove trailing ```json ... ``` or bare {...} JSON blocks from a message string."""
@@ -363,7 +371,14 @@ def refine_session(session_id, user_text, current_plan):
         raw = call_ollama(llm_messages)
         message, plan = parse_llm_response(raw)
     except Exception as e:
-        message = f"I encountered an issue processing your request. Please try again. (Error: {str(e)[:100]})"
+        err = str(e)[:200]
+        hint = ''
+        if 'Connection refused' in err or 'Errno 111' in err:
+            hint = (
+                ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
+                'Save Settings again or run ./flume restart after changing .env.'
+            )
+        message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
         plan = None
 
     if plan and plan.get('epics'):
@@ -1633,6 +1648,26 @@ def agents_start() -> dict:
     return {'ok': True, 'started': started, 'already_running': not started}
 
 
+def maybe_auto_start_workers():
+    """
+    Start worker manager + handlers when the dashboard starts (same as POST /api/workflow/agents/start).
+
+    Set FLUME_AUTO_START_WORKERS=0 (or false/no/off) to disable — e.g. if you run workers on another host.
+    """
+    raw = os.environ.get('FLUME_AUTO_START_WORKERS', '1').strip().lower()
+    if raw in ('0', 'false', 'no', 'off'):
+        return
+    try:
+        result = agents_start()
+        started = result.get('started') or []
+        if started:
+            print(f'Flume: auto-started workers: {started}')
+        elif result.get('already_running'):
+            print('Flume: workers already running (skipped auto-start).')
+    except Exception as e:
+        print(f'Flume: warning — could not auto-start workers: {e}')
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json_response(self, code, obj):
         data = json.dumps(obj).encode()
@@ -2034,6 +2069,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response(502, {'ok': False, 'error': str(e)[:300]})
                 return
+            # Apply to this process so Plan New Work / intake use the new model without restart.
+            for _k, _v in updates.items():
+                os.environ[_k] = _v if _v is not None else ''
             self._json_response(200, {'ok': True, 'restartRequired': True})
             return
 
@@ -2571,6 +2609,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    maybe_auto_start_workers()
     server = HTTPServer((HOST, PORT), Handler)
     print(f'Dashboard listening on http://{HOST}:{PORT}')
     server.serve_forever()

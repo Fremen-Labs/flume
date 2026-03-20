@@ -57,7 +57,7 @@ Control the dashboard:
 ./flume codex-oauth login   # optional: ChatGPT / Codex OAuth for OpenAI
 ```
 
-Open `http://<your-host>:8765`. Start workers in another terminal:
+Open `http://<your-host>:8765`. The dashboard **starts workers automatically** by default (`FLUME_AUTO_START_WORKERS=1`). To run workers separately (or disable auto-start), set `FLUME_AUTO_START_WORKERS=0` and use:
 
 ```bash
 # Git clone                         # Extracted package

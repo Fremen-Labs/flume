@@ -1,32 +1,14 @@
 #!/usr/bin/env python3
 """Flume LLM Client — stdlib only, zero third-party dependencies.
 
-Provides a unified interface for multiple LLM providers. Configure via
-environment variables:
+Configuration is read from **os.environ on each request** so `.env` updates apply without
+restarting the process (e.g. after Settings save, `flume codex-oauth`, or editing the file).
 
   LLM_PROVIDER   : ollama | openai | openai_compatible | anthropic | gemini
-                   Default: ollama
-  LLM_BASE_URL   : Base URL for 'ollama' (default: http://localhost:11434)
-                   or full base URL for 'openai_compatible'
-  LLM_API_KEY    : API key for openai, anthropic, gemini, openai_compatible
-  LLM_MODEL      : Default model name (default: llama3.2)
-
-Public API:
-  chat(messages, model=None, *, temperature=0.3, max_tokens=8192) -> str
-      Call the LLM and return the assistant text response.
-
-  chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096) -> dict
-      Call the LLM with tool definitions. Returns an Ollama-compatible dict:
-        {'message': {'role': 'assistant', 'content': str, 'tool_calls': [...]}}
-      where each tool_call is: {'function': {'name': str, 'arguments': dict}}
-
-Provider-specific notes:
-  ollama           : Requires local Ollama at LLM_BASE_URL. Tools use /api/chat.
-  openai           : Uses api.openai.com/v1/chat/completions. Set LLM_API_KEY.
-  openai_compatible: Uses LLM_BASE_URL/v1/chat/completions. Set LLM_API_KEY.
-                     Covers Groq, Together, Mistral, Azure OpenAI, and more.
-  anthropic        : Uses api.anthropic.com/v1/messages. Set LLM_API_KEY.
-  gemini           : Uses Gemini's OpenAI-compatible endpoint. Set LLM_API_KEY.
+  LLM_BASE_URL   : Base URL for ollama or openai_compatible
+  LLM_API_KEY    : API key (or OAuth access token for OpenAI)
+  LLM_MODEL      : Default model name
+  OPENAI_OAUTH_STATE_FILE / OPENAI_OAUTH_TOKEN_URL : OpenAI ChatGPT OAuth refresh
 """
 
 import json
@@ -36,13 +18,6 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
-_PROVIDER = os.environ.get('LLM_PROVIDER', 'ollama').lower()
-_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434').rstrip('/')
-_API_KEY = os.environ.get('LLM_API_KEY', '')
-_DEFAULT_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
-_OPENAI_OAUTH_STATE_FILE = os.environ.get('OPENAI_OAUTH_STATE_FILE', '').strip()
-_OPENAI_OAUTH_TOKEN_URL = os.environ.get('OPENAI_OAUTH_TOKEN_URL', 'https://auth.openai.com/oauth/token').strip()
-
 _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
     'anthropic': 'https://api.anthropic.com',
@@ -50,10 +25,25 @@ _PROVIDER_BASE_URLS = {
 }
 
 
-def _base_url():
-    if _PROVIDER in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
-        return _PROVIDER_BASE_URLS[_PROVIDER]
-    return _BASE_URL
+def _runtime():
+    """Current LLM config from the environment (call on each public API use)."""
+    return {
+        'provider': os.environ.get('LLM_PROVIDER', 'ollama').lower(),
+        'base_url': os.environ.get('LLM_BASE_URL', 'http://localhost:11434').rstrip('/'),
+        'api_key': os.environ.get('LLM_API_KEY', ''),
+        'default_model': os.environ.get('LLM_MODEL', 'llama3.2'),
+        'oauth_state_file': os.environ.get('OPENAI_OAUTH_STATE_FILE', '').strip(),
+        'oauth_token_url': os.environ.get(
+            'OPENAI_OAUTH_TOKEN_URL', 'https://auth.openai.com/oauth/token'
+        ).strip(),
+    }
+
+
+def _effective_base_url(rt: dict) -> str:
+    prov = rt['provider']
+    if prov in _PROVIDER_BASE_URLS and not (os.environ.get('LLM_BASE_URL') or '').strip():
+        return _PROVIDER_BASE_URLS[prov]
+    return rt['base_url']
 
 
 def _post(url, payload, extra_headers=None, timeout=120):
@@ -82,23 +72,24 @@ def _save_json(path: Path, data: dict):
     path.write_text(json.dumps(data, indent=2))
 
 
-def _oauth_state_path():
-    if not _OPENAI_OAUTH_STATE_FILE:
+def _oauth_state_path(rt: dict):
+    sf = rt['oauth_state_file']
+    if not sf:
         return None
     loom = os.environ.get('LOOM_WORKSPACE', '').strip()
     if loom:
         try:
             from flume_secrets import resolve_oauth_state_path
 
-            return resolve_oauth_state_path(Path(loom), _OPENAI_OAUTH_STATE_FILE)
+            return resolve_oauth_state_path(Path(loom), sf)
         except ImportError:
             pass
-    p = Path(_OPENAI_OAUTH_STATE_FILE)
+    p = Path(sf)
     return p.resolve() if p.is_absolute() else (Path.cwd() / p).resolve()
 
 
-def _refresh_oauth_access_token() -> str:
-    state_path = _oauth_state_path()
+def _refresh_oauth_access_token(rt: dict) -> str:
+    state_path = _oauth_state_path(rt)
     if not state_path or not state_path.exists():
         return ''
     state = _load_json(state_path)
@@ -114,12 +105,13 @@ def _refresh_oauth_access_token() -> str:
     if not client_id:
         return ''
 
+    token_url = rt['oauth_token_url'] or 'https://auth.openai.com/oauth/token'
     payload = {
         'grant_type': 'refresh_token',
         'refresh_token': refresh_token,
         'client_id': client_id,
     }
-    data = _post(_OPENAI_OAUTH_TOKEN_URL, payload, timeout=30)
+    data = _post(token_url, payload, timeout=30)
     new_access = str(data.get('access_token') or '').strip()
     if not new_access:
         return ''
@@ -134,13 +126,10 @@ def _refresh_oauth_access_token() -> str:
     return new_access
 
 
-# ---------------------------------------------------------------------------
-# Ollama
-# ---------------------------------------------------------------------------
-
-def _ollama_chat(messages, model, temperature, max_tokens):
+def _ollama_chat(messages, model, temperature, max_tokens, rt: dict):
+    base = rt['base_url']
     data = _post(
-        f'{_BASE_URL}/api/chat',
+        f'{base}/api/chat',
         {
             'model': model,
             'messages': messages,
@@ -151,9 +140,10 @@ def _ollama_chat(messages, model, temperature, max_tokens):
     return data.get('message', {}).get('content', '')
 
 
-def _ollama_chat_tools(messages, tools, model, temperature, max_tokens):
+def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
+    base = rt['base_url']
     return _post(
-        f'{_BASE_URL}/api/chat',
+        f'{base}/api/chat',
         {
             'model': model,
             'messages': messages,
@@ -165,12 +155,8 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens):
     )
 
 
-# ---------------------------------------------------------------------------
-# OpenAI / OpenAI-compatible / Gemini
-# ---------------------------------------------------------------------------
-
-def _openai_headers():
-    key = _API_KEY or _refresh_oauth_access_token()
+def _openai_headers(rt: dict):
+    key = rt['api_key'] or _refresh_oauth_access_token(rt)
     if not key:
         raise RuntimeError(
             'LLM_API_KEY is empty and OpenAI OAuth token refresh is not configured. '
@@ -179,18 +165,18 @@ def _openai_headers():
     return {'Authorization': f'Bearer {key}'}
 
 
-def _openai_chat(messages, model, temperature, max_tokens):
-    url = _base_url() + '/v1/chat/completions'
+def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
+    url = _effective_base_url(rt) + '/v1/chat/completions'
     data = _post(
         url,
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
-        _openai_headers(),
+        _openai_headers(rt),
     )
     return (data['choices'][0]['message'].get('content') or '').strip()
 
 
-def _openai_chat_tools(messages, tools, model, temperature, max_tokens):
-    url = _base_url() + '/v1/chat/completions'
+def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
+    url = _effective_base_url(rt) + '/v1/chat/completions'
     data = _post(
         url,
         {
@@ -200,7 +186,7 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens):
             'temperature': temperature,
             'max_tokens': max_tokens,
         },
-        _openai_headers(),
+        _openai_headers(rt),
         timeout=180,
     )
     choice_msg = data['choices'][0]['message']
@@ -222,13 +208,9 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens):
     }
 
 
-# ---------------------------------------------------------------------------
-# Anthropic
-# ---------------------------------------------------------------------------
-
-def _anthropic_headers():
+def _anthropic_headers(rt: dict):
     return {
-        'x-api-key': _API_KEY,
+        'x-api-key': rt['api_key'],
         'anthropic-version': '2023-06-01',
     }
 
@@ -244,7 +226,7 @@ def _split_system(messages):
     return system, rest
 
 
-def _anthropic_chat(messages, model, temperature, max_tokens):
+def _anthropic_chat(messages, model, temperature, max_tokens, rt: dict):
     system, rest = _split_system(messages)
     payload = {
         'model': model,
@@ -254,7 +236,7 @@ def _anthropic_chat(messages, model, temperature, max_tokens):
     }
     if system:
         payload['system'] = system
-    data = _post('https://api.anthropic.com/v1/messages', payload, _anthropic_headers())
+    data = _post('https://api.anthropic.com/v1/messages', payload, _anthropic_headers(rt))
     for block in data.get('content', []):
         if block.get('type') == 'text':
             return block['text']
@@ -262,7 +244,6 @@ def _anthropic_chat(messages, model, temperature, max_tokens):
 
 
 def _openai_tools_to_anthropic(tools):
-    """Convert OpenAI tool-call format to Anthropic's tool format."""
     out = []
     for t in tools:
         fn = t.get('function', {})
@@ -274,7 +255,7 @@ def _openai_tools_to_anthropic(tools):
     return out
 
 
-def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
+def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
     system, rest = _split_system(messages)
     payload = {
         'model': model,
@@ -285,7 +266,7 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
     }
     if system:
         payload['system'] = system
-    data = _post('https://api.anthropic.com/v1/messages', payload, _anthropic_headers(), timeout=180)
+    data = _post('https://api.anthropic.com/v1/messages', payload, _anthropic_headers(rt), timeout=180)
     content_text = ''
     tool_calls = []
     for block in data.get('content', []):
@@ -307,55 +288,25 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
     }
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
-    """Call the configured LLM and return the assistant's text response.
-
-    Args:
-        messages:    List of {role, content} dicts in OpenAI format.
-        model:       Model name override; falls back to LLM_MODEL env var.
-        temperature: Sampling temperature (0.0–1.0).
-        max_tokens:  Maximum tokens to generate.
-
-    Returns:
-        str: The assistant's text response.
-    """
-    m = model or _DEFAULT_MODEL
-    if _PROVIDER == 'ollama':
-        return _ollama_chat(messages, m, temperature, max_tokens)
-    elif _PROVIDER == 'anthropic':
-        return _anthropic_chat(messages, m, temperature, max_tokens)
-    else:
-        return _openai_chat(messages, m, temperature, max_tokens)
+    """Call the configured LLM and return the assistant's text response."""
+    rt = _runtime()
+    m = model or rt['default_model']
+    prov = rt['provider']
+    if prov == 'ollama':
+        return _ollama_chat(messages, m, temperature, max_tokens, rt)
+    if prov == 'anthropic':
+        return _anthropic_chat(messages, m, temperature, max_tokens, rt)
+    return _openai_chat(messages, m, temperature, max_tokens, rt)
 
 
 def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096):
-    """Call the configured LLM with tool definitions.
-
-    Args:
-        messages:    List of {role, content} dicts in OpenAI format.
-        tools:       List of tool definitions in OpenAI function-calling format.
-        model:       Model name override; falls back to LLM_MODEL env var.
-        temperature: Sampling temperature.
-        max_tokens:  Maximum tokens to generate.
-
-    Returns:
-        dict: Ollama-compatible response dict:
-            {
-                'message': {
-                    'role': 'assistant',
-                    'content': str,
-                    'tool_calls': [{'function': {'name': str, 'arguments': dict}}]
-                }
-            }
-    """
-    m = model or _DEFAULT_MODEL
-    if _PROVIDER == 'ollama':
-        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens)
-    elif _PROVIDER == 'anthropic':
-        return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens)
-    else:
-        return _openai_chat_tools(messages, tools, m, temperature, max_tokens)
+    """Call the configured LLM with tool definitions."""
+    rt = _runtime()
+    m = model or rt['default_model']
+    prov = rt['provider']
+    if prov == 'ollama':
+        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, rt)
+    if prov == 'anthropic':
+        return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens, rt)
+    return _openai_chat_tools(messages, tools, m, temperature, max_tokens, rt)
