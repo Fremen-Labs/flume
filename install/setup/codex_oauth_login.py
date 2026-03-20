@@ -150,6 +150,50 @@ def _parse_pasted_oauth_redirect(raw: str) -> tuple[str, str]:
     return code, st
 
 
+def _decode_auth_openai_error_paste(raw: str) -> str | None:
+    """
+    If the user pastes https://auth.openai.com/error?payload=... (sign-in failed on OpenAI's site),
+    decode the JWT-like payload and return a human-readable explanation. Otherwise return None.
+    """
+    s = raw.strip().strip('"').strip("'")
+    if not s or "auth.openai.com" not in s or "/error" not in s:
+        return None
+    try:
+        u = urllib.parse.urlparse(s)
+        q = urllib.parse.parse_qs(u.query)
+        payload_b64 = (q.get("payload") or [""])[0]
+        if not payload_b64:
+            return (
+                "OpenAI returned an auth error page (no payload in URL).\n"
+                "Check account status, subscription, and region; see help.openai.com."
+            )
+        payload_b64 = urllib.parse.unquote(payload_b64)
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        obj = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        kind = str(obj.get("kind") or "")
+        err_code = str(obj.get("errorCode") or "")
+        req_id = str(obj.get("requestId") or "")
+        lines = [
+            "OpenAI sign-in failed (you pasted the auth.openai.com error URL, not the localhost redirect).",
+            f"  Server says: kind={kind!r} errorCode={err_code!r} requestId={req_id!r}",
+            "",
+            "If errorCode is unknown_error, the authorize request is often rejected before redirect —",
+            "for example redirect_uri must match OpenAI's allowlist for the Codex client.",
+            "",
+            "Flume uses port 1455 by default (same as the official Codex CLI:",
+            "http://localhost:1455/auth/callback). Re-run login-paste without overriding the port,",
+            "or set FLUME_OAUTH_PASTE_PORT=1455.",
+            "",
+            "After a successful login you should paste a URL starting with http://localhost:.../auth/callback?code=...",
+        ]
+        return "\n".join(lines)
+    except Exception:
+        return (
+            "OpenAI returned an auth error page (payload could not be decoded).\n"
+            "Try again; if it persists, contact help.openai.com with the request ID from the error page."
+        )
+
+
 def _exchange_localhost_authorization_code(
     issuer: str,
     client_id: str,
@@ -650,10 +694,12 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
 
     port = args.port
     if port is None:
+        # Must match OpenAI allowlist for client app_EMoamEEZ73f0CkXaXp7hrann — Codex CLI uses 1455
+        # (codex-rs/login/src/server.rs DEFAULT_PORT). Other ports often yield auth.openai.com unknown_error.
         try:
-            port = int(os.environ.get("FLUME_OAUTH_PASTE_PORT", "14575"))
+            port = int(os.environ.get("FLUME_OAUTH_PASTE_PORT", "1455"))
         except ValueError:
-            port = 14575
+            port = 1455
     if not (1024 <= port <= 65535):
         raise SystemExit("--port must be between 1024 and 65535")
 
@@ -695,6 +741,9 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     )
     print()
     print(f"Redirect URI (must match what you paste later): {redirect_uri}")
+    print(
+        "(Port defaults to 1455 — same as the official Codex CLI; OpenAI often rejects other redirect ports.)"
+    )
     print()
     _ores = _optional_authorize_resource()
     print(
@@ -719,6 +768,10 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
         raw = input("Paste redirect URL here, then Enter: ").strip()
     except EOFError:
         raise SystemExit("No input (stdin closed). Run interactively or pipe the redirect URL.")
+
+    decoded_err = _decode_auth_openai_error_paste(raw)
+    if decoded_err:
+        raise SystemExit(decoded_err)
 
     try:
         auth_code, pasted_state = _parse_pasted_oauth_redirect(raw)
@@ -868,7 +921,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Port in redirect_uri http://localhost:N/auth/callback (default: env FLUME_OAUTH_PASTE_PORT or 14575)",
+        help="Port in redirect_uri http://localhost:N/auth/callback (default: env FLUME_OAUTH_PASTE_PORT or 1455, Codex default)",
     )
     pp.add_argument(
         "--write-html",

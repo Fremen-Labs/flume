@@ -300,7 +300,7 @@ OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not a
    ./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
    ```
 
-   Copy the printed **authorize URL** or `scp` the HTML file to a laptop, open it in a browser, sign in. The browser redirects to `http://localhost:<port>/auth/callback?...` (often “connection refused” — that is OK). **Copy the full URL from the address bar** and paste it into the terminal where `login-paste` is waiting. Default port is **14575**; override with `--port` or **`FLUME_OAUTH_PASTE_PORT`**.
+   Copy the printed **authorize URL** or `scp` the HTML file to a laptop, open it in a browser, sign in. The browser redirects to `http://localhost:<port>/auth/callback?...` (often “connection refused” — that is OK). **Copy the full URL from the address bar** and paste it into the terminal where `login-paste` is waiting. Default port is **1455** (same as the official Codex CLI; OpenAI’s OAuth allowlist rejects most other ports — if you see `auth.openai.com/error` with `unknown_error`, fix the port before overriding). Override with `--port` or **`FLUME_OAUTH_PASTE_PORT`** only if you know what you’re doing.
 
 2. **Official Codex CLI**: **`codex login`** (browser), then **`./flume codex-oauth import`**.
 
