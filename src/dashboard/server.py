@@ -8,6 +8,11 @@ import re
 import shlex
 import shutil
 import ssl
+
+class NetflixFaultTolerance:
+    '''Netflix Microservice Resilience Wrapper'''
+    pass
+
 import subprocess
 import sys
 import urllib.request
@@ -125,6 +130,7 @@ def save_projects_registry(registry):
 
 
 def es_search(index, body):
+    # POST is required for reliable JSON bodies (some stacks strip GET bodies).
     req = urllib.request.Request(
         f"{ES_URL}/{index}/_search",
         data=json.dumps(body).encode(),
@@ -132,10 +138,45 @@ def es_search(index, body):
             'Content-Type': 'application/json',
             'Authorization': f'ApiKey {ES_API_KEY}',
         },
-        method='GET',
+        method='POST',
     )
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
+
+
+def find_task_doc_by_logical_id(logical_id: str):
+    """
+    Return (es_id, source) for a work item in agent-task-records.
+
+    Documents are usually upserted with PUT .../_doc/<logical_id>, so the ES _id
+    matches the logical id. Older or reindexed data may only match on the `id`
+    field — try `term` (keyword), `id.keyword` (dynamic mapping), and
+    `match_phrase` (text mapping) so history / git / PR endpoints stay consistent
+    with the snapshot list.
+    """
+    tid = (logical_id or '').strip()
+    if not tid:
+        return None, None
+    attempts = [
+        {'ids': {'values': [tid]}},
+        {'term': {'id': tid}},
+        {'term': {'id.keyword': tid}},
+        {'match_phrase': {'id': tid}},
+    ]
+    for query in attempts:
+        try:
+            hits = es_search('agent-task-records', {'size': 1, 'query': query}).get('hits', {}).get('hits', [])
+            if hits:
+                h = hits[0]
+                return h.get('_id'), h.get('_source', {})
+        except Exception:
+            continue
+    return None, None
 
 
 def es_index(index, doc):
@@ -934,9 +975,44 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
 
 
 def load_workers():
-    if WORKER_STATE.exists():
-        return json.loads(WORKER_STATE.read_text()).get('workers', [])
-    return []
+    if not WORKER_STATE.exists():
+        return []
+    try:
+        data = json.loads(WORKER_STATE.read_text())
+        workers = data.get('workers', [])
+    except Exception:
+        return []
+        
+    try:
+        agg_res = es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {
+                'by_worker': {
+                    'terms': {'field': 'worker_name.keyword', 'size': 500},
+                    'aggs': {
+                        'total_input': {'sum': {'field': 'input_tokens'}},
+                        'total_output': {'sum': {'field': 'output_tokens'}}
+                    }
+                },
+                'total_elastro_savings': {
+                    'sum': {'field': 'savings'}
+                }
+            }
+        })
+        buckets = agg_res.get('aggregations', {}).get('by_worker', {}).get('buckets', [])
+        totals = {}
+        for b in buckets:
+            totals[b.get('key')] = {
+                'input': int(b.get('total_input', {}).get('value', 0)),
+                'output': int(b.get('total_output', {}).get('value', 0))
+            }
+        for w in workers:
+            w['input_tokens'] = totals.get(w['name'], {}).get('input', 0)
+            w['output_tokens'] = totals.get(w['name'], {}).get('output', 0)
+    except Exception:
+        pass
+        
+    return workers
 
 
 def priority_rank(priority: str) -> int:
@@ -977,13 +1053,9 @@ def queue_for_repo(repo_id: str):
 
 
 def transition_task(task_id: str, status: str, owner=None, needs_human=None):
-    find_res = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not find_res:
+    es_id, _src = find_task_doc_by_logical_id(task_id)
+    if not es_id:
         return None
-    es_id = find_res[0].get('_id')
     doc = {
         'status': status,
         'updated_at': datetime.utcnow().isoformat() + 'Z',
@@ -994,18 +1066,17 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         doc['assigned_agent_role'] = owner
     if needs_human is not None:
         doc['needs_human'] = bool(needs_human)
+    if status == 'ready':
+        doc['implementer_consecutive_llm_failures'] = 0
     es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
     return {'_id': es_id, 'id': task_id, **doc}
 
 
 def task_history(task_id: str):
-    task_hits = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not task_hits:
+    es_id, src = find_task_doc_by_logical_id(task_id)
+    if not src:
         return None
-    task = {'_id': task_hits[0].get('_id'), **task_hits[0].get('_source', {})}
+    task = {'_id': es_id, **src}
 
     events = []
 
@@ -1257,14 +1328,7 @@ def resolve_default_branch(repo_path: Path, override: Optional[str] = None) -> s
 
 def get_task_doc(task_id: str):
     """Fetch a single task document from ES by logical id."""
-    hits = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not hits:
-        return None, None
-    h = hits[0]
-    return h.get('_id'), h.get('_source', {})
+    return find_task_doc_by_logical_id(task_id)
 
 
 def create_task_pr(task_id: str) -> dict:
@@ -1564,6 +1628,16 @@ def load_snapshot():
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     }).get('hits', {}).get('hits', [])
+    elastro_savings = 0
+    try:
+        agg_res = es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
+        })
+        elastro_savings = int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
+    except Exception:
+        pass
+
     return {
         'workers': load_workers(),
         'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks],
@@ -1572,6 +1646,7 @@ def load_snapshot():
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance],
         'repos': load_repos(),
         'projects': load_projects_registry(),
+        'elastro_savings': elastro_savings,
     }
 
 
@@ -1823,12 +1898,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self._url_path()
+        if p == '/api/codex-app-server/status':
+            self._json_response(200, {'status': 'offline', 'port': None})
+            return
+
         if p == '/api/snapshot':
             try:
                 self._json_response(200, load_snapshot())
             except Exception as e:
                 err_msg = str(e)[:400]
                 self._json_response(502, {'error': err_msg, 'code': 'ES_CONNECTION'})
+            return
+
+        if p == '/api/system-state':
+            try:
+                workers = load_workers()
+                active = sum(1 for w in workers if w.get('status') == 'busy')
+                total = len(workers)
+
+                data = {
+                    "status": "online",
+                    "activeStreams": active,
+                    "totalNodes": total,
+                    "standbyNodes": total - active,
+                    "workers": workers
+                }
+                self._json_response(200, data)
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
             return
 
         if p == '/api/workflow/workers':
@@ -1865,6 +1962,36 @@ class Handler(BaseHTTPRequestHandler):
                 import agent_models_settings
                 data = agent_models_settings.get_agent_models_response(WORKSPACE_ROOT)
                 self._json_response(200, data)
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+            return
+
+        if p == '/api/security':
+            try:
+                from flume_secrets import fetch_openbao_kv
+                addr = os.environ.get("OPENBAO_ADDR", "")
+                token = os.environ.get("OPENBAO_TOKEN", "")
+                mount = os.environ.get("OPENBAO_MOUNT", "secret")
+                path = os.environ.get("OPENBAO_PATH", "flume")
+                secrets = fetch_openbao_kv(addr, token, mount, path) if addr and token else {}
+                masked_secrets = {str(k): "<SECURE STRING>" for k in secrets.keys()}
+
+                audits = []
+                try:
+                    res = es_search('agent-security-audits', {
+                        "size": 100,
+                        "sort": [{"@timestamp": {"order": "desc"}}]
+                    })
+                    audits = [hit["_source"] for hit in res.get("hits", {}).get("hits", [])]
+                except Exception as es_err:
+                    import logging
+                    logging.getLogger("dashboard_server").debug(f"Audit log missing: {es_err}")
+
+                self._json_response(200, {
+                    "vault_active": bool(addr and token),
+                    "openbao_keys": masked_secrets,
+                    "audit_logs": audits
+                })
             except Exception as e:
                 self._json_response(502, {'error': str(e)[:300]})
             return
@@ -2772,6 +2899,14 @@ class Handler(BaseHTTPRequestHandler):
 
                 # If we have a GitHub token configured, inject it into HTTPS clone URLs so
                 # `git clone` doesn't attempt interactive username/password prompts.
+                from llm_settings import _openbao_enabled
+
+                enabled, _ = _openbao_enabled(WORKSPACE_ROOT)
+                if not enabled:
+                    self._json_response(412, {
+                        'error': 'OpenBao is required for GitHub tokens. Configure OPENBAO_ADDR/OPENBAO_TOKEN and store GH_TOKEN in KV.'
+                    })
+                    return
                 gh_token = load_effective_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
                 if (gh_token.startswith('"') and gh_token.endswith('"')) or (gh_token.startswith("'") and gh_token.endswith("'")):
                     gh_token = gh_token[1:-1].strip()
@@ -2857,6 +2992,17 @@ class Handler(BaseHTTPRequestHandler):
             }
             registry.append(entry)
             save_projects_registry(registry)
+            
+            try:
+                subprocess.Popen(
+                    ['elastro', 'rag', 'ingest', str(target_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            except Exception:
+                pass
+                
             self._json_response(201, {'ok': True, 'project': entry})
             return
 

@@ -44,6 +44,8 @@ export default function AnalyticsPage() {
 
   const approvedReviews = reviews.filter(r => r.verdict === 'approved').length;
   const passRate = reviews.length > 0 ? Math.round((approvedReviews / reviews.length) * 100) : 0;
+  
+  const elastro_savings = snapshot?.elastro_savings ?? 0;
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
@@ -62,11 +64,12 @@ export default function AnalyticsPage() {
       {!isLoading && (
         <>
           {/* Top metrics */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 relative z-10">
             <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
             <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
             <GlassMetricCard title="Failure Count" value={String(failures.length)} icon={Clock} trend={{ value: failures.length, label: 'since start' }} />
+            <GlassMetricCard title="AST Tokens Saved" value={elastro_savings > 1000000 ? `${(elastro_savings / 1000000).toFixed(1)}M` : (elastro_savings > 1000 ? `${(elastro_savings / 1000).toFixed(1)}K` : String(elastro_savings))} icon={TrendingUp} trend={{ value: elastro_savings, label: 'efficiency via Elastro' }} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 relative z-10">
@@ -133,6 +136,57 @@ export default function AnalyticsPage() {
                     <Bar dataKey="value" fill="hsl(160,84%,39%)" radius={[0, 4, 4, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+              )}
+            </motion.div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 relative z-10">
+            {/* Token Usage by Worker */}
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }} className="glass-card p-5 lg:col-span-2">
+              <h3 className="text-sm font-semibold text-foreground mb-4">Token Usage by Worker</h3>
+              {workers.length === 0 ? (
+                <div className="text-xs text-muted-foreground text-center py-8">No workers</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead className="text-xs text-muted-foreground border-b border-border/30">
+                      <tr>
+                        <th className="pb-2 font-medium">Worker Name</th>
+                        <th className="pb-2 font-medium">Role</th>
+                        <th className="pb-2 font-medium text-right">Input Tokens</th>
+                        <th className="pb-2 font-medium text-right">Output Tokens</th>
+                        <th className="pb-2 font-medium text-right">Total Tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/20">
+                      {workers
+                        .filter(w => (w.input_tokens || w.output_tokens))
+                        .sort((a, b) => ((b.input_tokens || 0) + (b.output_tokens || 0)) - ((a.input_tokens || 0) + (a.output_tokens || 0)))
+                        .map(w => {
+                          const i = w.input_tokens || 0;
+                          const o = w.output_tokens || 0;
+                          return (
+                            <tr key={w.name}>
+                              <td className="py-2.5 font-medium">{w.name}</td>
+                              <td className="py-2.5 text-muted-foreground capitalize">{w.role}</td>
+                              <td className="py-2.5 text-right font-mono text-xs">{i.toLocaleString()}</td>
+                              <td className="py-2.5 text-right font-mono text-xs">{o.toLocaleString()}</td>
+                              <td className="py-2.5 text-right font-mono text-xs text-emerald-500/90 w-32">
+                                {(i + o).toLocaleString()}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      {workers.filter(w => (w.input_tokens || w.output_tokens)).length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="py-4 text-center text-xs text-muted-foreground">
+                            No token telemetry recorded yet. Trigger tasks to see usage.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </motion.div>
           </div>

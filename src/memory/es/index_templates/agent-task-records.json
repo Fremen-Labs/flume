@@ -20,6 +20,7 @@
         "acceptance_criteria": { "type": "text" },
         "artifacts": { "type": "keyword" },
         "needs_human": { "type": "boolean" },
+        "implementer_consecutive_llm_failures": { "type": "integer" },
         "risk": { "type": "keyword" },
         "last_update": { "type": "date" },
         "created_at": { "type": "date" },

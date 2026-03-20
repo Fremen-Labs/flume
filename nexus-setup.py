@@ -14,6 +14,7 @@ import socket
 import urllib.request
 import json
 import subprocess
+import getpass
 
 GREEN = '\033[92m'
 CYAN = '\033[96m'
@@ -120,11 +121,216 @@ def ask_choice(prompt, options):
             return int(choice)
         print(f"{RED}Invalid override sequence. Specify a valid numerical trajectory.{NC}")
 
-def deploy_flume(mode):
+def check_dashboard_port():
+    DEFAULT_PORT = 8765
+    type_text(f"\n{CYAN}--- ORBITAL PORT CHECK ---{NC}")
+    sys.stdout.write(f"{CYAN}[SCAN]{NC} Sweeping comms port {DEFAULT_PORT}... ")
+    sys.stdout.flush()
+    time.sleep(0.5)
+    
+    if check_port('127.0.0.1', DEFAULT_PORT):
+        print(f"{RED}[COLLISION DETECTED]{NC}")
+        type_text(f"\n{YELLOW}[CRITICAL ANOMALY] Port {DEFAULT_PORT} is monopolized by a rogue process.{NC}")
+        choice = ask_choice(f"PORT OVERRIDE PROTOCOL:", [
+            f"{GREEN}AUTO-ASSIGN{NC} -> Calculate available fallback subspace frequency",
+            f"{CYAN}MANUAL{NC}      -> Enter custom port authorization override"
+        ])
+        if choice == 1:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                new_port = s.getsockname()[1]
+            type_text(f"{GREEN}[SUCCESS] Subspace frequency securely calculated on Port {new_port}{NC}")
+            return new_port
+        else:
+            while True:
+                user_port = input(f"\n{YELLOW}root@flume-cortex:~# Enter override port (1024-65535): {NC}").strip()
+                if user_port.isdigit() and 1024 <= int(user_port) <= 65535:
+                    if not check_port('127.0.0.1', int(user_port)):
+                        type_text(f"{GREEN}[ACCEPTED] Port {user_port} manually locked.{NC}")
+                        return int(user_port)
+                    else:
+                        print(f"{RED}[ERROR] Port {user_port} is also monopolized. Try another frequency.{NC}")
+                else:
+                    print(f"{RED}[ERROR] Invalid sequence. Must be between 1024 and 65535.{NC}")
+    else:
+        print(f"{GREEN}[CLEAR]{NC}")
+        type_text(f"{GREEN}Port {DEFAULT_PORT} is available for Flume Hive bindings.{NC}")
+        return DEFAULT_PORT
+
+def detect_hardware():
+    cpu_cores = os.cpu_count() or 4
+    try:
+        if sys.platform == 'darwin':
+            ram_bytes = int(subprocess.check_output(['sysctl', '-n', 'hw.memsize']))
+            ram_gb = ram_bytes // (1024**3)
+            try:
+                gpu_info = subprocess.check_output(['system_profiler', 'SPDisplaysDataType']).decode(errors='ignore')
+                gpu_name = "Apple Silicon GPU"
+                for line in gpu_info.splitlines():
+                    if "Chipset Model:" in line:
+                        gpu_name = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                gpu_name = "Unknown macOS GPU"
+        elif sys.platform.startswith('linux'):
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if 'MemTotal' in line:
+                        ram_gb = int(line.split()[1]) // (1024**2)
+                        break
+            try:
+                gpu_info = subprocess.check_output(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader', '-i', '0']).decode(errors='ignore').strip()
+                gpu_name = gpu_info if gpu_info else "Unknown Linux GPU"
+            except Exception:
+                gpu_name = "No NVIDIA GPU Detected"
+        else:
+            ram_gb = 8
+            gpu_name = "Unknown GPU"
+    except Exception:
+        ram_gb = 8
+        gpu_name = "Unknown GPU"
+        
+    return cpu_cores, ram_gb, gpu_name
+
+def probe_exo_cluster():
+    try:
+        req = urllib.request.Request("http://localhost:52415/v1/models", method="GET")
+        with urllib.request.urlopen(req, timeout=1) as response:
+            if response.status == 200:
+                return True
+    except Exception as e:
+        sys.stderr.write(f"\\n\\033[93m[LOG] Exo Cluster Probe Timeout/Error: {e}\\033[0m\\n")
+    return False
+
+def append_to_env(port):
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    cpu_cores, ram_gb, gpu_name = detect_hardware()
+    type_text(f"{GREEN}[HARDWARE SCAN]{NC} Detected {cpu_cores} Cores, {ram_gb}GB RAM, [{gpu_name}]")
+    try:
+        es_url = "https://localhost:9200"
+        try:
+            with urllib.request.urlopen("http://localhost:9200", timeout=1) as resp:
+                es_url = "http://localhost:9200"
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                es_url = "http://localhost:9200"
+        except Exception as e:
+            sys.stderr.write(f"\\n\\033[93m[LOG] OpenSearch Probe Context: {e}\\033[0m\\n")
+
+        new_lines = [
+            f"DASHBOARD_PORT={port}\n",
+            f"HOST_CPU_CORES={cpu_cores}\n",
+            f"HOST_RAM_GB={ram_gb}\n",
+            f"HOST_GPU_NAME={gpu_name}\n",
+            f"OPENBAO_ADDR=http://127.0.0.1:8200\n",
+            f"ES_URL={es_url}\n"
+        ]
+        
+        if probe_exo_cluster():
+            type_text(f"{GREEN}[EXO DETECTED]{NC} Local computing cluster found. Binding LLM architecture to Exo matrix natively.")
+            new_lines.extend([
+                "LLM_PROVIDER=exo\n",
+                "LLM_BASE_URL=http://localhost:52415/v1\n",
+                "LLM_MODEL=qwen3-30b-A3B-4bit\n"
+            ])
+            # Auto-assign roles natively
+            agent_models_path = os.path.join(os.path.dirname(__file__), "src", "worker-manager", "agent_models.json")
+            os.makedirs(os.path.dirname(agent_models_path), exist_ok=True)
+            exo_roles = {
+                "version": 1,
+                "roles": {
+                    "intake": {"provider": "exo", "model": "qwen3-14b-instruct", "credentialId": "__settings_default__"},
+                    "pm": {"provider": "exo", "model": "qwen3-30b-A3B-4bit", "credentialId": "__settings_default__"},
+                    "implementer": {"provider": "exo", "model": "qwen3-30b-A3B-4bit", "credentialId": "__settings_default__"}
+                }
+            }
+            with open(agent_models_path, "w") as f:
+                json.dump(exo_roles, f, indent=2)
+
+        token_path = os.path.expanduser("~/.vault-token")
+        if os.path.exists(token_path):
+            with open(token_path, "r") as tf:
+                new_lines.append(f"OPENBAO_TOKEN={tf.read().strip()}\n")
+
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                lines = f.readlines()
+            lines = [line for line in lines if not any(line.startswith(p) for p in ('DASHBOARD_PORT=', 'HOST_CPU_CORES=', 'HOST_RAM_GB=', 'HOST_GPU_NAME=', 'OPENBAO_ADDR=', 'OPENBAO_TOKEN=', 'ES_URL=', 'LLM_PROVIDER=', 'LLM_BASE_URL=', 'LLM_MODEL='))]
+            lines.extend(new_lines)
+            with open(env_path, 'w') as f:
+                f.writelines(lines)
+        else:
+            with open(env_path, 'w') as f:
+                f.writelines(new_lines)
+        type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port}, hardware telemetry, and TLS settings.{NC}")
+    except Exception as e:
+        sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
+
+def inject_elastic_credentials(infra):
+    if not infra.get('openbao'):
+        type_text(f"\\n{RED}[CRITICAL ERROR] OpenBao installation not detected locally.{NC}")
+        type_text(f"To securely assimilate Elastic credentials, please manually establish the OpenBao matrix first.{NC}")
+        sys.exit(1)
+
+    type_text(f"\\n{CYAN}--- ELASTIC CREDENTIAL ASSIMILATION ---{NC}")
+    type_text(f"{YELLOW}A local Elasticsearch instance was detected. Please provide your API Key to securely bind it into the OpenBao matrix.{NC}")
+    es_key = getpass.getpass(f"{BOLD}root@flume-cortex:~# ES_API_KEY: {NC}").strip()
+    
+    if not es_key:
+        type_text(f"{RED}[ERROR] Blank token supplied. Neural upload aborted.{NC}")
+        sys.exit(1)
+
+    sys.stdout.write(f"{CYAN}[SYS]{NC} Transmitting token to OpenBao vault (secret/flume)... ")
+    sys.stdout.flush()
+    time.sleep(0.5)
+
+    try:
+        proc = subprocess.run(
+            ["openbao", "kv", "put", "-format=json", "secret/flume", f"ES_API_KEY={es_key}"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if proc.returncode == 0:
+            print(f"{GREEN}[SECURED]{NC}")
+            type_text(f"{GREEN}Elasticsearch credentials locked permanently into the OpenBao hive.{NC}")
+            
+            # Formally authorize Flume Daemons
+            home_dir = os.path.expanduser("~")
+            flume_conf_dir = os.path.join(home_dir, ".config", "flume")
+            os.makedirs(flume_conf_dir, exist_ok=True)
+            token_path = os.path.join(flume_conf_dir, "openbao.token")
+            
+            # Clone current root Vault Token
+            vault_token_path = os.path.join(home_dir, ".vault-token")
+            if os.path.exists(vault_token_path):
+                shutil.copy2(vault_token_path, token_path)
+                os.chmod(token_path, 0o600)
+                type_text(f"{CYAN}[SYS] Neural Vault tokens securely mirrored for Flume internal APIs.{NC}")
+            
+            # Map configuration structure if absent
+            config_target = os.path.join(os.path.dirname(__file__), "flume.config.json")
+            config_template = os.path.join(os.path.dirname(__file__), "install", "flume.config.example.json")
+            if not os.path.exists(config_target) and os.path.exists(config_template):
+                shutil.copy2(config_template, config_target)
+                type_text(f"{CYAN}[SYS] Flume configuration geometry synthesized natively.{NC}")
+
+        else:
+            print(f"{RED}[FAILED]{NC}")
+            sys.stderr.write(f"\\n\\033[91m[LOG] OpenBao KV Error: {proc.stderr}\\033[0m\\n")
+            sys.exit(1)
+    except Exception as e:
+        print(f"{RED}[FAILED]{NC}")
+        sys.stderr.write(f"\\n\\033[91m[LOG] Subprocess execution threw anomaly: {e}\\033[0m\\n")
+        sys.exit(1)
+
+def deploy_flume(mode, selected_port):
     type_text(f"\n{BOLD}{CYAN}>>> DEPLOYING FLUME CORE IN [{mode}] MODE... <<<{NC}")
     
-    # Delegate to the legacy setup.sh but inject our resolved parameters
+    append_to_env(selected_port)
     env = os.environ.copy()
+    env["DASHBOARD_PORT"] = str(selected_port)
+    
     if mode == "ASSIMILATION":
         env["FLUME_SKIP_ELASTIC_INSTALL"] = "true"
         env["FLUME_EXT_OPENBAO"] = "true"
@@ -160,11 +366,15 @@ def main():
         if choice == 1:
             type_text(f"\n{GREEN}[ACKNOWLEDGED] Trajectory: ASSIMILATION.{NC}")
             type_text(f"Synchronizing current host daemons into the Flume neural net...")
-            deploy_flume("ASSIMILATION")
+            if infra.get('elastic'):
+                inject_elastic_credentials(infra)
+            assigned_port = check_dashboard_port()
+            deploy_flume("ASSIMILATION", assigned_port)
         elif choice == 2:
             type_text(f"\n{CYAN}[ACKNOWLEDGED] Trajectory: ISOLATION.{NC}")
             type_text(f"Spawning completely isolated dockerized swarm instances...")
-            deploy_flume("ISOLATION")
+            assigned_port = check_dashboard_port()
+            deploy_flume("ISOLATION", assigned_port)
         else:
             type_text(f"\n{RED}Installation Aborted. Jacking out of the matrix.{NC}")
             sys.exit(0)
@@ -176,7 +386,8 @@ def main():
         ])
         
         if choice == 1:
-            deploy_flume("FRESH")
+            assigned_port = check_dashboard_port()
+            deploy_flume("FRESH", assigned_port)
         else:
             sys.exit(0)
 

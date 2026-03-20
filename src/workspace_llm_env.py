@@ -75,7 +75,7 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
         return
     wr = workspace_root.resolve()
     if str(wr) not in sys.path:
-        sys.path.insert(0, str(wr))
+        sys.path.append(str(wr))
     try:
         import llm_credentials_store as lcs
 
@@ -93,8 +93,9 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
         cbase = str(c.get("baseUrl") or "").strip()
         if cbase and prov == "openai_compatible":
             os.environ["LLM_BASE_URL"] = cbase
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.error(f'Agent swarm captured suppressed exception: {e}')
 
 
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
@@ -104,13 +105,17 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
     if not dash.is_dir():
         return
     if str(wr) not in sys.path:
-        sys.path.insert(0, str(wr))
+        sys.path.append(str(wr))
+    added_dash = False
     if str(dash) not in sys.path:
         sys.path.insert(0, str(dash))
+        added_dash = True
     try:
         from llm_settings import load_effective_pairs
 
         pairs = load_effective_pairs(wr)
+        if added_dash:
+            sys.path.remove(str(dash))
         for key in _LLM_SYNC_KEYS:
             v = pairs.get(key)
             if v is None:

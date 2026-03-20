@@ -82,7 +82,7 @@ while ! es_credentials_valid; do
         echo -e "${GREEN}MATRIX ASSIMILATION OVERRIDE: Bypassing localized Elasticsearch sequence...${NC}"
         break
     fi
-    if ! curl -sk "https://localhost:9200/" &>/dev/null; then
+    if ! curl -sk "https://localhost:9200/" &>/dev/null && ! curl -sk "http://localhost:9200/" &>/dev/null; then
         echo ""
         echo -e "${YELLOW}Elasticsearch is not running. Start it and re-run setup.sh${NC}"
         exit 1
