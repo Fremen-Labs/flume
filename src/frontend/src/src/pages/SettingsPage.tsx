@@ -517,12 +517,12 @@ export default function SettingsPage() {
                           </p>
                         )}
                         {data.oauthStatus.oauthScopeStatus === 'missing_responses_write' && (
-                          <p className="text-destructive">
-                            Missing <code className="text-[11px]">api.responses.write</code> in token scopes — run{' '}
-                            <code className="text-[11px]">./flume codex-oauth login-browser</code> or{' '}
-                            <code className="text-[11px]">codex login</code> then{' '}
-                            <code className="text-[11px]">./flume codex-oauth import</code>, then{' '}
-                            <code className="text-[11px]">./flume restart --all</code>. Refresh alone will not fix this.
+                          <p className="text-amber-700 dark:text-amber-400">
+                            JWT does not list <code className="text-[11px]">api.responses.write</code> — normal for
+                            official Codex browser OAuth (connector scopes only). Flume should use{' '}
+                            <strong>/v1/chat/completions</strong> for planner and agents; restart dashboard/workers after
+                            upgrade. If you still get 401, use a platform <code className="text-[11px]">sk-</code> API key
+                            or check model access for your account.
                           </p>
                         )}
                         {data.oauthStatus.accessTokenAudience ? (

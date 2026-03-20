@@ -14,6 +14,7 @@ restarting the process (e.g. after Settings save, `flume codex-oauth`, or editin
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -124,16 +125,52 @@ def _looks_like_openai_platform_api_key(key: str) -> bool:
     return t.startswith('sk-') or t.startswith('sk_')
 
 
+def _jwt_scope_list(access_token: str) -> list[str] | None:
+    """
+    Decode JWT `scp` / `scope` / `roles` without verifying signature.
+    None if not a classic 3-segment JWT or parse fails.
+    """
+    t = (access_token or '').strip()
+    parts = t.split('.')
+    if len(parts) != 3:
+        return None
+    try:
+        payload_b64 = parts[1]
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
+        scopes: list[str] = []
+        scp_raw = payload.get('scp')
+        if isinstance(scp_raw, str):
+            scopes.extend(x for x in scp_raw.split() if x)
+        elif isinstance(scp_raw, list):
+            scopes.extend(str(x) for x in scp_raw if x)
+        scope_one = payload.get('scope')
+        if isinstance(scope_one, str):
+            scopes.extend(x for x in scope_one.split() if x)
+        roles = payload.get('roles')
+        if isinstance(roles, list):
+            scopes.extend(str(x) for x in roles if x)
+        return scopes
+    except Exception:
+        return None
+
+
 def _openai_bearer_uses_responses_api(rt: dict) -> bool:
     """
-    ChatGPT / Codex OAuth access tokens work on /v1/responses; /v1/chat/completions returns 401.
+    Platform API keys use /v1/chat/completions.
+
+    OAuth: /v1/responses only if JWT lists api.responses.write; otherwise chat/completions
+    (Codex connector tokens, opaque tokens, JWE, etc.).
     """
     if rt['provider'] != 'openai':
         return False
-    key = (rt.get('api_key') or '').strip()
+    key = _openai_bearer_for_request(rt)
     if _looks_like_openai_platform_api_key(key):
         return False
-    return True
+    scopes = _jwt_scope_list(key)
+    if scopes is None:
+        return False
+    return 'api.responses.write' in scopes
 
 
 def _chat_messages_to_responses_input(messages: list) -> list:
@@ -246,11 +283,9 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if e.code == 401 and 'openai.com' in (url or '').lower():
             if 'Missing scopes' in body or 'api.responses.write' in body:
                 msg += (
-                    ' Hint: Your token is valid but lacks api.responses.write (refresh cannot add it). '
-                    'Run ./flume codex-oauth login-browser from the Flume install dir, then ./flume restart --all. '
-                    'If you already did, ensure Settings → LLM “OAuth state file” matches that JSON path and '
-                    'clear any stale LLM_API_KEY in .env so the new consent is used. '
-                    'Settings → LLM shows decoded JWT scopes.'
+                    ' Hint: Codex browser OAuth JWTs usually omit api.responses.write; Flume should use '
+                    '/v1/chat/completions instead of /v1/responses. git pull, ./flume restart --all. '
+                    'Or use a platform sk- API key.'
                 )
             else:
                 msg += (

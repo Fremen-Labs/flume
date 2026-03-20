@@ -536,6 +536,23 @@ def _jwt_access_token_scopes(access_token: str) -> tuple[bool, list[str]]:
         return False, []
 
 
+def _print_browser_oauth_route_hint(access: str) -> None:
+    """After login-browser / login-paste, explain whether Flume will call /v1/responses vs chat/completions."""
+    ok, scopes = _jwt_access_token_scopes(access)
+    print()
+    if ok and scopes and "api.responses.write" in scopes:
+        print("Token includes api.responses.write — Flume will use OpenAI /v1/responses for chat-style calls.")
+    elif ok and scopes:
+        print(
+            "Token has Codex-style scopes (JWT has no api.responses.write). "
+            "Flume will use /v1/chat/completions for OpenAI (Plan New Work and agents)."
+        )
+    elif ok and not scopes:
+        print("JWT has no scp list; Flume may try /v1/responses first at runtime.")
+    else:
+        print("Could not decode JWT scopes; Flume picks /v1/responses vs chat/completions at runtime.")
+
+
 def _warn_device_login_responses_scope(access: str) -> None:
     """After device-code login, tell the user if /v1/responses will 401."""
     ok, scopes = _jwt_access_token_scopes(access)
@@ -727,6 +744,7 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     )
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
+    _print_browser_oauth_route_hint(access)
     print("\nDone. Run: ./flume restart --all")
 
 
@@ -868,11 +886,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
     print("\nOAuth state saved.")
-    ok, scopes = _jwt_access_token_scopes(access)
-    if ok and scopes and "api.responses.write" in scopes:
-        print("Verified: access token includes api.responses.write — OK for Flume /v1/responses.")
-    elif ok and scopes:
-        print(f"Warning: token scopes may be incomplete: {' '.join(scopes[:16])}")
+    _print_browser_oauth_route_hint(access)
     print("Done. Run: ./flume restart --all")
 
 

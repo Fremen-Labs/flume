@@ -292,9 +292,19 @@ Account or org policies (e.g. device auth allowed in ChatGPT / Codex settings) a
 
 ### Error: `Missing scopes: api.responses.write`
 
-The access token must include **API scopes** (e.g. `model.request`, `api.responses.write`), not only `openid` / `profile` / `email`.
+**Browser / paste / import (Codex) tokens** usually list only **connector** scopes in the JWT (`api.connectors.read`, …) — OpenAI does **not** allow `model.request` / `api.responses.write` on `/oauth/authorize` for the public Codex client. **Current Flume** detects that and calls **`/v1/chat/completions`** for Plan New Work and agents instead of **`/v1/responses`**, so this error should stop after **`git pull`** and **`./flume restart --all`**.
 
-OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not attach** those API scopes to the token, even if Flume sends a `scope` field. **`Refresh OAuth` cannot add scopes** that were never granted.
+If you still see **`/v1/responses`** in the error after restart, the running code is **not** the version with JWT routing. Verify upstream is merged, then check the file on the server:
+
+```bash
+grep -n "if scopes is None" ~/flume/src/dashboard/llm_client.py
+```
+
+You should see **`return False`** (OAuth without decodable `api.responses.write` uses chat/completions). If the line is missing, **`git remote -v`** / **`git fetch upstream && git merge upstream/main`** (or pull from **Fremen-Labs/flume**). Then **`./flume restart --all`** again.
+
+If routing is correct but calls still fail, the model/account may reject **chat/completions** for that bearer — use a platform **`sk-…`** API key in Settings.
+
+**Device-code** (`./flume codex-oauth login`) often yields **weaker** tokens than browser OAuth; **`Refresh OAuth` cannot add scopes** that were never granted.
 
 **Fix (pick one):**
 
