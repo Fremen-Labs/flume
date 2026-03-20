@@ -309,7 +309,7 @@ flume/
 | Issue | What to check |
 |-------|----------------|
 | Dashboard won’t start | `python3 --version` ≥ 3.9; **`.env` or `flume.config.json`** exists; `journalctl --user -u flume-dashboard`; run `bash src/dashboard/run.sh` (git) in foreground for errors. |
-| **`/api/snapshot` 502 / ES not configured** | `ES_API_KEY` in OpenBao KV or `.env`; not `AUTO_GENERATED_BY_INSTALLER`. Token file readable for OpenBao mode. Restart after changing secrets. |
+| **`/api/snapshot` 502 / ES not configured** | `ES_API_KEY` in OpenBao KV or repo-root **`.env`** (`~/flume/.env`); not `AUTO_GENERATED_BY_INSTALLER`. If you have a stray **`src/.env`**, remove it or ensure **`flume/.env`** has the real key (repo root wins). Token file readable for OpenBao mode. **`./flume restart`** after changing secrets. |
 | OpenBao not loading | `openbao` on `PATH`; `OPENBAO_ADDR` + token; `flume.config.json` paths correct; `openbao kv get secret/flume` works manually. |
 | Indices missing | `bash install/setup/create-es-indices.sh`; template `agent-review-records.json` path in script. |
 | Workers idle / no tasks | `EXECUTION_HOST`, `worker-manager/manager.log`, ES connectivity from that host. |

@@ -20,51 +20,9 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 
-def _apply_env_file_line(raw_line: str) -> None:
-    """Parse one KEY=VAL line from a .env file into os.environ (last wins)."""
-    line = raw_line.strip()
-    if not line or line.startswith('#'):
-        return
-    if line.startswith('export '):
-        line = line[7:].lstrip()
-    if '=' not in line:
-        return
-    key, _, val = line.partition('=')
-    key = key.strip()
-    if not key or key.startswith('#'):
-        return
-    val = val.strip()
-    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
-        val = val[1:-1]
-    os.environ[key] = val
-
-
-def _load_dotenv_files() -> None:
-    """
-    Load .env into os.environ before reading ES_*.
-
-    systemd's EnvironmentFile= often misparses real-world .env (export, quotes, etc.).
-    run.sh sources .env, but we also load here so the dashboard always sees credentials
-    when .env exists next to the workspace (same resolution as run.sh).
-    """
-    default_ws = BASE.parent
-    ws = Path(os.environ.get('LOOM_WORKSPACE', str(default_ws)))
-    for candidate in (ws / '.env', ws.parent / '.env'):
-        if not candidate.is_file():
-            continue
-        try:
-            text = candidate.read_text(encoding='utf-8', errors='replace')
-        except OSError:
-            continue
-        for raw in text.splitlines():
-            _apply_env_file_line(raw)
-        return
-
-
-_load_dotenv_files()
-
 from flume_secrets import apply_runtime_config  # noqa: E402
 
+# Merge .env (src then repo root, repo wins) + OpenBao KV; see flume_secrets.load_legacy_dotenv_into_environ
 apply_runtime_config(_SRC_ROOT)
 
 from llm_settings import load_effective_pairs  # noqa: E402

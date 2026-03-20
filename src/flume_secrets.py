@@ -172,13 +172,57 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
         return {}
 
 
+def _apply_dotenv_line(raw_line: str) -> None:
+    """Parse one KEY=VAL line from a .env file into os.environ (last write wins)."""
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        return
+    if line.startswith("export "):
+        line = line[7:].lstrip()
+    if "=" not in line:
+        return
+    key, _, val = line.partition("=")
+    key = key.strip()
+    if not key or key.startswith("#"):
+        return
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        val = val[1:-1]
+    os.environ[key] = val
+
+
+def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
+    """
+    Load ``<workspace>/.env`` then ``<repo-root>/.env`` into the process environment.
+
+    The repo root is ``workspace_root.parent`` (e.g. ``flume/.env`` when workspace is
+    ``flume/src``). **Later files override earlier keys**, so the repo root wins on
+    duplicates — matching ``run.sh`` (which prefers repo-root ``.env``) and
+    ``llm_settings.load_env_pairs``.
+
+    This avoids a common bug: a stale ``src/.env`` must not shadow the real
+    ``flume/.env`` that the installer maintains.
+    """
+    wr = workspace_root.resolve()
+    for candidate in (wr / ".env", wr.parent / ".env"):
+        if not candidate.is_file():
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            _apply_dotenv_line(raw)
+
+
 def apply_runtime_config(workspace_root: Path) -> bool:
     """
-    Load flume.config.json (if any), fetch OpenBao KV, merge into os.environ.
+    Load legacy ``.env`` files, then ``flume.config.json`` (if any), then OpenBao KV.
 
     Returns True if OpenBao credentials were resolved and a KV read was attempted
     (even if the secret was empty or missing keys).
     """
+    load_legacy_dotenv_into_environ(workspace_root)
     bootstrap = load_merged_bootstrap(workspace_root)
     creds = resolve_openbao_credentials(workspace_root, bootstrap)
     if not creds:
