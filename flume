@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# Flume CLI — Control the dashboard service
+# Flume CLI — Dashboard service + ChatGPT/Codex OAuth
 #
 # Usage:
-#   flume start    — Start dashboard in background
-#   flume stop     — Stop dashboard
-#   flume restart  — Restart dashboard
-#   flume status   — Show dashboard status
-#   flume enable   — Start dashboard on login
-#   flume disable  — Don't start on login
-#   flume logs     — Tail dashboard logs
+#   flume start | stop | restart | status | enable | disable | logs
+#   flume codex-oauth login | import | refresh | status
 
 set -euo pipefail
 
@@ -25,6 +20,23 @@ elif [ -f "${FLUME_ROOT}/setup/install-flume-service.sh" ]; then
 else
     INSTALL_SCRIPT=""
 fi
+
+# OAuth helpers (git: install/setup/… — package: setup/…)
+_codex_oauth_py() {
+    if [ -f "${FLUME_ROOT}/install/setup/codex_oauth_login.py" ]; then
+        echo "${FLUME_ROOT}/install/setup/codex_oauth_login.py"
+    elif [ -f "${FLUME_ROOT}/setup/codex_oauth_login.py" ]; then
+        echo "${FLUME_ROOT}/setup/codex_oauth_login.py"
+    fi
+}
+
+_openai_oauth_sh() {
+    if [ -f "${FLUME_ROOT}/install/setup/openai-oauth.sh" ]; then
+        echo "${FLUME_ROOT}/install/setup/openai-oauth.sh"
+    elif [ -f "${FLUME_ROOT}/setup/openai-oauth.sh" ]; then
+        echo "${FLUME_ROOT}/setup/openai-oauth.sh"
+    fi
+}
 
 ensure_service_installed() {
     if [ ! -f "${UNIT_FILE}" ] && [ -n "${INSTALL_SCRIPT}" ]; then
@@ -82,12 +94,69 @@ cmd_logs() {
     journalctl --user -u "${SERVICE_NAME}" -f "${@}"
 }
 
-cmd_help() {
-    echo "Flume CLI — Control the dashboard service"
+cmd_codex_oauth_help() {
+    echo "ChatGPT / Codex OAuth for Flume (OpenAI provider, subscription session)"
     echo ""
-    echo "Usage: flume <command>"
+    echo "Usage: flume codex-oauth <command>"
     echo ""
     echo "Commands:"
+    echo "  login (default)  Device-code sign-in; writes .openai-oauth.json and updates .env"
+    echo "  import           Import from official Codex CLI session (~/.codex/auth.json)"
+    echo "  bootstrap        Try Codex cache then optional legacy profile import; refresh + .env"
+    echo "  refresh          Refresh access token using saved refresh token"
+    echo "  status           Show token metadata (secrets are not printed)"
+    echo ""
+    echo "After login or import: set Settings → LLM → OpenAI → OAuth, then:"
+    echo "  flume restart"
+    echo ""
+}
+
+cmd_codex_oauth() {
+    local py sh
+    py="$(_codex_oauth_py)"
+    sh="$(_openai_oauth_sh)"
+    local sub="${1:-login}"
+    [ "$#" -ge 1 ] && shift || true
+
+    case "${sub}" in
+        help|-h|--help)
+            cmd_codex_oauth_help
+            ;;
+        login)
+            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
+                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
+                exit 1
+            fi
+            python3 "${py}" login --flume-root "${FLUME_ROOT}" "$@"
+            ;;
+        import|import-codex)
+            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
+                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
+                exit 1
+            fi
+            python3 "${py}" import-codex --flume-root "${FLUME_ROOT}" "$@"
+            ;;
+        refresh|status|bootstrap)
+            if [ -z "${sh}" ] || [ ! -f "${sh}" ]; then
+                echo "Error: openai-oauth.sh not found under ${FLUME_ROOT}."
+                exit 1
+            fi
+            bash "${sh}" "${sub}" "$@"
+            ;;
+        *)
+            echo "Unknown codex-oauth command: ${sub}" >&2
+            cmd_codex_oauth_help
+            exit 1
+            ;;
+    esac
+}
+
+cmd_help() {
+    echo "Flume CLI — Dashboard service and OAuth"
+    echo ""
+    echo "Usage: flume <command> [args...]"
+    echo ""
+    echo "Dashboard (systemd user service):"
     echo "  start     Start dashboard in background"
     echo "  stop      Stop dashboard"
     echo "  restart   Restart dashboard"
@@ -95,6 +164,10 @@ cmd_help() {
     echo "  enable    Start dashboard automatically on login"
     echo "  disable   Don't start dashboard on login"
     echo "  logs      Tail dashboard logs (journalctl -f)"
+    echo ""
+    echo "OpenAI ChatGPT / Codex OAuth:"
+    echo "  codex-oauth [login|import|bootstrap|refresh|status]"
+    echo "  Run \"flume codex-oauth help\" for details."
     echo ""
 }
 
@@ -106,6 +179,10 @@ case "${1:-help}" in
     enable)  cmd_enable ;;
     disable) cmd_disable ;;
     logs)    shift; cmd_logs "$@" ;;
+    codex-oauth)
+        shift
+        cmd_codex_oauth "$@"
+        ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"

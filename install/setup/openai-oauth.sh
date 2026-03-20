@@ -40,7 +40,10 @@ usage() {
     cat <<EOF
 OpenAI ChatGPT / Codex OAuth helper for Flume (Flume root: ${FLUME_ROOT})
 
-Usage:
+Prefer the Flume CLI from this directory:
+  ./flume codex-oauth login | import | bootstrap | refresh | status
+
+Direct script usage:
   bash install/setup/openai-oauth.sh login
   bash install/setup/openai-oauth.sh import-codex [codex_home]
   bash install/setup/openai-oauth.sh bootstrap
@@ -49,11 +52,10 @@ Usage:
   bash install/setup/openai-oauth.sh status
 
 Commands:
-  login            Standalone device-code login (same flow as: codex login --device-auth).
-                   No OpenClaw and no Codex CLI required. Updates .openai-oauth.json + .env.
+  login            Device-code login (same flow as: codex login --device-auth). Updates .openai-oauth.json + .env.
   import-codex     Import tokens from official Codex CLI (${CODEX_HOME}/auth.json).
-  bootstrap        Try import-codex first, then OpenClaw; then refresh + sync .env.
-  import-openclaw  Copy oauth from OpenClaw auth-profiles.json (optional third-party).
+  bootstrap        Try import-codex first, then optional legacy profile import; refresh + sync .env.
+  import-openclaw  Copy oauth from a third-party auth-profiles.json (advanced).
   refresh          Refresh access token from saved refresh token.
   status           Show token metadata (never prints full tokens).
 
@@ -253,11 +255,10 @@ case "$cmd" in
             exit 0
         fi
         echo "No usable OAuth source found."
-        echo "  • Official Codex CLI: run  codex login  or  codex login --device-auth"
-        echo "    then:  bash install/setup/openai-oauth.sh import-codex"
-        echo "  • Standalone (no Codex/OpenClaw):"
-        echo "    python3 install/setup/codex_oauth_login.py login --flume-root ${FLUME_ROOT}"
-        echo "  • OpenClaw (optional): place auth file at ${OPENCLAW_AUTH_DEFAULT} then re-run bootstrap"
+        echo "  • Recommended:  ./flume codex-oauth login"
+        echo "  • Or:  codex login  then  ./flume codex-oauth import"
+        echo "  • Or:  python3 install/setup/codex_oauth_login.py login --flume-root ${FLUME_ROOT}"
+        echo "  • Advanced legacy import:  bash install/setup/openai-oauth.sh import-openclaw"
         exit 1
         ;;
     import-openclaw)

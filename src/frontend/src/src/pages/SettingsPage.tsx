@@ -68,7 +68,11 @@ async function saveRepoSettings(payload: RepoSettingsPayload): Promise<{ ok: boo
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
   { id: 'default', name: 'Default', description: 'Modern glass-morphism with blue accents' },
-  { id: 'retro', name: 'Retro', description: 'OpenClaw-style: navy panels, neon orange/purple/teal accents, gold active nav' },
+  {
+    id: 'retro',
+    name: 'Retro',
+    description: 'Pixel / CRT-inspired: navy panels, neon orange/purple/teal accents, gold active nav',
+  },
 ];
 
 export default function SettingsPage() {
@@ -435,16 +439,13 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>Standalone ChatGPT / Codex OAuth</strong> (no OpenClaw): on the Flume server run{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                        python3 install/setup/codex_oauth_login.py login
-                      </code>{' '}
-                      or{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                        bash install/setup/openai-oauth.sh login
-                      </code>
-                      . Or use the official Codex CLI (<code className="text-[11px]">codex login</code>) then{' '}
-                      <code className="text-[11px]">bash install/setup/openai-oauth.sh import-codex</code>.
+                      <strong>ChatGPT / Codex OAuth</strong> — on the machine running Flume, open a terminal in your
+                      Flume install directory and run{' '}
+                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume codex-oauth login</code>
+                      . If you already use the official Codex CLI, run{' '}
+                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume codex-oauth import</code>{' '}
+                      after <code className="text-[11px]">codex login</code>. Then save settings here and run{' '}
+                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">./flume restart</code>.
                     </p>
                     <div className="space-y-2">
                       <Label>OAuth state file</Label>

@@ -54,6 +54,7 @@ Control the dashboard:
 
 ```bash
 ./flume start | stop | restart | status | logs | enable | disable
+./flume codex-oauth login   # optional: ChatGPT / Codex OAuth for OpenAI
 ```
 
 Open `http://<your-host>:8765`. Start workers in another terminal:
