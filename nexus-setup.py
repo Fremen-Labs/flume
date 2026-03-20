@@ -14,6 +14,7 @@ import socket
 import urllib.request
 import json
 import subprocess
+import getpass
 
 GREEN = '\033[92m'
 CYAN = '\033[96m'
@@ -173,6 +174,43 @@ def append_to_env(port):
     except Exception as e:
         sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
 
+def inject_elastic_credentials(infra):
+    if not infra.get('openbao'):
+        type_text(f"\\n{RED}[CRITICAL ERROR] OpenBao installation not detected locally.{NC}")
+        type_text(f"To securely assimilate Elastic credentials, please manually establish the OpenBao matrix first.{NC}")
+        sys.exit(1)
+
+    type_text(f"\\n{CYAN}--- ELASTIC CREDENTIAL ASSIMILATION ---{NC}")
+    type_text(f"{YELLOW}A local Elasticsearch instance was detected. Please provide your API Key to securely bind it into the OpenBao matrix.{NC}")
+    es_key = getpass.getpass(f"{BOLD}root@flume-cortex:~# ES_API_KEY: {NC}").strip()
+    
+    if not es_key:
+        type_text(f"{RED}[ERROR] Blank token supplied. Neural upload aborted.{NC}")
+        sys.exit(1)
+
+    sys.stdout.write(f"{CYAN}[SYS]{NC} Transmitting token to OpenBao vault (secret/flume_elastic)... ")
+    sys.stdout.flush()
+    time.sleep(0.5)
+
+    try:
+        proc = subprocess.run(
+            ["openbao", "kv", "put", "-format=json", "secret/flume_elastic", f"ES_API_KEY={es_key}"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if proc.returncode == 0:
+            print(f"{GREEN}[SECURED]{NC}")
+            type_text(f"{GREEN}Elasticsearch credentials locked permanently into the OpenBao hive.{NC}")
+        else:
+            print(f"{RED}[FAILED]{NC}")
+            sys.stderr.write(f"\\n\\033[91m[LOG] OpenBao KV Error: {proc.stderr}\\033[0m\\n")
+            sys.exit(1)
+    except Exception as e:
+        print(f"{RED}[FAILED]{NC}")
+        sys.stderr.write(f"\\n\\033[91m[LOG] Subprocess execution threw anomaly: {e}\\033[0m\\n")
+        sys.exit(1)
+
 def deploy_flume(mode, selected_port):
     type_text(f"\n{BOLD}{CYAN}>>> DEPLOYING FLUME CORE IN [{mode}] MODE... <<<{NC}")
     
@@ -215,6 +253,8 @@ def main():
         if choice == 1:
             type_text(f"\n{GREEN}[ACKNOWLEDGED] Trajectory: ASSIMILATION.{NC}")
             type_text(f"Synchronizing current host daemons into the Flume neural net...")
+            if infra.get('elastic'):
+                inject_elastic_credentials(infra)
             assigned_port = check_dashboard_port()
             deploy_flume("ASSIMILATION", assigned_port)
         elif choice == 2:
