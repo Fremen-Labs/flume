@@ -12,8 +12,23 @@ from pathlib import Path
 from flume_secrets import resolve_oauth_state_path
 from typing import Any, Optional
 
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
+
+_DEFAULT_OPENAI_OAUTH_SCOPES = (
+    'openid profile email offline_access '
+    'model.request api.model.read api.responses.write '
+    'api.connectors.read api.connectors.invoke'
+)
+
+
+def _openai_oauth_refresh_scopes() -> str | None:
+    raw = os.environ.get('OPENAI_OAUTH_SCOPES')
+    if raw is None:
+        return _DEFAULT_OPENAI_OAUTH_SCOPES
+    s = str(raw).strip()
+    return s or None
 
 # ─── Provider/model catalog (all major public frontier) ────────────────────────
 
@@ -508,16 +523,19 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     if not token_url:
         token_url = "https://auth.openai.com/oauth/token"
 
-    payload = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
+    form = {
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token,
+        'client_id': client_id,
     }
+    scp = _openai_oauth_refresh_scopes()
+    if scp:
+        form['scope'] = scp
     req = urllib.request.Request(
         token_url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        data=urllib.parse.urlencode(form).encode(),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        method='POST',
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

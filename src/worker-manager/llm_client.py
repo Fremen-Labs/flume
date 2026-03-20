@@ -9,14 +9,16 @@ restarting the process (e.g. after Settings save, `flume codex-oauth`, or editin
   LLM_API_KEY    : API key (or OAuth access token for OpenAI)
   LLM_MODEL      : Default model name
   OPENAI_OAUTH_STATE_FILE / OPENAI_OAUTH_TOKEN_URL : OpenAI ChatGPT OAuth refresh
+  OPENAI_OAUTH_SCOPES       : Optional; space-separated scopes for refresh (defaults below)
 """
 
 import json
 import os
 import time
 from pathlib import Path
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
@@ -26,6 +28,20 @@ _PROVIDER_BASE_URLS = {
     'mistral': 'https://api.mistral.ai',
     'cohere': 'https://api.cohere.ai/v1',
 }
+
+_DEFAULT_OPENAI_OAUTH_SCOPES = (
+    'openid profile email offline_access '
+    'model.request api.model.read api.responses.write '
+    'api.connectors.read api.connectors.invoke'
+)
+
+
+def _openai_oauth_refresh_scopes() -> str | None:
+    raw = os.environ.get('OPENAI_OAUTH_SCOPES')
+    if raw is None:
+        return _DEFAULT_OPENAI_OAUTH_SCOPES
+    s = str(raw).strip()
+    return s or None
 
 
 def default_base_url_for_provider(provider_id: str) -> str:
@@ -182,6 +198,29 @@ def _openai_responses_chat(messages, model, temperature, max_tokens, rt: dict) -
     return _responses_output_text(data)
 
 
+def _post_urlencoded(url: str, form: dict, timeout: int = 120) -> dict:
+    data = urllib.parse.urlencode(form).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode(errors='replace')[:2000]
+        except Exception:
+            pass
+        msg = f'HTTP {e.code} {e.reason} calling {url}'
+        if body:
+            msg += f' — {body}'
+        raise RuntimeError(msg) from e
+
+
 def _post(url, payload, extra_headers=None, timeout=120):
     headers = {'Content-Type': 'application/json'}
     if extra_headers:
@@ -205,10 +244,17 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if body:
             msg += f' — {body}'
         if e.code == 401 and 'openai.com' in (url or '').lower():
-            msg += (
-                ' Hint: For ChatGPT/Codex OAuth use Refresh OAuth token; also ensure LLM_BASE_URL '
-                'is not still set to Ollama (localhost:11434) when LLM_PROVIDER=openai.'
-            )
+            if 'Missing scopes' in body or 'api.responses.write' in body:
+                msg += (
+                    ' Hint: OAuth token lacks API scopes (not fixed by refresh alone). Run a new device '
+                    'login: ./flume codex-oauth login (Flume requests model.request + api.responses.write), '
+                    'or browser login: codex login then ./flume codex-oauth import.'
+                )
+            else:
+                msg += (
+                    ' Hint: For ChatGPT/Codex OAuth use Refresh OAuth token; also ensure LLM_BASE_URL '
+                    'is not still set to Ollama (localhost:11434) when LLM_PROVIDER=openai.'
+                )
         raise RuntimeError(msg) from e
 
 
@@ -258,12 +304,15 @@ def _refresh_oauth_access_token(rt: dict) -> str:
         return ''
 
     token_url = rt['oauth_token_url'] or 'https://auth.openai.com/oauth/token'
-    payload = {
+    form = {
         'grant_type': 'refresh_token',
         'refresh_token': refresh_token,
         'client_id': client_id,
     }
-    data = _post(token_url, payload, timeout=30)
+    scp = _openai_oauth_refresh_scopes()
+    if scp:
+        form['scope'] = scp
+    data = _post_urlencoded(token_url, form, timeout=30)
     new_access = str(data.get('access_token') or '').strip()
     if not new_access:
         return ''

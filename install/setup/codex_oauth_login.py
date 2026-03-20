@@ -13,6 +13,8 @@ Usage (from Flume repo root is recommended):
 
 Environment:
   OPENAI_OAUTH_CLIENT_ID   Override OAuth client id (default: same as openai/codex CLI)
+  OPENAI_OAUTH_SCOPES      Space-separated OAuth scopes (default includes api.responses.write).
+                           Set to empty to omit scope from device/token requests (legacy).
   SSL_CERT_FILE            Optional corporate CA bundle
 """
 from __future__ import annotations
@@ -34,6 +36,23 @@ DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_ISSUER = "https://auth.openai.com"
 DEFAULT_TOKEN_URL = f"{DEFAULT_ISSUER}/oauth/token"
 USER_AGENT = "Flume/1.0 (codex-oauth-login; +https://github.com/Fremen-Labs/flume)"
+
+# Device + token exchange must request API scopes or access tokens only include openid/profile/email
+# and /v1/responses returns 401 "Missing scopes: api.responses.write" (see OpenAI Codex OAuth).
+# Override with OPENAI_OAUTH_SCOPES=""; omit from requests if you hit a server that rejects scope.
+DEFAULT_OAUTH_SCOPES = (
+    "openid profile email offline_access "
+    "model.request api.model.read api.responses.write "
+    "api.connectors.read api.connectors.invoke"
+)
+
+
+def _oauth_scopes_for_request() -> str | None:
+    raw = os.environ.get("OPENAI_OAUTH_SCOPES")
+    if raw is None:
+        return DEFAULT_OAUTH_SCOPES
+    s = str(raw).strip()
+    return s or None
 
 
 def _client_id_from_jwt(jwt_token: str) -> str:
@@ -100,7 +119,11 @@ def _http_json(
 def _request_user_code(issuer: str, client_id: str) -> dict:
     api = f"{issuer.rstrip('/')}/api/accounts"
     url = f"{api}/deviceauth/usercode"
-    code, body = _http_json("POST", url, json_body={"client_id": client_id}, timeout=60)
+    body: dict = {"client_id": client_id}
+    scp = _oauth_scopes_for_request()
+    if scp:
+        body["scope"] = scp
+    code, body = _http_json("POST", url, json_body=body, timeout=60)
     if code != 200 or not isinstance(body, dict):
         raise SystemExit(f"device usercode failed ({code}): {body}")
     return body
@@ -146,6 +169,9 @@ def _exchange_authorization_code(
         "client_id": client_id,
         "code_verifier": code_verifier,
     }
+    scp = _oauth_scopes_for_request()
+    if scp:
+        form["scope"] = scp
     url = f"{issuer.rstrip('/')}/oauth/token"
     code, body = _http_json("POST", url, form_body=form, timeout=60)
     if code != 200 or not isinstance(body, dict):
@@ -160,6 +186,8 @@ def _write_flume_state(
     client_id: str,
     expires_in: int,
     token_url: str,
+    *,
+    oauth_scopes_requested: str | None = None,
 ) -> None:
     now_ms = int(time.time() * 1000)
     exp = now_ms + int(expires_in) * 1000 if expires_in > 0 else 0
@@ -171,6 +199,8 @@ def _write_flume_state(
         "client_id": client_id,
         "token_url": token_url,
     }
+    if oauth_scopes_requested:
+        state["oauth_scopes_requested"] = oauth_scopes_requested
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     try:
@@ -257,7 +287,15 @@ def cmd_login(args: argparse.Namespace) -> None:
 
     expires_in = int(tokens.get("expires_in") or 3600)
     token_url = DEFAULT_TOKEN_URL
-    _write_flume_state(state_path, access, refresh, client_id, expires_in, token_url)
+    _write_flume_state(
+        state_path,
+        access,
+        refresh,
+        client_id,
+        expires_in,
+        token_url,
+        oauth_scopes_requested=_oauth_scopes_for_request() or "",
+    )
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
     print("\nDone. In Flume Settings choose OpenAI → Auth: OAuth, or restart the dashboard/workers.")

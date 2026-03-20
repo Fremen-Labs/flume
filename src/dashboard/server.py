@@ -390,10 +390,18 @@ def refine_session(session_id, user_text, current_plan):
                 'Save Settings again or run ./flume restart after changing .env.'
             )
         elif '401' in err or 'Unauthorized' in err:
-            hint = (
-                ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
-                '"Refresh OAuth token", or run ./flume codex-oauth refresh, then save settings.'
-            )
+            if 'Missing scopes' in err or 'api.responses.write' in err:
+                hint = (
+                    ' OAuth token is missing API scopes (refresh alone will not fix this). Run '
+                    './flume codex-oauth login again on Flume ≥ this fix, or: codex login (browser) then '
+                    './flume codex-oauth import. Optional: set OPENAI_OAUTH_SCOPES in .env if your IdP '
+                    'requires a custom scope list.'
+                )
+            else:
+                hint = (
+                    ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
+                    '"Refresh OAuth token", or run ./flume codex-oauth refresh, then save settings.'
+                )
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
         plan = None
 

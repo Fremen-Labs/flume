@@ -275,6 +275,15 @@ OAuth access tokens are honored on OpenAI’s **`/v1/responses`** endpoint; **`/
 
 If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (e.g. `http://127.0.0.1:11434`), older builds could POST your OAuth bearer to the wrong host and get **401**. Current Flume ignores localhost / `:11434` bases for official OpenAI; you can also **clear `LLM_BASE_URL`** in `.env` when using hosted OpenAI.
 
+### Error: `Missing scopes: api.responses.write`
+
+The access token must include **API scopes** (e.g. `model.request`, `api.responses.write`), not only `openid` / `profile` / `email`. Older Flume device login did not request those scopes.
+
+1. **Upgrade Flume** to a build that includes scope support, then run **`./flume codex-oauth login`** again (new device consent). **`Refresh OAuth` / `./flume codex-oauth refresh`** alone usually **cannot** add scopes to tokens minted without them.
+2. Or use a **current Codex CLI** browser login: **`codex login`**, then **`./flume codex-oauth import`** (then refresh if needed).
+
+Optional **`OPENAI_OAUTH_SCOPES`** in `.env` overrides the default scope list; set it **empty** to omit the `scope` parameter (legacy IdP behavior).
+
 ### Recommended: Flume CLI (from the Flume install directory)
 
 ```bash
@@ -328,6 +337,7 @@ bash install/setup/openai-oauth.sh refresh
 ### Advanced
 
 - **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
+- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh (defaults include `api.responses.write`; empty string omits `scope` from requests).
 - State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).
 
 Updates `.env` (and can sync sensitive fields to OpenBao via Settings when OpenBao is enabled).

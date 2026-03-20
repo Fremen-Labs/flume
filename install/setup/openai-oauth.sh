@@ -117,9 +117,8 @@ PY
 
 refresh_token() {
     python3 - "$STATE_FILE" "$TOKEN_URL" <<'PY'
-import json, sys, urllib.request
+import json, os, sys, time, urllib.parse, urllib.request
 from pathlib import Path
-import time
 
 state_path = Path(sys.argv[1])
 token_url = sys.argv[2]
@@ -132,15 +131,25 @@ client_id = str(state.get("client_id") or "").strip()
 if not refresh or not client_id:
     raise SystemExit("State file must contain refresh + client_id.")
 
-payload = {
+_default = (
+    "openid profile email offline_access "
+    "model.request api.model.read api.responses.write "
+    "api.connectors.read api.connectors.invoke"
+)
+_raw = os.environ.get("OPENAI_OAUTH_SCOPES")
+scope = _default if _raw is None else str(_raw).strip()
+
+form = {
     "grant_type": "refresh_token",
     "refresh_token": refresh,
     "client_id": client_id,
 }
+if scope:
+    form["scope"] = scope
 req = urllib.request.Request(
     token_url,
-    data=json.dumps(payload).encode(),
-    headers={"Content-Type": "application/json"},
+    data=urllib.parse.urlencode(form).encode(),
+    headers={"Content-Type": "application/x-www-form-urlencoded"},
     method="POST",
 )
 with urllib.request.urlopen(req, timeout=30) as resp:
