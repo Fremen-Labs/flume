@@ -273,6 +273,8 @@ Flume can call OpenAI using a **ChatGPT (Codex) OAuth session** instead of a pla
 
 OAuth access tokens are honored on OpenAI’s **`/v1/responses`** endpoint; **`/v1/chat/completions`** returns **401** for those bearers. Flume routes OAuth sessions through **Responses** automatically and keeps **`sk-…` platform API keys** on **chat/completions**.
 
+If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (e.g. `http://127.0.0.1:11434`), older builds could POST your OAuth bearer to the wrong host and get **401**. Current Flume ignores localhost / `:11434` bases for official OpenAI; you can also **clear `LLM_BASE_URL`** in `.env` when using hosted OpenAI.
+
 ### Recommended: Flume CLI (from the Flume install directory)
 
 ```bash

@@ -46,6 +46,35 @@ def _effective_base_url(rt: dict) -> str:
     return rt['base_url']
 
 
+def _looks_like_ollama_or_local_llm_base(url: str) -> bool:
+    u = (url or '').strip().lower()
+    if not u:
+        return False
+    return (
+        ':11434' in u
+        or 'localhost' in u
+        or '127.0.0.1' in u
+        or u.startswith('http://0.0.0.0:')
+    )
+
+
+def _openai_api_origin(rt: dict) -> str:
+    """
+    Host for OpenAI /v1/* HTTP APIs (chat/completions, responses).
+
+    After switching Settings from Ollama to OpenAI, LLM_BASE_URL often still points at
+    localhost:11434. urllib would then POST the OAuth bearer to Ollama → 401.
+    """
+    if rt.get('provider') != 'openai':
+        return _effective_base_url(rt)
+    explicit = (os.environ.get('LLM_BASE_URL') or '').strip().rstrip('/')
+    if explicit and _looks_like_ollama_or_local_llm_base(explicit):
+        return _PROVIDER_BASE_URLS['openai']
+    if not explicit:
+        return _PROVIDER_BASE_URLS['openai']
+    return explicit
+
+
 def _looks_like_openai_platform_api_key(key: str) -> bool:
     t = (key or '').strip()
     return t.startswith('sk-') or t.startswith('sk_')
@@ -117,7 +146,7 @@ def _responses_output_text(data: dict) -> str:
 
 
 def _openai_responses_chat(messages, model, temperature, max_tokens, rt: dict) -> str:
-    url = _effective_base_url(rt).rstrip('/') + '/v1/responses'
+    url = _openai_api_origin(rt).rstrip('/') + '/v1/responses'
     payload: dict = {
         'model': model,
         'input': _chat_messages_to_responses_input(messages),
@@ -139,8 +168,24 @@ def _post(url, payload, extra_headers=None, timeout=120):
         headers=headers,
         method='POST',
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode(errors='replace')[:2000]
+        except Exception:
+            pass
+        msg = f'HTTP {e.code} {e.reason} calling {url}'
+        if body:
+            msg += f' — {body}'
+        if e.code == 401 and 'openai.com' in (url or '').lower():
+            msg += (
+                ' Hint: For ChatGPT/Codex OAuth use Refresh OAuth token; also ensure LLM_BASE_URL '
+                'is not still set to Ollama (localhost:11434) when LLM_PROVIDER=openai.'
+            )
+        raise RuntimeError(msg) from e
 
 
 def _load_json(path: Path):
@@ -261,7 +306,7 @@ def _openai_headers(rt: dict):
 def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
     if _openai_bearer_uses_responses_api(rt):
         return _openai_responses_chat(messages, model, temperature, max_tokens, rt)
-    url = _effective_base_url(rt) + '/v1/chat/completions'
+    url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
     data = _post(
         url,
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
@@ -271,7 +316,7 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
 
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
-    url = _effective_base_url(rt) + '/v1/chat/completions'
+    url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
     data = _post(
         url,
         {
