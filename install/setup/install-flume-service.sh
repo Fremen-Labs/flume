@@ -36,6 +36,7 @@ SERVICE_FILE="${UNIT_DIR}/flume-dashboard.service"
 
 sed -e "s|__FLUME_ROOT__|${FLUME_ROOT}|g" \
     -e "s|__DASHBOARD_SCRIPT__|${DASHBOARD_SCRIPT}|g" \
+    -e "s|__ENV_FILE__|${ENV_FILE}|g" \
     "${SCRIPT_DIR}/flume-dashboard.service.template" > "${SERVICE_FILE}"
 
 # systemd user services need EnvironmentFile to be loaded; we also need LOOM_WORKSPACE etc.
