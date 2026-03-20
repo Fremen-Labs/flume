@@ -323,6 +323,8 @@ If routing is correct but you then see **`Missing scopes: model.request`** on **
 
    Run this on a machine where your **browser can reach `http://127.0.0.1:1455`** (or use **`ssh -L 1455:127.0.0.1:1455`** from your laptop). The script prints the exact authorize URL.
 
+   If the browser completes login on **another** computer (or you only have the redirect URL from chat), **paste the full `http://localhost:1455/auth/callback?...` line into the same terminal** where `login-browser` is running (Unix/macOS). Each run uses a new PKCE session — if you stopped the command, run **`login-browser`** again and use the **new** callback URL.
+
    **Headless server (no browser on the Flume host):** use **paste-back** (same API scopes as `login-browser`):
 
    ```bash
