@@ -240,6 +240,13 @@ cmd_codex_oauth() {
             fi
             python3 "${py}" login-browser --flume-root "${FLUME_ROOT}" "$@"
             ;;
+        login-paste)
+            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
+                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
+                exit 1
+            fi
+            python3 "${py}" login-paste --flume-root "${FLUME_ROOT}" "$@"
+            ;;
         import|import-codex)
             if [ -z "${py}" ] || [ ! -f "${py}" ]; then
                 echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
