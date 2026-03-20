@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon } from 'lucide-react';
+import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal, Plus, Trash2, Star } from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,8 +19,11 @@ import type {
   LlmSettingsResponse,
   LlmSettingsPayload,
   LlmCredentialActionPayload,
+  CodexAppServerStatusResponse,
   RepoSettingsResponse,
   RepoSettingsPayload,
+  GithubTokenActionPayload,
+  AdoTokenActionPayload,
 } from '@/types';
 
 async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
@@ -50,6 +54,12 @@ async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise
   return data;
 }
 
+async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
+  const res = await fetch('/api/codex-app-server/status');
+  if (!res.ok) throw new Error(`Codex app-server status failed: ${res.status}`);
+  return res.json();
+}
+
 async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch('/api/settings/llm/oauth/refresh', {
     method: 'POST',
@@ -65,17 +75,6 @@ async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
   const res = await fetch('/api/settings/repos');
   if (!res.ok) throw new Error(`Repo settings fetch failed: ${res.status}`);
   return res.json();
-}
-
-async function saveRepoSettings(payload: RepoSettingsPayload): Promise<{ ok: boolean; restartRequired: boolean }> {
-  const res = await fetch('/api/settings/repos', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
-  return data;
 }
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
@@ -141,22 +140,19 @@ export default function SettingsPage() {
     staleTime: 30_000,
   });
 
-  const [repoForm, setRepoForm] = useState<Partial<RepoSettingsPayload>>({});
+  const {
+    data: codexAppData,
+    isLoading: codexAppLoading,
+    error: codexAppError,
+    refetch: refetchCodexApp,
+  } = useQuery<CodexAppServerStatusResponse>({
+    queryKey: ['settings', 'codex-app-server'],
+    queryFn: fetchCodexAppServerStatus,
+    staleTime: 15_000,
+  });
+
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
   const [repoSaveSuccess, setRepoSaveSuccess] = useState(false);
-
-  const saveRepoMutation = useMutation({
-    mutationFn: saveRepoSettings,
-    onSuccess: () => {
-      setRepoSaveError(null);
-      setRepoSaveSuccess(true);
-      queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
-      setTimeout(() => setRepoSaveSuccess(false), 3000);
-    },
-    onError: (e: Error) => {
-      setRepoSaveError(e.message);
-    },
-  });
 
   const effectiveSettings = { ...data?.settings, ...form };
   const providerId = effectiveSettings.provider ?? 'ollama';
@@ -239,21 +235,71 @@ export default function SettingsPage() {
     }
   };
 
-  const effectiveRepo = { ...repoData?.settings, ...repoForm };
-  // Tokens are masked as "***" by the backend when configured.
-  const hasGhToken = Boolean(effectiveRepo.ghToken);
-  const hasAdoToken = Boolean(effectiveRepo.adoToken);
-  const handleSaveRepos = () => {
+  const githubTokens = repoData?.settings?.githubTokens ?? [];
+  const activeGithubId = repoData?.settings?.activeGithubTokenId ?? '';
+  const hasGhToken = githubTokens.some((t) => t.hasToken);
+  const adoCredentials = repoData?.settings?.adoCredentials ?? [];
+  const activeAdoId = repoData?.settings?.activeAdoCredentialId ?? '';
+  const hasAdoToken = adoCredentials.some((t) => t.hasToken);
+
+  const [newGithubLabel, setNewGithubLabel] = useState('');
+  const [newGithubToken, setNewGithubToken] = useState('');
+  const [ghRename, setGhRename] = useState<Record<string, string>>({});
+  const [ghReplaceToken, setGhReplaceToken] = useState<Record<string, string>>({});
+  const [ghBusy, setGhBusy] = useState<string | null>(null);
+
+  const [newAdoLabel, setNewAdoLabel] = useState('');
+  const [newAdoOrgUrl, setNewAdoOrgUrl] = useState('');
+  const [newAdoToken, setNewAdoToken] = useState('');
+  const [adoRename, setAdoRename] = useState<Record<string, string>>({});
+  const [adoReplaceToken, setAdoReplaceToken] = useState<Record<string, string>>({});
+  const [adoReplaceOrg, setAdoReplaceOrg] = useState<Record<string, string>>({});
+  const [adoBusy, setAdoBusy] = useState<string | null>(null);
+
+  const runGithubTokenAction = async (body: GithubTokenActionPayload, busyKey: string): Promise<boolean> => {
+    setGhBusy(busyKey);
     setRepoSaveError(null);
-    const payload: RepoSettingsPayload = {
-      ghToken: repoForm.ghToken ?? effectiveRepo.ghToken ?? '',
-      adoToken: repoForm.adoToken ?? effectiveRepo.adoToken ?? '',
-      adoOrgUrl: repoForm.adoOrgUrl ?? effectiveRepo.adoOrgUrl ?? '',
-    };
-    if (payload.ghToken === '***') delete (payload as Record<string, unknown>).ghToken;
-    if (payload.adoToken === '***') delete (payload as Record<string, unknown>).adoToken;
-    if (payload.adoOrgUrl === '***') delete (payload as Record<string, unknown>).adoOrgUrl;
-    saveRepoMutation.mutate(payload);
+    try {
+      const res = await fetch('/api/settings/repos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ githubTokenAction: body } satisfies RepoSettingsPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
+      setRepoSaveSuccess(true);
+      setTimeout(() => setRepoSaveSuccess(false), 3000);
+      return true;
+    } catch (e) {
+      setRepoSaveError(e instanceof Error ? e.message : 'GitHub token action failed');
+      return false;
+    } finally {
+      setGhBusy(null);
+    }
+  };
+
+  const runAdoTokenAction = async (body: AdoTokenActionPayload, busyKey: string): Promise<boolean> => {
+    setAdoBusy(busyKey);
+    setRepoSaveError(null);
+    try {
+      const res = await fetch('/api/settings/repos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adoTokenAction: body } satisfies RepoSettingsPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
+      setRepoSaveSuccess(true);
+      setTimeout(() => setRepoSaveSuccess(false), 3000);
+      return true;
+    } catch (e) {
+      setRepoSaveError(e instanceof Error ? e.message : 'ADO credential action failed');
+      return false;
+    } finally {
+      setAdoBusy(null);
+    }
   };
 
   if (isLoading || error) {
@@ -282,7 +328,7 @@ export default function SettingsPage() {
       <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
 
       <div className="glass-card p-6">
-        <Accordion type="single" collapsible defaultValue="appearance">
+        <Accordion type="single" collapsible>
           <AccordionItem value="appearance">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
@@ -652,18 +698,21 @@ export default function SettingsPage() {
                 )}
 
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
-                  <div className="space-y-4 p-4 rounded-lg bg-muted/50">
+                  <div className="space-y-4 p-4 rounded-lg bg-muted/50 border border-amber-500/25">
+                    <p className="text-xs text-amber-800 dark:text-amber-200/95 leading-relaxed font-medium">
+                      <strong>Plan New Work</strong> (text planning) auto-routes through the <strong>Codex CLI</strong>{' '}
+                      (<code className="text-[11px]">codex app-server</code> on stdio) so you can use{' '}
+                      <strong>ChatGPT/Codex subscription OAuth</strong> without a platform <code className="text-[11px]">sk-</code>{' '}
+                      key. Install Node, <code className="text-[11px]">npm i -g @openai/codex</code> or <code className="text-[11px]">npx</code>, run{' '}
+                      <code className="text-[11px]">codex login</code> so <code className="text-[11px]">~/.codex/auth.json</code>{' '}
+                      exists (Flume&apos;s <code className="text-[11px]">.openai-oauth.json</code> is not read by Codex).
+                    </p>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — good for Codex-style sessions.{' '}
-                      <strong className="text-foreground">Plan New Work and hosted GPT via api.openai.com</strong> need an
-                      OpenAI <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>): switch{' '}
-                      <strong>Auth mode</strong> to <strong>API Key</strong> or add the key from{' '}
-                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>. Codex browser OAuth tokens
-                      do not receive <code className="text-[11px]">model.request</code> on authorize, but{' '}
-                      <code className="text-[11px]">/v1/chat/completions</code> still requires it — so OAuth alone often
-                      cannot run the planner. Optional: <code className="text-[11px]">./flume codex-oauth login-paste</code>{' '}
-                      / <code className="text-[11px]">login-browser</code> / Codex import for other uses; then{' '}
-                      <code className="text-[11px]">./flume restart --all</code>.
+                      <strong>Worker agents</strong> that use OpenAI-style <strong>tool calling</strong> still hit{' '}
+                      <code className="text-[11px]">api.openai.com</code> today — use a platform <code className="text-[11px]">sk-</code>,{' '}
+                      switch Auth to <strong>API Key</strong>, or use <strong>Ollama</strong> for those roles until full Codex
+                      bridge support. <code className="text-[11px]">./flume codex-oauth</code> syncs tokens into Flume for UI refresh;
+                      subscription limits still apply per OpenAI/Codex.
                       <span className="block mt-1">
                         <strong>Refresh token</strong> only renews the same consent — it cannot add API product scopes
                         OpenAI did not grant.
@@ -704,6 +753,14 @@ export default function SettingsPage() {
                             OAuth scopes look OK for <code className="text-[11px]">api.responses.write</code>.
                           </p>
                         )}
+                        {data.oauthStatus.accessTokenJwtParsed &&
+                          data.oauthStatus.hasModelRequestScope === false && (
+                            <p className="text-amber-700 dark:text-amber-400">
+                              JWT has no <code className="text-[11px]">model.request</code> —{' '}
+                              <code className="text-[11px]">/v1/chat/completions</code> (Plan New Work) will return 401
+                              unless you use a platform <code className="text-[11px]">sk-</code> key.
+                            </p>
+                          )}
                         {data.oauthStatus.oauthScopeStatus === 'no_token' && (
                           <p className="text-amber-600 dark:text-amber-500">
                             No access token in the OAuth state file. Click <strong>Refresh token</strong> or complete
@@ -807,6 +864,110 @@ export default function SettingsPage() {
             </AccordionContent>
           </AccordionItem>
 
+          <AccordionItem value="codex-app-server">
+            <AccordionTrigger>
+              <div className="flex items-center justify-between w-full">
+                <span className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  Codex app-server
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {codexAppLoading
+                    ? '…'
+                    : codexAppData?.parseError
+                      ? 'config'
+                      : codexAppData?.tcpReachable
+                        ? 'port open'
+                        : codexAppData?.flumeWillUseNpxFallback
+                          ? 'start: npx'
+                          : 'port closed'}
+                </span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-4 pt-4 text-sm">
+                <p className="text-muted-foreground">
+                  Run the official <strong>Codex app-server</strong> on this host to use{' '}
+                  <strong>ChatGPT/Codex OAuth</strong> for agent coding and review (JSON-RPC — not Flume&apos;s HTTP LLM
+                  path). See{' '}
+                  <a
+                    href={codexAppData?.docsUrl ?? 'https://developers.openai.com/codex/app-server'}
+                    className="text-primary underline-offset-2 hover:underline"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    OpenAI docs
+                  </a>
+                  . For an in-dashboard WebSocket client (with optional approval replies), open{' '}
+                  <Link to="/codex" className="text-primary underline-offset-2 hover:underline">
+                    Codex
+                  </Link>{' '}
+                  (requires <code className="text-[10px]">websockets</code> and the dashboard proxy — see install docs).
+                </p>
+                {codexAppLoading && (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking status…
+                  </div>
+                )}
+                {codexAppError && (
+                  <p className="text-destructive">{String(codexAppError)}</p>
+                )}
+                {codexAppData && (
+                  <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envFlumeListen}</span>={codexAppData.listenUrl}
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">{codexAppData.envCodexBin}</span>={codexAppData.codexBinary}
+                      {codexAppData.codexResolvedPath ? (
+                        <span className="text-muted-foreground"> ({codexAppData.codexResolvedPath})</span>
+                      ) : null}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">codex on PATH:</span>{' '}
+                      {codexAppData.codexOnPath ? 'yes' : 'no'}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">npx on PATH:</span>{' '}
+                      {codexAppData.npxOnPath ? `yes${codexAppData.npxResolvedPath ? ` (${codexAppData.npxResolvedPath})` : ''}` : 'no'}
+                    </div>
+                    {codexAppData.flumeWillUseNpxFallback ? (
+                      <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
+                        <strong>./flume codex-app-server</strong> will run{' '}
+                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
+                        <code className="text-[10px]">codex</code> required).
+                      </p>
+                    ) : null}
+                    <div>
+                      <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
+                      {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
+                    </div>
+                    {codexAppData.parseError ? (
+                      <p className="text-amber-700 dark:text-amber-400">{codexAppData.parseError}</p>
+                    ) : (
+                      <div>
+                        <span className="font-medium text-foreground">TCP (listen port):</span>{' '}
+                        {codexAppData.tcpReachable ? (
+                          <span className="text-green-600 dark:text-green-400">reachable</span>
+                        ) : (
+                          <span className="text-amber-700 dark:text-amber-400">not listening (start ./flume codex-app-server)</span>
+                        )}
+                      </div>
+                    )}
+                    <p className="text-muted-foreground pt-2 font-sans text-[11px]">
+                      TCP check only — it does not validate JSON-RPC. Default listen is {codexAppData.defaultListenUrl}.
+                    </p>
+                  </div>
+                )}
+                <Button type="button" variant="outline" size="sm" onClick={() => refetchCodexApp()}>
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                  Recheck
+                </Button>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
           <AccordionItem value="repo-tokens">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
@@ -829,46 +990,402 @@ export default function SettingsPage() {
                   <p className="text-sm text-destructive">{String(repoError)}</p>
                 )}
 
-                <div className="space-y-2">
-                  <Label>GitHub token</Label>
-                  <Input
-                    type="password"
-                    placeholder={effectiveRepo.ghToken === '***' ? '••••••••' : 'ghp_...'}
-                    value={repoForm.ghToken ?? (effectiveRepo.ghToken === '***' ? '' : effectiveRepo.ghToken ?? '')}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, ghToken: e.target.value }))}
-                  />
+                <div className="space-y-4">
+                  <div>
+                    <Label>GitHub tokens</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Add labeled PATs; the <strong>active</strong> one is written to <code className="text-[10px]">GH_TOKEN</code>{' '}
+                      for clones and tooling. Only one is active at a time.
+                    </p>
+                  </div>
+
+                  <div className="rounded-md border border-border/60 bg-muted/20 p-4 space-y-3">
+                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add PAT</div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Input
+                        placeholder="Label (e.g. work, personal)"
+                        value={newGithubLabel}
+                        onChange={(e) => setNewGithubLabel(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        type="password"
+                        placeholder="ghp_…"
+                        value={newGithubToken}
+                        onChange={(e) => setNewGithubToken(e.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!!ghBusy}
+                      onClick={() => {
+                        const label = newGithubLabel.trim();
+                        const token = newGithubToken.trim();
+                        if (!label || !token) {
+                          setRepoSaveError('Label and token are required to add a GitHub PAT.');
+                          return;
+                        }
+                        void runGithubTokenAction({ action: 'upsert', label, token }, 'add').then((ok) => {
+                          if (ok) {
+                            setNewGithubLabel('');
+                            setNewGithubToken('');
+                          }
+                        });
+                      }}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add token
+                    </Button>
+                  </div>
+
+                  {githubTokens.length > 0 && (
+                    <ul className="space-y-4">
+                      {githubTokens.map((t) => {
+                        const isActive = t.id === activeGithubId;
+                        const renameVal = ghRename[t.id] ?? '';
+                        const replaceVal = ghReplaceToken[t.id] ?? '';
+                        return (
+                          <li
+                            key={t.id}
+                            className="rounded-md border border-border/60 p-4 space-y-3"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-foreground">{t.label}</span>
+                              {t.hasToken ? (
+                                <span className="text-xs text-muted-foreground">···{t.tokenSuffix}</span>
+                              ) : (
+                                <span className="text-xs text-amber-600 dark:text-amber-400">No secret stored</span>
+                              )}
+                              {isActive && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 text-primary px-2 py-0.5 text-xs font-medium">
+                                  <Star className="h-3 w-3" aria-hidden />
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={!!ghBusy || isActive || !t.hasToken}
+                                onClick={() => void runGithubTokenAction({ action: 'setActive', id: t.id }, `act-${t.id}`)}
+                              >
+                                Use as active
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                disabled={!!ghBusy}
+                                onClick={() => {
+                                  if (!confirm(`Remove GitHub token “${t.label}”?`)) return;
+                                  void runGithubTokenAction({ action: 'delete', id: t.id }, `del-${t.id}`).then(() => {
+                                    setGhRename((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                    setGhReplaceToken((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4 mr-1" />
+                                Remove
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Rename</Label>
+                                <Input
+                                  placeholder={t.label}
+                                  value={renameVal}
+                                  onChange={(e) => setGhRename((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!ghBusy || !renameVal.trim()}
+                                onClick={() => {
+                                  const label = renameVal.trim();
+                                  if (!label) return;
+                                  void runGithubTokenAction({ action: 'upsert', id: t.id, label }, `ren-${t.id}`).then(() => {
+                                    setGhRename((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Save label
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace PAT</Label>
+                                <Input
+                                  type="password"
+                                  placeholder="New token"
+                                  value={replaceVal}
+                                  onChange={(e) => setGhReplaceToken((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="new-password"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!ghBusy || !replaceVal.trim()}
+                                onClick={() => {
+                                  const token = replaceVal.trim();
+                                  if (!token) return;
+                                  void runGithubTokenAction({ action: 'upsert', id: t.id, token }, `tok-${t.id}`).then(() => {
+                                    setGhReplaceToken((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update PAT
+                              </Button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Azure DevOps (ADO) PAT</Label>
-                  <Input
-                    type="password"
-                    placeholder={effectiveRepo.adoToken === '***' ? '••••••••' : 'ado_pat_...'}
-                    value={repoForm.adoToken ?? (effectiveRepo.adoToken === '***' ? '' : effectiveRepo.adoToken ?? '')}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, adoToken: e.target.value }))}
-                  />
-                </div>
+                <div className="space-y-4 pt-2 border-t border-border/40">
+                  <div>
+                    <Label>Azure DevOps</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Each entry keeps a <strong>PAT and org URL together</strong>. The <strong>active</strong> pair is written to{' '}
+                      <code className="text-[10px]">ADO_TOKEN</code> and <code className="text-[10px]">ADO_ORG_URL</code>.
+                    </p>
+                  </div>
 
-                <div className="space-y-2">
-                  <Label>ADO Org URL (optional)</Label>
-                  <Input
-                    placeholder="https://dev.azure.com/<org>"
-                    value={repoForm.adoOrgUrl ?? effectiveRepo.adoOrgUrl ?? ''}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, adoOrgUrl: e.target.value }))}
-                  />
+                  <div className="rounded-md border border-border/60 bg-muted/20 p-4 space-y-3">
+                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add credential</div>
+                    <div className="grid gap-2">
+                      <Input
+                        placeholder="Label (e.g. Contoso prod)"
+                        value={newAdoLabel}
+                        onChange={(e) => setNewAdoLabel(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        placeholder="https://dev.azure.com/yourorg"
+                        value={newAdoOrgUrl}
+                        onChange={(e) => setNewAdoOrgUrl(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        type="password"
+                        placeholder="ADO PAT"
+                        value={newAdoToken}
+                        onChange={(e) => setNewAdoToken(e.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!!adoBusy}
+                      onClick={() => {
+                        const label = newAdoLabel.trim();
+                        const orgUrl = newAdoOrgUrl.trim();
+                        const token = newAdoToken.trim();
+                        if (!label || !orgUrl || !token) {
+                          setRepoSaveError('Label, organization URL, and PAT are required to add an ADO credential.');
+                          return;
+                        }
+                        void runAdoTokenAction({ action: 'upsert', label, orgUrl, token }, 'ado-add').then((ok) => {
+                          if (ok) {
+                            setNewAdoLabel('');
+                            setNewAdoOrgUrl('');
+                            setNewAdoToken('');
+                          }
+                        });
+                      }}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add credential
+                    </Button>
+                  </div>
+
+                  {adoCredentials.length > 0 && (
+                    <ul className="space-y-4">
+                      {adoCredentials.map((t) => {
+                        const isActive = t.id === activeAdoId;
+                        const renameVal = adoRename[t.id] ?? '';
+                        const replaceTok = adoReplaceToken[t.id] ?? '';
+                        const replaceOrg = adoReplaceOrg[t.id] ?? '';
+                        return (
+                          <li
+                            key={t.id}
+                            className="rounded-md border border-border/60 p-4 space-y-3"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-foreground">{t.label}</span>
+                              {t.orgUrl ? (
+                                <span className="text-xs text-muted-foreground truncate max-w-[min(100%,280px)]" title={t.orgUrl}>
+                                  {t.orgUrl}
+                                </span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">No org URL</span>
+                              )}
+                              {t.hasToken ? (
+                                <span className="text-xs text-muted-foreground">···{t.tokenSuffix}</span>
+                              ) : (
+                                <span className="text-xs text-amber-600 dark:text-amber-400">No PAT stored</span>
+                              )}
+                              {isActive && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 text-primary px-2 py-0.5 text-xs font-medium">
+                                  <Star className="h-3 w-3" aria-hidden />
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={!!adoBusy || isActive || !t.hasToken}
+                                onClick={() => void runAdoTokenAction({ action: 'setActive', id: t.id }, `ado-act-${t.id}`)}
+                              >
+                                Use as active
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                disabled={!!adoBusy}
+                                onClick={() => {
+                                  if (!confirm(`Remove ADO credential “${t.label}”?`)) return;
+                                  void runAdoTokenAction({ action: 'delete', id: t.id }, `ado-del-${t.id}`).then(() => {
+                                    setAdoRename((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                    setAdoReplaceToken((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                    setAdoReplaceOrg((prev) => {
+                                      const n = { ...prev };
+                                      delete n[t.id];
+                                      return n;
+                                    });
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4 mr-1" />
+                                Remove
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Rename</Label>
+                                <Input
+                                  placeholder={t.label}
+                                  value={renameVal}
+                                  onChange={(e) => setAdoRename((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !renameVal.trim()}
+                                onClick={() => {
+                                  const label = renameVal.trim();
+                                  if (!label) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, label }, `ado-ren-${t.id}`).then((ok) => {
+                                    if (ok) setAdoRename((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Save label
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace org URL</Label>
+                                <Input
+                                  placeholder={t.orgUrl || 'https://dev.azure.com/…'}
+                                  value={replaceOrg}
+                                  onChange={(e) => setAdoReplaceOrg((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !replaceOrg.trim()}
+                                onClick={() => {
+                                  const orgUrl = replaceOrg.trim();
+                                  if (!orgUrl) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, orgUrl }, `ado-org-${t.id}`).then((ok) => {
+                                    if (ok) setAdoReplaceOrg((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update URL
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace PAT</Label>
+                                <Input
+                                  type="password"
+                                  placeholder="New PAT"
+                                  value={replaceTok}
+                                  onChange={(e) => setAdoReplaceToken((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="new-password"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!adoBusy || !replaceTok.trim()}
+                                onClick={() => {
+                                  const token = replaceTok.trim();
+                                  if (!token) return;
+                                  void runAdoTokenAction({ action: 'upsert', id: t.id, token }, `ado-tok-${t.id}`).then((ok) => {
+                                    if (ok) setAdoReplaceToken((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update PAT
+                              </Button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 pt-4">
-                  <Button onClick={handleSaveRepos} disabled={saveRepoMutation.isPending}>
-                    {saveRepoMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Save className="h-4 w-4" />
-                    )}
-                    Save
-                  </Button>
                   {repoSaveError && <span className="text-sm text-destructive">{repoSaveError}</span>}
-                  {repoSaveSuccess && <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>}
+                  {repoSaveSuccess && (
+                    <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>
+                  )}
                 </div>
 
                 {repoData?.restartRequired && (
