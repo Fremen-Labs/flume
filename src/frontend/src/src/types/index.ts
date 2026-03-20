@@ -160,6 +160,8 @@ export interface LlmOAuthStatus {
   /** True if we successfully base64-decoded the JWT payload. */
   accessTokenJwtParsed?: boolean;
   hasApiResponsesWrite?: boolean;
+  /** JWT includes model.request (Codex browser OAuth typically does not). */
+  hasModelRequestScope?: boolean;
   oauthScopesRequested?: string;
   /** Consent / token diagnostics; refresh alone will not upgrade this from missing → ok. */
   oauthScopeStatus?: LlmOAuthScopeStatus;

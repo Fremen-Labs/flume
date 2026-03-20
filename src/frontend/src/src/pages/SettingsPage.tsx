@@ -670,18 +670,22 @@ export default function SettingsPage() {
                 )}
 
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
-                  <div className="space-y-4 p-4 rounded-lg bg-muted/50">
-                    <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — good for Codex-style sessions.{' '}
-                      <strong className="text-foreground">Plan New Work and hosted GPT via api.openai.com</strong> need an
-                      OpenAI <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>): switch{' '}
-                      <strong>Auth mode</strong> to <strong>API Key</strong> or add the key from{' '}
-                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>. Codex browser OAuth tokens
-                      do not receive <code className="text-[11px]">model.request</code> on authorize, but{' '}
-                      <code className="text-[11px]">/v1/chat/completions</code> still requires it — so OAuth alone often
-                      cannot run the planner. Optional: <code className="text-[11px]">./flume codex-oauth login-paste</code>{' '}
-                      / <code className="text-[11px]">login-browser</code> / Codex import for other uses; then{' '}
+                  <div className="space-y-4 p-4 rounded-lg bg-muted/50 border border-amber-500/25">
+                    <p className="text-xs text-amber-800 dark:text-amber-200/95 leading-relaxed font-medium">
+                      Codex / ChatGPT <strong>OAuth is not enough</strong> for Plan New Work or agents calling{' '}
+                      <code className="text-[11px]">api.openai.com</code> — OpenAI requires{' '}
+                      <code className="text-[11px]">model.request</code> on{' '}
+                      <code className="text-[11px]">/v1/chat/completions</code>, and the Codex OAuth app cannot grant
+                      that scope. Add a <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>):{' '}
+                      switch <strong>Auth mode</strong> to <strong>API Key</strong> (or use a saved key as default) from{' '}
+                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>, then{' '}
                       <code className="text-[11px]">./flume restart --all</code>.
+                    </p>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      <strong>ChatGPT / Codex OAuth</strong> remains useful for{' '}
+                      <strong className="text-foreground">Codex CLI / app-server</strong> and connector flows — not the
+                      same as the HTTP API key path. Optional: <code className="text-[11px]">./flume codex-oauth</code>{' '}
+                      for those tools.
                       <span className="block mt-1">
                         <strong>Refresh token</strong> only renews the same consent — it cannot add API product scopes
                         OpenAI did not grant.
@@ -722,6 +726,14 @@ export default function SettingsPage() {
                             OAuth scopes look OK for <code className="text-[11px]">api.responses.write</code>.
                           </p>
                         )}
+                        {data.oauthStatus.accessTokenJwtParsed &&
+                          data.oauthStatus.hasModelRequestScope === false && (
+                            <p className="text-amber-700 dark:text-amber-400">
+                              JWT has no <code className="text-[11px]">model.request</code> —{' '}
+                              <code className="text-[11px]">/v1/chat/completions</code> (Plan New Work) will return 401
+                              unless you use a platform <code className="text-[11px]">sk-</code> key.
+                            </p>
+                          )}
                         {data.oauthStatus.oauthScopeStatus === 'no_token' && (
                           <p className="text-amber-600 dark:text-amber-500">
                             No access token in the OAuth state file. Click <strong>Refresh token</strong> or complete

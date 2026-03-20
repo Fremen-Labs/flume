@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import {
   X, Send, Loader2, CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
@@ -7,6 +9,13 @@ import {
 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
+import type { LlmSettingsResponse } from '@/types';
+
+async function fetchLlmSettingsBrief(): Promise<LlmSettingsResponse> {
+  const res = await fetch('/api/settings/llm');
+  if (!res.ok) throw new Error(`Settings fetch failed: ${res.status}`);
+  return res.json();
+}
 
 // ─── Plan types ───────────────────────────────────────────────────────────────
 
@@ -270,6 +279,7 @@ interface IntakeModalProps {
 }
 
 export function IntakeModal({ open, onOpenChange, projectId, projectName }: IntakeModalProps) {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [phase, setPhase] = useState<Phase>('prompt');
   const [prompt, setPrompt] = useState('');
@@ -283,6 +293,24 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   const [commitCount, setCommitCount] = useState(0);
   const [committed, setCommitted] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  const { data: llmSettings } = useQuery({
+    queryKey: ['settings', 'llm'],
+    queryFn: fetchLlmSettingsBrief,
+    staleTime: 30_000,
+    enabled: open,
+  });
+
+  /** OpenAI + OAuth (typical Codex token) cannot call /v1/chat/completions — Plan New Work needs sk- or another provider. */
+  const plannerLikelyBlockedByOAuth = useMemo(() => {
+    const s = llmSettings?.settings;
+    if (!s || s.provider !== 'openai') return false;
+    if (s.authMode !== 'oauth') return false;
+    const st = llmSettings.oauthStatus;
+    if (!st?.hasAccessToken) return true;
+    if (st.accessTokenJwtParsed && st.hasModelRequestScope === true) return false;
+    return true;
+  }, [llmSettings]);
 
   // Reset when opened
   useEffect(() => {
@@ -432,6 +460,28 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
             </DialogPrimitive.Close>
           </div>
 
+          {plannerLikelyBlockedByOAuth && (
+            <div className="px-5 py-2.5 border-b border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-100 leading-snug shrink-0">
+              <strong className="text-amber-50">OpenAI is set to OAuth (Codex / ChatGPT).</strong> Plan New Work calls{' '}
+              <code className="text-[10px] opacity-90">/v1/chat/completions</code>, which requires{' '}
+              <code className="text-[10px] opacity-90">model.request</code> — that scope is{' '}
+              <strong>not</strong> available on Codex browser OAuth. Use a <strong>platform API key</strong> (
+              <code className="text-[10px] opacity-90">sk-…</code>) in{' '}
+              <button
+                type="button"
+                className="underline font-semibold text-amber-50 hover:text-white"
+                onClick={() => {
+                  onOpenChange(false);
+                  navigate('/settings');
+                }}
+              >
+                Settings → LLM
+              </button>
+              , then <code className="text-[10px] opacity-90">./flume restart --all</code>. Codex OAuth is still fine for
+              the Codex CLI / app-server path.
+            </div>
+          )}
+
           {/* Body */}
           <div className="flex-1 overflow-hidden">
 
@@ -459,9 +509,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     autoFocus
                   />
                   {error && (
-                    <div className="flex items-center gap-2 text-destructive text-xs">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      {error}
+                    <div className="flex items-start gap-2 text-destructive text-xs">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span className="whitespace-pre-wrap break-words">{error}</span>
                     </div>
                   )}
                   <button
@@ -504,8 +554,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     {phase === 'chat' && (
                       <div className="border-t border-white/8 p-3 space-y-2">
                         {error && (
-                          <div className="flex items-center gap-1.5 text-destructive text-[11px]">
-                            <AlertCircle className="w-3 h-3 shrink-0" />{error}
+                          <div className="flex items-start gap-1.5 text-destructive text-[11px]">
+                            <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                            <span className="whitespace-pre-wrap break-words">{error}</span>
                           </div>
                         )}
                         <div className="flex gap-2">

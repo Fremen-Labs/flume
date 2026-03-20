@@ -695,6 +695,8 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
         "accessTokenJwtLike": bool(dec.get("jwt_like")),
         "accessTokenJwtParsed": bool(dec.get("parsed")),
         "hasApiResponsesWrite": "api.responses.write" in scopes,
+        # OpenAI /v1/chat/completions requires model.request; Codex /oauth/authorize cannot grant it.
+        "hasModelRequestScope": "model.request" in scopes,
         "oauthScopesRequested": requested[:200] if requested else "",
         "oauthScopeStatus": scope_status,
     }
