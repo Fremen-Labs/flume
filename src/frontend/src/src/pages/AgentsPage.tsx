@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Bot, Loader2, AlertCircle, Settings2, Info, ChevronRight } from 'lucide-react';
+import { Bot, Loader2, AlertCircle, Settings2, Info } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
@@ -395,29 +395,23 @@ export default function AgentsPage() {
           </div>
         </div>
 
-        <div className="rounded-xl border-[3px] border-primary/70 bg-gradient-to-br from-primary/20 via-primary/12 to-primary/5 dark:from-primary/30 dark:via-primary/18 dark:to-primary/8 p-5 sm:p-6 shadow-xl shadow-primary/10 ring-4 ring-primary/15">
-          <div className="flex flex-col gap-5">
-            <div className="flex-1 min-w-0 space-y-2">
-              <p className="text-lg sm:text-xl font-bold text-foreground tracking-tight">
-                Configure each agent&apos;s model, provider &amp; API key
-              </p>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Each worker (e.g. <code className="text-xs bg-background/60 px-1 py-0.5 rounded">intake-worker-1</code>)
-                maps to one <strong>role</strong>. Open the editor to set them <strong>independently</strong> — not from
-                the cards below. Cards update after the worker manager&apos;s next poll.
-              </p>
-            </div>
-            <Button
-              type="button"
-              size="lg"
-              className="w-full gap-3 min-h-[3.75rem] sm:min-h-[4rem] px-8 text-base sm:text-lg font-bold shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 hover:brightness-105 active:brightness-95 border-2 border-primary-foreground/15"
-              onClick={() => setConfigOpen(true)}
-            >
-              <Settings2 className="w-6 h-6 sm:w-7 sm:h-7 shrink-0" aria-hidden />
-              <span className="flex-1 text-center sm:text-left">Configure agent models</span>
-              <ChevronRight className="w-6 h-6 sm:w-7 sm:h-7 shrink-0 opacity-90" aria-hidden />
-            </Button>
-          </div>
+        <div className="rounded-lg border border-border/50 bg-muted/20 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <p className="text-sm text-muted-foreground leading-snug min-w-0">
+            <span className="font-medium text-foreground">Per-role LLM</span>
+            {' — '}
+            Each worker maps to a role; set model, provider, and saved key in the editor (not on the cards). Cards
+            refresh after the worker manager poll.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0 gap-2 h-9"
+            onClick={() => setConfigOpen(true)}
+          >
+            <Settings2 className="h-4 w-4" aria-hidden />
+            Configure agent models
+          </Button>
         </div>
 
         <div>
