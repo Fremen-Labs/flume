@@ -566,6 +566,13 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
     rt = _runtime()
     m = model or rt['default_model']
     prov = rt['provider']
+    if prov == 'gemini':
+        try:
+            from workspace_llm_env import normalize_gemini_model_id
+
+            m = normalize_gemini_model_id(m)
+        except Exception:
+            pass
     if prov == 'ollama':
         return _ollama_chat(messages, m, temperature, max_tokens, rt)
     if prov == 'anthropic':
@@ -578,6 +585,13 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
     rt = _runtime()
     m = model or rt['default_model']
     prov = rt['provider']
+    if prov == 'gemini':
+        try:
+            from workspace_llm_env import normalize_gemini_model_id
+
+            m = normalize_gemini_model_id(m)
+        except Exception:
+            pass
     if prov == 'ollama':
         return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, rt)
     if prov == 'anthropic':

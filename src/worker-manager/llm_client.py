@@ -582,6 +582,13 @@ def chat(
     rt = _merge_runtime(provider_override, base_url_override, api_key_override)
     m = model or rt['default_model']
     prov = rt['provider']
+    if prov == 'gemini':
+        try:
+            from workspace_llm_env import normalize_gemini_model_id
+
+            m = normalize_gemini_model_id(m)
+        except Exception:
+            pass
     if prov == 'ollama':
         return _ollama_chat(messages, m, temperature, max_tokens, rt)
     if prov == 'anthropic':
@@ -604,6 +611,13 @@ def chat_with_tools(
     rt = _merge_runtime(provider_override, base_url_override, api_key_override)
     m = model or rt['default_model']
     prov = rt['provider']
+    if prov == 'gemini':
+        try:
+            from workspace_llm_env import normalize_gemini_model_id
+
+            m = normalize_gemini_model_id(m)
+        except Exception:
+            pass
     if prov == 'ollama':
         return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, rt)
     if prov == 'anthropic':

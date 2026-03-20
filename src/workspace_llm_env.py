@@ -15,6 +15,26 @@ from pathlib import Path
 # Hosted APIs — model id "llama3.2" is the Ollama default and is invalid here; use Settings model.
 _CLOUD_LLM_PROVIDER_IDS = frozenset({"openai", "anthropic", "gemini", "xai", "mistral", "cohere"})
 
+# Google retires old IDs on the OpenAI-compatible endpoint; map saved .env / agent_models values.
+_GEMINI_MODEL_ALIASES = {
+    "gemini-1.5-flash": "gemini-2.5-flash",
+    "gemini-1.5-flash-latest": "gemini-2.5-flash",
+    "gemini-1.5-flash-8b": "gemini-2.5-flash",
+    "gemini-1.5-pro": "gemini-2.5-pro",
+    "gemini-1.5-pro-latest": "gemini-2.5-pro",
+    "gemini-2.0-flash": "gemini-2.5-flash",
+    "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
+}
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def normalize_gemini_model_id(model_id: str | None) -> str:
+    """Map deprecated Gemini API model strings to current stable IDs."""
+    m = (model_id or "").strip()
+    if not m:
+        return DEFAULT_GEMINI_MODEL
+    return _GEMINI_MODEL_ALIASES.get(m, m)
+
 _LLM_SYNC_KEYS = (
     "LLM_PROVIDER",
     "LLM_MODEL",
@@ -35,8 +55,12 @@ def resolve_cloud_agent_model(provider_id: str, stored_model: str, global_llm_mo
     sm = (stored_model or "").strip()
     gm = (global_llm_model or "").strip() or "llama3.2"
     if pid in _CLOUD_LLM_PROVIDER_IDS and sm == "llama3.2":
-        return gm
-    return sm if sm else gm
+        out = gm
+    else:
+        out = sm if sm else gm
+    if pid == "gemini":
+        out = normalize_gemini_model_id(out)
+    return out
 
 
 def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:

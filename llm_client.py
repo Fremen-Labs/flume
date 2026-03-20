@@ -46,6 +46,22 @@ _PROVIDER_BASE_URLS = {
     'gemini': 'https://generativelanguage.googleapis.com/v1beta/openai',
 }
 
+# Retired IDs on generativelanguage OpenAI-compat API → current stable names
+_GEMINI_MODEL_ALIASES = {
+    'gemini-1.5-flash': 'gemini-2.5-flash',
+    'gemini-1.5-flash-latest': 'gemini-2.5-flash',
+    'gemini-1.5-flash-8b': 'gemini-2.5-flash',
+    'gemini-1.5-pro': 'gemini-2.5-pro',
+    'gemini-1.5-pro-latest': 'gemini-2.5-pro',
+    'gemini-2.0-flash': 'gemini-2.5-flash',
+    'gemini-2.0-flash-lite': 'gemini-2.5-flash-lite',
+}
+
+
+def _normalize_gemini_model(model_id: str) -> str:
+    m = (model_id or '').strip() or 'gemini-2.5-flash'
+    return _GEMINI_MODEL_ALIASES.get(m, m)
+
 
 def _base_url():
     if _PROVIDER in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
@@ -254,6 +270,8 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
         str: The assistant's text response.
     """
     m = model or _DEFAULT_MODEL
+    if _PROVIDER == 'gemini':
+        m = _normalize_gemini_model(m)
     if _PROVIDER == 'ollama':
         return _ollama_chat(messages, m, temperature, max_tokens)
     elif _PROVIDER == 'anthropic':
@@ -283,6 +301,8 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
             }
     """
     m = model or _DEFAULT_MODEL
+    if _PROVIDER == 'gemini':
+        m = _normalize_gemini_model(m)
     if _PROVIDER == 'ollama':
         return _ollama_chat_tools(messages, tools, m, temperature, max_tokens)
     elif _PROVIDER == 'anthropic':

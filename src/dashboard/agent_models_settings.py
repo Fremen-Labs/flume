@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import llm_credentials_store as lcs
 from llm_settings import PROVIDER_CATALOG, load_effective_pairs, get_oauth_status
-from workspace_llm_env import resolve_cloud_agent_model
+from workspace_llm_env import normalize_gemini_model_id, resolve_cloud_agent_model
 
 AGENT_ROLE_IDS = (
     "intake",
@@ -388,6 +388,8 @@ def validate_save_agent_models(
         host = (spec.get("executionHost") or "").strip() or None
         if not model:
             model = default_model
+        if prov == "gemini":
+            model = normalize_gemini_model_id(model)
         if not provider_is_configured(workspace_root, prov, pairs, cred_id):
             return False, f"Provider '{prov}' is not configured for role '{role}'", {}
         if _role_model_allowed(cred_groups, cred_id, model):
