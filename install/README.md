@@ -319,7 +319,9 @@ If routing is correct but you then see **`Missing scopes: model.request`** on **
 
    **Note:** `auth.openai.com` does **not** accept a `resource` parameter on **token refresh** (it returns `unknown_parameter`). Flume only adds optional `resource=` to the **authorize** URL if you set **`OPENAI_OAUTH_RESOURCE`** in `.env`.
 
-   Run this on a machine where your **browser can reach `http://127.0.0.1:<port>`** (or use SSH port-forwarding from your laptop to that port). The script prints the exact URL.
+   **`login-browser`** listens on **`http://localhost:1455/auth/callback`** by default (same as the official Codex CLI). Do not use a random port — OpenAI often returns **`unknown_error`** on the sign-in page if the redirect URI is not allowlisted.
+
+   Run this on a machine where your **browser can reach `http://127.0.0.1:1455`** (or use **`ssh -L 1455:127.0.0.1:1455`** from your laptop). The script prints the exact authorize URL.
 
    **Headless server (no browser on the Flume host):** use **paste-back** (same API scopes as `login-browser`):
 
