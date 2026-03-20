@@ -439,13 +439,18 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — for <strong>/v1/responses</strong> you need consent that
-                      includes <code className="text-[11px]">api.responses.write</code>. Use{' '}
+                      <strong>ChatGPT / Codex OAuth</strong> — Flume’s planner calls OpenAI{' '}
+                      <code className="text-[11px]">/v1/responses</code>, which requires{' '}
+                      <code className="text-[11px]">api.responses.write</code>.{' '}
+                      <strong className="text-foreground">Do not use device-code</strong>{' '}
+                      <code className="text-[11px]">./flume codex-oauth login</code> for that — it usually completes
+                      successfully but <em>without</em> that scope (401 “Missing scopes”). Use{' '}
                       <code className="rounded bg-background px-1 py-0.5 text-[11px]">
                         ./flume codex-oauth login-browser
                       </code>{' '}
-                      (browser + localhost callback). Device-code{' '}
-                      <code className="text-[11px]">login</code> often yields “Missing scopes”. Alternatively:{' '}
+                      (browser on this machine) or{' '}
+                      <code className="text-[11px]">./flume codex-oauth login-paste</code> on headless servers
+                      (prints URL / optional HTML; paste redirect URL back). Alternatively:{' '}
                       <code className="text-[11px]">codex login</code> then{' '}
                       <code className="text-[11px]">./flume codex-oauth import</code>. Then save and{' '}
                       <code className="text-[11px]">./flume restart --all</code>.

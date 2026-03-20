@@ -10,6 +10,7 @@ Also can import tokens from the official Codex CLI cache (~/.codex/auth.json).
 Usage (from Flume repo root is recommended):
   python3 install/setup/codex_oauth_login.py login [--flume-root DIR]
   python3 install/setup/codex_oauth_login.py login-browser [--flume-root DIR]   # use if device login lacks API scopes
+  python3 install/setup/codex_oauth_login.py login-paste [--port N] [--write-html FILE]   # headless: open URL elsewhere, paste redirect back
   python3 install/setup/codex_oauth_login.py import-codex [--codex-home DIR] [--flume-root DIR]
 
 Environment:
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import html
 import json
 import os
 import ssl
@@ -118,6 +120,34 @@ def _build_browser_authorize_url(
         params.append(("resource", res))
     qs = urllib.parse.urlencode(params)
     return f"{issuer.rstrip('/')}/oauth/authorize?{qs}"
+
+
+def _parse_pasted_oauth_redirect(raw: str) -> tuple[str, str]:
+    """
+    Extract (authorization_code, state) from a pasted browser URL or raw query string.
+
+    After OAuth, the browser is redirected to e.g. http://localhost:PORT/auth/callback?code=...&state=...
+    The page may fail to load on the machine with the browser; the user copies the full address bar URL.
+    """
+    s = raw.strip().strip('"').strip("'")
+    if not s:
+        raise ValueError("empty input")
+    if "://" not in s:
+        qstr = s.lstrip("?")
+        q = urllib.parse.parse_qs(qstr, keep_blank_values=False)
+    else:
+        u = urllib.parse.urlparse(s)
+        if u.query:
+            q = urllib.parse.parse_qs(u.query, keep_blank_values=False)
+        elif u.fragment and "code=" in u.fragment:
+            q = urllib.parse.parse_qs(u.fragment, keep_blank_values=False)
+        else:
+            q = {}
+    code = (q.get("code") or [""])[0].strip()
+    st = (q.get("state") or [""])[0].strip()
+    if not code:
+        raise ValueError("could not find code= in pasted URL (copy the full address bar URL after login)")
+    return code, st
 
 
 def _exchange_localhost_authorization_code(
@@ -394,6 +424,63 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     print(f"Updated {env_path}")
 
 
+def _jwt_access_token_scopes(access_token: str) -> tuple[bool, list[str]]:
+    """Decode JWT `scp` / `roles` without verifying the signature (CLI hint only)."""
+    t = (access_token or "").strip()
+    if t.count(".") < 2:
+        return False, []
+    try:
+        payload_b64 = t.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
+        scopes: list[str] = []
+        scp = payload.get("scp")
+        if isinstance(scp, str):
+            scopes.extend(x for x in scp.split() if x)
+        elif isinstance(scp, list):
+            scopes.extend(str(x) for x in scp if x)
+        roles = payload.get("roles")
+        if isinstance(roles, list):
+            scopes.extend(str(x) for x in roles if x)
+        return True, scopes
+    except Exception:
+        return False, []
+
+
+def _warn_device_login_responses_scope(access: str) -> None:
+    """After device-code login, tell the user if /v1/responses will 401."""
+    ok, scopes = _jwt_access_token_scopes(access)
+    print()
+    if not ok:
+        print(
+            "Note: Could not read API scopes from the access token (not a JWT or parse failed).\n"
+            'If Flume returns "Missing scopes: api.responses.write", device login did not grant API access.\n'
+            "Run:\n"
+            "  ./flume codex-oauth login-browser\n"
+            "  ./flume restart --all\n"
+        )
+        return
+    if not scopes:
+        print(
+            "WARNING: Access token has no `scp` in the JWT. OpenAI may still reject /v1/responses.\n"
+            "If Flume shows missing api.responses.write, run:\n"
+            "  ./flume codex-oauth login-browser\n"
+            "  ./flume restart --all\n"
+        )
+        return
+    if "api.responses.write" not in scopes:
+        shown = " ".join(scopes[:12])
+        if len(scopes) > 12:
+            shown += " …"
+        print(
+            "WARNING: Device-code login did NOT grant api.responses.write (required for Flume Plan New Work /v1/responses).\n"
+            f"Decoded token scopes ({len(scopes)}): {shown}\n\n"
+            "Use the browser flow instead (requests scopes on /oauth/authorize):\n"
+            "  ./flume codex-oauth login-browser\n"
+            "  ./flume restart --all\n"
+        )
+
+
 def cmd_login(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
@@ -416,6 +503,11 @@ def cmd_login(args: argparse.Namespace) -> None:
     verify_url = f"{issuer}/codex/device"
     print()
     print("Flume — ChatGPT / Codex OAuth (standalone, same flow as `codex login --device-auth`)")
+    print()
+    print(
+        "If you need the Flume planner (OpenAI /v1/responses), device login often lacks api.responses.write — "
+        "use `login-browser` instead if you see 401 Missing scopes after this.\n"
+    )
     print()
     print(f"1. Open in your browser and sign in:\n   {verify_url}\n")
     print(f"2. Enter this one-time code:\n   {user_code}\n")
@@ -447,7 +539,8 @@ def cmd_login(args: argparse.Namespace) -> None:
     )
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
-    print("\nDone. In Flume Settings choose OpenAI → Auth: OAuth, or restart the dashboard/workers.")
+    _warn_device_login_responses_scope(access)
+    print("Done. In Flume Settings choose OpenAI → Auth: OAuth, or restart the dashboard/workers.")
 
 
 def cmd_login_browser(args: argparse.Namespace) -> None:
@@ -540,6 +633,139 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     print("\nDone. Run: ./flume restart --all")
 
 
+def cmd_login_paste(args: argparse.Namespace) -> None:
+    """
+    Headless / remote server: print authorize URL (and optional HTML file), user opens it on any machine
+    with a browser, then pastes the redirect URL from the address bar back into this terminal.
+
+    Uses a fixed http://localhost:<port>/auth/callback redirect_uri (like OpenClaw-style manual capture).
+    The browser will usually show "connection refused" after login — that is expected; copy the URL anyway.
+    """
+    issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
+    client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
+    flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
+    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    if not state_path.is_absolute():
+        state_path = flume_root / state_path
+
+    port = args.port
+    if port is None:
+        try:
+            port = int(os.environ.get("FLUME_OAUTH_PASTE_PORT", "14575"))
+        except ValueError:
+            port = 14575
+    if not (1024 <= port <= 65535):
+        raise SystemExit("--port must be between 1024 and 65535")
+
+    redirect_uri = f"http://localhost:{port}/auth/callback"
+    oauth_state = _random_oauth_state()
+    code_verifier, code_challenge = _generate_pkce()
+    scope = _browser_authorize_scopes()
+    auth_url = _build_browser_authorize_url(
+        issuer, client_id, redirect_uri, code_challenge, oauth_state, scope
+    )
+
+    html_out = args.write_html
+    if html_out:
+        hp = Path(html_out)
+        hp.parent.mkdir(parents=True, exist_ok=True)
+        safe_href = html.escape(auth_url, quote=True)
+        hp.write_text(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Flume — ChatGPT OAuth</title></head>"
+            "<body style=\"font-family:system-ui,sans-serif;max-width:48rem;margin:2rem auto;line-height:1.5\">"
+            "<h1>Flume OAuth (headless helper)</h1>"
+            "<p>Click the link below and sign in. Your browser will try to open "
+            f"<code>localhost:{port}</code> and may show an error — that is normal.</p>"
+            "<p><strong>Copy the entire URL from the address bar</strong> (it contains <code>code=</code>) "
+            "and paste it into the Flume server terminal where <code>login-paste</code> is waiting.</p>"
+            f'<p><a href="{safe_href}">Sign in with ChatGPT / OpenAI</a></p>'
+            "<hr><p style=\"font-size:0.85rem;color:#555\">If the link does not work, copy this URL:</p>"
+            f"<pre style=\"white-space:pre-wrap;word-break:break-all;font-size:0.75rem\">{html.escape(auth_url)}</pre>"
+            "</body></html>",
+            encoding="utf-8",
+        )
+        print(f"Wrote HTML helper: {hp.resolve()}")
+
+    print()
+    print("Flume — ChatGPT / Codex OAuth (paste redirect — for headless servers)")
+    print()
+    print(
+        "This flow requests API scopes on /oauth/authorize (same as login-browser), including "
+        "api.responses.write for Flume /v1/responses."
+    )
+    print()
+    print(f"Redirect URI (must match what you paste later): {redirect_uri}")
+    print()
+    _ores = _optional_authorize_resource()
+    print(
+        f"Authorize URL will include resource={_ores!r} (OPENAI_OAUTH_RESOURCE)."
+        if _ores
+        else "OPENAI_OAUTH_RESOURCE unset — authorize URL has no resource=."
+    )
+    print()
+    print("1) On any computer with a browser, open this URL (copy/paste or use the HTML file):\n")
+    print(auth_url)
+    print()
+    if html_out:
+        print(f"   (HTML file with the same link: {Path(html_out).resolve()})")
+    print()
+    print(
+        "2) After you sign in, the browser redirects to localhost on **that** computer. "
+        "You may see \"Unable to connect\" — that is OK."
+    )
+    print("3) Copy the **full URL** from the address bar (starts with http://localhost:...) and paste it below.")
+    print()
+    try:
+        raw = input("Paste redirect URL here, then Enter: ").strip()
+    except EOFError:
+        raise SystemExit("No input (stdin closed). Run interactively or pipe the redirect URL.")
+
+    try:
+        auth_code, pasted_state = _parse_pasted_oauth_redirect(raw)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    if not pasted_state:
+        raise SystemExit(
+            "Paste must include state= (copy the full redirect URL from the address bar, not only code=)."
+        )
+
+    if pasted_state != oauth_state:
+        raise SystemExit(
+            f"OAuth state mismatch (possible wrong paste or stale tab). Expected state ending …{oauth_state[-8:]}, "
+            f"got {pasted_state!r}. Run login-paste again and use the fresh URL from this run only."
+        )
+
+    tokens = _exchange_localhost_authorization_code(
+        issuer, client_id, auth_code, code_verifier, redirect_uri
+    )
+    access = str(tokens.get("access_token") or "").strip()
+    refresh = str(tokens.get("refresh_token") or "").strip()
+    if not access or not refresh:
+        raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
+
+    expires_in = int(tokens.get("expires_in") or 3600)
+    token_url = DEFAULT_TOKEN_URL
+    _write_flume_state(
+        state_path,
+        access,
+        refresh,
+        client_id,
+        expires_in,
+        token_url,
+        oauth_scopes_requested=scope,
+    )
+    if args.sync_env:
+        _merge_env(flume_root, state_path, token_url)
+    print("\nOAuth state saved.")
+    ok, scopes = _jwt_access_token_scopes(access)
+    if ok and scopes and "api.responses.write" in scopes:
+        print("Verified: access token includes api.responses.write — OK for Flume /v1/responses.")
+    elif ok and scopes:
+        print(f"Warning: token scopes may be incomplete: {' '.join(scopes[:16])}")
+    print("Done. Run: ./flume restart --all")
+
+
 def cmd_import_codex(args: argparse.Namespace) -> None:
     codex_home = Path(os.path.expanduser(args.codex_home)).resolve()
     auth_path = codex_home / "auth.json"
@@ -624,6 +850,39 @@ def main() -> None:
         help="Do not merge LLM_* into .env (use OpenBao / Settings only)",
     )
     pb.set_defaults(func=cmd_login_browser, sync_env=True)
+
+    pp = sub.add_parser(
+        "login-paste",
+        help="Headless: print authorize URL (optional HTML file); paste redirect URL from browser after login",
+    )
+    pp.add_argument("--flume-root", type=str, default=None, help="Flume repository / package root")
+    pp.add_argument(
+        "--state-file",
+        type=str,
+        default=None,
+        help="Path for Flume .openai-oauth.json (default: <flume-root>/.openai-oauth.json)",
+    )
+    pp.add_argument("--issuer", type=str, default=None, help=f"Default: {DEFAULT_ISSUER}")
+    pp.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Port in redirect_uri http://localhost:N/auth/callback (default: env FLUME_OAUTH_PASTE_PORT or 14575)",
+    )
+    pp.add_argument(
+        "--write-html",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a small HTML page with a clickable sign-in link (scp to your laptop and open in a browser)",
+    )
+    pp.add_argument(
+        "--no-sync-env",
+        action="store_true",
+        help="Do not merge LLM_* into .env (use OpenBao / Settings only)",
+    )
+    pp.set_defaults(func=cmd_login_paste, sync_env=True)
 
     pi = sub.add_parser("import-codex", help="Import tokens from official Codex CLI ~/.codex/auth.json")
     pi.add_argument("--codex-home", type=str, default="~/.codex", help="CODEX_HOME directory")

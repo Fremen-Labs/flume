@@ -294,6 +294,14 @@ OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not a
 
    Run this on a machine where your **browser can reach `http://127.0.0.1:<port>`** (or use SSH port-forwarding from your laptop to that port). The script prints the exact URL.
 
+   **Headless server (no browser on the Flume host):** use **paste-back** (same API scopes as `login-browser`):
+
+   ```bash
+   ./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
+   ```
+
+   Copy the printed **authorize URL** or `scp` the HTML file to a laptop, open it in a browser, sign in. The browser redirects to `http://localhost:<port>/auth/callback?...` (often “connection refused” — that is OK). **Copy the full URL from the address bar** and paste it into the terminal where `login-paste` is waiting. Default port is **14575**; override with `--port` or **`FLUME_OAUTH_PASTE_PORT`**.
+
 2. **Official Codex CLI**: **`codex login`** (browser), then **`./flume codex-oauth import`**.
 
 3. **Device code** (`./flume codex-oauth login`) may still work for some accounts; if you see this 401, prefer **`login-browser`**.
@@ -303,12 +311,16 @@ Optional **`OPENAI_OAUTH_SCOPES`** / **`OPENAI_OAUTH_ORIGINATOR`** — see **Adv
 ### Recommended: Flume CLI (from the Flume install directory)
 
 ```bash
-./flume codex-oauth login-browser   # best for ChatGPT + /v1/responses (API scopes)
+./flume codex-oauth login-browser   # best when the Flume host can open localhost in a browser
+# or (headless / OpenClaw-style paste-back):
+./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
 # or: ./flume codex-oauth login    # device code; may lack api.responses.write
 ./flume restart --all
 ```
 
 **`login-browser`:** opens (or prints) an **authorize** URL; after you sign in, the browser redirects to **localhost** and Flume writes **`<flume-root>/.openai-oauth.json`** and updates **`.env`** (unless `--no-sync-env`).
+
+**`login-paste`:** for **headless** hosts: prints the authorize URL, optionally writes an HTML file with a clickable link; you complete login on another machine and **paste the redirect URL** from the address bar back into the terminal.
 
 **`login`:** follow the **Codex device** URL and enter the one-time code.
 
