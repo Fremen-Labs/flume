@@ -1063,6 +1063,29 @@ def main():
             apply_runtime_config(_WS)
             sync_llm_env_from_workspace(_WS)
             state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
+            claimed_workers = {w.get('name') for w in state.get('workers', []) if w.get('status') == 'claimed'}
+
+            # Release orphaned tasks: active_worker set but no matching claimed worker
+            try:
+                res = es_request(
+                    f'/{TASK_INDEX}/_search',
+                    {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state': 'active'}}]}}},
+                    method='POST',
+                )
+                for h in res.get('hits', {}).get('hits', []):
+                    src = h.get('_source', {})
+                    aw = src.get('active_worker')
+                    if aw and aw not in claimed_workers:
+                        update_task_doc(h.get('_id'), {
+                            'status': 'ready',
+                            'queue_state': 'queued',
+                            'active_worker': None,
+                            'needs_human': False,
+                        })
+                        log(f"released orphaned task={src.get('id')} (active_worker={aw})")
+            except Exception:
+                pass
+
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':
                     # Safety: if a task is stuck in running with no agent_log, release it
