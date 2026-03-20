@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
 const OLLAMA_CREDENTIAL_ID = '__ollama__';
+const OPENAI_OAUTH_CREDENTIAL_ID = '__openai_oauth__';
 import { motion } from 'framer-motion';
 import { Bot, Loader2, AlertCircle, Settings2, Info } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
@@ -108,6 +109,7 @@ function credentialShortName(cfg: AgentModelsResponse, credId?: string): string 
   const cid = credId || '';
   if (!cid || cid === SETTINGS_DEFAULT_CREDENTIAL_ID) return 'Settings default';
   if (cid === OLLAMA_CREDENTIAL_ID) return 'Ollama';
+  if (cid === OPENAI_OAUTH_CREDENTIAL_ID) return 'OpenAI OAuth';
   const g = cfg.availableCredentials?.find((c) => c.credentialId === cid);
   return g?.shortLabel || g?.label || cid;
 }
@@ -170,9 +172,10 @@ export default function AgentsPage() {
       const defP = data.settingsProvider;
       const defM = data.defaultLlmModel;
       const defH = data.defaultExecutionHost;
-      const credChoices: AgentModelsCredentialGroup[] =
-        data.availableCredentials?.filter((g) => g.configured) ?? [];
-      const useCredUi = credChoices.length > 0;
+      const allCred: AgentModelsCredentialGroup[] = data.availableCredentials ?? [];
+      const hasCatalog = allCred.length > 0;
+      const credChoices: AgentModelsCredentialGroup[] = allCred.filter((g) => g.configured);
+      const useCredentialPicker = hasCatalog && credChoices.length > 0;
       for (const id of data.roleIds) {
         let row = normalizeRoleSpec(data.effective[id], {
           credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
@@ -180,7 +183,7 @@ export default function AgentsPage() {
           model: defM,
           host: defH,
         });
-        if (useCredUi) {
+        if (useCredentialPicker) {
           if (!credChoices.some((g) => g.credentialId === row.credentialId)) {
             const first = credChoices[0];
             if (first) {
@@ -238,12 +241,22 @@ export default function AgentsPage() {
     [agentCfg],
   );
 
+  const allCredentials = useMemo(() => agentCfg?.availableCredentials ?? [], [agentCfg]);
+
   const selectableCredentials = useMemo(
-    () => agentCfg?.availableCredentials?.filter((g) => g.configured) ?? [],
-    [agentCfg],
+    () => allCredentials.filter((g) => g.configured),
+    [allCredentials],
   );
 
-  const useCredUi = selectableCredentials.length > 0;
+  const incompleteCredentials = useMemo(
+    () => allCredentials.filter((g) => !g.configured),
+    [allCredentials],
+  );
+
+  /** API returned credential catalog (includes incomplete rows for visibility). */
+  const hasCredentialCatalog = allCredentials.length > 0;
+  /** Enough ready connections to use Provider → Key → Model pickers. */
+  const canPickCredentials = selectableCredentials.length > 0;
 
   const vendorOptions = useMemo(() => {
     const ids = [...new Set(selectableCredentials.map((g) => g.providerId))];
@@ -297,11 +310,15 @@ export default function AgentsPage() {
     setSaving(true);
     setSaveMsg(null);
     try {
+      const credCatalog = agentCfg.availableCredentials ?? [];
+      const credReady = credCatalog.filter((g) => g.configured);
+      const hasCat = credCatalog.length > 0;
+      const canPick = credReady.length > 0;
       const roles: AgentModelsSavePayload['roles'] = {};
       for (const id of agentCfg.roleIds) {
         const s = roleForm[id];
         if (!s) continue;
-        if (useCredUi) {
+        if (hasCat && canPick) {
           roles[id] = {
             credentialId: s.credentialId,
             model: s.model.trim(),
@@ -450,12 +467,12 @@ export default function AgentsPage() {
               <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                 <DialogTitle>Agent models & hosts</DialogTitle>
                 <DialogDescription>
-                  Each <strong>row</strong> is one <strong>role</strong> (matches{' '}
-                  <code className="text-[10px]">intake-worker-1</code>, <code className="text-[10px]">pm-worker-1</code>, …).
-                  You can set a <strong>different model and vendor</strong> for every role: choose vendor + saved key, then
-                  model. To mix OpenAI and Gemini, add both keys in Settings → LLM and pick the right key per row. Save —
-                  the worker manager applies changes on its next cycle. Worker cards below show live model/provider after
-                  that poll.
+                  <strong>Settings → LLM</strong> defines the default profile. Here you <strong>override per role</strong>{' '}
+                  (each row matches <code className="text-[10px]">intake-worker-1</code>,{' '}
+                  <code className="text-[10px]">pm-worker-1</code>, …). Pick <strong>Provider</strong>, then a{' '}
+                  <strong>saved key</strong> (or Settings default / OpenAI OAuth), then a <strong>model</strong> from the
+                  catalog. If a saved key is removed, that role falls back to <strong>Settings default</strong>{' '}
+                  automatically.
                 </DialogDescription>
               </DialogHeader>
               <div className="px-6 flex-1 min-h-0 overflow-y-auto py-2 space-y-4">
@@ -471,21 +488,38 @@ export default function AgentsPage() {
                     {cfgError}
                   </div>
                 )}
-                {!cfgLoading && !cfgError && !useCredUi && selectableProviders.length === 0 && (
+                {!cfgLoading && !cfgError && !hasCredentialCatalog && selectableProviders.length === 0 && (
                   <p className="text-sm text-muted-foreground py-4">
                     No LLM providers are configured. Open Settings → LLM and add API keys or OAuth, then return here.
                   </p>
                 )}
-                {!cfgLoading && !cfgError && useCredUi && selectableCredentials.length === 0 && (
-                  <p className="text-sm text-muted-foreground py-4">
-                    No saved connections. Open Settings → LLM, choose a provider, add labeled keys, then return here.
-                  </p>
+                {!cfgLoading && !cfgError && hasCredentialCatalog && !canPickCredentials && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm space-y-2">
+                    <p className="font-medium text-amber-950 dark:text-amber-100">
+                      Saved key profiles need an API key before agents can use them
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Open <strong>Settings → LLM</strong>, select each provider, and paste keys for the labels below. You
+                      can still use <strong>Settings (default)</strong> here if your global Settings profile is already
+                      configured — switch to the legacy form below if it appears.
+                    </p>
+                    {incompleteCredentials.length > 0 && (
+                      <ul className="text-xs list-disc pl-4 space-y-1 text-foreground/90">
+                        {incompleteCredentials.map((g) => (
+                          <li key={g.credentialId}>
+                            <strong>{g.shortLabel ?? g.label}</strong> ({g.providerId})
+                            {g.hint ? ` — ${g.hint}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
                 {!cfgLoading &&
                   !cfgError &&
                   agentCfg &&
-                  useCredUi &&
-                  selectableCredentials.length > 0 &&
+                  hasCredentialCatalog &&
+                  canPickCredentials &&
                   agentCfg.roleIds.map((roleId) => {
                     const spec = roleForm[roleId];
                     if (!spec) return null;
@@ -508,10 +542,10 @@ export default function AgentsPage() {
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                           <div className="space-y-1.5">
-                            <Label className="text-xs">Vendor</Label>
+                            <Label className="text-xs">Provider</Label>
                             <Select value={spec.provider} onValueChange={(v) => onVendorChange(roleId, v)}>
                               <SelectTrigger className="h-9">
-                                <SelectValue placeholder="Vendor" />
+                                <SelectValue placeholder="Provider" />
                               </SelectTrigger>
                               <SelectContent>
                                 {vendorOptions.map((v) => (
@@ -540,6 +574,8 @@ export default function AgentsPage() {
                                   {keysThisVendor.map((g) => (
                                     <SelectItem key={g.credentialId} value={g.credentialId}>
                                       {g.shortLabel ?? g.label}
+                                      {g.keySuffix ? ` · ···${g.keySuffix}` : ''}
+                                      {g.credentialId === SETTINGS_DEFAULT_CREDENTIAL_ID ? ' (default)' : ''}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
@@ -589,7 +625,7 @@ export default function AgentsPage() {
                 {!cfgLoading &&
                   !cfgError &&
                   agentCfg &&
-                  !useCredUi &&
+                  (!hasCredentialCatalog || !canPickCredentials) &&
                   selectableProviders.length > 0 &&
                   agentCfg.roleIds.map((roleId) => {
                     const spec = roleForm[roleId];
@@ -681,7 +717,9 @@ export default function AgentsPage() {
                     cfgLoading ||
                     !!cfgError ||
                     !agentCfg ||
-                    (useCredUi ? selectableCredentials.length === 0 : selectableProviders.length === 0)
+                    (hasCredentialCatalog && canPickCredentials
+                      ? false
+                      : selectableProviders.length === 0)
                   }
                   onClick={() => void saveAgentModels()}
                 >

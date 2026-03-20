@@ -251,6 +251,8 @@ export interface AgentModelsCredentialGroup {
   shortLabel?: string;
   providerId: string;
   configured: boolean;
+  /** Last 4 chars of key when present (for disambiguation in UI). */
+  keySuffix?: string;
   models: LlmProviderModel[];
   allowCustomModelId?: boolean;
   hint?: string;

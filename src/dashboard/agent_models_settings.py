@@ -75,6 +75,9 @@ def provider_is_configured(
     if cid == lcs.OLLAMA_CREDENTIAL_ID:
         return pid == "ollama"
 
+    if cid == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
+        return pid == "openai" and _provider_is_configured_env(workspace_root, "openai", pairs)
+
     if cid and cid not in ("", lcs.SETTINGS_DEFAULT_CREDENTIAL_ID):
         cred = lcs.get_by_id(workspace_root, cid)
         if not cred:
@@ -86,7 +89,9 @@ def provider_is_configured(
         if pid == "openai_compatible":
             return bool(key) and bool(str(cred.get("baseUrl") or "").strip())
         if pid == "openai":
-            return bool(key)
+            if key:
+                return True
+            return _provider_is_configured_env(workspace_root, "openai", pairs)
         if pid == "ollama":
             return True
         return bool(key)
@@ -94,59 +99,125 @@ def provider_is_configured(
     return _provider_is_configured_env(workspace_root, pid, pairs)
 
 
+def _oauth_configured(workspace_root: Path) -> bool:
+    try:
+        return bool(get_oauth_status(workspace_root).get("configured"))
+    except Exception:
+        return False
+
+
 def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any]]:
     """
-    Selectable credentials for the Agents UI: Settings default profile, saved keys, Ollama.
+    Credentials for the Agents UI: Settings default (current LLM_* profile), saved keys (incl. incomplete),
+    optional OpenAI OAuth profile, and Ollama when not already the active Settings provider.
     """
     pairs = load_effective_pairs(workspace_root)
     out: list[dict[str, Any]] = []
 
     current = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
-    if current != "ollama" and _provider_is_configured_env(workspace_root, current, pairs):
-        entry = _catalog_entry(current)
-        models = list((entry or {}).get("models") or [])
+    entry = _catalog_entry(current)
+    if entry:
+        models = list(entry.get("models") or [])
         if current == "openai_compatible":
             models = []
+        settings_ok = _provider_is_configured_env(workspace_root, current, pairs)
         out.append(
             {
                 "credentialId": lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
-                "label": f"Active Settings ({entry.get('name', current) if entry else current})",
+                "label": f"Settings default — {entry.get('name', current)}",
                 "shortLabel": "Settings (default)",
                 "providerId": current,
-                "configured": True,
+                "configured": settings_ok,
                 "models": models,
                 "allowCustomModelId": current in ("ollama", "openai_compatible"),
+                "hint": None
+                if settings_ok
+                else "Set this provider and API key (or OAuth) under Settings → LLM.",
+            }
+        )
+    else:
+        settings_ok = _provider_is_configured_env(workspace_root, current, pairs)
+        out.append(
+            {
+                "credentialId": lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
+                "label": f"Settings default — {current}",
+                "shortLabel": "Settings (default)",
+                "providerId": current,
+                "configured": settings_ok,
+                "models": [],
+                "allowCustomModelId": True,
+                "hint": None if settings_ok else "Set this provider under Settings → LLM.",
             }
         )
 
-    for c in lcs.list_public_credentials(workspace_root):
-        if not c.get("hasKey"):
+    oauth_ok = _oauth_configured(workspace_root)
+    doc = lcs.load_document(workspace_root)
+    for c in doc.get("credentials") or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip()
+        if not cid:
             continue
         pid = str(c.get("provider") or "").strip().lower()
-        entry = _catalog_entry(pid)
-        if not entry and pid != "openai_compatible":
+        cat = _catalog_entry(pid)
+        if not cat and pid != "openai_compatible":
             continue
+        key = str(c.get("apiKey") or "").strip()
         base = str(c.get("baseUrl") or "").strip()
         if pid == "openai_compatible" and not base:
             continue
-        models = list((entry or {}).get("models") or []) if entry else []
+        models = list(cat.get("models") or []) if cat else []
         if pid == "openai_compatible":
             models = []
-        disp = entry.get("name", pid) if entry else pid
+        disp = cat.get("name", pid) if cat else pid
+        lbl = str(c.get("label") or cid).strip() or cid
+        if pid == "openai":
+            row_ok = bool(key) or oauth_ok
+        elif pid == "openai_compatible":
+            row_ok = bool(key) and bool(base)
+        else:
+            row_ok = bool(key)
+        hint = None
+        if not row_ok:
+            if pid == "openai":
+                hint = "Paste an API key in Settings → LLM, or configure OpenAI OAuth."
+            elif pid == "openai_compatible":
+                hint = "Set base URL and API key under Settings → LLM for this profile."
+            else:
+                hint = "Paste an API key for this label under Settings → LLM."
+        ks = key[-4:] if len(key) > 4 else ("••••" if key else "")
         out.append(
             {
-                "credentialId": c["id"],
-                "label": f"{c['label']} · {disp}",
-                "shortLabel": c["label"],
+                "credentialId": cid,
+                "label": f"{lbl} · {disp}",
+                "shortLabel": lbl,
                 "providerId": pid,
-                "configured": True,
+                "configured": row_ok,
+                "keySuffix": ks,
                 "models": models,
                 "allowCustomModelId": pid in ("ollama", "openai_compatible"),
+                "hint": hint,
+            }
+        )
+
+    # Explicit OpenAI OAuth option when Codex/ChatGPT login is set up (even if Settings uses API key).
+    openai_entry = _catalog_entry("openai")
+    if openai_entry and oauth_ok:
+        out.append(
+            {
+                "credentialId": lcs.OPENAI_OAUTH_CREDENTIAL_ID,
+                "label": "OpenAI (OAuth — ChatGPT / Codex)",
+                "shortLabel": "OpenAI OAuth",
+                "providerId": "openai",
+                "configured": True,
+                "models": list(openai_entry.get("models") or []),
+                "allowCustomModelId": False,
+                "hint": "Uses OPENAI_OAUTH_STATE_FILE from Settings / .env (not the platform API key).",
             }
         )
 
     ollama_entry = _catalog_entry("ollama")
-    if ollama_entry:
+    if ollama_entry and current != "ollama":
         out.append(
             {
                 "credentialId": lcs.OLLAMA_CREDENTIAL_ID,
@@ -291,6 +362,7 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
     stored = load_agent_models(workspace_root)
     groups = available_model_groups(workspace_root)
     cred_groups = available_credentials_for_agents(workspace_root)
+    valid_cred_ids = {str(g.get("credentialId") or "") for g in cred_groups if g.get("credentialId")}
 
     effective_roles: dict[str, Any] = {}
     for role in AGENT_ROLE_IDS:
@@ -307,10 +379,14 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
         cred_id = str(rdef.get("credentialId") or rdef.get("credential_id") or "").strip()
         if not cred_id:
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+        if cred_id not in valid_cred_ids:
+            cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
         if cred_id == lcs.SETTINGS_DEFAULT_CREDENTIAL_ID:
             prov = (rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
         elif cred_id == lcs.OLLAMA_CREDENTIAL_ID:
             prov = "ollama"
+        elif cred_id == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
+            prov = "openai"
         else:
             c = lcs.get_by_id(workspace_root, cred_id)
             prov = (
@@ -382,7 +458,16 @@ def validate_save_agent_models(
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
         cg = _credential_group_by_id(cred_groups, cred_id)
         if not cg:
+            cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            cg = _credential_group_by_id(cred_groups, cred_id)
+        if not cg:
             return False, f"Unknown credential for role '{role}'", {}
+        if not cg.get("configured"):
+            return (
+                False,
+                f"Credential '{cg.get('shortLabel') or cred_id}' is not ready — add its API key in Settings → LLM (role '{role}').",
+                {},
+            )
         prov = str(cg.get("providerId") or "").strip().lower()
         model = (spec.get("model") or "").strip()
         host = (spec.get("executionHost") or "").strip() or None

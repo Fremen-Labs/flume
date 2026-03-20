@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +12,8 @@ from typing import Any, Optional
 OLLAMA_CREDENTIAL_ID = "__ollama__"
 # Use global LLM_* from env / Settings (no row in llm_credentials.json).
 SETTINGS_DEFAULT_CREDENTIAL_ID = "__settings_default__"
+# OpenAI ChatGPT/Codex OAuth only (uses OPENAI_OAUTH_* from env — no row in llm_credentials.json).
+OPENAI_OAUTH_CREDENTIAL_ID = "__openai_oauth__"
 
 
 def resolve_credential_label(workspace_root: Path, cred_id: str) -> str:
@@ -20,6 +23,8 @@ def resolve_credential_label(workspace_root: Path, cred_id: str) -> str:
         return "Settings (default)"
     if cid == OLLAMA_CREDENTIAL_ID:
         return "Ollama"
+    if cid == OPENAI_OAUTH_CREDENTIAL_ID:
+        return "OpenAI OAuth"
     row = get_by_id(workspace_root, cid)
     if row:
         return str(row.get("label") or cid).strip() or cid
@@ -93,7 +98,7 @@ def list_public_credentials(workspace_root: Path) -> list[dict[str, Any]]:
 
 def get_by_id(workspace_root: Path, cred_id: str) -> Optional[dict[str, Any]]:
     cid = (cred_id or "").strip()
-    if not cid or cid == OLLAMA_CREDENTIAL_ID:
+    if not cid or cid == OLLAMA_CREDENTIAL_ID or cid == OPENAI_OAUTH_CREDENTIAL_ID:
         return None
     for c in load_document(workspace_root).get("credentials") or []:
         if isinstance(c, dict) and str(c.get("id") or "").strip() == cid:
@@ -115,14 +120,24 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
             "api_key": "",
             "base_url": "",
         }
+    if cid == OPENAI_OAUTH_CREDENTIAL_ID:
+        # Empty api_key lets llm_client use OPENAI_OAUTH_STATE_FILE from env.
+        return {
+            "provider": "openai",
+            "api_key": "",
+            "base_url": "",
+        }
     c = get_by_id(workspace_root, cid)
     if not c:
         return None
     key = str(c.get("apiKey") or "").strip()
-    if not key:
-        return None
     prov = str(c.get("provider") or "openai").strip().lower()
     base = str(c.get("baseUrl") or "").strip()
+    if not key:
+        # OpenAI OAuth-only rows (or env OAuth) — empty api_key lets llm_client refresh from state file.
+        if prov == "openai" and (os.environ.get("OPENAI_OAUTH_STATE_FILE") or "").strip():
+            return {"provider": "openai", "api_key": "", "base_url": base}
+        return None
     return {"provider": prov, "api_key": key, "base_url": base}
 
 
