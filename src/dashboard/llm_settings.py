@@ -545,14 +545,17 @@ def validate_llm_settings(payload: dict[str, Any], workspace_root: Path) -> tupl
         if new_key:
             label = str(payload.get("credentialLabel") or "").strip() or f"{provider} · {model}"
             cid_in = str(payload.get("credentialId") or "").strip() or None
-            nid = llm_credentials_store.upsert_credential(
-                workspace_root,
-                cid_in,
-                label,
-                provider,
-                new_key,
-                updates.get("LLM_BASE_URL", ""),
-            )
+            try:
+                nid = llm_credentials_store.upsert_credential(
+                    workspace_root,
+                    cid_in,
+                    label,
+                    provider,
+                    new_key,
+                    updates.get("LLM_BASE_URL", ""),
+                )
+            except ValueError as e:
+                return False, str(e), {}
             llm_credentials_store.set_active_credential_id(workspace_root, nid)
     else:
         # OAuth mode

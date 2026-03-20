@@ -113,6 +113,31 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
     return {"provider": prov, "api_key": key, "base_url": base}
 
 
+def duplicate_label_for_provider(
+    workspace_root: Path,
+    provider: str,
+    label: str,
+    exclude_cred_id: Optional[str] = None,
+) -> bool:
+    """True if another credential (same provider) already uses this label (case-insensitive)."""
+    pl = (provider or "").strip().lower()
+    ll = (label or "").strip().lower()
+    if not pl or not ll:
+        return False
+    ex = (exclude_cred_id or "").strip() or None
+    for c in load_document(workspace_root).get("credentials") or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip()
+        if ex and cid == ex:
+            continue
+        if str(c.get("provider") or "").strip().lower() != pl:
+            continue
+        if str(c.get("label") or "").strip().lower() == ll:
+            return True
+    return False
+
+
 def upsert_credential(
     workspace_root: Path,
     cred_id: Optional[str],
@@ -132,6 +157,11 @@ def upsert_credential(
     key = (api_key or "").strip()
     base = (base_url or "").strip()
     new_id = (cred_id or "").strip() or uuid.uuid4().hex[:12]
+    if duplicate_label_for_provider(workspace_root, pid, label, new_id):
+        raise ValueError(
+            f'Another saved key for provider "{pid}" is already labeled "{label}". '
+            "Use a unique label per provider."
+        )
     row = {"id": new_id, "label": label, "provider": pid, "apiKey": "", "baseUrl": base}
     replaced = False
     for i, c in enumerate(creds):
@@ -162,7 +192,14 @@ def update_credential_meta(
             continue
         found = True
         if label is not None:
-            c["label"] = str(label).strip() or str(c.get("label") or "")
+            nl = str(label).strip() or str(c.get("label") or "")
+            prov = str(c.get("provider") or "").strip().lower()
+            if duplicate_label_for_provider(workspace_root, prov, nl, cred_id):
+                raise ValueError(
+                    f'Another saved key for provider "{prov}" is already labeled "{nl}". '
+                    "Use a unique label per provider."
+                )
+            c["label"] = nl
         if base_url is not None:
             c["baseUrl"] = str(base_url).strip()
         break
@@ -266,12 +303,16 @@ def apply_credentials_action(
         base_url = payload.get("baseUrl")
         if label is None and base_url is None:
             return False, "label or baseUrl required", None
-        if not update_credential_meta(
-            workspace_root,
-            cid,
-            label=None if label is None else str(label),
-            base_url=None if base_url is None else str(base_url),
-        ):
+        try:
+            ok = update_credential_meta(
+                workspace_root,
+                cid,
+                label=None if label is None else str(label),
+                base_url=None if base_url is None else str(base_url),
+            )
+        except ValueError as e:
+            return False, str(e), None
+        if not ok:
             return False, "Credential not found", None
         return True, "", None
 
@@ -297,7 +338,10 @@ def apply_credentials_action(
                 return False, "apiKey is required", None
         if api_key == "***":
             api_key = ""
-        new_id = upsert_credential(workspace_root, cred_id, label, provider, api_key, base_url)
+        try:
+            new_id = upsert_credential(workspace_root, cred_id, label, provider, api_key, base_url)
+        except ValueError as e:
+            return False, str(e), None
         set_active_credential_id(workspace_root, new_id)
         try:
             updates = build_activation_env_updates(workspace_root, new_id)

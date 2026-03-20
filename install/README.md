@@ -219,7 +219,7 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 | OpenAI-compatible | `openai_compatible` | Custom `LLM_BASE_URL` |
 | Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys. **Gemini** uses a [Google AI Studio](https://aistudio.google.com/apikey) key; the OpenAI-compatible endpoint expects **`Authorization: Bearer <key>`** (per [Google’s OpenAI compat docs](https://ai.google.dev/gemini-api/docs/openai)). |
 
-**Multiple providers / keys:** In the Settings UI you can **label** each saved API key. Keys are stored in **`worker-manager/llm_credentials.json`** (alongside `agent_models.json`). Use **Agents → Configure agent models** to assign a **connection** (saved key or “Active Settings” / Ollama) and **model** per agent role. The worker manager passes `preferred_llm_credential_id` on claimed tasks so each run uses the correct key.
+**Multiple providers / keys:** In Settings, pick a **provider** (OpenAI, Gemini, …); the **Saved API keys** list shows **only keys for that provider**. You can store **many labeled keys per vendor** (labels must be **unique per provider**). Keys live in **`worker-manager/llm_credentials.json`**. In **Agents → Configure agent models**, choose **Vendor → Saved API key → Model** per role; the worker manager sends `preferred_llm_credential_id` on tasks so each agent uses the right key.
 
 ChatGPT/Codex OAuth: prefer **`./flume codex-oauth login-browser`** (see **OpenAI ChatGPT / Codex OAuth**); device **`login`** may lack `api.responses.write`.
 

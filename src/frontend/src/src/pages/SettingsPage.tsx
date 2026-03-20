@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon } from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
@@ -170,6 +170,11 @@ export default function SettingsPage() {
   const providerName = providerCatalog?.name ?? providerId;
   const currentModelName =
     models.find((m) => m.id === (effectiveSettings.model ?? ''))?.name ?? effectiveSettings.model ?? '';
+
+  const credentialsForProvider = useMemo(
+    () => (data?.credentials ?? []).filter((c) => c.provider === providerId),
+    [data?.credentials, providerId],
+  );
 
   const updateForm = useCallback((updates: Partial<LlmSettingsPayload>) => {
     setForm((prev) => ({ ...prev, ...updates }));
@@ -441,23 +446,30 @@ export default function SettingsPage() {
                 )}
 
                 <h3 className="text-sm font-medium pt-2 border-t">Authentication</h3>
-                {(data?.credentials?.length ?? 0) > 0 && (
+                {providerId !== 'ollama' && (
                   <div className="space-y-2 rounded-lg border border-border/50 bg-muted/20 p-3">
-                    <Label className="text-xs text-muted-foreground">Saved API keys</Label>
+                    <Label className="text-xs text-muted-foreground">
+                      Saved API keys for {providerName}
+                    </Label>
                     <p className="text-[11px] text-muted-foreground leading-snug">
-                      Each key is labeled and stored in{' '}
-                      <code className="text-[10px]">worker-manager/llm_credentials.json</code>. Use <strong>Use</strong>{' '}
-                      to copy one into the active Settings profile (LLM_* env).
+                      Only keys for the <strong>selected provider</strong> are listed. Each label must be unique per
+                      vendor. Keys live in{' '}
+                      <code className="text-[10px]">worker-manager/llm_credentials.json</code>.{' '}
+                      <strong>Use</strong> copies a key into the active profile (LLM_*).
                     </p>
+                    {credentialsForProvider.length === 0 && (
+                      <p className="text-xs text-muted-foreground italic py-1">
+                        No saved keys for this provider yet. Add a label and API key below, then Save.
+                      </p>
+                    )}
                     <ul className="space-y-2">
-                      {(data?.credentials ?? []).map((c) => (
+                      {credentialsForProvider.map((c) => (
                         <li
                           key={c.id}
                           className="flex flex-col gap-2 rounded-md border border-border/40 bg-background/60 p-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2"
                         >
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 flex-1">
                             <span className="font-medium text-sm truncate">{c.label}</span>
-                            <span className="text-xs text-muted-foreground">{c.provider}</span>
                             <span className="font-mono text-[11px] text-muted-foreground">
                               {c.hasKey ? `···${c.keySuffix || '••••'}` : 'empty'}
                             </span>
@@ -572,8 +584,8 @@ export default function SettingsPage() {
                         onChange={(e) => updateForm({ credentialLabel: e.target.value })}
                       />
                       <p className="text-[11px] text-muted-foreground">
-                        Shown in Settings and agent configuration. When you paste a new API key and Save, the key is
-                        stored under this label (and becomes the active profile).
+                        Unique among all <strong>{providerName}</strong> keys. When you paste a new API key and Save, it
+                        is stored for this provider and becomes the active profile.
                       </p>
                     </div>
                     <div className="space-y-2">

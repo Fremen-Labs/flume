@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+
+const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
 import { motion } from 'framer-motion';
 import { Bot, Loader2, AlertCircle, Settings2 } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
@@ -29,7 +31,6 @@ import type {
   AgentModelsSavePayload,
 } from '@/types';
 
-const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
 import agentAvatar1 from '@/assets/agents/agent-1.png';
 import agentAvatar2 from '@/assets/agents/agent-2.png';
 import agentAvatar3 from '@/assets/agents/agent-3.png';
@@ -146,11 +147,12 @@ export default function AgentsPage() {
             }
           }
           const cg = credChoices.find((x) => x.credentialId === row.credentialId);
-          if (cg && !cg.allowCustomModelId && cg.models?.length) {
-            const ok = cg.models.some((m) => m.id === row.model);
-            if (!ok) row = { ...row, model: cg.models[0].id, provider: cg.providerId };
-          } else if (cg) {
+          if (cg) {
             row = { ...row, provider: cg.providerId };
+            if (!cg.allowCustomModelId && cg.models?.length) {
+              const ok = cg.models.some((m) => m.id === row.model);
+              if (!ok) row = { ...row, model: cg.models[0].id };
+            }
           }
         } else {
           const configured = data.availableProviders.filter((g) => g.configured);
@@ -197,6 +199,18 @@ export default function AgentsPage() {
 
   const useCredUi = selectableCredentials.length > 0;
 
+  const vendorOptions = useMemo(() => {
+    const ids = [...new Set(selectableCredentials.map((g) => g.providerId))];
+    return ids.map((id) => ({
+      id,
+      label:
+        selectableProviders.find((p) => p.providerId === id)?.label ??
+        id
+          .replace(/_/g, ' ')
+          .replace(/\b\w/g, (ch) => ch.toUpperCase()),
+    }));
+  }, [selectableCredentials, selectableProviders]);
+
   const updateRole = (roleId: string, patch: Partial<RoleForm>) => {
     setRoleForm((prev) => {
       const cur = prev[roleId];
@@ -211,6 +225,27 @@ export default function AgentsPage() {
     updateRole(roleId, { provider: providerId, model: firstModel });
   };
 
+  const onVendorChange = (roleId: string, vendorId: string) => {
+    const keys = selectableCredentials.filter((g) => g.providerId === vendorId);
+    const first = keys[0];
+    if (!first) return;
+    updateRole(roleId, {
+      provider: vendorId,
+      credentialId: first.credentialId,
+      model: first.models[0]?.id ?? '',
+    });
+  };
+
+  const onCredentialPick = (roleId: string, credentialId: string) => {
+    const g = selectableCredentials.find((x) => x.credentialId === credentialId);
+    if (!g) return;
+    updateRole(roleId, {
+      provider: g.providerId,
+      credentialId,
+      model: g.models[0]?.id ?? '',
+    });
+  };
+
   const saveAgentModels = async () => {
     if (!agentCfg) return;
     setSaving(true);
@@ -220,11 +255,19 @@ export default function AgentsPage() {
       for (const id of agentCfg.roleIds) {
         const s = roleForm[id];
         if (!s) continue;
-        roles[id] = {
-          provider: s.provider,
-          model: s.model.trim(),
-          executionHost: s.executionHost.trim(),
-        };
+        if (useCredUi) {
+          roles[id] = {
+            credentialId: s.credentialId,
+            model: s.model.trim(),
+            executionHost: s.executionHost.trim(),
+          };
+        } else {
+          roles[id] = {
+            provider: s.provider,
+            model: s.model.trim(),
+            executionHost: s.executionHost.trim(),
+          };
+        }
       }
       const res = await fetch('/api/settings/agent-models', {
         method: 'POST',
@@ -270,8 +313,9 @@ export default function AgentsPage() {
               <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                 <DialogTitle>Agent models & hosts</DialogTitle>
                 <DialogDescription>
-                  Choose a saved API key connection and model per role (from Settings → labeled keys), or the active
-                  Settings profile / Ollama. Workers pick up changes on the next manager cycle.
+                  Pick a <strong>vendor</strong>, then one of that vendor&apos;s <strong>saved keys</strong> (from
+                  Settings), then a model. Each agent role can use a different key. Workers pick up changes on the next
+                  manager cycle.
                 </DialogDescription>
               </DialogHeader>
               <div className="px-6 flex-1 min-h-0 overflow-y-auto py-2 space-y-4">
@@ -287,14 +331,125 @@ export default function AgentsPage() {
                     {cfgError}
                   </div>
                 )}
-                {!cfgLoading && !cfgError && selectableProviders.length === 0 && (
+                {!cfgLoading && !cfgError && !useCredUi && selectableProviders.length === 0 && (
                   <p className="text-sm text-muted-foreground py-4">
                     No LLM providers are configured. Open Settings → LLM and add API keys or OAuth, then return here.
+                  </p>
+                )}
+                {!cfgLoading && !cfgError && useCredUi && selectableCredentials.length === 0 && (
+                  <p className="text-sm text-muted-foreground py-4">
+                    No saved connections. Open Settings → LLM, choose a provider, add labeled keys, then return here.
                   </p>
                 )}
                 {!cfgLoading &&
                   !cfgError &&
                   agentCfg &&
+                  useCredUi &&
+                  selectableCredentials.length > 0 &&
+                  agentCfg.roleIds.map((roleId) => {
+                    const spec = roleForm[roleId];
+                    if (!spec) return null;
+                    const keysThisVendor = selectableCredentials.filter((g) => g.providerId === spec.provider);
+                    const credGroup =
+                      keysThisVendor.find((g) => g.credentialId === spec.credentialId) ?? keysThisVendor[0];
+                    const group = credGroup;
+                    const keySelectValue = keysThisVendor.some((k) => k.credentialId === spec.credentialId)
+                      ? spec.credentialId
+                      : (keysThisVendor[0]?.credentialId ?? '');
+                    const allowCustom = group?.allowCustomModelId === true;
+                    const useModelInput = allowCustom || !group?.models?.length;
+                    return (
+                      <div
+                        key={roleId}
+                        className="rounded-lg border border-border/40 bg-muted/5 p-4 space-y-3"
+                      >
+                        <div className="text-sm font-medium text-foreground">
+                          {roleLabels[roleId] ?? roleId}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Vendor</Label>
+                            <Select value={spec.provider} onValueChange={(v) => onVendorChange(roleId, v)}>
+                              <SelectTrigger className="h-9">
+                                <SelectValue placeholder="Vendor" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {vendorOptions.map((v) => (
+                                  <SelectItem key={v.id} value={v.id}>
+                                    {v.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Saved API key</Label>
+                            {keysThisVendor.length === 0 ? (
+                              <p className="text-[11px] text-muted-foreground py-1">
+                                No keys for this vendor — add them in Settings → LLM for that provider.
+                              </p>
+                            ) : (
+                              <Select
+                                value={keySelectValue}
+                                onValueChange={(v) => onCredentialPick(roleId, v)}
+                              >
+                                <SelectTrigger className="h-9">
+                                  <SelectValue placeholder="Key" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {keysThisVendor.map((g) => (
+                                    <SelectItem key={g.credentialId} value={g.credentialId}>
+                                      {g.shortLabel ?? g.label}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {group?.hint && (
+                              <p className="text-[10px] text-muted-foreground leading-tight">{group.hint}</p>
+                            )}
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Model</Label>
+                            {useModelInput ? (
+                              <Input
+                                className="h-9"
+                                value={spec.model}
+                                onChange={(e) => updateRole(roleId, { model: e.target.value })}
+                                placeholder="Model id"
+                              />
+                            ) : (
+                              <Select value={spec.model} onValueChange={(v) => updateRole(roleId, { model: v })}>
+                                <SelectTrigger className="h-9">
+                                  <SelectValue placeholder="Model" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {(group?.models ?? []).map((m) => (
+                                    <SelectItem key={m.id} value={m.id}>
+                                      {m.name || m.id}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Execution host</Label>
+                            <Input
+                              className="h-9"
+                              value={spec.executionHost}
+                              onChange={(e) => updateRole(roleId, { executionHost: e.target.value })}
+                              placeholder={agentCfg.defaultExecutionHost}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                {!cfgLoading &&
+                  !cfgError &&
+                  agentCfg &&
+                  !useCredUi &&
                   selectableProviders.length > 0 &&
                   agentCfg.roleIds.map((roleId) => {
                     const spec = roleForm[roleId];
