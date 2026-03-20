@@ -412,8 +412,24 @@ def compute_ready_for_repo(repo):
             # Epics with no deps and no outstanding children of type task are leaf — skip
             continue
         if all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
-            update_task_doc(src['_es_id'], {'status': 'ready'})
-            src['status'] = 'ready'  # update local view
+            # Infer role/requirements for task items if missing
+            patch = {'status': 'ready'}
+            if src.get('item_type') == 'task':
+                title = (src.get('title') or '').lower()
+                if not src.get('assigned_agent_role'):
+                    if 'review' in title or 'approve' in title:
+                        patch['assigned_agent_role'] = 'reviewer'
+                        patch['owner'] = 'reviewer'
+                    elif 'test' in title or 'validate' in title or 'qa' in title:
+                        patch['assigned_agent_role'] = 'tester'
+                        patch['owner'] = 'tester'
+                    else:
+                        patch['assigned_agent_role'] = 'implementer'
+                        patch['owner'] = 'implementer'
+                if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
+                    patch['requires_code'] = True
+            update_task_doc(src['_es_id'], patch)
+            src.update(patch)  # update local view
             changed += 1
             log(f"compute_ready: promoted {item_id} to ready")
 
