@@ -40,8 +40,12 @@ _openai_oauth_sh() {
     fi
 }
 
+has_systemctl() {
+    command -v systemctl >/dev/null 2>&1
+}
+
 ensure_service_installed() {
-    if [ ! -f "${UNIT_FILE}" ] && [ -n "${INSTALL_SCRIPT}" ]; then
+    if has_systemctl && [ ! -f "${UNIT_FILE}" ] && [ -n "${INSTALL_SCRIPT}" ]; then
         echo "Installing Flume dashboard service..."
         bash "${INSTALL_SCRIPT}"
         systemctl --user daemon-reload
@@ -70,6 +74,14 @@ _show_dashboard_failure_logs() {
 }
 
 cmd_start() {
+    if ! has_systemctl; then
+        echo "systemctl unavailable (e.g. macOS). Starting dashboard natively in background..."
+        DASHBOARD_PORT=$(grep -E '^DASHBOARD_PORT=' "${FLUME_ROOT}/.env" 2>/dev/null | cut -d= -f2- || echo "8765")
+        nohup bash "${FLUME_ROOT}/src/dashboard/run.sh" > "${FLUME_ROOT}/dashboard.nohup.log" 2>&1 &
+        echo "Flume dashboard started."
+        echo "Open http://localhost:${DASHBOARD_PORT}"
+        return
+    fi
     ensure_service_installed
     if [ ! -f "${UNIT_FILE}" ]; then
         echo "Error: Service not installed. Run setup.sh first."
@@ -88,6 +100,13 @@ cmd_start() {
 }
 
 cmd_stop() {
+    if ! has_systemctl; then
+        echo "Stopping native dashboard processes..."
+        pkill -f "src/dashboard/server.py" 2>/dev/null || true
+        pkill -f "src/dashboard/codex_ws_proxy.py" 2>/dev/null || true
+        echo "Flume dashboard stopped."
+        return
+    fi
     systemctl --user stop "${SERVICE_NAME}" 2>/dev/null || true
     echo "Flume dashboard stopped."
 }
@@ -220,6 +239,25 @@ cmd_restart() {
         cmd_build_ui
         echo ""
     fi
+    if ! has_systemctl; then
+        cmd_stop
+        sleep 1
+        cmd_start
+        echo "Flume dashboard restarted."
+        if [ "${opt_build_ui}" != true ]; then
+            _warn_if_frontend_bundle_stale
+        fi
+        if [ "${opt_all}" = true ]; then
+            echo ""
+            _workers_bounce || true
+        else
+            echo ""
+            echo "Note: The dashboard was restarted, but worker-manager / worker_handlers were not."
+            echo "      They keep running until killed — use LLM/agent code from disk on next restart."
+            echo "      To restart them too:  ./flume restart --all"
+        fi
+        return
+    fi
     ensure_service_installed
     systemctl --user daemon-reload
     systemctl --user restart "${SERVICE_NAME}" 2>/dev/null || systemctl --user start "${SERVICE_NAME}"
@@ -244,6 +282,14 @@ cmd_restart() {
 }
 
 cmd_status() {
+    if ! has_systemctl; then
+        if pgrep -f "src/dashboard/server.py" > /dev/null; then
+            echo "Flume dashboard is running natively."
+        else
+            echo "Flume dashboard is not running."
+        fi
+        return
+    fi
     if [ ! -f "${UNIT_FILE}" ]; then
         echo "Service not installed. Run: ./flume start (or setup.sh)"
         exit 0
@@ -252,18 +298,34 @@ cmd_status() {
 }
 
 cmd_enable() {
+    if ! has_systemctl; then
+        echo "Enable/disable on boot requires systemd (unavailable on macOS)."
+        return
+    fi
     ensure_service_installed
     systemctl --user enable "${SERVICE_NAME}"
     echo "Flume dashboard will start on login."
 }
 
 cmd_disable() {
+    if ! has_systemctl; then
+        echo "Enable/disable on boot requires systemd (unavailable on macOS)."
+        return
+    fi
     systemctl --user disable "${SERVICE_NAME}" 2>/dev/null || true
     echo "Flume dashboard will not start on login."
 }
 
 cmd_logs() {
-    journalctl --user -u "${SERVICE_NAME}" -f "${@}"
+    if ! has_systemctl; then
+        if [ -f "${FLUME_ROOT}/dashboard.nohup.log" ]; then
+            tail -f "${FLUME_ROOT}/dashboard.nohup.log"
+        else
+            echo "No native logs available yet."
+        fi
+        return
+    fi
+    journalctl --user -u "${SERVICE_NAME}" -f ${@+"$@"}
 }
 
 cmd_codex_oauth_help() {
