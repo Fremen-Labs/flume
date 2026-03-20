@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -319,6 +320,8 @@ def run_implementer(
         _progress(f'Thinking… (step {_iteration + 1})')
         raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model, task=task)
         if not raw:
+            # Backoff before retrying to avoid tight error loops (e.g., rate limits)
+            time.sleep(min(2 + _iteration, 8))
             _progress('LLM returned no response — stopping.')
             return AgentResult(
                 action='implementer_failed',
