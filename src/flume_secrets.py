@@ -9,11 +9,11 @@ Out-of-box flow:
 Bootstrap file is non-secret JSON. Secrets live only in OpenBao KV (or process env from your orchestrator).
 """
 from __future__ import annotations
-
 import json
 import os
 import shutil
 import subprocess
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +193,12 @@ def _apply_dotenv_line(raw_line: str) -> None:
         return
     key, _, val = line.partition("=")
     key = key.strip()
+    
+    # ENFORCE NATIVE OPENBAO: Do not allow sensitive credentials to be loaded from plaintext .env files
+    if key in {"ES_API_KEY", "LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "OPENAI_OAUTH_SCOPES"}:
+        logging.warning(f"SECURITY: Attempted to load sensitive key '{key}' from plaintext .env file. This is blocked. Please migrate this secret natively into your OpenBao vault.")
+        return
+
     if not key or key.startswith("#"):
         return
     val = val.strip()
