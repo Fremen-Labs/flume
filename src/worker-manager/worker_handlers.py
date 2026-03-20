@@ -531,6 +531,32 @@ def task_requires_code(task: dict) -> bool:
     return any(t in text for t in code_triggers)
 
 
+def _implementer_clear_claim_fields() -> dict:
+    """Drop manager claim markers so the task is not stuck 'running' in the UI."""
+    return {'active_worker': None, 'queue_state': 'queued'}
+
+
+def _implementer_requeue_after_llm_failure(es_id: str, task_id: str) -> None:
+    """Reset task to ready and clear claim fields after LLM gave no usable output."""
+    append_agent_note(
+        es_id,
+        'Re-queued: LLM returned no usable response. On the host running worker_handlers.py, '
+        'check LLM_PROVIDER / LLM_BASE_URL / LLM_API_KEY, that the model exists (e.g. `ollama pull <model>`), '
+        'and worker_handlers.log for HTTP errors.',
+    )
+    update_task_doc(
+        es_id,
+        {
+            'status': 'ready',
+            'owner': 'implementer',
+            'assigned_agent_role': 'implementer',
+            'needs_human': False,
+            **_implementer_clear_claim_fields(),
+        },
+    )
+    log(f"implementer failed to complete task={task_id} (LLM error/fallback) — re-queued for retry")
+
+
 def handle_implementer_worker(task, es_id):
     # Resolve repo path without creating a branch yet — branches are only
     # created when the agent actually writes files.
@@ -559,141 +585,168 @@ def handle_implementer_worker(task, es_id):
 
     # Hint to the agent and enforce worker-side gating.
     task['requires_code'] = task_requires_code(task)
-
-    result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress)
-    implementer_model = task.get('preferred_model') or 'qwen3-coder:30b'
     task_id = task.get('id', '')
+    released = False
 
-    commit_message = result.metadata.get('commit_message') or f"Implement task: {task.get('title', task_id)}"
-    commit_sha = ''
-    branch = None
-    has_changes = False
-    agent_completed = result.metadata.get('source') == 'llm_agentic'
+    try:
+        result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress)
+        implementer_model = task.get('preferred_model') or 'qwen3-coder:30b'
 
-    if repo_path and agent_completed:
-        # Check whether the agent actually modified any files before touching git
-        status = subprocess.run(
-            ['git', '-C', repo_path, 'status', '--porcelain'],
-            capture_output=True, text=True,
-        )
-        has_changes = bool(status.stdout.strip())
-
-        # Enforce "no branches for non-code tasks":
-        # If the agent wrote files for a task that we believe should be
-        # analysis-only, discard those changes and treat the task as
-        # having written no code.
-        if has_changes and not task_requires_code(task):
-            subprocess.run(['git', '-C', repo_path, 'checkout', '--', '.'], capture_output=True, text=True)
-            subprocess.run(['git', '-C', repo_path, 'clean', '-fd'], capture_output=True, text=True)
-            has_changes = False
-
-        if has_changes:
-            # Code was written — create branch and commit now
-            branch, _ = ensure_task_branch(task)
-            if branch:
-                commit_sha = auto_commit_and_push(repo_path, branch, commit_message, task_id)
-
-        # Edge case: branch already had commits from a previous partial run
-        if not commit_sha and branch and _branch_has_new_commits(repo_path, branch):
-            existing_sha, existing_msg = get_latest_commit_sha(repo_path)
-            commit_sha = existing_sha
-            if not commit_message:
-                commit_message = existing_msg
-
-        # If the agent *should* have written code (has_changes=True) but we couldn't
-        # record it (commit_sha == ''), don't mark the task done.
-        if has_changes and not commit_sha:
-            update_task_doc(es_id, {
-                'status': 'blocked',
-                'needs_human': True,
-                'owner': 'implementer',
-                'assigned_agent_role': 'implementer',
-            })
-            log(f"implementer: task={task_id} has changes but commit failed; blocking for human attention")
+        if result.metadata.get('source') == 'llm_no_response':
+            _implementer_requeue_after_llm_failure(es_id, task_id)
+            released = True
             return True
 
-        if commit_sha and branch:
-            update_task_doc(es_id, {'branch': branch, 'worktree': repo_path})
+        commit_message = result.metadata.get('commit_message') or f"Implement task: {task.get('title', task_id)}"
+        commit_sha = ''
+        branch = None
+        has_changes = False
+        agent_completed = result.metadata.get('source') == 'llm_agentic'
 
-    # ── Path A: code was written and committed ────────────────────────────────
-    # Normal flow: send through tester → reviewer pipeline.
-    if commit_sha:
-        pass  # falls through to the handoff block below
+        if repo_path and agent_completed:
+            # Check whether the agent actually modified any files before touching git
+            status = subprocess.run(
+                ['git', '-C', repo_path, 'status', '--porcelain'],
+                capture_output=True, text=True,
+            )
+            has_changes = bool(status.stdout.strip())
 
-    # ── Path B: agent completed but wrote no code ─────────────────────────────
-    # This is an analysis, exploration, or context task. Mark it done directly
-    # — no branch, no tester/reviewer needed.
-    elif agent_completed and not has_changes:
-        if task_requires_code(task):
-            # This task *should* result in code edits, but the agent wrote nothing.
-            # Re-queue rather than incorrectly marking the task done.
-            update_task_doc(es_id, {
-                'status': 'ready',
-                'owner': 'implementer',
-                'assigned_agent_role': 'implementer',
-                'needs_human': False,
+            # Enforce "no branches for non-code tasks":
+            # If the agent wrote files for a task that we believe should be
+            # analysis-only, discard those changes and treat the task as
+            # having written no code.
+            if has_changes and not task_requires_code(task):
+                subprocess.run(['git', '-C', repo_path, 'checkout', '--', '.'], capture_output=True, text=True)
+                subprocess.run(['git', '-C', repo_path, 'clean', '-fd'], capture_output=True, text=True)
+                has_changes = False
+
+            if has_changes:
+                # Code was written — create branch and commit now
+                branch, _ = ensure_task_branch(task)
+                if branch:
+                    commit_sha = auto_commit_and_push(repo_path, branch, commit_message, task_id)
+
+            # Edge case: branch already had commits from a previous partial run
+            if not commit_sha and branch and _branch_has_new_commits(repo_path, branch):
+                existing_sha, existing_msg = get_latest_commit_sha(repo_path)
+                commit_sha = existing_sha
+                if not commit_message:
+                    commit_message = existing_msg
+
+            # If the agent *should* have written code (has_changes=True) but we couldn't
+            # record it (commit_sha == ''), don't mark the task done.
+            if has_changes and not commit_sha:
+                update_task_doc(es_id, {
+                    'status': 'blocked',
+                    'needs_human': True,
+                    'owner': 'implementer',
+                    'assigned_agent_role': 'implementer',
+                    **_implementer_clear_claim_fields(),
+                })
+                log(f"implementer: task={task_id} has changes but commit failed; blocking for human attention")
+                released = True
+                return True
+
+            if commit_sha and branch:
+                update_task_doc(es_id, {'branch': branch, 'worktree': repo_path})
+
+        # ── Path A: code was written and committed ────────────────────────────
+        # Normal flow: send through tester → reviewer pipeline.
+        if commit_sha:
+            write_doc(HANDOFF_INDEX, {
+                'task_id': task_id,
+                'from_role': 'implementer',
+                'to_role': 'tester',
+                'reason': result.summary,
+                'objective': task.get('objective', ''),
+                'inputs': result.artifacts,
+                'constraints': commit_message or '',
+                'status_hint': 'review',
+                'model_used': implementer_model,
+                'commit_sha': commit_sha,
+                'branch': branch or task.get('branch'),
+                'created_at': now_iso(),
             })
-            log(f"implementer: task={task_id} expected code edits but wrote nothing; re-queued")
+            update_task_doc(es_id, {
+                'status': 'review',
+                'owner': 'tester',
+                'assigned_agent_role': 'tester',
+                'artifacts': result.artifacts or task.get('artifacts', []),
+                'branch': branch or task.get('branch'),
+                'worktree': repo_path or task.get('worktree'),
+                'commit_sha': commit_sha,
+                'commit_message': commit_message,
+                **_implementer_clear_claim_fields(),
+            })
+            log(f"implementer completed task={task_id} branch={branch} sha={commit_sha[:8] if commit_sha else 'n/a'} -> tester")
+            released = True
             return True
 
-        update_task_doc(es_id, {
-            'status': 'done',
-            'owner': 'implementer',
-            'assigned_agent_role': 'implementer',
-        })
-        write_doc(HANDOFF_INDEX, {
-            'task_id': task_id,
-            'from_role': 'implementer',
-            'to_role': 'done',
-            'reason': result.summary,
-            'objective': task.get('objective', ''),
-            'inputs': result.artifacts,
-            'constraints': 'non-code task — no commit required',
-            'status_hint': 'done',
-            'model_used': implementer_model,
-            'created_at': now_iso(),
-        })
-        promoted = compute_ready_for_repo(task.get('repo'))
-        log(f"implementer completed non-code task={task_id} (analysis/exploration) — marked done directly; promoted={promoted}")
+        # ── Path B: agent completed but wrote no code ──────────────────────────
+        # This is an analysis, exploration, or context task. Mark it done directly
+        # — no branch, no tester/reviewer needed.
+        if agent_completed and not has_changes:
+            if task_requires_code(task):
+                # This task *should* result in code edits, but the agent wrote nothing.
+                # Re-queue rather than incorrectly marking the task done.
+                update_task_doc(es_id, {
+                    'status': 'ready',
+                    'owner': 'implementer',
+                    'assigned_agent_role': 'implementer',
+                    'needs_human': False,
+                    **_implementer_clear_claim_fields(),
+                })
+                log(f"implementer: task={task_id} expected code edits but wrote nothing; re-queued")
+                released = True
+                return True
+
+            update_task_doc(es_id, {
+                'status': 'done',
+                'owner': 'implementer',
+                'assigned_agent_role': 'implementer',
+                **_implementer_clear_claim_fields(),
+            })
+            write_doc(HANDOFF_INDEX, {
+                'task_id': task_id,
+                'from_role': 'implementer',
+                'to_role': 'done',
+                'reason': result.summary,
+                'objective': task.get('objective', ''),
+                'inputs': result.artifacts,
+                'constraints': 'non-code task — no commit required',
+                'status_hint': 'done',
+                'model_used': implementer_model,
+                'created_at': now_iso(),
+            })
+            promoted = compute_ready_for_repo(task.get('repo'))
+            log(f"implementer completed non-code task={task_id} (analysis/exploration) — marked done directly; promoted={promoted}")
+            released = True
+            return True
+
+        # ── Path C: agent failed to complete at all ────────────────────────────
+        # Fallback / LLM error — re-queue so it can be retried automatically.
+        _implementer_requeue_after_llm_failure(es_id, task_id)
+        released = True
         return True
 
-    # ── Path C: agent failed to complete at all ────────────────────────────────
-    # Fallback / LLM error — re-queue so it can be retried automatically.
-    else:
-        update_task_doc(es_id, {
-            'status': 'ready',
-            'owner': 'implementer',
-            'assigned_agent_role': 'implementer',
-        })
-        log(f"implementer failed to complete task={task_id} (LLM error/fallback) — re-queued for retry")
-        return True
-
-    write_doc(HANDOFF_INDEX, {
-        'task_id': task_id,
-        'from_role': 'implementer',
-        'to_role': 'tester',
-        'reason': result.summary,
-        'objective': task.get('objective', ''),
-        'inputs': result.artifacts,
-        'constraints': commit_message or '',
-        'status_hint': 'review',
-        'model_used': implementer_model,
-        'commit_sha': commit_sha,
-        'branch': branch or task.get('branch'),
-        'created_at': now_iso(),
-    })
-    update_task_doc(es_id, {
-        'status': 'review',
-        'owner': 'tester',
-        'assigned_agent_role': 'tester',
-        'artifacts': result.artifacts or task.get('artifacts', []),
-        'branch': branch or task.get('branch'),
-        'worktree': repo_path or task.get('worktree'),
-        'commit_sha': commit_sha,
-        'commit_message': commit_message,
-    })
-    log(f"implementer completed task={task_id} branch={branch} sha={commit_sha[:8] if commit_sha else 'n/a'} -> tester")
-    return True
+    except Exception as e:
+        log(f"implementer: task={task_id} exception: {e}")
+        return False
+    finally:
+        if not released:
+            try:
+                _, cur = fetch_task_doc(task_id)
+                if cur and str(cur.get('status') or '') == 'running':
+                    update_task_doc(es_id, {
+                        'status': 'ready',
+                        'owner': 'implementer',
+                        'assigned_agent_role': 'implementer',
+                        'needs_human': False,
+                        **_implementer_clear_claim_fields(),
+                    })
+                    log(f"implementer: released stuck running task={task_id} (handler did not finish normally)")
+            except Exception as ex:
+                log(f"implementer: finally guard failed task={task_id}: {ex}")
 
 
 def handle_tester_worker(task, es_id):

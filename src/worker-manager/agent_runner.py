@@ -300,7 +300,16 @@ def run_implementer(
         raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model, task=task)
         if not raw:
             _progress('LLM returned no response — stopping.')
-            break
+            return AgentResult(
+                action='implementer_failed',
+                summary='LLM returned no response — stopping.',
+                artifacts=[],
+                metadata={
+                    'source': 'llm_no_response',
+                    'commit_sha': '',
+                    'commit_message': '',
+                },
+            )
 
         message = raw.get('message', {})
         tool_calls = message.get('tool_calls') or []

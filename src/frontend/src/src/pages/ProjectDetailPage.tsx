@@ -489,7 +489,7 @@ export default function ProjectDetailPage() {
   ).length;
 
   const selectedTask = selectedTaskId ? allTasks.find(t => t.id === selectedTaskId) : null;
-  const isRunning = selectedTask?.status === 'running';
+  const qc = useQueryClient();
 
   // Task history query — polls every 3s while the agent is actively working
   const historyQuery = useQuery({
@@ -497,9 +497,28 @@ export default function ProjectDetailPage() {
     enabled: !!selectedTaskId,
     queryFn: () =>
       fetchTaskApiJson(`/api/tasks/${encodeURIComponent(selectedTaskId!)}/history`),
-    refetchInterval: isRunning ? 3_000 : 10_000,
+    refetchInterval: (query) => {
+      const data = query.state.data as { task?: ApiTask } | undefined;
+      const live = data?.task?.status;
+      const snap = selectedTask?.status;
+      if (live === 'running' || (live === undefined && snap === 'running')) return 3_000;
+      return 10_000;
+    },
     retry: 2,
   });
+
+  const liveTaskStatus = (historyQuery.data as { task?: ApiTask } | undefined)?.task?.status;
+  const isRunning =
+    liveTaskStatus === 'running' ||
+    (liveTaskStatus === undefined && selectedTask?.status === 'running');
+
+  const snapshotTaskStatus = selectedTask?.status;
+  useEffect(() => {
+    if (!selectedTaskId || liveTaskStatus === undefined || snapshotTaskStatus === undefined) return;
+    if (liveTaskStatus !== snapshotTaskStatus) {
+      qc.invalidateQueries({ queryKey: ['snapshot'] });
+    }
+  }, [selectedTaskId, liveTaskStatus, snapshotTaskStatus, qc]);
 
   const diffQuery = useQuery({
     queryKey: ['task-diff', selectedTaskId],
@@ -520,7 +539,6 @@ export default function ProjectDetailPage() {
   });
 
   // Unblock a task
-  const qc = useQueryClient();
   async function unblockTask(taskId: string) {
     await fetch(`/api/tasks/${taskId}/transition`, {
       method: 'POST',
