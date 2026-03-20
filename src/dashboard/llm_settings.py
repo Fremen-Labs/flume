@@ -20,9 +20,7 @@ import urllib.parse
 import urllib.request
 
 _DEFAULT_OPENAI_OAUTH_SCOPES = (
-    'openid profile email offline_access '
-    'model.request api.model.read api.responses.write '
-    'api.connectors.read api.connectors.invoke'
+    'openid profile email offline_access model.request api.model.read api.responses.write'
 )
 
 
@@ -34,30 +32,58 @@ def _openai_oauth_refresh_scopes() -> str | None:
     return s or None
 
 
-def _jwt_access_token_scopes(access_token: str) -> tuple[list[str], str]:
-    """Decode JWT `scp` and `aud` without verifying signature (debug / UI only)."""
+def _decode_access_token_for_oauth_ui(access_token: str) -> dict[str, Any]:
+    """Decode JWT claims without verifying signature (Settings UI / diagnostics only)."""
     t = (access_token or '').strip()
-    if t.count('.') < 2:
-        return [], ''
+    out: dict[str, Any] = {
+        'jwt_like': t.count('.') >= 2,
+        'parsed': False,
+        'scopes': [],
+        'audience': '',
+    }
+    if not out['jwt_like']:
+        return out
     try:
         payload_b64 = t.split('.')[1]
         payload_b64 += '=' * (-len(payload_b64) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()).decode())
+        out['parsed'] = True
         aud = payload.get('aud')
-        aud_s = ''
         if isinstance(aud, str):
-            aud_s = aud
+            out['audience'] = aud
         elif isinstance(aud, list) and aud:
-            aud_s = str(aud[0])
-        scp_raw = payload.get('scp')
+            out['audience'] = str(aud[0])
         scopes: list[str] = []
+        scp_raw = payload.get('scp')
         if isinstance(scp_raw, str):
-            scopes = [x for x in scp_raw.split() if x]
+            scopes.extend(x for x in scp_raw.split() if x)
         elif isinstance(scp_raw, list):
-            scopes = [str(x) for x in scp_raw if x]
-        return scopes, aud_s
+            scopes.extend(str(x) for x in scp_raw if x)
+        roles = payload.get('roles')
+        if isinstance(roles, list):
+            scopes.extend(str(x) for x in roles if x)
+        out['scopes'] = scopes
     except Exception:
-        return [], ''
+        out['parsed'] = False
+    return out
+
+
+def _oauth_scope_status(dec: dict[str, Any], has_access: bool) -> str:
+    """
+    ok | missing_responses_write | jwt_no_scp | opaque_or_unknown | no_token
+    """
+    if not has_access:
+        return 'no_token'
+    if not dec.get('jwt_like'):
+        return 'opaque_or_unknown'
+    if not dec.get('parsed'):
+        return 'opaque_or_unknown'
+    scopes = dec.get('scopes') or []
+    if not scopes:
+        return 'jwt_no_scp'
+    if 'api.responses.write' not in scopes:
+        return 'missing_responses_write'
+    return 'ok'
 
 # ─── Provider/model catalog (all major public frontier) ────────────────────────
 
@@ -624,8 +650,11 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     expires_in_sec = max(0, (expires - now_ms) // 1000) if expires else 0
     access = str(state.get("access") or "").strip()
-    scopes, aud = _jwt_access_token_scopes(access)
+    dec = _decode_access_token_for_oauth_ui(access)
+    scopes = list(dec.get("scopes") or [])
+    aud = str(dec.get("audience") or "")
     requested = str(state.get("oauth_scopes_requested") or "").strip()
+    scope_status = _oauth_scope_status(dec, bool(access))
 
     return {
         "configured": has_refresh and client_id,
@@ -634,8 +663,11 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
         "expiresInSeconds": expires_in_sec,
         "accessTokenScopes": scopes,
         "accessTokenAudience": (aud[:120] + "...") if len(aud) > 120 else aud,
+        "accessTokenJwtLike": bool(dec.get("jwt_like")),
+        "accessTokenJwtParsed": bool(dec.get("parsed")),
         "hasApiResponsesWrite": "api.responses.write" in scopes,
         "oauthScopesRequested": requested[:200] if requested else "",
+        "oauthScopeStatus": scope_status,
     }
 
 

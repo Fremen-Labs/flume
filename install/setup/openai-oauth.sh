@@ -133,8 +133,7 @@ if not refresh or not client_id:
 
 _default = (
     "openid profile email offline_access "
-    "model.request api.model.read api.responses.write "
-    "api.connectors.read api.connectors.invoke"
+    "model.request api.model.read api.responses.write"
 )
 _raw = os.environ.get("OPENAI_OAUTH_SCOPES")
 scope = _default if _raw is None else str(_raw).strip()

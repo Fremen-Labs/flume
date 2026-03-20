@@ -219,7 +219,7 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 | OpenAI-compatible | `openai_compatible` | Custom `LLM_BASE_URL` |
 | Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys |
 
-ChatGPT/Codex OAuth: **`./flume codex-oauth login`** (see **OpenAI ChatGPT / Codex OAuth**).
+ChatGPT/Codex OAuth: prefer **`./flume codex-oauth login-browser`** (see **OpenAI ChatGPT / Codex OAuth**); device **`login`** may lack `api.responses.write`.
 
 After changes, **restart** dashboard and workers.
 
@@ -357,7 +357,7 @@ bash install/setup/openai-oauth.sh refresh
 ### Advanced
 
 - **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
-- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh + **`login-browser`** authorize URL (defaults include `api.responses.write`; empty string omits `scope` from device/refresh only).
+- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh + **`login-browser`** authorize URL. Default is a **minimal** set (`openid profile email offline_access model.request api.model.read api.responses.write`) so consent is less likely to drop API scopes. To add Codex connector scopes, append e.g. `api.connectors.read api.connectors.invoke`. Empty string omits `scope` from device/refresh only.
 - **`OPENAI_OAUTH_RESOURCE`** — Optional. If set (non-empty), appended as **`resource`** on **`login-browser`** `/oauth/authorize` only. **Not** sent to `/oauth/token` — OpenAI’s token endpoint returns **`unknown_parameter`** for `resource` on refresh and code exchange.
 - **`OPENAI_OAUTH_ORIGINATOR`** — `originator` query param for **`login-browser`** (default `codex_cli_rs`, matches Codex CLI).
 - State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).

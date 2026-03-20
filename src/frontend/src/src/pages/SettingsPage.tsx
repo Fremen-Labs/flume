@@ -439,7 +439,8 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — for <strong>/v1/responses</strong> you usually need{' '}
+                      <strong>ChatGPT / Codex OAuth</strong> — for <strong>/v1/responses</strong> you need consent that
+                      includes <code className="text-[11px]">api.responses.write</code>. Use{' '}
                       <code className="rounded bg-background px-1 py-0.5 text-[11px]">
                         ./flume codex-oauth login-browser
                       </code>{' '}
@@ -448,6 +449,10 @@ export default function SettingsPage() {
                       <code className="text-[11px]">codex login</code> then{' '}
                       <code className="text-[11px]">./flume codex-oauth import</code>. Then save and{' '}
                       <code className="text-[11px]">./flume restart --all</code>.
+                      <span className="block mt-1">
+                        <strong>Refresh token</strong> only renews the same consent — it cannot add missing API scopes.
+                        You must complete a new browser / Codex login if scopes are wrong.
+                      </span>
                     </p>
                     <div className="space-y-2">
                       <Label>OAuth state file</Label>
@@ -477,31 +482,81 @@ export default function SettingsPage() {
                         </span>
                       )}
                     </div>
-                    {data?.oauthStatus?.configured &&
-                      Array.isArray(data.oauthStatus.accessTokenScopes) &&
-                      data.oauthStatus.accessTokenScopes.length > 0 && (
-                        <div className="text-xs space-y-1">
-                          <p className="text-muted-foreground font-medium">Access token scopes (from JWT)</p>
-                          <p className="font-mono break-all text-[11px]">
-                            {data.oauthStatus.accessTokenScopes.join(' ')}
+                    {data?.oauthStatus?.configured && (
+                      <div className="text-xs space-y-2">
+                        {data.oauthStatus.oauthScopeStatus === 'ok' && (
+                          <p className="text-green-700 dark:text-green-500">
+                            OAuth scopes look OK for <code className="text-[11px]">api.responses.write</code>.
                           </p>
-                          {data.oauthStatus.accessTokenScopes.length > 0 &&
-                            data.oauthStatus.hasApiResponsesWrite === false && (
-                            <p className="text-destructive">
-                              Missing <code className="text-[11px]">api.responses.write</code> — run{' '}
-                              <code className="text-[11px]">./flume codex-oauth login-browser</code> or{' '}
-                              <code className="text-[11px]">codex login</code> then{' '}
-                              <code className="text-[11px]">./flume codex-oauth import</code>, then{' '}
-                              <code className="text-[11px]">./flume restart --all</code>.
+                        )}
+                        {data.oauthStatus.oauthScopeStatus === 'no_token' && (
+                          <p className="text-amber-600 dark:text-amber-500">
+                            No access token in the OAuth state file. Click <strong>Refresh token</strong> or complete
+                            login again.
+                          </p>
+                        )}
+                        {data.oauthStatus.oauthScopeStatus === 'opaque_or_unknown' &&
+                          data.oauthStatus.hasAccessToken && (
+                            <p className="text-amber-600 dark:text-amber-500">
+                              Access token is not a JWT we can decode (or parsing failed), so scopes are unknown here.
+                              If API calls return 401 “Missing scopes: api.responses.write”, run{' '}
+                              <code className="text-[11px]">./flume codex-oauth login-browser</code> or import from Codex,
+                              then <code className="text-[11px]">./flume restart --all</code>.
                             </p>
                           )}
-                        </div>
-                      )}
+                        {data.oauthStatus.oauthScopeStatus === 'jwt_no_scp' && (
+                          <p className="text-amber-600 dark:text-amber-500">
+                            JWT decodes but has no <code className="text-[11px]">scp</code> / roles we can read. If you
+                            still get 401 on <code className="text-[11px]">/v1/responses</code>, re-consent via{' '}
+                            <code className="text-[11px]">login-browser</code> or Codex import.
+                          </p>
+                        )}
+                        {data.oauthStatus.oauthScopeStatus === 'missing_responses_write' && (
+                          <p className="text-destructive">
+                            Missing <code className="text-[11px]">api.responses.write</code> in token scopes — run{' '}
+                            <code className="text-[11px]">./flume codex-oauth login-browser</code> or{' '}
+                            <code className="text-[11px]">codex login</code> then{' '}
+                            <code className="text-[11px]">./flume codex-oauth import</code>, then{' '}
+                            <code className="text-[11px]">./flume restart --all</code>. Refresh alone will not fix this.
+                          </p>
+                        )}
+                        {data.oauthStatus.accessTokenAudience ? (
+                          <p className="text-muted-foreground">
+                            <span className="font-medium">Audience</span>{' '}
+                            <code className="break-all text-[11px]">{data.oauthStatus.accessTokenAudience}</code>
+                          </p>
+                        ) : null}
+                        {Array.isArray(data.oauthStatus.accessTokenScopes) &&
+                        data.oauthStatus.accessTokenScopes.length > 0 ? (
+                          <div className="space-y-1">
+                            <p className="text-muted-foreground font-medium">Access token scopes (from JWT)</p>
+                            <p className="font-mono break-all text-[11px]">
+                              {data.oauthStatus.accessTokenScopes.join(' ')}
+                            </p>
+                          </div>
+                        ) : null}
+                        {data.oauthStatus.oauthScopesRequested ? (
+                          <p className="text-muted-foreground">
+                            <span className="font-medium">Scopes requested at login</span>{' '}
+                            <code className="break-all text-[11px]">{data.oauthStatus.oauthScopesRequested}</code>
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
                     {refreshError && (
                       <p className="text-sm text-destructive">{refreshError}</p>
                     )}
                     {refreshSuccess && (
-                      <p className="text-sm text-green-600">Token refreshed successfully.</p>
+                      <div className="space-y-1">
+                        <p className="text-sm text-green-600">Token refreshed successfully.</p>
+                        {data?.oauthStatus?.oauthScopeStatus &&
+                          data.oauthStatus.oauthScopeStatus !== 'ok' && (
+                            <p className="text-sm text-amber-600 dark:text-amber-500">
+                              If scopes were wrong before, they are still wrong — refresh does not add consent. Use{' '}
+                              <code className="text-[11px]">login-browser</code> or Codex import, then restart services.
+                            </p>
+                          )}
+                      </div>
                     )}
                   </div>
                 )}

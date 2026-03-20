@@ -32,9 +32,7 @@ _PROVIDER_BASE_URLS = {
 }
 
 _DEFAULT_OPENAI_OAUTH_SCOPES = (
-    'openid profile email offline_access '
-    'model.request api.model.read api.responses.write '
-    'api.connectors.read api.connectors.invoke'
+    'openid profile email offline_access model.request api.model.read api.responses.write'
 )
 
 

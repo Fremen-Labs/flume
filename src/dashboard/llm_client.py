@@ -30,9 +30,7 @@ _PROVIDER_BASE_URLS = {
 
 # Match install/setup/codex_oauth_login.py — refresh can ask IdP to preserve API scopes.
 _DEFAULT_OPENAI_OAUTH_SCOPES = (
-    'openid profile email offline_access '
-    'model.request api.model.read api.responses.write '
-    'api.connectors.read api.connectors.invoke'
+    'openid profile email offline_access model.request api.model.read api.responses.write'
 )
 
 

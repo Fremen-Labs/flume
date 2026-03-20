@@ -46,10 +46,10 @@ USER_AGENT = "Flume/1.0 (codex-oauth-login; +https://github.com/Fremen-Labs/flum
 # Device + token exchange must request API scopes or access tokens only include openid/profile/email
 # and /v1/responses returns 401 "Missing scopes: api.responses.write" (see OpenAI Codex OAuth).
 # Override with OPENAI_OAUTH_SCOPES=""; omit from requests if you hit a server that rejects scope.
+# Connector scopes (Codex browser URL) are omitted by default — some consent flows drop API scopes
+# when combined; api.responses.write is required for /v1/responses.
 DEFAULT_OAUTH_SCOPES = (
-    "openid profile email offline_access "
-    "model.request api.model.read api.responses.write "
-    "api.connectors.read api.connectors.invoke"
+    "openid profile email offline_access model.request api.model.read api.responses.write"
 )
 
 

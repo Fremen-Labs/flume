@@ -121,6 +121,14 @@ export interface LlmSettings {
   oauthTokenUrl: string;
 }
 
+/** From dashboard get_oauth_status — token shape / consent diagnostics */
+export type LlmOAuthScopeStatus =
+  | 'ok'
+  | 'missing_responses_write'
+  | 'jwt_no_scp'
+  | 'opaque_or_unknown'
+  | 'no_token';
+
 export interface LlmOAuthStatus {
   configured: boolean;
   message?: string;
@@ -130,8 +138,14 @@ export interface LlmOAuthStatus {
   /** JWT scp claim (decoded for display only) */
   accessTokenScopes?: string[];
   accessTokenAudience?: string;
+  /** True if token has three dot-separated segments (may still be opaque to us). */
+  accessTokenJwtLike?: boolean;
+  /** True if we successfully base64-decoded the JWT payload. */
+  accessTokenJwtParsed?: boolean;
   hasApiResponsesWrite?: boolean;
   oauthScopesRequested?: string;
+  /** Consent / token diagnostics; refresh alone will not upgrade this from missing → ok. */
+  oauthScopeStatus?: LlmOAuthScopeStatus;
 }
 
 export interface LlmSettingsResponse {
