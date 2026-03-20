@@ -126,6 +126,10 @@ if [ -f "${SRC}/flume_secrets.py" ]; then
     cp "${SRC}/flume_secrets.py" "${STAGE}/"
     success "flume_secrets.py (OpenBao / config bootstrap)"
 fi
+if [ -f "${SRC}/workspace_llm_env.py" ]; then
+    cp "${SRC}/workspace_llm_env.py" "${STAGE}/"
+    success "workspace_llm_env.py (worker LLM env sync)"
+fi
 
 # Copy dashboard
 # =============================================================================

@@ -12,6 +12,7 @@ _WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
 if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
+from workspace_llm_env import resolve_cloud_agent_model, sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
@@ -55,8 +56,8 @@ def log(msg):
 
 def load_agent_role_defs():
     """Merge per-role overrides from agent_models.json with LLM_* / EXECUTION_HOST env."""
-    default_model = os.environ.get('LLM_MODEL', 'llama3.2')
-    default_host = os.environ.get('EXECUTION_HOST', 'localhost')
+    default_model = (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
+    default_host = (os.environ.get('EXECUTION_HOST') or 'localhost').strip() or 'localhost'
     default_prov = os.environ.get('LLM_PROVIDER', 'ollama').strip().lower()
     cfg = {}
     if AGENT_MODELS_FILE.is_file():
@@ -77,6 +78,7 @@ def load_agent_role_defs():
             model = (spec.get('model') or model).strip() or model
             host = (spec.get('executionHost') or host).strip() or host
             prov = (spec.get('provider') or prov).strip().lower() or prov
+        model = resolve_cloud_agent_model(prov, model, default_model)
         defs.append(
             {
                 'role': role,
@@ -215,8 +217,9 @@ def save_state(state):
 
 
 def cycle():
-    # Re-merge .env + OpenBao so LLM_MODEL / LLM_PROVIDER track Settings without restarting.
+    # Re-merge .env + OpenBao, then same LLM_* resolution as the dashboard (load_effective_pairs).
     apply_runtime_config(_WS)
+    sync_llm_env_from_workspace(_WS)
     workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:

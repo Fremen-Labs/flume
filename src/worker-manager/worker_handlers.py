@@ -13,6 +13,7 @@ _WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
 if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
+from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
@@ -902,6 +903,7 @@ def main():
     while True:
         try:
             apply_runtime_config(_WS)
+            sync_llm_env_from_workspace(_WS)
             state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':

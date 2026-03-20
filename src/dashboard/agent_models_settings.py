@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from llm_settings import PROVIDER_CATALOG, load_effective_pairs, get_oauth_status
+from workspace_llm_env import resolve_cloud_agent_model
 
 AGENT_ROLE_IDS = (
     "intake",
@@ -178,6 +179,7 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
             rdef = {}
         prov = (rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
         model = (rdef.get("model") or default_model).strip() or default_model
+        model = resolve_cloud_agent_model(prov, model, default_model)
         host = (rdef.get("executionHost") or default_host).strip() or default_host
         effective_roles[role] = {"provider": prov, "model": model, "executionHost": host}
 
