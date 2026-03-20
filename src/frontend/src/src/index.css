@@ -1,4 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -143,122 +144,124 @@
     --mesh-base: 0 0% 98%;
   }
 
-  /* ─── RETRO SKIN (dark) ─── */
+  /* ─── RETRO SKIN (dark) – 1980s pixel art / 8-bit ─── */
   [data-skin='retro'] {
-    --background: 30 15% 8%;
-    --foreground: 45 30% 88%;
+    --background: 180 50% 4%;
+    --foreground: 180 100% 90%;
 
-    --card: 30 12% 10%;
-    --card-foreground: 45 30% 88%;
+    --card: 180 40% 6%;
+    --card-foreground: 180 100% 90%;
 
-    --popover: 30 12% 10%;
-    --popover-foreground: 45 30% 88%;
+    --popover: 180 40% 6%;
+    --popover-foreground: 180 100% 90%;
 
-    --primary: 38 92% 50%;
-    --primary-foreground: 30 15% 8%;
+    --primary: 180 100% 50%;
+    --primary-foreground: 180 50% 4%;
 
-    --secondary: 35 25% 45%;
-    --secondary-foreground: 45 30% 88%;
+    --secondary: 300 100% 60%;
+    --secondary-foreground: 180 50% 4%;
 
-    --muted: 30 10% 16%;
-    --muted-foreground: 35 20% 50%;
+    --muted: 180 30% 12%;
+    --muted-foreground: 180 50% 55%;
 
-    --accent: 30 12% 18%;
-    --accent-foreground: 45 30% 88%;
+    --accent: 180 40% 14%;
+    --accent-foreground: 180 100% 90%;
 
-    --destructive: 0 65% 50%;
+    --destructive: 0 100% 55%;
     --destructive-foreground: 0 0% 100%;
 
-    --success: 85 45% 40%;
-    --success-foreground: 30 15% 8%;
+    --success: 120 100% 40%;
+    --success-foreground: 180 50% 4%;
 
-    --warning: 38 92% 50%;
-    --warning-foreground: 30 15% 8%;
+    --warning: 60 100% 50%;
+    --warning-foreground: 180 50% 4%;
 
-    --border: 35 20% 25% / 0.5;
-    --input: 35 15% 20% / 0.6;
-    --ring: 38 92% 50%;
+    --border: 180 60% 25% / 0.8;
+    --input: 180 40% 15% / 0.9;
+    --ring: 180 100% 50%;
 
-    --sidebar-background: 30 15% 6%;
-    --sidebar-foreground: 45 25% 75%;
-    --sidebar-primary: 38 92% 50%;
-    --sidebar-primary-foreground: 30 15% 8%;
-    --sidebar-accent: 30 10% 16%;
-    --sidebar-accent-foreground: 45 30% 88%;
-    --sidebar-border: 35 20% 25% / 0.5;
-    --sidebar-ring: 38 92% 50%;
+    --sidebar-background: 180 50% 3%;
+    --sidebar-foreground: 180 100% 85%;
+    --sidebar-primary: 180 100% 50%;
+    --sidebar-primary-foreground: 180 50% 4%;
+    --sidebar-accent: 180 30% 12%;
+    --sidebar-accent-foreground: 180 100% 90%;
+    --sidebar-border: 180 60% 25% / 0.8;
+    --sidebar-ring: 180 100% 50%;
 
-    --glass-bg: 30 12% 10%;
-    --glass-border: 35 20% 25% / 0.5;
-    --glass-glow: 38 92% 50% / 0.15;
+    --glass-bg: 180 40% 6%;
+    --glass-border: 180 60% 25% / 0.8;
+    --glass-glow: 180 100% 50% / 0.2;
 
-    --glass-card-bg: rgba(40, 32, 24, 0.85);
-    --glass-card-border: rgba(180, 140, 80, 0.2);
-    --glass-card-shadow: rgba(0, 0, 0, 0.4);
-    --glass-card-inset: rgba(255, 220, 160, 0.04);
-    --glass-sidebar-bg: rgba(30, 24, 18, 0.9);
-    --glass-sidebar-border: rgba(180, 140, 80, 0.15);
-    --grid-line-color: rgba(180, 140, 80, 0.08);
-    --mesh-base: 30 15% 8%;
+    --glass-card-bg: rgba(4, 24, 28, 0.95);
+    --glass-card-border: rgba(0, 255, 255, 0.35);
+    --glass-card-shadow: rgba(0, 0, 0, 0.6);
+    --glass-card-inset: rgba(0, 255, 255, 0.06);
+    --glass-sidebar-bg: rgba(2, 18, 22, 0.98);
+    --glass-sidebar-border: rgba(0, 255, 255, 0.3);
+    --grid-line-color: rgba(0, 255, 255, 0.12);
+    --mesh-base: 180 50% 4%;
+    --radius: 0;
   }
 
-  /* ─── RETRO SKIN (light) ─── */
+  /* ─── RETRO SKIN (light) – 1980s pixel art light mode ─── */
   [data-skin='retro'].light {
-    --background: 40 25% 96%;
-    --foreground: 30 20% 18%;
+    --background: 60 20% 96%;
+    --foreground: 180 50% 12%;
 
-    --card: 45 30% 99%;
-    --card-foreground: 30 20% 18%;
+    --card: 60 15% 99%;
+    --card-foreground: 180 50% 12%;
 
-    --popover: 45 30% 99%;
-    --popover-foreground: 30 20% 18%;
+    --popover: 60 15% 99%;
+    --popover-foreground: 180 50% 12%;
 
-    --primary: 32 85% 42%;
-    --primary-foreground: 45 30% 98%;
+    --primary: 180 80% 35%;
+    --primary-foreground: 60 20% 98%;
 
-    --secondary: 35 25% 45%;
-    --secondary-foreground: 45 30% 98%;
+    --secondary: 300 60% 45%;
+    --secondary-foreground: 60 20% 98%;
 
-    --muted: 40 20% 90%;
-    --muted-foreground: 35 15% 40%;
+    --muted: 60 15% 90%;
+    --muted-foreground: 180 30% 40%;
 
-    --accent: 45 25% 92%;
-    --accent-foreground: 30 20% 18%;
+    --accent: 60 20% 92%;
+    --accent-foreground: 180 50% 12%;
 
-    --destructive: 0 65% 48%;
+    --destructive: 0 70% 45%;
     --destructive-foreground: 0 0% 100%;
 
-    --success: 85 45% 32%;
-    --success-foreground: 45 30% 98%;
+    --success: 120 60% 30%;
+    --success-foreground: 60 20% 98%;
 
-    --warning: 38 85% 42%;
-    --warning-foreground: 45 30% 98%;
+    --warning: 45 90% 45%;
+    --warning-foreground: 180 50% 12%;
 
-    --border: 35 25% 80%;
-    --input: 35 20% 85%;
-    --ring: 32 85% 42%;
+    --border: 180 30% 75%;
+    --input: 180 25% 85%;
+    --ring: 180 80% 35%;
 
-    --sidebar-background: 42 28% 97%;
-    --sidebar-foreground: 30 15% 35%;
-    --sidebar-primary: 32 85% 42%;
-    --sidebar-primary-foreground: 45 30% 98%;
-    --sidebar-accent: 45 25% 92%;
-    --sidebar-accent-foreground: 30 20% 18%;
-    --sidebar-border: 35 25% 85%;
-    --sidebar-ring: 32 85% 42%;
+    --sidebar-background: 60 18% 98%;
+    --sidebar-foreground: 180 40% 25%;
+    --sidebar-primary: 180 80% 35%;
+    --sidebar-primary-foreground: 60 20% 98%;
+    --sidebar-accent: 60 20% 92%;
+    --sidebar-accent-foreground: 180 50% 12%;
+    --sidebar-border: 180 30% 80%;
+    --sidebar-ring: 180 80% 35%;
 
-    --glass-bg: 45 30% 99%;
-    --glass-border: 35 25% 85%;
-    --glass-glow: 32 85% 42% / 0.12;
+    --glass-bg: 60 15% 99%;
+    --glass-border: 180 30% 75%;
+    --glass-glow: 180 80% 35% / 0.15;
 
-    --glass-card-bg: rgba(255, 248, 235, 0.9);
-    --glass-card-border: rgba(180, 140, 80, 0.25);
-    --glass-card-shadow: rgba(120, 90, 50, 0.08);
-    --glass-card-inset: rgba(255, 255, 255, 0.7);
-    --glass-sidebar-bg: rgba(255, 250, 240, 0.95);
-    --glass-sidebar-border: rgba(180, 140, 80, 0.2);
-    --grid-line-color: rgba(180, 140, 80, 0.06);
-    --mesh-base: 40 25% 96%;
+    --glass-card-bg: rgba(250, 252, 252, 0.95);
+    --glass-card-border: rgba(0, 150, 170, 0.4);
+    --glass-card-shadow: rgba(0, 80, 90, 0.1);
+    --glass-card-inset: rgba(255, 255, 255, 0.8);
+    --glass-sidebar-bg: rgba(252, 253, 253, 0.98);
+    --glass-sidebar-border: rgba(0, 150, 170, 0.35);
+    --grid-line-color: rgba(0, 150, 170, 0.15);
+    --mesh-base: 60 20% 96%;
+    --radius: 0;
   }
 }
 
@@ -270,6 +273,51 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  /* ─── RETRO SKIN: 1980s pixel art overrides ─── */
+  [data-skin='retro'] body {
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    font-size: 10px;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+  }
+
+  [data-skin='retro'] .glass-card,
+  [data-skin='retro'] .glass-card-glow,
+  [data-skin='retro'] .glass-card-sweep,
+  [data-skin='retro'] .glass-panel,
+  [data-skin='retro'] .glass-surface {
+    border-radius: 0;
+    border-width: 2px;
+    box-shadow:
+      4px 4px 0 var(--glass-card-shadow),
+      inset 0 0 0 1px var(--glass-card-inset);
+  }
+
+  [data-skin='retro'] .glass-card:hover,
+  [data-skin='retro'] .glass-card-glow:hover {
+    box-shadow:
+      6px 6px 0 var(--glass-card-shadow),
+      inset 0 0 0 1px var(--glass-card-inset);
+  }
+
+  [data-skin='retro'] [class*='rounded'] {
+    border-radius: 0 !important;
+  }
+
+  [data-skin='retro'] button[class*='rounded'],
+  [data-skin='retro'] a[class*='rounded'],
+  [data-skin='retro'] input,
+  [data-skin='retro'] select {
+    border-radius: 0 !important;
+  }
+
+  /* Pixel-art style for SVG icons in Retro skin */
+  [data-skin='retro'] svg {
+    stroke-linecap: square;
+    stroke-linejoin: miter;
   }
 }
 
