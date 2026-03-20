@@ -308,11 +308,18 @@ def _planner_llm_error_hint(err: str) -> str:
             'Save Settings again or run ./flume restart after changing .env.'
         )
     if '401' in err or 'Unauthorized' in err:
-        if 'Missing scopes' in err or 'api.responses.write' in err:
+        if 'model.request' in err:
             return (
-                ' OAuth token is missing API scopes (refresh will not fix this). Run '
-                './flume codex-oauth login-browser, then ./flume restart --all. Or: codex login then '
-                './flume codex-oauth import. Settings → LLM shows decoded JWT scopes.'
+                ' ChatGPT/Codex **browser OAuth** tokens do not include **model.request** (OpenAI does not allow '
+                'that scope on /oauth/authorize for the Codex client), but **/v1/chat/completions** still requires it. '
+                'Plan New Work and similar calls need an OpenAI **platform API key** (sk-…): Settings → LLM → '
+                'Auth mode → API Key, from https://platform.openai.com/api-keys — OAuth alone cannot satisfy this API.'
+            )
+        if 'api.responses.write' in err:
+            return (
+                ' Token lacks api.responses.write for /v1/responses. With current Flume, Codex OAuth usually routes '
+                'to chat/completions instead; if you still see responses in the error, restart all services. '
+                'Otherwise use a platform sk- API key.'
             )
         return (
             ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
@@ -2133,6 +2140,32 @@ class Handler(BaseHTTPRequestHandler):
             for _k, _v in updates.items():
                 os.environ[_k] = _v if _v is not None else ''
             self._json_response(200, {'ok': True, 'restartRequired': True})
+            return
+
+        if self.path == '/api/settings/llm/credentials':
+            try:
+                import llm_credentials_store as lcs
+                import llm_settings
+                payload = self._read_json_body()
+            except json.JSONDecodeError:
+                self._json_response(400, {'error': 'Invalid JSON body'})
+                return
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+                return
+            ok, err, env_updates = lcs.apply_credentials_action(WORKSPACE_ROOT, payload)
+            if not ok:
+                self._json_response(422, {'ok': False, 'error': err})
+                return
+            if env_updates:
+                try:
+                    llm_settings._update_env_keys(WORKSPACE_ROOT, env_updates)
+                except Exception as e:
+                    self._json_response(502, {'ok': False, 'error': str(e)[:300]})
+                    return
+                for _k, _v in env_updates.items():
+                    os.environ[_k] = _v if _v is not None else ''
+            self._json_response(200, {'ok': True, 'restartRequired': bool(env_updates)})
             return
 
         if self.path == '/api/settings/llm/oauth/refresh':

@@ -36,6 +36,8 @@ _DEFAULT_OPENAI_OAUTH_SCOPES = (
     'openid profile email offline_access model.request api.model.read api.responses.write'
 )
 
+_UNSET = object()
+
 
 def _openai_oauth_refresh_scopes() -> str | None:
     raw = os.environ.get('OPENAI_OAUTH_SCOPES')
@@ -60,9 +62,12 @@ def default_base_url_for_provider(provider_id: str) -> str:
 def _merge_runtime(
     provider_override: str | None = None,
     base_url_override: str | None = None,
+    api_key_override: object = _UNSET,
 ):
     rt = _runtime()
     if not provider_override:
+        if api_key_override is not _UNSET:
+            rt = {**rt, 'api_key': str(api_key_override or '').strip()}
         return rt
     prov = provider_override.strip().lower()
     rt = {**rt, 'provider': prov}
@@ -70,6 +75,8 @@ def _merge_runtime(
         rt['base_url'] = str(base_url_override).strip().rstrip('/')
     else:
         rt['base_url'] = default_base_url_for_provider(prov)
+    if api_key_override is not _UNSET:
+        rt = {**rt, 'api_key': str(api_key_override or '').strip()}
     return rt
 
 
@@ -281,11 +288,15 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if body:
             msg += f' — {body}'
         if e.code == 401 and 'openai.com' in (url or '').lower():
-            if 'Missing scopes' in body or 'api.responses.write' in body:
+            if 'model.request' in body:
                 msg += (
-                    ' Hint: Codex browser OAuth JWTs usually omit api.responses.write; Flume should use '
-                    '/v1/chat/completions instead of /v1/responses. git pull, ./flume restart --all. '
-                    'Or use a platform sk- API key.'
+                    ' Hint: ChatGPT/Codex browser OAuth cannot obtain model.request; this endpoint requires it. '
+                    'Use an OpenAI platform API key (sk-…) in Settings → LLM → API Key.'
+                )
+            elif 'Missing scopes' in body or 'api.responses.write' in body:
+                msg += (
+                    ' Hint: Codex OAuth JWTs usually omit api.responses.write; Flume uses /v1/chat/completions. '
+                    'For persistent 401, use a platform sk- API key.'
                 )
             else:
                 msg += (
@@ -409,6 +420,17 @@ def _openai_bearer_for_request(rt: dict) -> str:
     return api_key or _refresh_oauth_access_token(rt)
 
 
+def _google_ai_studio_openai_compat(rt: dict) -> bool:
+    """
+    Gemini's OpenAI-compatible base URL expects ``x-goog-api-key``, not
+    ``Authorization: Bearer <key>``. See Gemini OpenAI API compatibility docs.
+    """
+    if rt.get('provider') == 'gemini':
+        return True
+    origin = _openai_api_origin(rt).lower()
+    return 'generativelanguage.googleapis.com' in origin
+
+
 def _openai_headers(rt: dict):
     key = _openai_bearer_for_request(rt)
     if not key:
@@ -416,6 +438,8 @@ def _openai_headers(rt: dict):
             'LLM_API_KEY is empty and OpenAI OAuth token refresh is not configured. '
             'Set LLM_API_KEY or configure OPENAI_OAUTH_STATE_FILE.'
         )
+    if _google_ai_studio_openai_compat(rt):
+        return {'x-goog-api-key': key}
     return {'Authorization': f'Bearer {key}'}
 
 
@@ -552,12 +576,14 @@ def chat(
     max_tokens=8192,
     provider_override=None,
     base_url_override=None,
+    api_key_override=_UNSET,
 ):
     """Call the configured LLM and return the assistant's text response.
 
-    provider_override / base_url_override: optional per-call routing (e.g. task preferred_llm_provider).
+    provider_override / base_url_override / api_key_override: optional per-call routing
+    (e.g. task preferred_llm_provider / saved credential).
     """
-    rt = _merge_runtime(provider_override, base_url_override)
+    rt = _merge_runtime(provider_override, base_url_override, api_key_override)
     m = model or rt['default_model']
     prov = rt['provider']
     if prov == 'ollama':
@@ -576,9 +602,10 @@ def chat_with_tools(
     max_tokens=4096,
     provider_override=None,
     base_url_override=None,
+    api_key_override=_UNSET,
 ):
     """Call the configured LLM with tool definitions."""
-    rt = _merge_runtime(provider_override, base_url_override)
+    rt = _merge_runtime(provider_override, base_url_override, api_key_override)
     m = model or rt['default_model']
     prov = rt['provider']
     if prov == 'ollama':

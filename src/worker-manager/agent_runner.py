@@ -2,12 +2,17 @@
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+import llm_credentials_store as lcs  # noqa: E402
+
 AGENTS_ROOT = BASE / 'agents'
 
 
@@ -34,9 +39,19 @@ def _load_system_prompt(role: str) -> str:
 
 
 def _task_llm_kw(task: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """Route LLM calls per task when manager set preferred_llm_provider (e.g. Ollama vs OpenAI)."""
+    """Route LLM calls per task: saved credential (API key + provider) or preferred_llm_provider."""
     if not task:
         return {}
+    cred_id = str(task.get('preferred_llm_credential_id') or '').strip()
+    if cred_id and cred_id != lcs.SETTINGS_DEFAULT_CREDENTIAL_ID:
+        resolved = lcs.get_resolved_for_worker(BASE, cred_id)
+        if resolved:
+            bu = (resolved.get('base_url') or '').strip() or None
+            return {
+                'provider_override': resolved['provider'],
+                'base_url_override': bu,
+                'api_key_override': resolved.get('api_key', ''),
+            }
     pov = (task.get('preferred_llm_provider') or '').strip().lower()
     if not pov:
         return {}

@@ -17,6 +17,7 @@ import type {
   LlmSettingsCatalogItem,
   LlmSettingsResponse,
   LlmSettingsPayload,
+  LlmCredentialActionPayload,
   RepoSettingsResponse,
   RepoSettingsPayload,
 } from '@/types';
@@ -35,6 +36,17 @@ async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boole
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
+  return data;
+}
+
+async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean; restartRequired?: boolean }> {
+  const res = await fetch('/api/settings/llm/credentials', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
   return data;
 }
 
@@ -89,6 +101,9 @@ export default function SettingsPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [refreshSuccess, setRefreshSuccess] = useState(false);
+  const [credBusy, setCredBusy] = useState<string | null>(null);
+  const [credMsg, setCredMsg] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
 
   const saveMutation = useMutation({
     mutationFn: saveLlmSettings,
@@ -174,9 +189,29 @@ export default function SettingsPage() {
       apiKey: effectiveSettings.authMode === 'oauth' ? '' : (form.apiKey ?? effectiveSettings.apiKey ?? ''),
       oauthStateFile: effectiveSettings.oauthStateFile,
       oauthTokenUrl: effectiveSettings.oauthTokenUrl,
+      credentialLabel: form.credentialLabel ?? effectiveSettings.credentialLabel ?? undefined,
+      credentialId:
+        form.credentialId === ''
+          ? undefined
+          : (form.credentialId !== undefined ? form.credentialId : effectiveSettings.credentialId) || undefined,
     };
     if (payload.apiKey === '***') delete (payload as Record<string, unknown>).apiKey;
     saveMutation.mutate(payload);
+  };
+
+  const runCredAction = async (payload: LlmCredentialActionPayload, okMessage: string) => {
+    setCredMsg(null);
+    setCredBusy(payload.action + (payload.id || ''));
+    try {
+      await llmCredentialAction(payload);
+      setCredMsg(okMessage);
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
+      setTimeout(() => setCredMsg(null), 4000);
+    } catch (e) {
+      setCredMsg(e instanceof Error ? e.message : 'Credential action failed');
+    } finally {
+      setCredBusy(null);
+    }
   };
 
   const effectiveRepo = { ...repoData?.settings, ...repoForm };
@@ -406,6 +441,109 @@ export default function SettingsPage() {
                 )}
 
                 <h3 className="text-sm font-medium pt-2 border-t">Authentication</h3>
+                {(data?.credentials?.length ?? 0) > 0 && (
+                  <div className="space-y-2 rounded-lg border border-border/50 bg-muted/20 p-3">
+                    <Label className="text-xs text-muted-foreground">Saved API keys</Label>
+                    <p className="text-[11px] text-muted-foreground leading-snug">
+                      Each key is labeled and stored in{' '}
+                      <code className="text-[10px]">worker-manager/llm_credentials.json</code>. Use <strong>Use</strong>{' '}
+                      to copy one into the active Settings profile (LLM_* env).
+                    </p>
+                    <ul className="space-y-2">
+                      {(data?.credentials ?? []).map((c) => (
+                        <li
+                          key={c.id}
+                          className="flex flex-col gap-2 rounded-md border border-border/40 bg-background/60 p-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2"
+                        >
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 flex-1">
+                            <span className="font-medium text-sm truncate">{c.label}</span>
+                            <span className="text-xs text-muted-foreground">{c.provider}</span>
+                            <span className="font-mono text-[11px] text-muted-foreground">
+                              {c.hasKey ? `···${c.keySuffix || '••••'}` : 'empty'}
+                            </span>
+                            {data?.activeCredentialId === c.id && (
+                              <span className="text-[10px] font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                                Active
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-1 shrink-0">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              className="h-8"
+                              disabled={!!credBusy}
+                              onClick={() =>
+                                void runCredAction({ action: 'activate', id: c.id }, 'Active profile updated.')
+                              }
+                            >
+                              Use
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-8"
+                              disabled={!!credBusy}
+                              onClick={() => {
+                                updateForm({ credentialId: c.id, credentialLabel: c.label });
+                                setCredMsg(`Editing "${c.label}" — enter a new key below and Save, or rename here.`);
+                              }}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 text-destructive hover:text-destructive"
+                              disabled={!!credBusy}
+                              onClick={() => {
+                                if (!window.confirm(`Delete saved key "${c.label}"?`)) return;
+                                void runCredAction({ action: 'delete', id: c.id }, 'Credential removed.');
+                              }}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                          <div className="flex w-full flex-col gap-1 sm:flex-row sm:items-center">
+                            <Input
+                              className="h-8 text-sm flex-1"
+                              placeholder="Rename…"
+                              value={renameDraft[c.id] ?? ''}
+                              onChange={(e) => setRenameDraft((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                            />
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-8 shrink-0"
+                              disabled={!!credBusy || !(renameDraft[c.id] ?? '').trim()}
+                              onClick={() => {
+                                const name = (renameDraft[c.id] ?? '').trim();
+                                if (!name) return;
+                                void runCredAction(
+                                  { action: 'patch', id: c.id, label: name },
+                                  'Label updated.',
+                                ).then(() =>
+                                  setRenameDraft((prev) => {
+                                    const next = { ...prev };
+                                    delete next[c.id];
+                                    return next;
+                                  }),
+                                );
+                              }}
+                            >
+                              Save label
+                            </Button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    {credMsg && <p className="text-xs text-muted-foreground">{credMsg}</p>}
+                  </div>
+                )}
                 {supportsOAuth ? (
                   <div className="space-y-2">
                     <Label>Auth mode</Label>
@@ -425,38 +563,62 @@ export default function SettingsPage() {
                 ) : null}
 
                 {effectiveSettings.authMode === 'api_key' && providerId !== 'ollama' && (
-                  <div className="space-y-2">
-                    <Label>API Key</Label>
-                    <Input
-                      type="password"
-                      placeholder={effectiveSettings.apiKey === '***' ? '••••••••' : 'sk-...'}
-                      value={form.apiKey ?? (effectiveSettings.apiKey === '***' ? '' : effectiveSettings.apiKey ?? '')}
-                      onChange={(e) => updateForm({ apiKey: e.target.value })}
-                    />
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <Label>Key label</Label>
+                      <Input
+                        placeholder="e.g. Work Gemini, Personal OpenAI"
+                        value={form.credentialLabel ?? effectiveSettings.credentialLabel ?? ''}
+                        onChange={(e) => updateForm({ credentialLabel: e.target.value })}
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Shown in Settings and agent configuration. When you paste a new API key and Save, the key is
+                        stored under this label (and becomes the active profile).
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>API Key</Label>
+                      {effectiveSettings.apiKey === '***' && (
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                          Key is saved
+                          {effectiveSettings.keySuffix ? ` (ends with ···{effectiveSettings.keySuffix})` : ''}.
+                          Paste a new key only if you want to replace it.
+                        </p>
+                      )}
+                      <Input
+                        type="password"
+                        placeholder={effectiveSettings.apiKey === '***' ? 'Leave blank to keep saved key' : 'sk-… or paste key'}
+                        value={form.apiKey ?? (effectiveSettings.apiKey === '***' ? '' : effectiveSettings.apiKey ?? '')}
+                        onChange={(e) => updateForm({ apiKey: e.target.value })}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => updateForm({ credentialId: '', credentialLabel: '' })}
+                    >
+                      New credential (clear selection)
+                    </Button>
                   </div>
                 )}
 
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50">
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong>ChatGPT / Codex OAuth</strong> — Flume’s planner calls OpenAI{' '}
-                      <code className="text-[11px]">/v1/responses</code>, which requires{' '}
-                      <code className="text-[11px]">api.responses.write</code>.{' '}
-                      <strong className="text-foreground">Do not use device-code</strong>{' '}
-                      <code className="text-[11px]">./flume codex-oauth login</code> for that — it usually completes
-                      successfully but <em>without</em> that scope (401 “Missing scopes”). Use{' '}
-                      <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                        ./flume codex-oauth login-browser
-                      </code>{' '}
-                      (browser on this machine) or{' '}
-                      <code className="text-[11px]">./flume codex-oauth login-paste</code> on headless servers
-                      (prints URL / optional HTML; paste redirect URL back). Alternatively:{' '}
-                      <code className="text-[11px]">codex login</code> then{' '}
-                      <code className="text-[11px]">./flume codex-oauth import</code>. Then save and{' '}
+                      <strong>ChatGPT / Codex OAuth</strong> — good for Codex-style sessions.{' '}
+                      <strong className="text-foreground">Plan New Work and hosted GPT via api.openai.com</strong> need an
+                      OpenAI <strong>platform API key</strong> (<code className="text-[11px]">sk-…</code>): switch{' '}
+                      <strong>Auth mode</strong> to <strong>API Key</strong> or add the key from{' '}
+                      <span className="whitespace-nowrap">platform.openai.com/api-keys</span>. Codex browser OAuth tokens
+                      do not receive <code className="text-[11px]">model.request</code> on authorize, but{' '}
+                      <code className="text-[11px]">/v1/chat/completions</code> still requires it — so OAuth alone often
+                      cannot run the planner. Optional: <code className="text-[11px]">./flume codex-oauth login-paste</code>{' '}
+                      / <code className="text-[11px]">login-browser</code> / Codex import for other uses; then{' '}
                       <code className="text-[11px]">./flume restart --all</code>.
                       <span className="block mt-1">
-                        <strong>Refresh token</strong> only renews the same consent — it cannot add missing API scopes.
-                        You must complete a new browser / Codex login if scopes are wrong.
+                        <strong>Refresh token</strong> only renews the same consent — it cannot add API product scopes
+                        OpenAI did not grant.
                       </span>
                     </p>
                     <div className="space-y-2">
@@ -518,11 +680,11 @@ export default function SettingsPage() {
                         )}
                         {data.oauthStatus.oauthScopeStatus === 'missing_responses_write' && (
                           <p className="text-amber-700 dark:text-amber-400">
-                            JWT does not list <code className="text-[11px]">api.responses.write</code> — normal for
-                            official Codex browser OAuth (connector scopes only). Flume should use{' '}
-                            <strong>/v1/chat/completions</strong> for planner and agents; restart dashboard/workers after
-                            upgrade. If you still get 401, use a platform <code className="text-[11px]">sk-</code> API key
-                            or check model access for your account.
+                            Typical <strong>Codex OAuth</strong> JWT (connector scopes only). Flume routes to{' '}
+                            <code className="text-[11px]">/v1/chat/completions</code>, but OpenAI usually still requires{' '}
+                            <code className="text-[11px]">model.request</code> — not granted by Codex authorize. For{' '}
+                            <strong>Plan New Work</strong>, use a platform <code className="text-[11px]">sk-</code> API key
+                            (Auth mode → API Key).
                           </p>
                         )}
                         {data.oauthStatus.accessTokenAudience ? (

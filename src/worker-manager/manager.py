@@ -72,12 +72,14 @@ def load_agent_role_defs():
         model = default_model
         host = default_host
         prov = default_prov
+        cred_id = ''
         if isinstance(spec, str):
             model = spec.strip() or model
         elif isinstance(spec, dict):
             model = (spec.get('model') or model).strip() or model
             host = (spec.get('executionHost') or host).strip() or host
             prov = (spec.get('provider') or prov).strip().lower() or prov
+            cred_id = str(spec.get('credentialId') or spec.get('credential_id') or '').strip()
         model = resolve_cloud_agent_model(prov, model, default_model)
         defs.append(
             {
@@ -85,6 +87,7 @@ def load_agent_role_defs():
                 'model': model,
                 'execution_host': host,
                 'llm_provider': prov,
+                'llm_credential_id': cred_id,
             }
         )
     return defs
@@ -101,6 +104,7 @@ def build_workers():
                     'model': role_def['model'],
                     'execution_host': role_def['execution_host'],
                     'llm_provider': role_def['llm_provider'],
+                    'llm_credential_id': role_def.get('llm_credential_id') or '',
                 }
             )
     return workers
@@ -191,6 +195,7 @@ def claim(
     preferred_model=None,
     worker_name=None,
     preferred_llm_provider=None,
+    preferred_llm_credential_id=None,
 ):
     doc = {
         'status': 'running' if role != 'pm' else 'planned',
@@ -206,6 +211,8 @@ def claim(
         doc['preferred_model'] = preferred_model
     if preferred_llm_provider:
         doc['preferred_llm_provider'] = preferred_llm_provider
+    if preferred_llm_credential_id:
+        doc['preferred_llm_credential_id'] = preferred_llm_credential_id
     if worker_name:
         doc['active_worker'] = worker_name
     es_request(f'/{TASK_INDEX}/_update/{item_id}', {'doc': doc}, method='POST')
@@ -234,6 +241,7 @@ def cycle():
             src = task.get('_source', {})
             pref_model = src.get('preferred_model') or worker['model']
             pref_prov = src.get('preferred_llm_provider') or worker.get('llm_provider')
+            pref_cred = src.get('preferred_llm_credential_id') or worker.get('llm_credential_id')
             claim(
                 item_id,
                 worker['role'],
@@ -241,12 +249,14 @@ def cycle():
                 pref_model,
                 worker['name'],
                 pref_prov,
+                pref_cred,
             )
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = src.get('id', item_id)
             snapshot['current_task_title'] = src.get('title')
             snapshot['preferred_model'] = pref_model
             snapshot['preferred_llm_provider'] = pref_prov
+            snapshot['preferred_llm_credential_id'] = pref_cred
             log(f"{worker['name']} claimed {snapshot['current_task_id']}")
         state['workers'].append(snapshot)
     save_state(state)

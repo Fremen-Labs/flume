@@ -130,6 +130,10 @@ if [ -f "${SRC}/workspace_llm_env.py" ]; then
     cp "${SRC}/workspace_llm_env.py" "${STAGE}/"
     success "workspace_llm_env.py (worker LLM env sync)"
 fi
+if [ -f "${SRC}/llm_credentials_store.py" ]; then
+    cp "${SRC}/llm_credentials_store.py" "${STAGE}/"
+    success "llm_credentials_store.py (labeled LLM keys)"
+fi
 
 # Copy dashboard
 # =============================================================================

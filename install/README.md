@@ -217,7 +217,9 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 | Ollama | `ollama` | Local / network URL |
 | OpenAI | `openai` | API key or OAuth |
 | OpenAI-compatible | `openai_compatible` | Custom `LLM_BASE_URL` |
-| Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys |
+| Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys. **Gemini** uses a [Google AI Studio](https://aistudio.google.com/apikey) key on the OpenAI-compatible URL; Flume sends **`x-goog-api-key`** (not `Authorization: Bearer`). |
+
+**Multiple providers / keys:** In the Settings UI you can **label** each saved API key. Keys are stored in **`worker-manager/llm_credentials.json`** (alongside `agent_models.json`). Use **Agents → Configure agent models** to assign a **connection** (saved key or “Active Settings” / Ollama) and **model** per agent role. The worker manager passes `preferred_llm_credential_id` on claimed tasks so each run uses the correct key.
 
 ChatGPT/Codex OAuth: prefer **`./flume codex-oauth login-browser`** (see **OpenAI ChatGPT / Codex OAuth**); device **`login`** may lack `api.responses.write`.
 
@@ -269,9 +271,9 @@ ENV_FILE=/path/to/flume/.env bash install/setup/create-es-indices.sh
 
 ## OpenAI ChatGPT / Codex OAuth
 
-Flume can call OpenAI using a **ChatGPT (Codex) OAuth session** instead of a platform API key. The flow matches the official [Codex CLI](https://github.com/openai/codex) device login (`codex login --device-auth`).
+Flume can store a **ChatGPT (Codex) OAuth session** (same flows as the [Codex CLI](https://github.com/openai/codex)) or use an OpenAI **platform API key** (`sk-…`).
 
-OAuth access tokens are honored on OpenAI’s **`/v1/responses`** endpoint; **`/v1/chat/completions`** returns **401** for those bearers. Flume routes OAuth sessions through **Responses** automatically and keeps **`sk-…` platform API keys** on **chat/completions**.
+**Important — Plan New Work / `gpt-*` via `api.openai.com`:** Codex **browser** OAuth tokens only get **connector** scopes (`api.connectors.*`). OpenAI’s **`/v1/chat/completions`** and **`/v1/responses`** both enforce **`model.request`** / **`api.responses.write`** in ways Codex authorize **does not grant** together. In practice, **hosted model calls from Flume need a platform `sk-` API key** (Settings → LLM → API Key). ChatGPT OAuth remains useful for other Codex-style tooling, but not for this API pair on current OpenAI behavior.
 
 If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (e.g. `http://127.0.0.1:11434`), older builds could POST your OAuth bearer to the wrong host and get **401**. Current Flume ignores localhost / `:11434` bases for official OpenAI; you can also **clear `LLM_BASE_URL`** in `.env` when using hosted OpenAI.
 
@@ -284,7 +286,7 @@ The [Codex CLI](https://github.com/openai/codex) uses **browser OAuth** by defau
 | **GUI on same machine** | `codex login` opens browser → localhost callback | `./flume codex-oauth login-browser` |
 | **No browser on the server** | Open authorize URL on another device; still need the **localhost** redirect URL to complete PKCE | `./flume codex-oauth login-paste` (paste full `http://localhost:1455/auth/callback?...` back into SSH) |
 | **SSH tunnel** | Forward the random/high port to the server | `ssh -L <port>:127.0.0.1:<port> user@host` then open the printed URL on your laptop |
-| **Device code** | `codex login --device-auth` (code + URL on any browser) | `./flume codex-oauth login` — often **no** `api.responses.write`; **Plan New Work** may still **401**; prefer browser or import |
+| **Device code** | `codex login --device-auth` (code + URL on any browser) | `./flume codex-oauth login` — weak scopes; **Plan New Work** needs **`sk-` API key** (see above) |
 | **Login on a laptop, run Flume on a server** | Copy **`~/.codex/auth.json`** (e.g. `scp`) | Run **`codex login`** locally, then **`./flume codex-oauth import`** on the server (or copy `auth.json` and import) |
 | **No ChatGPT OAuth** | Platform **API key** | **Settings → LLM → API Key** (`sk-…`); uses **`/v1/chat/completions`**, not the ChatGPT OAuth bearer path |
 
@@ -302,7 +304,7 @@ grep -n "if scopes is None" ~/flume/src/dashboard/llm_client.py
 
 You should see **`return False`** (OAuth without decodable `api.responses.write` uses chat/completions). If the line is missing, **`git remote -v`** / **`git fetch upstream && git merge upstream/main`** (or pull from **Fremen-Labs/flume**). Then **`./flume restart --all`** again.
 
-If routing is correct but calls still fail, the model/account may reject **chat/completions** for that bearer — use a platform **`sk-…`** API key in Settings.
+If routing is correct but you then see **`Missing scopes: model.request`** on **`/v1/chat/completions`**, that is expected for Codex OAuth: the authorize URL cannot request `model.request`, but the API still requires it. **Use a platform `sk-` API key** for Flume’s planner and agents calling **`api.openai.com`**.
 
 **Device-code** (`./flume codex-oauth login`) often yields **weaker** tokens than browser OAuth; **`Refresh OAuth` cannot add scopes** that were never granted.
 

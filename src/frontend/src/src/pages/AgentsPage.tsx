@@ -23,10 +23,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type {
+  AgentModelsCredentialGroup,
   AgentModelsResponse,
   AgentModelsRoleEffective,
   AgentModelsSavePayload,
 } from '@/types';
+
+const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
 import agentAvatar1 from '@/assets/agents/agent-1.png';
 import agentAvatar2 from '@/assets/agents/agent-2.png';
 import agentAvatar3 from '@/assets/agents/agent-3.png';
@@ -47,24 +50,40 @@ const roleLabels: Record<string, string> = {
   qa: 'QA Engineer',
 };
 
-type RoleForm = { provider: string; model: string; executionHost: string };
+type RoleForm = {
+  credentialId: string;
+  provider: string;
+  model: string;
+  executionHost: string;
+};
 
 function normalizeRoleSpec(
   raw: unknown,
-  fallback: { provider: string; model: string; host: string },
+  fallback: { credentialId: string; provider: string; model: string; host: string },
 ): RoleForm {
   if (typeof raw === 'string') {
-    return { provider: fallback.provider, model: raw || fallback.model, executionHost: fallback.host };
+    return {
+      credentialId: fallback.credentialId,
+      provider: fallback.provider,
+      model: raw || fallback.model,
+      executionHost: fallback.host,
+    };
   }
   if (raw && typeof raw === 'object') {
     const o = raw as AgentModelsRoleEffective;
     return {
+      credentialId: o.credentialId || fallback.credentialId,
       provider: o.provider || fallback.provider,
       model: o.model || fallback.model,
       executionHost: o.executionHost || fallback.host,
     };
   }
-  return { provider: fallback.provider, model: fallback.model, executionHost: fallback.host };
+  return {
+    credentialId: fallback.credentialId,
+    provider: fallback.provider,
+    model: fallback.model,
+    executionHost: fallback.host,
+  };
 }
 
 function timeAgo(ts?: string) {
@@ -104,27 +123,52 @@ export default function AgentsPage() {
       const defP = data.settingsProvider;
       const defM = data.defaultLlmModel;
       const defH = data.defaultExecutionHost;
+      const credChoices: AgentModelsCredentialGroup[] =
+        data.availableCredentials?.filter((g) => g.configured) ?? [];
+      const useCredUi = credChoices.length > 0;
       for (const id of data.roleIds) {
         let row = normalizeRoleSpec(data.effective[id], {
+          credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
           provider: defP,
           model: defM,
           host: defH,
         });
-        const configured = data.availableProviders.filter((g) => g.configured);
-        if (!configured.some((g) => g.providerId === row.provider)) {
-          const first = configured[0];
-          if (first) {
-            row = {
-              ...row,
-              provider: first.providerId,
-              model: first.models[0]?.id || row.model,
-            };
+        if (useCredUi) {
+          if (!credChoices.some((g) => g.credentialId === row.credentialId)) {
+            const first = credChoices[0];
+            if (first) {
+              row = {
+                ...row,
+                credentialId: first.credentialId,
+                provider: first.providerId,
+                model: first.models[0]?.id || row.model,
+              };
+            }
           }
-        }
-        const g = configured.find((x) => x.providerId === row.provider);
-        if (g && !g.allowCustomModelId && g.models?.length) {
-          const ok = g.models.some((m) => m.id === row.model);
-          if (!ok) row = { ...row, model: g.models[0].id };
+          const cg = credChoices.find((x) => x.credentialId === row.credentialId);
+          if (cg && !cg.allowCustomModelId && cg.models?.length) {
+            const ok = cg.models.some((m) => m.id === row.model);
+            if (!ok) row = { ...row, model: cg.models[0].id, provider: cg.providerId };
+          } else if (cg) {
+            row = { ...row, provider: cg.providerId };
+          }
+        } else {
+          const configured = data.availableProviders.filter((g) => g.configured);
+          if (!configured.some((g) => g.providerId === row.provider)) {
+            const first = configured[0];
+            if (first) {
+              row = {
+                ...row,
+                provider: first.providerId,
+                model: first.models[0]?.id || row.model,
+              };
+            }
+          }
+          const g = configured.find((x) => x.providerId === row.provider);
+          if (g && !g.allowCustomModelId && g.models?.length) {
+            const ok = g.models.some((m) => m.id === row.model);
+            if (!ok) row = { ...row, model: g.models[0].id };
+          }
         }
         next[id] = row;
       }
@@ -145,6 +189,13 @@ export default function AgentsPage() {
     () => agentCfg?.availableProviders.filter((g) => g.configured) ?? [],
     [agentCfg],
   );
+
+  const selectableCredentials = useMemo(
+    () => agentCfg?.availableCredentials?.filter((g) => g.configured) ?? [],
+    [agentCfg],
+  );
+
+  const useCredUi = selectableCredentials.length > 0;
 
   const updateRole = (roleId: string, patch: Partial<RoleForm>) => {
     setRoleForm((prev) => {
@@ -219,8 +270,8 @@ export default function AgentsPage() {
               <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                 <DialogTitle>Agent models & hosts</DialogTitle>
                 <DialogDescription>
-                  Choose provider and model per role. Only providers you have configured in Settings (plus Ollama)
-                  appear here.
+                  Choose a saved API key connection and model per role (from Settings → labeled keys), or the active
+                  Settings profile / Ollama. Workers pick up changes on the next manager cycle.
                 </DialogDescription>
               </DialogHeader>
               <div className="px-6 flex-1 min-h-0 overflow-y-auto py-2 space-y-4">
@@ -294,7 +345,7 @@ export default function AgentsPage() {
                                   <SelectValue placeholder="Model" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  {(group!.models ?? []).map((m) => (
+                                  {(group?.models ?? []).map((m) => (
                                     <SelectItem key={m.id} value={m.id}>
                                       {m.name || m.id}
                                     </SelectItem>
@@ -330,7 +381,13 @@ export default function AgentsPage() {
                 </Button>
                 <Button
                   type="button"
-                  disabled={saving || cfgLoading || !!cfgError || !agentCfg || selectableProviders.length === 0}
+                  disabled={
+                    saving ||
+                    cfgLoading ||
+                    !!cfgError ||
+                    !agentCfg ||
+                    (useCredUi ? selectableCredentials.length === 0 : selectableProviders.length === 0)
+                  }
                   onClick={() => void saveAgentModels()}
                 >
                   {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save'}

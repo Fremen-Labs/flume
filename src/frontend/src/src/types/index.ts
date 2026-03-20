@@ -45,6 +45,7 @@ export interface ApiWorker {
   execution_host: string;
   /** LLM provider for this worker (from agent_models.json + env). */
   llm_provider?: string;
+  preferred_llm_credential_id?: string;
   status: string;
   current_task_id: string | null;
   current_task_title?: string;
@@ -117,8 +118,22 @@ export interface LlmSettings {
   port: number | null;
   basePath: string | null;
   apiKey?: string;
+  /** Last 4 characters hint when apiKey is masked (***). */
+  keySuffix?: string;
+  /** Active saved credential id (llm_credentials.json), if any. */
+  credentialId?: string;
+  credentialLabel?: string;
   oauthStateFile: string;
   oauthTokenUrl: string;
+}
+
+export interface LlmCredentialSummary {
+  id: string;
+  label: string;
+  provider: string;
+  keySuffix: string;
+  hasKey: boolean;
+  baseUrl?: string;
 }
 
 /** From dashboard get_oauth_status — token shape / consent diagnostics */
@@ -151,28 +166,14 @@ export interface LlmOAuthStatus {
 export interface LlmSettingsResponse {
   catalog: LlmProviderCatalogEntry[];
   settings: LlmSettings;
+  /** Saved labeled API keys (worker-manager/llm_credentials.json). */
+  credentials: LlmCredentialSummary[];
+  activeCredentialId: string;
   oauthStatus: LlmOAuthStatus;
   restartRequired: boolean;
   openbaoInstalled?: boolean;
 }
 
-export type LlmSettingsCatalogItem = LlmProviderCatalogEntry;
-
-export interface LlmSettingsPayload {
-  provider: string;
-  model: string;
-  authMode: 'api_key' | 'oauth';
-  routeType: 'local' | 'network';
-  host?: string;
-  port?: number;
-  basePath?: string;
-  baseUrl?: string;
-  apiKey?: string;
-  oauthStateFile?: string;
-  oauthTokenUrl?: string;
-}
-
-/** Alias for provider catalog items (used by SettingsPage). */
 export type LlmSettingsCatalogItem = LlmProviderCatalogEntry;
 
 /** Payload for POST /api/settings/llm. */
@@ -188,6 +189,20 @@ export interface LlmSettingsPayload {
   apiKey?: string;
   oauthStateFile?: string;
   oauthTokenUrl?: string;
+  /** Label for the saved credential row when apiKey is sent. */
+  credentialLabel?: string;
+  /** When editing an existing saved credential’s key/label. */
+  credentialId?: string;
+}
+
+/** POST /api/settings/llm/credentials */
+export interface LlmCredentialActionPayload {
+  action: 'upsert' | 'delete' | 'activate' | 'patch';
+  id?: string;
+  label?: string;
+  provider?: string;
+  apiKey?: string;
+  baseUrl?: string;
 }
 
 // ─── Repo Settings API ─────────────────────────────────────────────────────
@@ -222,9 +237,21 @@ export interface AgentModelsProviderGroup {
 }
 
 export interface AgentModelsRoleEffective {
+  credentialId?: string;
   provider: string;
   model: string;
   executionHost: string;
+}
+
+export interface AgentModelsCredentialGroup {
+  credentialId: string;
+  label: string;
+  shortLabel?: string;
+  providerId: string;
+  configured: boolean;
+  models: LlmProviderModel[];
+  allowCustomModelId?: boolean;
+  hint?: string;
 }
 
 export interface AgentModelsResponse {
@@ -234,13 +261,18 @@ export interface AgentModelsResponse {
   roles: Record<string, AgentModelsRoleEffective | string>;
   effective: Record<string, AgentModelsRoleEffective>;
   availableProviders: AgentModelsProviderGroup[];
+  /** Prefer this for per-agent provider+key selection. */
+  availableCredentials?: AgentModelsCredentialGroup[];
   roleIds: string[];
 }
 
 export interface AgentModelsSavePayload {
   roles: Record<
     string,
-    { provider: string; model: string; executionHost?: string } | string | null
+    | { credentialId: string; provider?: string; model: string; executionHost?: string }
+    | { provider: string; model: string; executionHost?: string }
+    | string
+    | null
   >;
 }
 

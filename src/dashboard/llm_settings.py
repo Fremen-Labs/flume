@@ -15,6 +15,8 @@ from pathlib import Path
 from flume_secrets import resolve_oauth_state_path
 from typing import Any, Optional
 
+import llm_credentials_store
+
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -529,10 +531,28 @@ def validate_llm_settings(payload: dict[str, Any], workspace_root: Path) -> tupl
     }
 
     if auth_mode == "api_key":
-        api_key = str(payload.get("apiKey") or "").strip()
-        updates["LLM_API_KEY"] = api_key
-        # Clear OAuth state when using API key
+        # Only overwrite LLM_API_KEY when the client sends a new value (omit key or send "***" to keep existing).
+        raw_ak = payload.get("apiKey")
+        new_key: str | None = None
+        if raw_ak is not None:
+            cand = str(raw_ak).strip()
+            if cand and cand != "***":
+                new_key = cand
+                updates["LLM_API_KEY"] = cand
+        # Clear OAuth state when using API key mode
         updates["OPENAI_OAUTH_STATE_FILE"] = ""
+        if new_key:
+            label = str(payload.get("credentialLabel") or "").strip() or f"{provider} · {model}"
+            cid_in = str(payload.get("credentialId") or "").strip() or None
+            nid = llm_credentials_store.upsert_credential(
+                workspace_root,
+                cid_in,
+                label,
+                provider,
+                new_key,
+                updates.get("LLM_BASE_URL", ""),
+            )
+            llm_credentials_store.set_active_credential_id(workspace_root, nid)
     else:
         # OAuth mode
         updates["LLM_API_KEY"] = ""  # Will be filled by refresh
@@ -714,6 +734,19 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
 
     oauth_status = get_oauth_status(workspace_root) if provider == "openai" else {}
 
+    # Any saved API key (Gemini, Anthropic, OpenAI sk-, etc.) shows as masked with last-4 hint.
+    api_key_masked = ""
+    key_suffix_out = ""
+    if api_key_set and auth_mode == "api_key":
+        api_key_masked = "***"
+        t = raw_api_key.strip()
+        key_suffix_out = t[-4:] if len(t) > 4 else "••••"
+
+    active_cred = llm_credentials_store.get_active_credential_id(workspace_root)
+    cred_list = llm_credentials_store.list_public_credentials(workspace_root)
+    active_meta = next((c for c in cred_list if c.get("id") == active_cred), None)
+    active_label = str(active_meta.get("label") or "") if active_meta else ""
+
     return {
         "catalog": PROVIDER_CATALOG,
         "settings": {
@@ -725,10 +758,15 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             "host": host,
             "port": port,
             "basePath": base_path,
-            "apiKey": "***" if api_key_set and auth_mode == "api_key" and platform_api_key else "",
+            "apiKey": api_key_masked,
+            "keySuffix": key_suffix_out,
+            "credentialId": active_cred,
+            "credentialLabel": active_label,
             "oauthStateFile": oauth_state or str(resolve_oauth_state_path(workspace_root, "")),
             "oauthTokenUrl": oauth_token_url,
         },
+        "credentials": cred_list,
+        "activeCredentialId": active_cred,
         "oauthStatus": oauth_status,
         "restartRequired": True,
         "openbaoInstalled": is_openbao_installed(),

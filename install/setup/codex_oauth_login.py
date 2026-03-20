@@ -537,20 +537,26 @@ def _jwt_access_token_scopes(access_token: str) -> tuple[bool, list[str]]:
 
 
 def _print_browser_oauth_route_hint(access: str) -> None:
-    """After login-browser / login-paste, explain whether Flume will call /v1/responses vs chat/completions."""
+    """After login-browser / login-paste, explain Flume routing and platform-key need for api.openai.com."""
     ok, scopes = _jwt_access_token_scopes(access)
     print()
     if ok and scopes and "api.responses.write" in scopes:
-        print("Token includes api.responses.write — Flume will use OpenAI /v1/responses for chat-style calls.")
+        print("Token includes api.responses.write — Flume can use OpenAI /v1/responses for chat-style calls.")
     elif ok and scopes:
         print(
-            "Token has Codex-style scopes (JWT has no api.responses.write). "
-            "Flume will use /v1/chat/completions for OpenAI (Plan New Work and agents)."
+            "Token has Codex connector scopes only (typical browser OAuth). "
+            "Flume will try /v1/chat/completions, but OpenAI usually still requires **model.request** — "
+            "which this OAuth flow cannot obtain. For Plan New Work / hosted GPT models, add an OpenAI **platform API key** "
+            "(sk-…) in Settings → LLM → API Key (https://platform.openai.com/api-keys)."
         )
     elif ok and not scopes:
-        print("JWT has no scp list; Flume may try /v1/responses first at runtime.")
+        print(
+            "JWT has no scp list. If Flume returns 401 missing model.request or api.responses.write, use a platform sk- API key."
+        )
     else:
-        print("Could not decode JWT scopes; Flume picks /v1/responses vs chat/completions at runtime.")
+        print(
+            "Could not decode JWT scopes. If planner fails with missing scopes, use a platform sk- API key for api.openai.com calls."
+        )
 
 
 def _warn_device_login_responses_scope(access: str) -> None:

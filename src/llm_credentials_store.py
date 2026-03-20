@@ -1,0 +1,308 @@
+# Labeled LLM API keys (multi-provider). Stored in worker-manager/llm_credentials.json
+# beside agent_models.json. Workers read this file to resolve per-agent keys.
+
+from __future__ import annotations
+
+import json
+import uuid
+from pathlib import Path
+from typing import Any, Optional
+
+OLLAMA_CREDENTIAL_ID = "__ollama__"
+# Use global LLM_* from env / Settings (no row in llm_credentials.json).
+SETTINGS_DEFAULT_CREDENTIAL_ID = "__settings_default__"
+
+
+def credentials_path(workspace_root: Path) -> Path:
+    return workspace_root / "worker-manager" / "llm_credentials.json"
+
+
+def _default_doc() -> dict[str, Any]:
+    return {"version": 1, "activeCredentialId": "", "credentials": []}
+
+
+def load_document(workspace_root: Path) -> dict[str, Any]:
+    path = credentials_path(workspace_root)
+    if not path.is_file():
+        return _default_doc()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _default_doc()
+        data.setdefault("version", 1)
+        data.setdefault("activeCredentialId", "")
+        creds = data.get("credentials")
+        if not isinstance(creds, list):
+            data["credentials"] = []
+        return data
+    except (OSError, json.JSONDecodeError):
+        return _default_doc()
+
+
+def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
+    path = credentials_path(workspace_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def _key_suffix(key: str) -> str:
+    t = (key or "").strip()
+    if not t:
+        return ""
+    if len(t) <= 4:
+        return "••••"
+    return t[-4:]
+
+
+def list_public_credentials(workspace_root: Path) -> list[dict[str, Any]]:
+    """Safe for JSON API: no raw keys."""
+    doc = load_document(workspace_root)
+    out: list[dict[str, Any]] = []
+    for c in doc.get("credentials") or []:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip()
+        if not cid:
+            continue
+        key = str(c.get("apiKey") or "").strip()
+        out.append(
+            {
+                "id": cid,
+                "label": str(c.get("label") or cid).strip() or cid,
+                "provider": str(c.get("provider") or "").strip().lower(),
+                "keySuffix": _key_suffix(key),
+                "hasKey": bool(key),
+                "baseUrl": str(c.get("baseUrl") or "").strip(),
+            }
+        )
+    return out
+
+
+def get_by_id(workspace_root: Path, cred_id: str) -> Optional[dict[str, Any]]:
+    cid = (cred_id or "").strip()
+    if not cid or cid == OLLAMA_CREDENTIAL_ID:
+        return None
+    for c in load_document(workspace_root).get("credentials") or []:
+        if isinstance(c, dict) and str(c.get("id") or "").strip() == cid:
+            return dict(c)
+    return None
+
+
+def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict[str, str]]:
+    """
+    Return overrides for one LLM call: provider, api_key, base_url.
+    None = use process env only (unknown / empty id / __settings_default__).
+    """
+    cid = (cred_id or "").strip()
+    if not cid or cid == SETTINGS_DEFAULT_CREDENTIAL_ID:
+        return None
+    if cid == OLLAMA_CREDENTIAL_ID:
+        return {
+            "provider": "ollama",
+            "api_key": "",
+            "base_url": "",
+        }
+    c = get_by_id(workspace_root, cid)
+    if not c:
+        return None
+    key = str(c.get("apiKey") or "").strip()
+    if not key:
+        return None
+    prov = str(c.get("provider") or "openai").strip().lower()
+    base = str(c.get("baseUrl") or "").strip()
+    return {"provider": prov, "api_key": key, "base_url": base}
+
+
+def upsert_credential(
+    workspace_root: Path,
+    cred_id: Optional[str],
+    label: str,
+    provider: str,
+    api_key: str,
+    base_url: str,
+) -> str:
+    """Insert or replace by id. Preserves existing apiKey when api_key is empty."""
+    doc = load_document(workspace_root)
+    creds: list[dict[str, Any]] = []
+    for c in doc.get("credentials") or []:
+        if isinstance(c, dict) and c.get("id"):
+            creds.append(dict(c))
+    pid = (provider or "").strip().lower()
+    label = (label or "").strip() or f"{pid} key"
+    key = (api_key or "").strip()
+    base = (base_url or "").strip()
+    new_id = (cred_id or "").strip() or uuid.uuid4().hex[:12]
+    row = {"id": new_id, "label": label, "provider": pid, "apiKey": "", "baseUrl": base}
+    replaced = False
+    for i, c in enumerate(creds):
+        if str(c.get("id")) == new_id:
+            old_key = str(c.get("apiKey") or "").strip()
+            row["apiKey"] = key if key else old_key
+            creds[i] = row
+            replaced = True
+            break
+    if not replaced:
+        row["apiKey"] = key
+        creds.append(row)
+    doc["credentials"] = creds
+    save_document(workspace_root, doc)
+    return new_id
+
+
+def update_credential_meta(
+    workspace_root: Path, cred_id: str, *, label: Optional[str] = None, base_url: Optional[str] = None
+) -> bool:
+    doc = load_document(workspace_root)
+    creds = doc.get("credentials") or []
+    found = False
+    for c in creds:
+        if not isinstance(c, dict):
+            continue
+        if str(c.get("id") or "") != cred_id:
+            continue
+        found = True
+        if label is not None:
+            c["label"] = str(label).strip() or str(c.get("label") or "")
+        if base_url is not None:
+            c["baseUrl"] = str(base_url).strip()
+        break
+    if not found:
+        return False
+    save_document(workspace_root, doc)
+    return True
+
+
+def delete_credential(workspace_root: Path, cred_id: str) -> bool:
+    doc = load_document(workspace_root)
+    old = list(doc.get("credentials") or [])
+    creds = [c for c in old if isinstance(c, dict) and str(c.get("id")) != cred_id]
+    if len(creds) == len(old):
+        return False
+    doc["credentials"] = creds
+    if str(doc.get("activeCredentialId") or "") == cred_id:
+        doc["activeCredentialId"] = ""
+    save_document(workspace_root, doc)
+    return True
+
+
+def set_active_credential_id(workspace_root: Path, cred_id: str) -> None:
+    doc = load_document(workspace_root)
+    doc["activeCredentialId"] = (cred_id or "").strip()
+    save_document(workspace_root, doc)
+
+
+def get_active_credential_id(workspace_root: Path) -> str:
+    return str(load_document(workspace_root).get("activeCredentialId") or "").strip()
+
+
+def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str, str]:
+    """
+    LLM_* env updates when user activates a saved credential (or Ollama).
+    """
+    from llm_settings import load_effective_pairs
+
+    pairs = load_effective_pairs(workspace_root)
+    cid = (cred_id or "").strip()
+    if cid == OLLAMA_CREDENTIAL_ID:
+        base = (pairs.get("LLM_BASE_URL") or "").strip()
+        return {
+            "LLM_PROVIDER": "ollama",
+            "LLM_API_KEY": "",
+            "LLM_BASE_URL": base,
+            "OPENAI_OAUTH_STATE_FILE": "",
+        }
+    c = get_by_id(workspace_root, cid)
+    if not c:
+        raise ValueError(f"Unknown credential: {cred_id}")
+    key = str(c.get("apiKey") or "").strip()
+    if not key:
+        raise ValueError("Credential has no API key")
+    prov = str(c.get("provider") or "openai").strip().lower()
+    base = str(c.get("baseUrl") or "").strip()
+    out: dict[str, str] = {
+        "LLM_PROVIDER": prov,
+        "LLM_API_KEY": key,
+        "OPENAI_OAUTH_STATE_FILE": "",
+    }
+    if prov in ("openai", "anthropic", "gemini", "xai", "mistral", "cohere") and not base:
+        out["LLM_BASE_URL"] = ""
+    else:
+        out["LLM_BASE_URL"] = base
+    return out
+
+
+def apply_credentials_action(
+    workspace_root: Path, payload: dict[str, Any]
+) -> tuple[bool, str, Optional[dict[str, str]]]:
+    """
+    Handle credential CRUD from API. Returns (ok, error, env_updates_or_none).
+    env_updates are merged into .env/OpenBao when activating or upserting with a key.
+    """
+    action = str(payload.get("action") or "").strip().lower()
+    if action == "delete":
+        cid = str(payload.get("id") or "").strip()
+        if not cid or cid == OLLAMA_CREDENTIAL_ID:
+            return False, "id is required", None
+        if not delete_credential(workspace_root, cid):
+            return False, "Credential not found", None
+        return True, "", None
+
+    if action == "activate":
+        cid = str(payload.get("id") or "").strip()
+        if not cid:
+            return False, "id is required", None
+        try:
+            updates = build_activation_env_updates(workspace_root, cid)
+        except ValueError as e:
+            return False, str(e), None
+        set_active_credential_id(workspace_root, cid)
+        return True, "", updates
+
+    if action == "patch":
+        cid = str(payload.get("id") or "").strip()
+        if not cid or cid == OLLAMA_CREDENTIAL_ID:
+            return False, "id is required", None
+        label = payload.get("label")
+        base_url = payload.get("baseUrl")
+        if label is None and base_url is None:
+            return False, "label or baseUrl required", None
+        if not update_credential_meta(
+            workspace_root,
+            cid,
+            label=None if label is None else str(label),
+            base_url=None if base_url is None else str(base_url),
+        ):
+            return False, "Credential not found", None
+        return True, "", None
+
+    if action == "upsert":
+        from llm_settings import VALID_PROVIDERS
+
+        label = str(payload.get("label") or "").strip()
+        provider = str(payload.get("provider") or "").strip().lower()
+        if not provider:
+            return False, "provider is required", None
+        if provider not in VALID_PROVIDERS:
+            return False, f"Invalid provider: {provider}", None
+        api_key = str(payload.get("apiKey") or "").strip()
+        cred_id = str(payload.get("id") or "").strip() or None
+        base_url = str(payload.get("baseUrl") or "").strip()
+        if not label:
+            label = f"{provider} key"
+        if (not api_key or api_key == "***") and not cred_id:
+            return False, "apiKey is required for new credentials", None
+        if (not api_key or api_key == "***") and cred_id:
+            old = get_by_id(workspace_root, cred_id)
+            if not old or not str(old.get("apiKey") or "").strip():
+                return False, "apiKey is required", None
+        if api_key == "***":
+            api_key = ""
+        new_id = upsert_credential(workspace_root, cred_id, label, provider, api_key, base_url)
+        set_active_credential_id(workspace_root, new_id)
+        try:
+            updates = build_activation_env_updates(workspace_root, new_id)
+        except ValueError as e:
+            return False, str(e), None
+        return True, "", updates
+
+    return False, "action must be upsert, delete, activate, or patch", None
