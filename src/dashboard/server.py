@@ -8,19 +8,72 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import urllib.request
 import urllib.parse
 import uuid
 from datetime import datetime
 
-from llm_settings import load_effective_pairs
+BASE = Path(__file__).resolve().parent
+_SRC_ROOT = BASE.parent
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+
+def _apply_env_file_line(raw_line: str) -> None:
+    """Parse one KEY=VAL line from a .env file into os.environ (last wins)."""
+    line = raw_line.strip()
+    if not line or line.startswith('#'):
+        return
+    if line.startswith('export '):
+        line = line[7:].lstrip()
+    if '=' not in line:
+        return
+    key, _, val = line.partition('=')
+    key = key.strip()
+    if not key or key.startswith('#'):
+        return
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        val = val[1:-1]
+    os.environ[key] = val
+
+
+def _load_dotenv_files() -> None:
+    """
+    Load .env into os.environ before reading ES_*.
+
+    systemd's EnvironmentFile= often misparses real-world .env (export, quotes, etc.).
+    run.sh sources .env, but we also load here so the dashboard always sees credentials
+    when .env exists next to the workspace (same resolution as run.sh).
+    """
+    default_ws = BASE.parent
+    ws = Path(os.environ.get('LOOM_WORKSPACE', str(default_ws)))
+    for candidate in (ws / '.env', ws.parent / '.env'):
+        if not candidate.is_file():
+            continue
+        try:
+            text = candidate.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            _apply_env_file_line(raw)
+        return
+
+
+_load_dotenv_files()
+
+from flume_secrets import apply_runtime_config  # noqa: E402
+
+apply_runtime_config(_SRC_ROOT)
+
+from llm_settings import load_effective_pairs  # noqa: E402
 
 ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
-BASE = Path(__file__).resolve().parent
 STATIC_ROOT = Path(os.environ.get('LOOM_FRONTEND_DIST', str(Path(__file__).parent.parent / 'frontend' / 'dist')))
 WORKSPACE_ROOT = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
 WORKER_STATE = WORKSPACE_ROOT / 'worker-manager/state.json'
@@ -1449,8 +1502,9 @@ def load_repos():
 def load_snapshot():
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         raise RuntimeError(
-            'Elasticsearch not configured. ES_API_KEY is missing or invalid in .env. '
-            'Run: ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh'
+            'Elasticsearch not configured. ES_API_KEY is missing or invalid. '
+            'Set it in OpenBao KV (secret/flume) or .env, or run: '
+            'ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh'
         )
     tasks = es_search('agent-task-records', {
         'size': 300,

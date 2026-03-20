@@ -3,14 +3,22 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+_WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+if str(_WS) not in sys.path:
+    sys.path.insert(0, str(_WS))
+from flume_secrets import apply_runtime_config  # noqa: E402
+
+apply_runtime_config(_WS)
+
 from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester
 
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent))) / 'worker-manager'
+BASE = _WS / 'worker-manager'
 STATE = BASE / 'state.json'
 LOG = BASE / 'worker_handlers.log'
 
@@ -23,7 +31,7 @@ FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
 REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
 PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
-PROJECTS_REGISTRY = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent))) / 'projects.json'
+PROJECTS_REGISTRY = _WS / 'projects.json'
 
 ctx = None
 if not ES_VERIFY_TLS:
@@ -886,8 +894,10 @@ def run_worker(worker):
 
 
 def main():
-    if not ES_API_KEY:
-        raise SystemExit('ES_API_KEY is required')
+    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+        raise SystemExit(
+            'ES_API_KEY is required. Use OpenBao KV (secret/flume) or .env — see install/flume.config.example.json'
+        )
     log('worker handlers starting')
     while True:
         try:

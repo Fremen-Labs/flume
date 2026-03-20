@@ -14,9 +14,10 @@ else
     DASHBOARD_SCRIPT="${FLUME_ROOT}/dashboard/run.sh"
 fi
 ENV_FILE="${FLUME_ROOT}/.env"
+CFG_FILE="${FLUME_ROOT}/flume.config.json"
 
-if [ ! -f "${ENV_FILE}" ]; then
-    echo "Error: .env not found at ${ENV_FILE}. Run setup.sh first."
+if [ ! -f "${ENV_FILE}" ] && [ ! -f "${CFG_FILE}" ]; then
+    echo "Error: Need ${ENV_FILE} (legacy) or ${CFG_FILE} (OpenBao). Run install.sh or copy install/flume.config.example.json."
     exit 1
 fi
 
@@ -36,17 +37,9 @@ SERVICE_FILE="${UNIT_DIR}/flume-dashboard.service"
 
 sed -e "s|__FLUME_ROOT__|${FLUME_ROOT}|g" \
     -e "s|__DASHBOARD_SCRIPT__|${DASHBOARD_SCRIPT}|g" \
-    -e "s|__ENV_FILE__|${ENV_FILE}|g" \
     "${SCRIPT_DIR}/flume-dashboard.service.template" > "${SERVICE_FILE}"
 
-# systemd user services need EnvironmentFile to be loaded; we also need LOOM_WORKSPACE etc.
-# The run.sh sources .env and sets LOOM_WORKSPACE. But ExecStart runs the script directly.
-# The run.sh handles env loading. Remove EnvironmentFile if it causes issues - run.sh loads it.
-# Actually EnvironmentFile in systemd loads vars - but run.sh sources .env itself. Let me keep it
-# for any vars systemd might need. Actually the run.sh does the full setup. So we just need
-# to run the script. The WorkingDirectory and ExecStart are enough. Let me simplify - remove
-# EnvironmentFile from the template since run.sh loads everything. Or keep it for transparency.
-# I'll keep it - it preloads the env for the process.
+# .env is loaded by run.sh and again by server.py (see flume-dashboard.service.template).
 
 echo "Installed: ${SERVICE_FILE}"
 echo ""

@@ -53,9 +53,26 @@ if [ -z "${ES_API_KEY:-}" ]; then
     fi
 fi
 
+# OpenBao: hydrate ES_* when flume.config.json exists (no secrets in .env)
+if [ -z "${ES_API_KEY:-}" ] || [ "${ES_API_KEY}" = "AUTO_GENERATED_BY_INSTALLER" ]; then
+    CFG_OK=false
+    [ -f "${WORKSPACE_ROOT}/flume.config.json" ] && CFG_OK=true
+    [ -f "${WORKSPACE_ROOT}/../flume.config.json" ] && CFG_OK=true
+    if [ "$CFG_OK" = "true" ] && command -v python3 >/dev/null 2>&1; then
+        export FLUME_WORKSPACE_ROOT="${WORKSPACE_ROOT}"
+        if [ -d "${WORKSPACE_ROOT}/src" ]; then
+            export PYTHONPATH="${WORKSPACE_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
+        else
+            export PYTHONPATH="${WORKSPACE_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+        fi
+        # shellcheck disable=SC1090
+        eval "$(python3 "${SCRIPT_DIR}/hydrate-openbao-env.py")" 2>/dev/null || true
+    fi
+fi
+
 # Validate required vars
-: "${ES_URL:?ES_URL is not set. Set it in .env or pass it as an environment variable.}"
-: "${ES_API_KEY:?ES_API_KEY is not set. Set it in .env or pass it as an environment variable.}"
+: "${ES_URL:?ES_URL is not set. Set it in OpenBao KV, .env, or pass as an environment variable.}"
+: "${ES_API_KEY:?ES_API_KEY is not set. Set it in OpenBao KV (secret/flume), .env, or pass as an environment variable.}"
 
 ES_VERIFY_TLS="${ES_VERIFY_TLS:-false}"
 CURL_TLS_OPT=""
@@ -124,7 +141,7 @@ create_index "agent-handoff-records"   "${TEMPLATES_DIR}/handoff_records.json"
 create_index "agent-failure-records"   "${TEMPLATES_DIR}/failure_records.json"
 create_index "agent-provenance-records" "${TEMPLATES_DIR}/provenance_records.json"
 create_index "agent-memory-entries"    "${TEMPLATES_DIR}/memory_entries.json"
-create_index "agent-review-records"    "${TEMPLATES_DIR}/review_records.json"
+create_index "agent-review-records"    "${TEMPLATES_DIR}/agent-review-records.json"
 
 echo ""
 echo -e "${GREEN}Index creation complete.${NC}"

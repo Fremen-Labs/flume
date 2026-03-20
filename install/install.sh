@@ -5,7 +5,7 @@
 #   Step 1: Verify dependencies
 #   Step 2: Install Elasticsearch (automatic when missing)
 #   Step 3: Install OpenBao CLI & GitHub CLI (best-effort)
-#   Step 4: Configure .env
+#   Step 4: Configure runtime (.env + flume.config.json, optional OpenBao sync)
 #   Step 5: Create Elasticsearch indices
 #   Step 6: Set up workspace directories
 #   Step 7: Final instructions
@@ -187,7 +187,7 @@ else
 fi
 
 # =============================================================================
-# Step 4: Configure .env
+# Step 4: Configure runtime (.env + flume.config.json, optional OpenBao sync)
 # =============================================================================
 step 4 "Configure .env"
 
@@ -247,6 +247,21 @@ replace_env_value "DASHBOARD_PORT" "8765"
 
 echo ""
 echo -e "${GREEN}.env configured at ${ENV_FILE}${NC}"
+
+# OpenBao-first bootstrap (optional): minimal JSON on disk; secrets in KV
+EXAMPLE_CFG="${SCRIPT_DIR}/flume.config.example.json"
+TARGET_CFG="${WORKSPACE_ROOT}/flume.config.json"
+if [ ! -f "${TARGET_CFG}" ] && [ -f "${EXAMPLE_CFG}" ]; then
+    cp "${EXAMPLE_CFG}" "${TARGET_CFG}"
+    echo -e "  ${GREEN}Created ${TARGET_CFG}${NC} (OpenBao bootstrap — set tokenFile; secrets live in KV, not in git)"
+fi
+
+if command -v openbao >/dev/null 2>&1 && [ -f "${BOOTSTRAP_FILE}" ]; then
+    if [ -n "${BAO_TOKEN:-}" ] || [ -n "${VAULT_TOKEN:-}" ] || [ -n "${OPENBAO_TOKEN:-}" ]; then
+        bash "${SCRIPT_DIR}/setup/sync-bootstrap-to-openbao.sh" "${BOOTSTRAP_FILE}" && \
+            echo -e "  ${GREEN}Synced Elasticsearch credentials to OpenBao KV (secret/flume).${NC}" || true
+    fi
+fi
 
 # =============================================================================
 # Step 5: Create Elasticsearch indices

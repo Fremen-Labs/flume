@@ -5,7 +5,8 @@ After=network.target elasticsearch.service
 [Service]
 Type=simple
 WorkingDirectory=__FLUME_ROOT__
-EnvironmentFile=__ENV_FILE__
+# Do not use EnvironmentFile=.env here: systemd parses env files stricter than bash,
+# which can drop ES_API_KEY. run.sh sources .env; server.py also loads .env on startup.
 ExecStart=__DASHBOARD_SCRIPT__
 Restart=on-failure
 RestartSec=5

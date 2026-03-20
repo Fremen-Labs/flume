@@ -116,7 +116,7 @@ PROVIDER_CATALOG = [
 
 VALID_PROVIDERS = {p["id"] for p in PROVIDER_CATALOG}
 OAUTH_PROVIDERS = {"openai"}  # Only OpenAI supports OAuth Codex flow
-SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN"}
+SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "ES_API_KEY"}
 
 # ─── .env load/save ────────────────────────────────────────────────────────────
 
@@ -125,12 +125,9 @@ def _env_file_path(workspace_root: Path) -> Path:
     return workspace_root / ".env"
 
 
-def load_env_pairs(workspace_root: Path) -> dict[str, str]:
-    path = _env_file_path(workspace_root)
-    out = {}
-    if not path.exists():
-        return out
-    for line in path.read_text().splitlines():
+def _parse_env_lines(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -139,8 +136,39 @@ def load_env_pairs(workspace_root: Path) -> dict[str, str]:
     return out
 
 
+def load_env_pairs(workspace_root: Path) -> dict[str, str]:
+    """Load workspace .env then repo-root .env (repo root wins for duplicate keys)."""
+    out: dict[str, str] = {}
+    wr = workspace_root.resolve()
+    for base in (wr, wr.parent):
+        path = base / ".env"
+        if path.is_file():
+            try:
+                out.update(_parse_env_lines(path.read_text(encoding="utf-8", errors="replace")))
+            except OSError:
+                pass
+    return out
+
+
+def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
+    """Use process env + token file so Settings works after server hydrated from OpenBao."""
+    for k in ("OPENBAO_ADDR", "OPENBAO_TOKEN", "OPENBAO_MOUNT", "OPENBAO_PATH", "OPENBAO_TOKEN_FILE"):
+        v = os.environ.get(k, "").strip()
+        if v:
+            pairs[k] = v
+    tf = pairs.get("OPENBAO_TOKEN_FILE", "").strip()
+    if tf and not pairs.get("OPENBAO_TOKEN", "").strip():
+        p = Path(tf).expanduser()
+        if p.is_file():
+            try:
+                pairs["OPENBAO_TOKEN"] = p.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                pass
+    return pairs
+
+
 def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
-    pairs = load_env_pairs(workspace_root)
+    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
     if not shutil.which("openbao"):
         return False, pairs
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
@@ -220,16 +248,23 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
 
 def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     """
-    Load settings with OpenBao values overlaying .env for sensitive keys.
-    Non-sensitive settings always come from .env.
+    Load settings: .env (optional), process env (OpenBao hydration), then live OpenBao KV.
+    Values from OpenBao override earlier sources.
     """
-    pairs = load_env_pairs(workspace_root)
+    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
+    try:
+        from flume_secrets import FLUME_ENV_KEYS
+
+        for key in FLUME_ENV_KEYS:
+            v = os.environ.get(key, "").strip()
+            if v:
+                pairs[key] = v
+    except ImportError:
+        pass
     bao_vals = _openbao_get_all(workspace_root)
-    if not bao_vals:
-        return pairs
-    for key in SENSITIVE_KEYS:
-        if key in bao_vals and str(bao_vals.get(key, "")).strip():
-            pairs[key] = str(bao_vals[key]).strip()
+    for key, val in bao_vals.items():
+        if val is not None and str(val).strip():
+            pairs[str(key)] = str(val).strip()
     return pairs
 
 

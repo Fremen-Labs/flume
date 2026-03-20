@@ -2,41 +2,40 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${WORKSPACE_ROOT}/.env"
+REPO_ROOT="$(cd "${WORKSPACE_ROOT}/.." && pwd)"
 
-# Support both layouts:
-# - packaged install: <root>/.env next to worker-manager/
-# - git clone:       <repo>/.env with app under <repo>/src/
-if [ ! -f "${ENV_FILE}" ] && [ -f "${WORKSPACE_ROOT}/../.env" ]; then
-    ENV_FILE="${WORKSPACE_ROOT}/../.env"
-fi
+export PYTHONPATH="${WORKSPACE_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
-if [ ! -f "${ENV_FILE}" ]; then
-    echo "Missing .env file."
-    echo "Expected one of:"
-    echo "  ${WORKSPACE_ROOT}/.env"
-    echo "  ${WORKSPACE_ROOT}/../.env"
-    echo "Create it with: cp install/.env.template .env"
+has_cfg=false
+[ -f "${REPO_ROOT}/flume.config.json" ] && has_cfg=true
+[ -f "${WORKSPACE_ROOT}/flume.config.json" ] && has_cfg=true
+[ -f "${REPO_ROOT}/.env" ] && has_cfg=true
+[ -f "${WORKSPACE_ROOT}/.env" ] && has_cfg=true
+[ -n "${OPENBAO_ADDR:-}" ] && has_cfg=true
+
+if [ "$has_cfg" = "false" ]; then
+    echo "Missing configuration. Add flume.config.json (OpenBao) or .env — see install/flume.config.example.json"
     exit 1
 fi
 
-set -a
-source "${ENV_FILE}"
+ENV_FILE=""
+if [ -f "${REPO_ROOT}/.env" ]; then
+    ENV_FILE="${REPO_ROOT}/.env"
+elif [ -f "${WORKSPACE_ROOT}/.env" ]; then
+    ENV_FILE="${WORKSPACE_ROOT}/.env"
+fi
+
+if [ -n "${ENV_FILE}" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "${ENV_FILE}"
+    set +a
+fi
+
 export LOOM_WORKSPACE="${WORKSPACE_ROOT}"
 export WORKER_MANAGER_POLL_SECONDS="${WORKER_MANAGER_POLL_SECONDS:-15}"
-set +a
 
-# Check ES_API_KEY before starting (manager.py would fail anyway)
-if [ -z "${ES_API_KEY:-}" ] || [ "${ES_API_KEY}" = "AUTO_GENERATED_BY_INSTALLER" ]; then
-    echo "ES_API_KEY is missing or invalid in .env"
-    echo ""
-    echo "Run the installer first:  bash install/install.sh"
-    echo "Or bootstrap credentials: ELASTIC_PASSWORD=yourpassword bash install/setup/bootstrap-es-credentials.sh"
-    echo "(Get the elastic password from ES install, or reset: sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i)"
-    exit 1
-fi
-
-# Apply git identity from .env
+# Apply git identity when present (non-secret; may come from OpenBao KV or .env)
 if [ -n "${GIT_USER_NAME:-}" ]; then
     git config --global user.name "${GIT_USER_NAME}" 2>/dev/null || true
 fi

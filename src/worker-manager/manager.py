@@ -2,12 +2,20 @@
 import json
 import os
 import ssl
+import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent))) / 'worker-manager'
+_WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+if str(_WS) not in sys.path:
+    sys.path.insert(0, str(_WS))
+from flume_secrets import apply_runtime_config  # noqa: E402
+
+apply_runtime_config(_WS)
+
+BASE = _WS / 'worker-manager'
 STATE = BASE / 'state.json'
 LOG = BASE / 'manager.log'
 
@@ -179,8 +187,10 @@ def cycle():
 
 
 def main():
-    if not ES_API_KEY:
-        raise SystemExit('ES_API_KEY is required')
+    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+        raise SystemExit(
+            'ES_API_KEY is required. Store it in OpenBao (KV secret/flume) or .env — see install/flume.config.example.json'
+        )
     log('worker manager starting')
     while True:
         try:
