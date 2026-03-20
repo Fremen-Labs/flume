@@ -334,10 +334,18 @@ def run_implementer(
         message = raw.get('message', {})
         tool_calls = message.get('tool_calls') or []
 
+        # Normalize tool call shape (OpenAI requires type + id on follow-up turns)
+        norm_calls = []
+        for idx, call in enumerate(tool_calls):
+            call = dict(call)
+            call.setdefault('id', f'call_{idx}')
+            call.setdefault('type', 'function')
+            norm_calls.append(call)
+
         # Append assistant turn
         assistant_msg: dict[str, Any] = {'role': 'assistant', 'content': message.get('content') or ''}
-        if tool_calls:
-            assistant_msg['tool_calls'] = tool_calls
+        if norm_calls:
+            assistant_msg['tool_calls'] = norm_calls
         messages.append(assistant_msg)
 
         if not tool_calls:
