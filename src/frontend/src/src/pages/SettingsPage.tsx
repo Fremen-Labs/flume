@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal } from 'lucide-react';
+import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal, Plus, Trash2, Star } from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +22,7 @@ import type {
   CodexAppServerStatusResponse,
   RepoSettingsResponse,
   RepoSettingsPayload,
+  GithubTokenActionPayload,
 } from '@/types';
 
 async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
@@ -259,17 +260,46 @@ export default function SettingsPage() {
   };
 
   const effectiveRepo = { ...repoData?.settings, ...repoForm };
-  // Tokens are masked as "***" by the backend when configured.
-  const hasGhToken = Boolean(effectiveRepo.ghToken);
+  const githubTokens = repoData?.settings?.githubTokens ?? [];
+  const activeGithubId = repoData?.settings?.activeGithubTokenId ?? '';
+  const hasGhToken = githubTokens.some((t) => t.hasToken);
   const hasAdoToken = Boolean(effectiveRepo.adoToken);
+
+  const [newGithubLabel, setNewGithubLabel] = useState('');
+  const [newGithubToken, setNewGithubToken] = useState('');
+  const [ghRename, setGhRename] = useState<Record<string, string>>({});
+  const [ghReplaceToken, setGhReplaceToken] = useState<Record<string, string>>({});
+  const [ghBusy, setGhBusy] = useState<string | null>(null);
+
+  const runGithubTokenAction = async (body: GithubTokenActionPayload, busyKey: string): Promise<boolean> => {
+    setGhBusy(busyKey);
+    setRepoSaveError(null);
+    try {
+      const res = await fetch('/api/settings/repos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ githubTokenAction: body } satisfies RepoSettingsPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'repos'] });
+      setRepoSaveSuccess(true);
+      setTimeout(() => setRepoSaveSuccess(false), 3000);
+      return true;
+    } catch (e) {
+      setRepoSaveError(e instanceof Error ? e.message : 'GitHub token action failed');
+      return false;
+    } finally {
+      setGhBusy(null);
+    }
+  };
+
   const handleSaveRepos = () => {
     setRepoSaveError(null);
     const payload: RepoSettingsPayload = {
-      ghToken: repoForm.ghToken ?? effectiveRepo.ghToken ?? '',
       adoToken: repoForm.adoToken ?? effectiveRepo.adoToken ?? '',
       adoOrgUrl: repoForm.adoOrgUrl ?? effectiveRepo.adoOrgUrl ?? '',
     };
-    if (payload.ghToken === '***') delete (payload as Record<string, unknown>).ghToken;
     if (payload.adoToken === '***') delete (payload as Record<string, unknown>).adoToken;
     if (payload.adoOrgUrl === '***') delete (payload as Record<string, unknown>).adoOrgUrl;
     saveRepoMutation.mutate(payload);
@@ -963,14 +993,176 @@ export default function SettingsPage() {
                   <p className="text-sm text-destructive">{String(repoError)}</p>
                 )}
 
-                <div className="space-y-2">
-                  <Label>GitHub token</Label>
-                  <Input
-                    type="password"
-                    placeholder={effectiveRepo.ghToken === '***' ? '••••••••' : 'ghp_...'}
-                    value={repoForm.ghToken ?? (effectiveRepo.ghToken === '***' ? '' : effectiveRepo.ghToken ?? '')}
-                    onChange={(e) => setRepoForm((prev) => ({ ...prev, ghToken: e.target.value }))}
-                  />
+                <div className="space-y-4">
+                  <div>
+                    <Label>GitHub tokens</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Add labeled PATs; the <strong>active</strong> one is written to <code className="text-[10px]">GH_TOKEN</code>{' '}
+                      for clones and tooling. Only one is active at a time.
+                    </p>
+                  </div>
+
+                  <div className="rounded-md border border-border/60 bg-muted/20 p-4 space-y-3">
+                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add PAT</div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Input
+                        placeholder="Label (e.g. work, personal)"
+                        value={newGithubLabel}
+                        onChange={(e) => setNewGithubLabel(e.target.value)}
+                        autoComplete="off"
+                      />
+                      <Input
+                        type="password"
+                        placeholder="ghp_…"
+                        value={newGithubToken}
+                        onChange={(e) => setNewGithubToken(e.target.value)}
+                        autoComplete="new-password"
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!!ghBusy}
+                      onClick={() => {
+                        const label = newGithubLabel.trim();
+                        const token = newGithubToken.trim();
+                        if (!label || !token) {
+                          setRepoSaveError('Label and token are required to add a GitHub PAT.');
+                          return;
+                        }
+                        void runGithubTokenAction({ action: 'upsert', label, token }, 'add').then((ok) => {
+                          if (ok) {
+                            setNewGithubLabel('');
+                            setNewGithubToken('');
+                          }
+                        });
+                      }}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add token
+                    </Button>
+                  </div>
+
+                  {githubTokens.length > 0 && (
+                    <ul className="space-y-4">
+                      {githubTokens.map((t) => {
+                        const isActive = t.id === activeGithubId;
+                        const renameVal = ghRename[t.id] ?? '';
+                        const replaceVal = ghReplaceToken[t.id] ?? '';
+                        return (
+                          <li
+                            key={t.id}
+                            className="rounded-md border border-border/60 p-4 space-y-3"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-foreground">{t.label}</span>
+                              {t.hasToken ? (
+                                <span className="text-xs text-muted-foreground">···{t.tokenSuffix}</span>
+                              ) : (
+                                <span className="text-xs text-amber-600 dark:text-amber-400">No secret stored</span>
+                              )}
+                              {isActive && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 text-primary px-2 py-0.5 text-xs font-medium">
+                                  <Star className="h-3 w-3" aria-hidden />
+                                  Active
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={!!ghBusy || isActive || !t.hasToken}
+                                onClick={() => void runGithubTokenAction({ action: 'setActive', id: t.id }, `act-${t.id}`)}
+                              >
+                                Use as active
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                disabled={!!ghBusy}
+                                onClick={() => {
+                                  if (!confirm(`Remove GitHub token “${t.label}”?`)) return;
+                                  void runGithubTokenAction({ action: 'delete', id: t.id }, `del-${t.id}`).then(() => {
+                                    setGhRename((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                    setGhReplaceToken((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4 mr-1" />
+                                Remove
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Rename</Label>
+                                <Input
+                                  placeholder={t.label}
+                                  value={renameVal}
+                                  onChange={(e) => setGhRename((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="off"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!ghBusy || !renameVal.trim()}
+                                onClick={() => {
+                                  const label = renameVal.trim();
+                                  if (!label) return;
+                                  void runGithubTokenAction({ action: 'upsert', id: t.id, label }, `ren-${t.id}`).then(() => {
+                                    setGhRename((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Save label
+                              </Button>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                              <div className="space-y-1">
+                                <Label className="text-xs">Replace PAT</Label>
+                                <Input
+                                  type="password"
+                                  placeholder="New token"
+                                  value={replaceVal}
+                                  onChange={(e) => setGhReplaceToken((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                                  autoComplete="new-password"
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                disabled={!!ghBusy || !replaceVal.trim()}
+                                onClick={() => {
+                                  const token = replaceVal.trim();
+                                  if (!token) return;
+                                  void runGithubTokenAction({ action: 'upsert', id: t.id, token }, `tok-${t.id}`).then(() => {
+                                    setGhReplaceToken((prev) => ({ ...prev, [t.id]: '' }));
+                                  });
+                                }}
+                              >
+                                Update PAT
+                              </Button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
 
                 <div className="space-y-2">

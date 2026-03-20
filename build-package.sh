@@ -134,6 +134,10 @@ if [ -f "${SRC}/llm_credentials_store.py" ]; then
     cp "${SRC}/llm_credentials_store.py" "${STAGE}/"
     success "llm_credentials_store.py (labeled LLM keys)"
 fi
+if [ -f "${SRC}/github_tokens_store.py" ]; then
+    cp "${SRC}/github_tokens_store.py" "${STAGE}/"
+    success "github_tokens_store.py (labeled GitHub PATs)"
+fi
 
 # Copy dashboard
 # =============================================================================

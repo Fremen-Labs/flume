@@ -160,6 +160,8 @@ export interface LlmOAuthStatus {
   /** True if we successfully base64-decoded the JWT payload. */
   accessTokenJwtParsed?: boolean;
   hasApiResponsesWrite?: boolean;
+  /** JWT includes model.request (Codex browser OAuth typically does not). */
+  hasModelRequestScope?: boolean;
   oauthScopesRequested?: string;
   /** Consent / token diagnostics; refresh alone will not upgrade this from missing → ok. */
   oauthScopeStatus?: LlmOAuthScopeStatus;
@@ -209,10 +211,63 @@ export interface LlmCredentialActionPayload {
   baseUrl?: string;
 }
 
+/** GET /api/codex-app-server/status */
+export interface CodexAppServerStatusResponse {
+  listenUrl: string;
+  defaultListenUrl: string;
+  codexBinary: string;
+  codexResolvedPath: string | null;
+  codexOnPath: boolean;
+  npxOnPath?: boolean;
+  npxResolvedPath?: string | null;
+  /** True when ./flume codex-app-server will use npx @openai/codex (no global codex). */
+  flumeWillUseNpxFallback?: boolean;
+  tcpReachable: boolean | null;
+  parseError: string | null;
+  codexAuthFilePresent: boolean;
+  docsUrl: string;
+  envFlumeListen: string;
+  envCodexBin: string;
+}
+
+/** GET /api/codex-app-server/proxy-config */
+export interface CodexAppServerProxyConfigResponse {
+  proxyWanted: boolean;
+  proxyEnabled: boolean;
+  proxyRunning: boolean;
+  proxyPort: number;
+  proxyBind: string;
+  clientWsUrl: string;
+  upstreamListenUrl: string;
+  workspaceRoot: string;
+  websocketsInstalled: boolean;
+  websocketsImportError?: string | null;
+  installHint?: string | null;
+  disableReason?: string | null;
+  serveError?: string | null;
+}
+
 // ─── Repo Settings API ─────────────────────────────────────────────────────
 
+export interface GithubTokenPublic {
+  id: string;
+  label: string;
+  tokenSuffix: string;
+  hasToken: boolean;
+}
+
+export interface GithubTokenActionPayload {
+  action: 'upsert' | 'delete' | 'setActive';
+  id?: string;
+  label?: string;
+  token?: string;
+}
+
 export interface RepoSettings {
+  /** Masked; mirrors whether the active GitHub PAT is set. */
   ghToken: string;
+  githubTokens: GithubTokenPublic[];
+  activeGithubTokenId: string;
   adoToken: string;
   adoOrgUrl: string;
 }
@@ -223,7 +278,9 @@ export interface RepoSettingsResponse {
 }
 
 export interface RepoSettingsPayload {
+  /** @deprecated Prefer githubTokenAction + store; still accepted for legacy saves. */
   ghToken?: string;
+  githubTokenAction?: GithubTokenActionPayload;
   adoToken?: string;
   adoOrgUrl?: string;
 }
