@@ -198,8 +198,8 @@ def probe_exo_cluster():
         with urllib.request.urlopen(req, timeout=1) as response:
             if response.status == 200:
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"\\n\\033[93m[LOG] Exo Cluster Probe Timeout/Error: {e}\\033[0m\\n")
     return False
 
 def append_to_env(port):
