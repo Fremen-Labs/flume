@@ -309,6 +309,40 @@ def elastro_watchdog():
                                             stderr=subprocess.DEVNULL
                                         )
                                         log(f'watchdog: triggered elastro rag update for {filepath.name}')
+                                        
+                                        try:
+                                            total_bytes = 0
+                                            for r, ds, fs in os.walk(workspace_dir):
+                                                if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']): continue
+                                                for fw in fs:
+                                                    total_bytes += (Path(r) / fw).stat().st_size
+                                            mod_bytes = filepath.stat().st_size
+                                            if total_bytes > mod_bytes:
+                                                savings = (total_bytes - mod_bytes) // 4
+                                                import urllib.request
+                                                import json
+                                                es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+                                                es_key = os.environ.get('ES_API_KEY', '')
+                                                if es_key and es_url:
+                                                    doc = {
+                                                        'worker_name': 'elastro-watchdog',
+                                                        'worker_role': 'system',
+                                                        'provider': 'elastro-cache',
+                                                        'model': 'ast-sync',
+                                                        'input_tokens': 0,
+                                                        'output_tokens': 0,
+                                                        'savings': savings,
+                                                        'created_at': datetime.now(timezone.utc).isoformat()
+                                                    }
+                                                    req = urllib.request.Request(
+                                                        f"{es_url}/agent-token-telemetry/_doc",
+                                                        data=json.dumps(doc).encode(),
+                                                        headers={'Content-Type': 'application/json', 'Authorization': f'ApiKey {es_key}'},
+                                                        method='POST'
+                                                    )
+                                                    with urllib.request.urlopen(req, timeout=3, context=ctx): pass
+                                        except Exception:
+                                            pass
                                     except Exception:
                                         pass
                                 file_mtimes[str(filepath)] = mtime

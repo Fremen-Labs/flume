@@ -44,6 +44,8 @@ export default function AnalyticsPage() {
 
   const approvedReviews = reviews.filter(r => r.verdict === 'approved').length;
   const passRate = reviews.length > 0 ? Math.round((approvedReviews / reviews.length) * 100) : 0;
+  
+  const elastro_savings = snapshot?.elastro_savings ?? 0;
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
@@ -62,11 +64,12 @@ export default function AnalyticsPage() {
       {!isLoading && (
         <>
           {/* Top metrics */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 relative z-10">
             <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
             <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
             <GlassMetricCard title="Failure Count" value={String(failures.length)} icon={Clock} trend={{ value: failures.length, label: 'since start' }} />
+            <GlassMetricCard title="AST Tokens Saved" value={elastro_savings > 1000000 ? `${(elastro_savings / 1000000).toFixed(1)}M` : (elastro_savings > 1000 ? `${(elastro_savings / 1000).toFixed(1)}K` : String(elastro_savings))} icon={TrendingUp} trend={{ value: elastro_savings, label: 'efficiency via Elastro' }} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 relative z-10">

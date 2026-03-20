@@ -951,6 +951,9 @@ def load_workers():
                         'total_input': {'sum': {'field': 'input_tokens'}},
                         'total_output': {'sum': {'field': 'output_tokens'}}
                     }
+                },
+                'total_elastro_savings': {
+                    'sum': {'field': 'savings'}
                 }
             }
         })
@@ -1595,6 +1598,16 @@ def load_snapshot():
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     }).get('hits', {}).get('hits', [])
+    elastro_savings = 0
+    try:
+        agg_res = es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
+        })
+        elastro_savings = int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
+    except Exception:
+        pass
+
     return {
         'workers': load_workers(),
         'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks],
@@ -1603,6 +1616,7 @@ def load_snapshot():
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance],
         'repos': load_repos(),
         'projects': load_projects_registry(),
+        'elastro_savings': elastro_savings,
     }
 
 
