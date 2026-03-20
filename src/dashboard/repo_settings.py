@@ -3,78 +3,86 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 # Reuse the same settings helpers from llm_settings.py
-from llm_settings import load_effective_pairs, _update_env_keys  # type: ignore
+from llm_settings import load_effective_pairs  # type: ignore
+
+import ado_tokens_store as ats  # type: ignore
+import github_tokens_store as gts  # type: ignore
 
 MASK = "***"
 
-ENV_GH_TOKEN = "GH_TOKEN"
-ENV_ADO_TOKEN = "ADO_TOKEN"
-ENV_ADO_ORG_URL = "ADO_ORG_URL"
-
-
-def _mask_if_set(value: str) -> str:
-    return MASK if str(value or "").strip() else ""
-
-
-def validate_repo_settings(payload: dict[str, Any], workspace_root: Path) -> tuple[bool, str, dict[str, str]]:
-    """
-    Validate settings payload and return (ok, error_message, env_updates).
-    env_updates is the dict of key=value to write to .env.
-
-    Notes:
-    - We treat token input of "***" as "leave unchanged".
-    - Empty string is treated as "set empty" (clear).
-    - Missing fields are treated as "leave unchanged".
-    """
-    updates: dict[str, str] = {}
-
-    if "ghToken" in payload:
-        token = str(payload.get("ghToken") or "").strip()
-        if token != MASK:
-            updates[ENV_GH_TOKEN] = token
-
-    if "adoToken" in payload:
-        token = str(payload.get("adoToken") or "").strip()
-        if token != MASK:
-            updates[ENV_ADO_TOKEN] = token
-
-    if "adoOrgUrl" in payload:
-        url = str(payload.get("adoOrgUrl") or "").strip()
-        if url != MASK:
-            updates[ENV_ADO_ORG_URL] = url
-
-    return True, "", updates
-
 
 def get_repo_settings_response(workspace_root: Path) -> dict[str, Any]:
+    gts.ensure_migrated_from_env(workspace_root)
+    ats.ensure_migrated_from_env(workspace_root)
     pairs = load_effective_pairs(workspace_root)
+
+    active_gh = gts.get_active_token_plain(workspace_root)
+    gh_mask = MASK if active_gh else ""
+
+    active_ado_tok = ats.get_active_token_plain(workspace_root)
+    ado_mask = MASK if active_ado_tok else ""
+    ado_org = ats.get_active_org_url(workspace_root)
 
     return {
         "settings": {
-            "ghToken": _mask_if_set(pairs.get(ENV_GH_TOKEN, "")),
-            "adoToken": _mask_if_set(pairs.get(ENV_ADO_TOKEN, "")),
-            "adoOrgUrl": str(pairs.get(ENV_ADO_ORG_URL, "") or "").strip(),
+            "ghToken": gh_mask,
+            "githubTokens": gts.list_public_tokens(workspace_root),
+            "activeGithubTokenId": gts.get_active_token_id(workspace_root),
+            "adoToken": ado_mask,
+            "adoOrgUrl": ado_org,
+            "adoCredentials": ats.list_public_credentials(workspace_root),
+            "activeAdoCredentialId": ats.get_active_credential_id(workspace_root),
         },
         "restartRequired": True,
     }
 
 
 def update_repo_settings(workspace_root: Path, payload: dict[str, Any]) -> tuple[bool, str]:
-    ok, err, updates = validate_repo_settings(payload, workspace_root)
-    if not ok:
-        return False, err
-    if not updates:
-        # Nothing to update; still considered ok.
-        return True, ""
-    _update_env_keys(workspace_root, updates)
-    # Align process env so git clone / same-request API see the new token (mirrors LLM save).
-    fresh = load_effective_pairs(workspace_root)
-    for key in (ENV_GH_TOKEN, ENV_ADO_TOKEN, ENV_ADO_ORG_URL):
-        os.environ[key] = str(fresh.get(key) or "")
-    return True, ""
+    gts.ensure_migrated_from_env(workspace_root)
+    ats.ensure_migrated_from_env(workspace_root)
 
+    if isinstance(payload.get("githubTokenAction"), dict):
+        ok, err = gts.apply_action(workspace_root, payload["githubTokenAction"])
+        if not ok:
+            return False, err
+
+    if isinstance(payload.get("adoTokenAction"), dict):
+        ok, err = ats.apply_action(workspace_root, payload["adoTokenAction"])
+        if not ok:
+            return False, err
+
+    gh_action = isinstance(payload.get("githubTokenAction"), dict)
+    ado_action = isinstance(payload.get("adoTokenAction"), dict)
+
+    if "ghToken" in payload and not gh_action:
+        token = str(payload.get("ghToken") or "").strip()
+        if token and token != MASK:
+            ok, err = gts.apply_legacy_gh_token_value(workspace_root, token)
+            if not ok:
+                return False, err
+
+    if not ado_action:
+        ut = uo = False
+        tv = ov = ""
+        if "adoToken" in payload:
+            raw_t = str(payload.get("adoToken") or "").strip()
+            if raw_t != MASK:
+                ut = True
+                tv = raw_t
+        if "adoOrgUrl" in payload:
+            raw_o = str(payload.get("adoOrgUrl") or "").strip()
+            if raw_o != MASK:
+                uo = True
+                ov = raw_o
+        if ut or uo:
+            ok, err = ats.apply_legacy_patch(
+                workspace_root, update_token=ut, token=tv, update_org=uo, org_url=ov
+            )
+            if not ok:
+                return False, err
+
+    return True, ""

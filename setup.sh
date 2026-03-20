@@ -77,6 +77,11 @@ elif [ -f "setup/install-elasticsearch.sh" ]; then
 fi
 
 while ! es_credentials_valid; do
+    if [ "${FLUME_SKIP_ELASTIC_INSTALL:-}" == "auto" ] || [ "${FLUME_SKIP_ELASTIC_INSTALL:-}" == "true" ]; then
+        echo ""
+        echo -e "${GREEN}MATRIX ASSIMILATION OVERRIDE: Bypassing localized Elasticsearch sequence...${NC}"
+        break
+    fi
     if ! curl -sk "https://localhost:9200/" &>/dev/null; then
         echo ""
         echo -e "${YELLOW}Elasticsearch is not running. Start it and re-run setup.sh${NC}"

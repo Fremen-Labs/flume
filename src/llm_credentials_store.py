@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import functools
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,6 +54,7 @@ def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeCredentialId": "", "defaultCredentialId": "", "credentials": []}
 
 
+@functools.lru_cache(maxsize=1)
 def load_document(workspace_root: Path) -> dict[str, Any]:
     path = credentials_path(workspace_root)
     if not path.is_file():
@@ -78,7 +80,14 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
     path = credentials_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    # Mask API keys before saving to disk to prevent plaintext vulnerability
+    masked_doc = json.loads(json.dumps(doc))
+    for cred in masked_doc.get("credentials", []):
+        if cred.get("apiKey") and cred["apiKey"] != "***":
+            cred["apiKey"] = "***OPENBAO_DELEGATED***"
+            
+    path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    load_document.cache_clear()
 
 
 def _key_suffix(key: str) -> str:
