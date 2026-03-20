@@ -1060,17 +1060,20 @@ def main():
                     # Safety: if a task is stuck in running with no agent_log, release it
                     try:
                         task_id = worker.get('current_task_id')
-                        if task_id and worker.get('role') == 'implementer':
+                        role = worker.get('role')
+                        if task_id and role in ('implementer', 'tester', 'reviewer'):
                             es_id, task = fetch_task_doc(task_id)
                             if es_id and task and not task.get('agent_log'):
-                                update_task_doc(es_id, {
+                                patch = {
                                     'status': 'ready',
-                                    'owner': 'implementer',
-                                    'assigned_agent_role': 'implementer',
+                                    'owner': role,
+                                    'assigned_agent_role': role,
                                     'needs_human': False,
-                                    **_implementer_clear_claim_fields(),
-                                })
-                                log(f"implementer: released task={task_id} (no agent_log)")
+                                    'queue_state': 'queued',
+                                    'active_worker': None,
+                                }
+                                update_task_doc(es_id, patch)
+                                log(f"{role}: released task={task_id} (no agent_log)")
                                 continue
                     except Exception:
                         pass
