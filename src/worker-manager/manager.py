@@ -338,10 +338,12 @@ def cycle():
             task = hits[0]
             item_id = task.get('_id')
             src = task.get('_source', {})
-            pref_model = src.get('preferred_model') or worker['model']
-            pref_prov = src.get('preferred_llm_provider') or worker.get('llm_provider')
-            # Role config in agent_models.json must win: ES tasks kept an old preferred_llm_credential_id
-            # from the first claim, which ignored per-role key changes until the task completed.
+            # Role config in agent_models.json must win when a worker claims a task.
+            # Older tasks may carry stale preferred_model / provider / credential values from
+            # queue generation or a previous claim; re-stamping them here keeps runtime settings
+            # authoritative and prevents task-local defaults from overriding the Agents UI.
+            pref_model = worker['model']
+            pref_prov = worker.get('llm_provider')
             pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             claim(
                 item_id,
