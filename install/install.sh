@@ -4,7 +4,7 @@
 # Guides you through a complete Flume setup:
 #   Step 1: Verify dependencies
 #   Step 2: Install Elasticsearch (automatic when missing)
-#   Step 3: Install OpenBao CLI & GitHub CLI (best-effort)
+#   Step 3: Install OpenBao CLI, GitHub CLI & Codex CLI (best-effort)
 #   Step 4: Configure runtime (.env + flume.config.json, optional OpenBao sync)
 #   Step 5: Create Elasticsearch indices
 #   Step 6: Set up workspace directories
@@ -160,9 +160,9 @@ if [ "$NEED_ES_BOOTSTRAP" = "true" ]; then
 fi
 
 # =============================================================================
-# Step 3: Install OpenBao CLI & GitHub CLI (optional, best-effort)
+# Step 3: Install OpenBao CLI, GitHub CLI & Codex CLI (optional, best-effort)
 # =============================================================================
-step 3 "OpenBao & GitHub CLI"
+step 3 "OpenBao, GitHub CLI & Codex"
 
 if command -v openbao >/dev/null 2>&1; then
     echo -e "${GREEN}OpenBao already installed:${NC} $(openbao version 2>/dev/null | head -n 1 || echo 'openbao')"
@@ -183,6 +183,18 @@ else
         sudo bash "${SCRIPT_DIR}/setup/install-gh.sh" || echo -e "${YELLOW}gh install skipped (continuing).${NC}"
     else
         bash "${SCRIPT_DIR}/setup/install-gh.sh" || echo -e "${YELLOW}gh install skipped (continuing).${NC}"
+    fi
+fi
+
+# OpenAI Codex CLI — Node LTS + npm global @openai/codex (Plan New Work OAuth / flume codex-app-server)
+if command -v codex >/dev/null 2>&1; then
+    echo -e "${GREEN}Codex CLI already installed:${NC} $(codex --version 2>/dev/null | head -n 1 || echo codex)"
+else
+    echo "Installing OpenAI Codex CLI (Node.js LTS if needed, then npm i -g @openai/codex)."
+    if [ "$EUID" -ne 0 ]; then
+        sudo bash "${SCRIPT_DIR}/setup/install-codex-cli.sh" || echo -e "${YELLOW}Codex CLI install skipped (continuing).${NC}"
+    else
+        bash "${SCRIPT_DIR}/setup/install-codex-cli.sh" || echo -e "${YELLOW}Codex CLI install skipped (continuing).${NC}"
     fi
 fi
 
@@ -391,7 +403,8 @@ echo -e "${BOLD}Control the service:${NC}"
 echo "  ./flume stop     # Stop dashboard"
 echo "  ./flume restart  # Restart dashboard"
 echo "  ./flume status   # Check status"
-echo "  ./flume codex-oauth login  # ChatGPT/Codex OAuth for OpenAI (optional)"
+echo "  ./flume codex-oauth login-browser   # Flume OAuth state (optional)"
+echo "  codex login && ./flume codex-oauth import   # ~/.codex session for Plan New Work / Codex bridge"
 echo ""
 echo -e "${BOLD}Then open in your browser:${NC}"
 echo "  http://${DISPLAY_HOST}:${DASHBOARD_PORT_VAL:-8765}"

@@ -74,7 +74,7 @@ The installer is **non-interactive** by default. It performs:
 |------|------|----------------|
 | 1 | **Check dependencies** | `verify-deps.sh` — Python 3.9+, git, pgrep, curl; optional `gh`, `openbao`, node |
 | 2 | **Elasticsearch** | If ES is not running or API key is missing, runs `install-elasticsearch.sh` (may use `sudo`); may write `install/.es-bootstrap.env` |
-| 3 | **OpenBao & GitHub CLI** | Best-effort install of `openbao` and `gh` to `/usr/local/bin` |
+| 3 | **OpenBao, GitHub CLI & Codex** | Best-effort: `openbao`, `gh`, **Node.js LTS** + **`codex`** (`npm i -g @openai/codex`) |
 | 4 | **Configure runtime** | Creates/updates **`.env`** from template; applies ES bootstrap; creates **`flume.config.json`** from example (OpenBao bootstrap); optionally **syncs ES credentials to OpenBao** if `BAO_TOKEN` / `VAULT_TOKEN` / `OPENBAO_TOKEN` is set |
 | 5 | **Elasticsearch indices** | `create-es-indices.sh` (can hydrate `ES_*` from OpenBao via `hydrate-openbao-env.py` if no key in `.env`) |
 | 6 | **Workspace** | `projects.json`, `sequence_counters.json`, worker state, optional `flume` systemd service install |
@@ -124,6 +124,6 @@ cd src/frontend/src && npm install && npm run build
 
 **Required:** Python 3.9+, git, pgrep, curl, Elasticsearch 8.x (installed by installer or pre-provisioned).
 
-**Optional:** OpenBao **server** (you run it; installer installs **CLI**), `gh`, Node (frontend rebuild).
+**Optional:** OpenBao **server** (you run it; installer installs **CLI**), `gh`. **Node + Codex CLI** are installed by the installer when `sudo` is available (frontend rebuild + OAuth planning).
 
 See [`install/README.md`](install/README.md) for the full table and scripts.

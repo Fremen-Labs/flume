@@ -18,7 +18,7 @@ The **repository root README** is [`../README.md`](../README.md) (short overview
 | **Worker handlers** (`worker_handlers.py`) | Runs agent pipelines (intake, PM, implementer, tester, reviewer, memory-updater) using configured LLMs. |
 | **Elasticsearch 8.x** | Primary store: tasks, handoffs, failures, provenance, memory indices (see `memory/es/index_templates/`). |
 | **OpenBao** (optional, recommended) | **KV secrets** — API keys, `ES_API_KEY`, tokens. Flume reads **`flume.config.json`** + token file, then `openbao kv get`. |
-| **OpenBao CLI / `gh`** | Installed by the installer (best-effort) for local secret management and GitHub PR creation. |
+| **OpenBao CLI / `gh` / Codex** | Installed by the installer (best-effort): secrets, GitHub PRs, and **OpenAI Codex CLI** (`@openai/codex`) for OAuth / Plan New Work. |
 
 ### Configuration flow (startup)
 
@@ -66,7 +66,7 @@ bash setup.sh
 This:
 
 1. Runs **`install/install.sh`** (git) or **`install.sh`** (package).
-2. On **git clones**, runs `npm install && npm run build` under `src/frontend/src` if `npm` exists.
+2. On **git clones**, runs `npm install && npm run build` under `src/frontend/src` if `npm` exists (the installer usually adds **Node.js LTS** + **codex** first).
 3. Loops until **`.env` has a valid `ES_API_KEY`** (or bootstrap applied), optionally invoking ES installers / bootstrap scripts.
 4. Runs **`create-es-indices.sh`** with `ENV_FILE` set.
 5. Installs **`flume-dashboard.service`** (systemd user) and runs **`./flume start`** when ES credentials are valid.
@@ -91,9 +91,9 @@ bash install.sh
 
 | Step | Name | Scripts / actions |
 |------|------|-------------------|
-| **1** | Check dependencies | `setup/verify-deps.sh` — required: `python3`, `git`, `pgrep`, `curl`. Optional: `gh`, `openbao` CLI, `node`, running Elasticsearch. |
+| **1** | Check dependencies | `setup/verify-deps.sh` — required: `python3`, `git`, `pgrep`, `curl`. Optional: `gh`, `openbao` CLI, `node`, `codex`, running Elasticsearch. |
 | **2** | Elasticsearch | If ES is down or `install/.es-bootstrap.env` lacks a key, runs `setup/install-elasticsearch.sh` (often via `sudo`). May run `bootstrap-es-credentials.sh` on a TTY if needed. |
-| **3** | OpenBao & GitHub CLI | `setup/install-openbao.sh`, `setup/install-gh.sh` (skip if already on `PATH`). |
+| **3** | OpenBao, GitHub CLI & Codex | `setup/install-openbao.sh`, `setup/install-gh.sh`, **`setup/install-codex-cli.sh`** (installs **Node.js LTS** into `/usr/local` if needed, then `npm i -g @openai/codex`). Best-effort; requires `sudo` and outbound HTTPS to `nodejs.org` + `registry.npmjs.org`. |
 | **4** | Configure runtime | Creates **`.env`** from `install/.env.template` if missing; merges ES bootstrap into `.env`; writes **`flume.config.json`** from `install/flume.config.example.json` if missing; if `BAO_TOKEN`/`VAULT_TOKEN`/`OPENBAO_TOKEN` is set, runs **`setup/sync-bootstrap-to-openbao.sh`** to push `ES_*` into OpenBao KV. |
 | **5** | Elasticsearch indices | `setup/create-es-indices.sh` — uses `.env` and/or **`setup/hydrate-openbao-env.py`** when `ES_API_KEY` is only in OpenBao. |
 | **6** | Workspace | Creates state files, scrubs stray bundled repos, optional **`setup/install-flume-service.sh`** (needs `.env` **or** `flume.config.json`). |

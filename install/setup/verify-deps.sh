@@ -70,12 +70,17 @@ else
     echo "         Install: https://cli.github.com/"
 fi
 
-# node / npm — only needed to rebuild frontend from source
+# node / npm — frontend build + Codex CLI
 if command -v node &>/dev/null; then
     ok "node $(node --version) — frontend can be rebuilt from source"
 else
-    warn "node — not found. Pre-built frontend will be used (no rebuild capability)."
-    echo "         Install: https://nodejs.org/ or use nvm"
+    warn "node — not found. Run install.sh (installs Node LTS + Codex) or see https://nodejs.org/"
+fi
+
+if command -v codex &>/dev/null; then
+    ok "codex CLI — OpenAI Codex ($(codex --version 2>/dev/null | head -n 1 || echo present))"
+else
+    warn "codex CLI — not found. Plan New Work (OAuth) needs it; re-run: sudo bash install/setup/install-codex-cli.sh"
 fi
 
 # openbao — optional secrets CLI
