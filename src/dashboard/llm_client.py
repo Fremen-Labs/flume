@@ -420,9 +420,16 @@ def _google_ai_studio_openai_compat(rt: dict) -> bool:
 def _openai_headers(rt: dict):
     key = _openai_bearer_for_request(rt)
     if not key:
+        prov = (rt.get('provider') or '').strip().lower()
+        if prov == 'openai' and (rt.get('oauth_state_file') or '').strip():
+            raise RuntimeError(
+                'LLM_API_KEY is empty and OpenAI OAuth token refresh did not yield a token. '
+                'Set LLM_API_KEY in Settings, or configure OPENAI_OAUTH_STATE_FILE and refresh.'
+            )
         raise RuntimeError(
-            'LLM_API_KEY is empty and OpenAI OAuth token refresh is not configured. '
-            'Set LLM_API_KEY or configure OPENAI_OAUTH_STATE_FILE.'
+            'LLM_API_KEY is empty. In Settings → LLM, paste your API key and Save, or click '
+            '"Use" on an active saved key (worker-manager/llm_credentials.json). '
+            'For OpenAI with OAuth only, configure OPENAI_OAUTH_STATE_FILE.'
         )
     if _google_ai_studio_openai_compat(rt):
         return {'x-goog-api-key': key}

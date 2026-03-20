@@ -39,6 +39,40 @@ def resolve_cloud_agent_model(provider_id: str, stored_model: str, global_llm_mo
     return sm if sm else gm
 
 
+def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
+    """
+    If LLM_API_KEY is still empty after load_effective_pairs, copy the key from the active
+    row in worker-manager/llm_credentials.json (Settings may store keys only there).
+    """
+    if (os.environ.get("LLM_API_KEY") or "").strip():
+        return
+    prov = (os.environ.get("LLM_PROVIDER") or "ollama").strip().lower()
+    if prov == "ollama":
+        return
+    wr = workspace_root.resolve()
+    if str(wr) not in sys.path:
+        sys.path.insert(0, str(wr))
+    try:
+        import llm_credentials_store as lcs
+
+        aid = lcs.get_active_credential_id(wr)
+        if not aid:
+            return
+        c = lcs.get_by_id(wr, aid)
+        if not c:
+            return
+        cprov = str(c.get("provider") or "").strip().lower()
+        ckey = str(c.get("apiKey") or "").strip()
+        if not ckey or cprov != prov:
+            return
+        os.environ["LLM_API_KEY"] = ckey
+        cbase = str(c.get("baseUrl") or "").strip()
+        if cbase and prov == "openai_compatible":
+            os.environ["LLM_BASE_URL"] = cbase
+    except Exception:
+        pass
+
+
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
     """Overlay os.environ with dashboard-equivalent LLM_* from load_effective_pairs."""
     wr = workspace_root.resolve()
@@ -64,6 +98,7 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
                     continue
                 continue
             os.environ[key] = s
+        _inject_llm_key_from_active_credential(wr)
     except Exception as e:
         try:
             logf = wr / "worker-manager" / "llm_sync_errors.log"
