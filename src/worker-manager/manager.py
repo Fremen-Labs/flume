@@ -120,6 +120,9 @@ def es_request(path, body=None, method='GET'):
     if body is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(body).encode()
+        # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
+        if method == 'GET':
+            method = 'POST'
     req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, context=ctx) as resp:
         raw = resp.read().decode()

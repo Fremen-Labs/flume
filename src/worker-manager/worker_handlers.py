@@ -57,6 +57,8 @@ def es_request(path, body=None, method='GET'):
     if body is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(body).encode()
+        if method == 'GET':
+            method = 'POST'
     req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, context=ctx) as resp:
         raw = resp.read().decode()
@@ -64,16 +66,33 @@ def es_request(path, body=None, method='GET'):
 
 
 def fetch_task_doc(task_id):
-    res = es_request(
-        f'/{TASK_INDEX}/_search',
-        {'size': 1, 'query': {'term': {'id': task_id}}},
-        method='GET',
-    )
-    hits = res.get('hits', {}).get('hits', [])
-    if not hits:
+    """
+    Resolve (es_id, source) by logical id. Matches dashboard server behavior: document _id
+    is usually the logical id (PUT _doc/<id>), but dynamic mappings may require term /
+    match_phrase on the `id` field.
+    """
+    tid = (task_id or '').strip()
+    if not tid:
         return None, None
-    hit = hits[0]
-    return hit.get('_id'), hit.get('_source', {})
+    for query in (
+        {'ids': {'values': [tid]}},
+        {'term': {'id': tid}},
+        {'term': {'id.keyword': tid}},
+        {'match_phrase': {'id': tid}},
+    ):
+        try:
+            res = es_request(
+                f'/{TASK_INDEX}/_search',
+                {'size': 1, 'query': query},
+                method='POST',
+            )
+            hits = res.get('hits', {}).get('hits', [])
+            if hits:
+                hit = hits[0]
+                return hit.get('_id'), hit.get('_source', {})
+        except Exception:
+            continue
+    return None, None
 
 
 def update_task_doc(es_id, doc):
@@ -348,7 +367,7 @@ def compute_ready_for_repo(repo):
     res = es_request(
         f'/{TASK_INDEX}/_search',
         {'size': 500, 'query': {'bool': {'must': [{'term': {'repo': repo}}], 'must_not': [{'term': {'status': 'archived'}}]}}},
-        method='GET',
+        method='POST',
     )
     hits = res.get('hits', {}).get('hits', [])
     by_id = {}
