@@ -9,11 +9,11 @@ Out-of-box flow:
 Bootstrap file is non-secret JSON. Secrets live only in OpenBao KV (or process env from your orchestrator).
 """
 from __future__ import annotations
-
 import json
 import os
 import shutil
 import subprocess
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +84,8 @@ def load_merged_bootstrap(workspace_root: Path) -> dict[str, Any]:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 merged.update(data)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            logging.warning(f"Failed to load bootstrap JSON at {p}: {e}")
             continue
     return merged
 
@@ -169,7 +170,8 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
         if not isinstance(data, dict):
             return {}
         return {str(k): "" if v is None else str(v) for k, v in data.items()}
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError) as e:
+        logging.warning(f"OpenBao KV fetch failed for {secret_ref}: {e}")
         return {}
 
 
@@ -184,6 +186,12 @@ def _apply_dotenv_line(raw_line: str) -> None:
         return
     key, _, val = line.partition("=")
     key = key.strip()
+    
+    # ENFORCE NATIVE OPENBAO: Do not allow sensitive credentials to be loaded from plaintext .env files
+    if key in {"ES_API_KEY", "LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "OPENAI_OAUTH_SCOPES"}:
+        logging.warning(f"SECURITY: Attempted to load sensitive key '{key}' from plaintext .env file. This is blocked. Please migrate this secret natively into your OpenBao vault.")
+        return
+
     if not key or key.startswith("#"):
         return
     val = val.strip()
@@ -210,7 +218,8 @@ def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
             continue
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as e:
+            logging.warning(f"Failed to read legacy .env file at {candidate}: {e}")
             continue
         for raw in text.splitlines():
             _apply_dotenv_line(raw)
