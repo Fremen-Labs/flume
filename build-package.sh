@@ -134,6 +134,7 @@ mkdir -p "${STAGE}/dashboard"
 cp "${SRC}/dashboard/server.py"    "${STAGE}/dashboard/"
 cp "${SRC}/dashboard/llm_client.py" "${STAGE}/dashboard/"
 cp "${SRC}/dashboard/llm_settings.py" "${STAGE}/dashboard/"
+cp "${SRC}/dashboard/agent_models_settings.py" "${STAGE}/dashboard/"
 cp "${SRC}/dashboard/repo_settings.py" "${STAGE}/dashboard/"
 cp "${SRC}/dashboard/run.sh"       "${STAGE}/dashboard/"
 [ -f "${SRC}/dashboard/index.html" ] && cp "${SRC}/dashboard/index.html" "${STAGE}/dashboard/" || true

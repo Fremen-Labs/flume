@@ -22,7 +22,38 @@ _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
     'anthropic': 'https://api.anthropic.com',
     'gemini': 'https://generativelanguage.googleapis.com/v1beta/openai',
+    'xai': 'https://api.x.ai',
+    'mistral': 'https://api.mistral.ai',
+    'cohere': 'https://api.cohere.ai/v1',
 }
+
+
+def default_base_url_for_provider(provider_id: str) -> str:
+    """Public base URL when switching provider for a single call (e.g. per-task override)."""
+    pid = (provider_id or '').strip().lower()
+    if pid == 'openai_compatible':
+        return os.environ.get('LLM_BASE_URL', '').rstrip('/')
+    if pid in _PROVIDER_BASE_URLS:
+        return _PROVIDER_BASE_URLS[pid]
+    if pid == 'ollama':
+        return os.environ.get('LLM_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
+    return os.environ.get('LLM_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
+
+
+def _merge_runtime(
+    provider_override: str | None = None,
+    base_url_override: str | None = None,
+):
+    rt = _runtime()
+    if not provider_override:
+        return rt
+    prov = provider_override.strip().lower()
+    rt = {**rt, 'provider': prov}
+    if base_url_override is not None and str(base_url_override).strip():
+        rt['base_url'] = str(base_url_override).strip().rstrip('/')
+    else:
+        rt['base_url'] = default_base_url_for_provider(prov)
+    return rt
 
 
 def _runtime():
@@ -288,9 +319,20 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens, rt: d
     }
 
 
-def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
-    """Call the configured LLM and return the assistant's text response."""
-    rt = _runtime()
+def chat(
+    messages,
+    model=None,
+    *,
+    temperature=0.3,
+    max_tokens=8192,
+    provider_override=None,
+    base_url_override=None,
+):
+    """Call the configured LLM and return the assistant's text response.
+
+    provider_override / base_url_override: optional per-call routing (e.g. task preferred_llm_provider).
+    """
+    rt = _merge_runtime(provider_override, base_url_override)
     m = model or rt['default_model']
     prov = rt['provider']
     if prov == 'ollama':
@@ -300,9 +342,18 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
     return _openai_chat(messages, m, temperature, max_tokens, rt)
 
 
-def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096):
+def chat_with_tools(
+    messages,
+    tools,
+    model=None,
+    *,
+    temperature=0.2,
+    max_tokens=4096,
+    provider_override=None,
+    base_url_override=None,
+):
     """Call the configured LLM with tool definitions."""
-    rt = _runtime()
+    rt = _merge_runtime(provider_override, base_url_override)
     m = model or rt['default_model']
     prov = rt['provider']
     if prov == 'ollama':

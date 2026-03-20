@@ -31,18 +31,39 @@ def _load_system_prompt(role: str) -> str:
     return f"You are the {role} agent. Produce concise, actionable outputs."
 
 
-def _call_ollama(system_prompt: str, user_payload: dict[str, Any], model: Optional[str] = None) -> Optional[dict[str, Any]]:
+def _task_llm_kw(task: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Route LLM calls per task when manager set preferred_llm_provider (e.g. Ollama vs OpenAI)."""
+    if not task:
+        return {}
+    pov = (task.get('preferred_llm_provider') or '').strip().lower()
+    if not pov:
+        return {}
+    return {'provider_override': pov, 'base_url_override': None}
+
+
+def _call_ollama(
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    model: Optional[str] = None,
+    task: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
     import llm_client
     messages = [
         {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': json.dumps(user_payload, indent=2)},
     ]
     try:
-        content = llm_client.chat(messages, model=model or LLM_MODEL, temperature=0.2, max_tokens=2048)
+        kw = _task_llm_kw(task)
+        content = llm_client.chat(
+            messages,
+            model=model or LLM_MODEL,
+            temperature=0.2,
+            max_tokens=2048,
+            **kw,
+        )
         content = content.strip()
         if content.startswith('`' * 3):
-            content = content.strip('`').replace('json
-', '', 1).strip()
+            content = content.strip('`').replace('json\n', '', 1).strip()
         return json.loads(content)
     except Exception:
         return None
@@ -188,11 +209,24 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR running shell command: {e}'
 
 
-def _call_ollama_tools(messages: list, tools: list, model: str) -> Optional[dict]:
+def _call_ollama_tools(
+    messages: list,
+    tools: list,
+    model: str,
+    task: Optional[dict[str, Any]] = None,
+) -> Optional[dict]:
     import sys
     import llm_client
     try:
-        return llm_client.chat_with_tools(messages, tools, model=model, temperature=0.2, max_tokens=4096)
+        kw = _task_llm_kw(task)
+        return llm_client.chat_with_tools(
+            messages,
+            tools,
+            model=model,
+            temperature=0.2,
+            max_tokens=4096,
+            **kw,
+        )
     except Exception as e:
         print(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
         return None
@@ -246,7 +280,7 @@ def run_implementer(
 
     for _iteration in range(25):
         _progress(f'Thinking… (step {_iteration + 1})')
-        raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model)
+        raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model, task=task)
         if not raw:
             _progress('LLM returned no response — stopping.')
             break
@@ -332,6 +366,7 @@ def run_tester(task: dict[str, Any]) -> AgentResult:
             'task': task,
         },
         model=task.get('preferred_model') or LLM_MODEL,
+        task=task,
     )
     if response and isinstance(response, dict):
         action = response.get('action', 'pass')
@@ -355,6 +390,7 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
             'task': task,
         },
         model=task.get('preferred_model') or LLM_MODEL,
+        task=task,
     )
     if response and isinstance(response, dict):
         verdict = response.get('verdict', 'approved')
@@ -380,7 +416,8 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             'instruction': 'Return JSON: {"action":"compute_ready","summary":"..."}',
             'task': task or {},
         },
-        model=LLM_MODEL,
+        model=(task or {}).get('preferred_model') or LLM_MODEL,
+        task=task,
     )
     if response and isinstance(response, dict):
         return AgentResult(

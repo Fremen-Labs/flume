@@ -17,6 +17,7 @@ apply_runtime_config(_WS)
 
 BASE = _WS / 'worker-manager'
 STATE = BASE / 'state.json'
+AGENT_MODELS_FILE = BASE / 'agent_models.json'
 LOG = BASE / 'manager.log'
 
 ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
@@ -26,30 +27,14 @@ TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
 WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '1'))
 
-ROLE_DEFS = [
-    {'role': 'intake',         'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
-    {'role': 'pm',             'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
-    {'role': 'implementer',    'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
-    {'role': 'tester',         'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
-    {'role': 'reviewer',       'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
-    {'role': 'memory-updater', 'model': os.environ.get('LLM_MODEL', 'llama3.2'), 'execution_host': os.environ.get('EXECUTION_HOST', 'localhost')},
+ROLE_ORDER = [
+    'intake',
+    'pm',
+    'implementer',
+    'tester',
+    'reviewer',
+    'memory-updater',
 ]
-
-
-def build_workers():
-    workers = []
-    for role_def in ROLE_DEFS:
-        for idx in range(1, max(WORKERS_PER_ROLE, 1) + 1):
-            workers.append({
-                'name': f"{role_def['role']}-worker-{idx}",
-                'role': role_def['role'],
-                'model': role_def['model'],
-                'execution_host': role_def['execution_host'],
-            })
-    return workers
-
-
-WORKERS = build_workers()
 
 ctx = None
 if not ES_VERIFY_TLS:
@@ -66,6 +51,57 @@ def log(msg):
     BASE.mkdir(parents=True, exist_ok=True)
     with LOG.open('a') as f:
         f.write(f"[{now_iso()}] {msg}\n")
+
+
+def load_agent_role_defs():
+    """Merge per-role overrides from agent_models.json with LLM_* / EXECUTION_HOST env."""
+    default_model = os.environ.get('LLM_MODEL', 'llama3.2')
+    default_host = os.environ.get('EXECUTION_HOST', 'localhost')
+    default_prov = os.environ.get('LLM_PROVIDER', 'ollama').strip().lower()
+    cfg = {}
+    if AGENT_MODELS_FILE.is_file():
+        try:
+            data = json.loads(AGENT_MODELS_FILE.read_text(encoding='utf-8'))
+            cfg = (data.get('roles') or {}) if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            pass
+    defs = []
+    for role in ROLE_ORDER:
+        spec = cfg.get(role)
+        model = default_model
+        host = default_host
+        prov = default_prov
+        if isinstance(spec, str):
+            model = spec.strip() or model
+        elif isinstance(spec, dict):
+            model = (spec.get('model') or model).strip() or model
+            host = (spec.get('executionHost') or host).strip() or host
+            prov = (spec.get('provider') or prov).strip().lower() or prov
+        defs.append(
+            {
+                'role': role,
+                'model': model,
+                'execution_host': host,
+                'llm_provider': prov,
+            }
+        )
+    return defs
+
+
+def build_workers():
+    workers = []
+    for role_def in load_agent_role_defs():
+        for idx in range(1, max(WORKERS_PER_ROLE, 1) + 1):
+            workers.append(
+                {
+                    'name': f"{role_def['role']}-worker-{idx}",
+                    'role': role_def['role'],
+                    'model': role_def['model'],
+                    'execution_host': role_def['execution_host'],
+                    'llm_provider': role_def['llm_provider'],
+                }
+            )
+    return workers
 
 
 def es_request(path, body=None, method='GET'):
@@ -107,9 +143,6 @@ def ready_items_for_role(role):
             ], 'minimum_should_match': 1}},
         ]
     elif role == 'pm':
-        # PM should only claim items that are actually owned/assigned to PM
-        # (epics/features/stories). Tasks inside stories must not be
-        # accidentally re-owned by PM.
         must = [
             {'term': {'status': 'planned'}},
             {'bool': {
@@ -120,11 +153,25 @@ def ready_items_for_role(role):
                 'minimum_should_match': 1,
             }},
         ]
-    elif role in ('pm', 'intake', 'memory-updater'):
+    elif role == 'intake':
         must = [
             {'term': {'status': 'ready'}},
-            {'term': {'assigned_agent_role': role}},
+            {'bool': {'should': [
+                {'term': {'assigned_agent_role': 'intake'}},
+                {'term': {'owner': 'intake'}},
+            ], 'minimum_should_match': 1}},
         ]
+    elif role == 'memory-updater':
+        must = [
+            {'term': {'status': 'ready'}},
+            {'bool': {'should': [
+                {'term': {'assigned_agent_role': 'memory-updater'}},
+                {'term': {'owner': 'memory-updater'}},
+            ], 'minimum_should_match': 1}},
+        ]
+    else:
+        log(f'unknown role in ready_items_for_role: {role}')
+        return []
     body = {
         'size': 20,
         'query': {'bool': {'must': must}},
@@ -135,7 +182,14 @@ def ready_items_for_role(role):
     return es_request(f'/{TASK_INDEX}/_search', body, method='GET').get('hits', {}).get('hits', [])
 
 
-def claim(item_id, role, execution_host=None, preferred_model=None, worker_name=None):
+def claim(
+    item_id,
+    role,
+    execution_host=None,
+    preferred_model=None,
+    worker_name=None,
+    preferred_llm_provider=None,
+):
     doc = {
         'status': 'running' if role != 'pm' else 'planned',
         'queue_state': 'active',
@@ -148,15 +202,11 @@ def claim(item_id, role, execution_host=None, preferred_model=None, worker_name=
         doc['execution_host'] = execution_host
     if preferred_model:
         doc['preferred_model'] = preferred_model
+    if preferred_llm_provider:
+        doc['preferred_llm_provider'] = preferred_llm_provider
     if worker_name:
         doc['active_worker'] = worker_name
     es_request(f'/{TASK_INDEX}/_update/{item_id}', {'doc': doc}, method='POST')
-
-
-def load_state():
-    if STATE.exists():
-        return json.loads(STATE.read_text())
-    return {'workers': []}
 
 
 def save_state(state):
@@ -165,8 +215,9 @@ def save_state(state):
 
 
 def cycle():
+    workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
-    for worker in WORKERS:
+    for worker in workers:
         snapshot = dict(worker)
         snapshot['heartbeat_at'] = now_iso()
         snapshot['status'] = 'idle'
@@ -176,11 +227,21 @@ def cycle():
             task = hits[0]
             item_id = task.get('_id')
             src = task.get('_source', {})
-            claim(item_id, worker['role'], worker.get('execution_host'), src.get('preferred_model') or worker['model'], worker['name'])
+            pref_model = src.get('preferred_model') or worker['model']
+            pref_prov = src.get('preferred_llm_provider') or worker.get('llm_provider')
+            claim(
+                item_id,
+                worker['role'],
+                worker.get('execution_host'),
+                pref_model,
+                worker['name'],
+                pref_prov,
+            )
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = src.get('id', item_id)
             snapshot['current_task_title'] = src.get('title')
-            snapshot['preferred_model'] = src.get('preferred_model') or worker['model']
+            snapshot['preferred_model'] = pref_model
+            snapshot['preferred_llm_provider'] = pref_prov
             log(f"{worker['name']} claimed {snapshot['current_task_id']}")
         state['workers'].append(snapshot)
     save_state(state)

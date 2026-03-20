@@ -43,10 +43,13 @@ export interface ApiWorker {
   role: string;
   model: string;
   execution_host: string;
+  /** LLM provider for this worker (from agent_models.json + env). */
+  llm_provider?: string;
   status: string;
   current_task_id: string | null;
   current_task_title?: string;
   preferred_model?: string;
+  preferred_llm_provider?: string;
   heartbeat_at?: string;
 }
 
@@ -185,6 +188,41 @@ export interface RepoSettingsPayload {
   ghToken?: string;
   adoToken?: string;
   adoOrgUrl?: string;
+}
+
+// ─── Per-role agent models (worker manager) ─────────────────────────────────
+
+export interface AgentModelsProviderGroup {
+  providerId: string;
+  label: string;
+  configured: boolean;
+  isPrimary: boolean;
+  models: LlmProviderModel[];
+  allowCustomModelId?: boolean;
+  hint?: string;
+}
+
+export interface AgentModelsRoleEffective {
+  provider: string;
+  model: string;
+  executionHost: string;
+}
+
+export interface AgentModelsResponse {
+  defaultLlmModel: string;
+  defaultExecutionHost: string;
+  settingsProvider: string;
+  roles: Record<string, AgentModelsRoleEffective | string>;
+  effective: Record<string, AgentModelsRoleEffective>;
+  availableProviders: AgentModelsProviderGroup[];
+  roleIds: string[];
+}
+
+export interface AgentModelsSavePayload {
+  roles: Record<
+    string,
+    { provider: string; model: string; executionHost?: string } | string | null
+  >;
 }
 
 // ─── Legacy mock types (kept for compatibility) ───────────────────────────────

@@ -18,6 +18,9 @@ BASE = Path(__file__).resolve().parent
 _SRC_ROOT = BASE.parent
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
+# Dashboard modules (llm_settings, agent_models_settings) live next to server.py; prefer this package on import.
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
 
 
 from flume_secrets import apply_runtime_config, load_legacy_dotenv_into_environ  # noqa: E402
@@ -1720,6 +1723,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
             return
 
+        if self.path == '/api/settings/agent-models':
+            try:
+                import agent_models_settings
+                data = agent_models_settings.get_agent_models_response(WORKSPACE_ROOT)
+                self._json_response(200, data)
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+            return
+
         queue_match = re.match(r'^/api/queue/([^/]+)$', self.path)
         if queue_match:
             repo_id = queue_match.group(1)
@@ -2104,6 +2116,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(422, {'ok': False, 'error': err})
                 return
             self._json_response(200, {'ok': True, 'restartRequired': True})
+            return
+
+        if self.path == '/api/settings/agent-models':
+            try:
+                import agent_models_settings
+                payload = self._read_json_body()
+            except json.JSONDecodeError:
+                self._json_response(400, {'error': 'Invalid JSON body'})
+                return
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+                return
+            ok, err, data = agent_models_settings.validate_save_agent_models(WORKSPACE_ROOT, payload)
+            if not ok:
+                self._json_response(422, {'ok': False, 'error': err})
+                return
+            try:
+                agent_models_settings.save_agent_models(WORKSPACE_ROOT, data)
+            except Exception as e:
+                self._json_response(502, {'ok': False, 'error': str(e)[:300]})
+                return
+            self._json_response(200, {'ok': True, 'restartRequired': False})
             return
 
         if self.path == '/api/workflow/agents/stop':
