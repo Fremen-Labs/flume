@@ -11,15 +11,15 @@ export function MeshBackground() {
   const gradientBg = isRetro
     ? isDark
       ? `
-        radial-gradient(ellipse 120% 80% at 20% 10%, hsl(180 50% 6%) 0%, transparent 60%),
-        radial-gradient(ellipse 100% 60% at 80% 90%, hsl(300 40% 5%) 0%, transparent 50%),
-        radial-gradient(ellipse 80% 40% at 50% 50%, hsl(180 30% 4%) 0%, transparent 40%),
-        hsl(180 50% 4%)
+        radial-gradient(ellipse 120% 80% at 15% 8%, hsl(276 45% 8%) 0%, transparent 55%),
+        radial-gradient(ellipse 100% 70% at 85% 85%, hsl(33 60% 6%) 0%, transparent 50%),
+        radial-gradient(ellipse 70% 50% at 50% 50%, hsl(240 40% 5%) 0%, transparent 45%),
+        hsl(240 33% 6%)
       `
       : `
-        radial-gradient(ellipse 120% 80% at 20% 10%, hsl(60 20% 97%) 0%, transparent 60%),
-        radial-gradient(ellipse 100% 60% at 80% 90%, hsl(180 30% 95%) 0%, transparent 50%),
-        hsl(60 20% 96%)
+        radial-gradient(ellipse 120% 80% at 20% 10%, hsl(45 35% 97%) 0%, transparent 60%),
+        radial-gradient(ellipse 100% 60% at 80% 90%, hsl(271 30% 96%) 0%, transparent 50%),
+        hsl(45 30% 96%)
       `
     : isDark
       ? `
@@ -34,17 +34,17 @@ export function MeshBackground() {
         hsl(0 0% 98%)
       `;
 
-  const orbPrimary = isRetro ? 'hsl(180 100% 50% / 0.08)' : (isDark ? 'hsl(239 84% 67% / 0.05)' : 'hsl(220 20% 85% / 0.4)');
-  const orbSecondary = isRetro ? 'hsl(300 100% 60% / 0.06)' : (isDark ? 'hsl(180 60% 40% / 0.04)' : 'hsl(220 15% 88% / 0.3)');
-  const orbTertiary = isRetro ? 'hsl(120 100% 40% / 0.04)' : (isDark ? 'hsl(280 60% 50% / 0.03)' : 'hsl(220 10% 90% / 0.3)');
-  const orbQuaternary = isRetro ? 'hsl(180 60% 30% / 0.03)' : (isDark ? 'hsl(170 80% 40% / 0.03)' : 'hsl(220 10% 92% / 0.2)');
+  const orbPrimary = isRetro ? 'hsl(276 88% 53% / 0.07)' : (isDark ? 'hsl(239 84% 67% / 0.05)' : 'hsl(220 20% 85% / 0.4)');
+  const orbSecondary = isRetro ? 'hsl(33 100% 50% / 0.06)' : (isDark ? 'hsl(180 60% 40% / 0.04)' : 'hsl(220 15% 88% / 0.3)');
+  const orbTertiary = isRetro ? 'hsl(170 80% 42% / 0.05)' : (isDark ? 'hsl(280 60% 50% / 0.03)' : 'hsl(220 10% 90% / 0.3)');
+  const orbQuaternary = isRetro ? 'hsl(51 100% 50% / 0.04)' : (isDark ? 'hsl(170 80% 40% / 0.03)' : 'hsl(220 10% 92% / 0.2)');
   const lineGradient = isRetro
-    ? `linear-gradient(90deg, transparent, hsl(180 100% 50% / 0.4), transparent)`
+    ? `linear-gradient(90deg, transparent, hsl(33 100% 50% / 0.35), transparent)`
     : isDark
       ? 'linear-gradient(90deg, transparent, hsl(239 84% 67% / 0.4), transparent)'
       : 'linear-gradient(90deg, transparent, rgba(0,0,0,0.06), transparent)';
 
-  const gridSize = isRetro ? '16px 16px' : '60px 60px';
+  const gridSize = isRetro ? '20px 20px' : '60px 60px';
   const gridOpacity = isRetro ? (isDark ? 0.08 : 0.06) : (isDark ? 0.03 : 0.06);
 
   return (
@@ -91,7 +91,7 @@ export function MeshBackground() {
         style={{
           top: '55%',
           opacity: isDark ? 0.04 : 0.03,
-          background: isRetro ? 'linear-gradient(90deg, transparent, hsl(300 100% 60% / 0.25), transparent)' : isDark ? 'linear-gradient(90deg, transparent, hsl(180 60% 50% / 0.3), transparent)' : 'linear-gradient(90deg, transparent, rgba(0,0,0,0.04), transparent)',
+          background: isRetro ? 'linear-gradient(90deg, transparent, hsl(276 88% 53% / 0.22), transparent)' : isDark ? 'linear-gradient(90deg, transparent, hsl(180 60% 50% / 0.3), transparent)' : 'linear-gradient(90deg, transparent, rgba(0,0,0,0.04), transparent)',
         }}
       />
     </div>

@@ -15,6 +15,7 @@ export function SidebarNavItem({ to, icon: Icon, label, collapsed }: SidebarNavI
   return (
     <RouterNavLink
       to={to}
+      end={to === '/'}
       className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group relative overflow-hidden
         ${isActive
           ? 'bg-primary/10 text-primary'

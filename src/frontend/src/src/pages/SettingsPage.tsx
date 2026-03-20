@@ -68,7 +68,7 @@ async function saveRepoSettings(payload: RepoSettingsPayload): Promise<{ ok: boo
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
   { id: 'default', name: 'Default', description: 'Modern glass-morphism with blue accents' },
-  { id: 'retro', name: 'Retro', description: '1980s pixel art style with cyan, magenta, and chunky borders' },
+  { id: 'retro', name: 'Retro', description: 'OpenClaw-style: navy panels, neon orange/purple/teal accents, gold active nav' },
 ];
 
 export default function SettingsPage() {
