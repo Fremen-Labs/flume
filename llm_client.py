@@ -27,7 +27,7 @@ Provider-specific notes:
                      Covers Groq, Together, Mistral, Azure OpenAI, and more.
   anthropic        : Uses api.anthropic.com/v1/messages. Set LLM_API_KEY.
   gemini           : Uses Gemini's OpenAI-compatible endpoint. Set LLM_API_KEY (AI Studio key);
-                     uses x-goog-api-key header, not Bearer.
+                     uses Authorization: Bearer <key> per Google docs.
 """
 
 import json
@@ -106,9 +106,6 @@ def _openai_headers():
     key = (_API_KEY or '').strip()
     if not key:
         raise RuntimeError('LLM_API_KEY is empty.')
-    base = _base_url().lower()
-    if _PROVIDER == 'gemini' or 'generativelanguage.googleapis.com' in base:
-        return {'x-goog-api-key': key}
     return {'Authorization': f'Bearer {key}'}
 
 

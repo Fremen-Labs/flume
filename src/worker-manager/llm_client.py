@@ -420,17 +420,6 @@ def _openai_bearer_for_request(rt: dict) -> str:
     return api_key or _refresh_oauth_access_token(rt)
 
 
-def _google_ai_studio_openai_compat(rt: dict) -> bool:
-    """
-    Gemini's OpenAI-compatible base URL expects ``x-goog-api-key``, not
-    ``Authorization: Bearer <key>``. See Gemini OpenAI API compatibility docs.
-    """
-    if rt.get('provider') == 'gemini':
-        return True
-    origin = _openai_api_origin(rt).lower()
-    return 'generativelanguage.googleapis.com' in origin
-
-
 def _openai_headers(rt: dict):
     key = _openai_bearer_for_request(rt)
     if not key:
@@ -445,8 +434,8 @@ def _openai_headers(rt: dict):
             '"Use" on an active saved key (worker-manager/llm_credentials.json). '
             'For OpenAI with OAuth only, configure OPENAI_OAUTH_STATE_FILE.'
         )
-    if _google_ai_studio_openai_compat(rt):
-        return {'x-goog-api-key': key}
+    # Gemini OpenAI-compat: Authorization: Bearer <GEMINI_API_KEY>
+    # https://ai.google.dev/gemini-api/docs/openai
     return {'Authorization': f'Bearer {key}'}
 
 

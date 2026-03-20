@@ -217,7 +217,7 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 | Ollama | `ollama` | Local / network URL |
 | OpenAI | `openai` | API key or OAuth |
 | OpenAI-compatible | `openai_compatible` | Custom `LLM_BASE_URL` |
-| Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys. **Gemini** uses a [Google AI Studio](https://aistudio.google.com/apikey) key on the OpenAI-compatible URL; Flume sends **`x-goog-api-key`** (not `Authorization: Bearer`). |
+| Anthropic / Gemini / xAI / Mistral / Cohere | `anthropic`, `gemini`, … | API keys. **Gemini** uses a [Google AI Studio](https://aistudio.google.com/apikey) key; the OpenAI-compatible endpoint expects **`Authorization: Bearer <key>`** (per [Google’s OpenAI compat docs](https://ai.google.dev/gemini-api/docs/openai)). |
 
 **Multiple providers / keys:** In the Settings UI you can **label** each saved API key. Keys are stored in **`worker-manager/llm_credentials.json`** (alongside `agent_models.json`). Use **Agents → Configure agent models** to assign a **connection** (saved key or “Active Settings” / Ollama) and **model** per agent role. The worker manager passes `preferred_llm_credential_id` on claimed tasks so each run uses the correct key.
 
