@@ -197,22 +197,29 @@ def append_to_env(port):
     cpu_cores, ram_gb, gpu_name = detect_hardware()
     type_text(f"{GREEN}[HARDWARE SCAN]{NC} Detected {cpu_cores} Cores, {ram_gb}GB RAM, [{gpu_name}]")
     try:
+        new_lines = [
+            f"DASHBOARD_PORT={port}\n",
+            f"HOST_CPU_CORES={cpu_cores}\n",
+            f"HOST_RAM_GB={ram_gb}\n",
+            f"HOST_GPU_NAME={gpu_name}\n",
+            f"OPENBAO_ADDR=http://127.0.0.1:8200\n",
+            f"ES_URL=http://localhost:9200\n"
+        ]
+        token_path = os.path.expanduser("~/.vault-token")
+        if os.path.exists(token_path):
+            with open(token_path, "r") as tf:
+                new_lines.append(f"OPENBAO_TOKEN={tf.read().strip()}\n")
+
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
                 lines = f.readlines()
-            lines = [line for line in lines if not any(line.startswith(p) for p in ('DASHBOARD_PORT=', 'HOST_CPU_CORES=', 'HOST_RAM_GB=', 'HOST_GPU_NAME='))]
-            lines.append(f"DASHBOARD_PORT={port}\n")
-            lines.append(f"HOST_CPU_CORES={cpu_cores}\n")
-            lines.append(f"HOST_RAM_GB={ram_gb}\n")
-            lines.append(f"HOST_GPU_NAME={gpu_name}\n")
+            lines = [line for line in lines if not any(line.startswith(p) for p in ('DASHBOARD_PORT=', 'HOST_CPU_CORES=', 'HOST_RAM_GB=', 'HOST_GPU_NAME=', 'OPENBAO_ADDR=', 'OPENBAO_TOKEN=', 'ES_URL='))]
+            lines.extend(new_lines)
             with open(env_path, 'w') as f:
                 f.writelines(lines)
         else:
             with open(env_path, 'w') as f:
-                f.write(f"DASHBOARD_PORT={port}\n")
-                f.write(f"HOST_CPU_CORES={cpu_cores}\n")
-                f.write(f"HOST_RAM_GB={ram_gb}\n")
-                f.write(f"HOST_GPU_NAME={gpu_name}\n")
+                f.writelines(new_lines)
         type_text(f"{CYAN}[SYS] Neural configurations successfully patched with port {port} and hardware telemetry.{NC}")
     except Exception as e:
         sys.stderr.write(f"\n\033[91m[LOG] Failed to sync override port to .env: {e}\033[0m\n")
