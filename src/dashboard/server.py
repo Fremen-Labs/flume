@@ -5,6 +5,7 @@ from typing import Optional
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -1707,6 +1708,58 @@ def agents_start() -> dict:
     return {'ok': True, 'started': started, 'already_running': not started}
 
 
+def _resolve_flume_cli() -> Optional[Path]:
+    """Path to the `flume` driver script at repo or package root, or None."""
+    w = WORKSPACE_ROOT.resolve()
+    for base in (w, w.parent):
+        candidate = base / 'flume'
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def restart_flume_services() -> dict:
+    """
+    Schedule `./flume restart --all` in a detached shell so systemd can restart
+    the dashboard and workers bounce. If `flume` is missing, fall back to
+    stopping/starting worker processes only.
+    """
+    flume_sh = _resolve_flume_cli()
+    if flume_sh is not None:
+        root = flume_sh.parent.resolve()
+        script = flume_sh.name
+        inner = (
+            f'cd {shlex.quote(str(root))} && sleep 0.5 && exec bash {shlex.quote(script)} restart --all'
+        )
+        try:
+            subprocess.Popen(
+                ['bash', '-c', inner],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            return {
+                'ok': True,
+                'mode': 'flume',
+                'message': 'Restart scheduled. You may lose connection briefly; refresh if the page stops responding.',
+            }
+        except Exception:
+            pass
+    try:
+        agents_stop()
+        started = agents_start()
+        return {
+            'ok': True,
+            'mode': 'workers_only',
+            'message': 'Worker processes restarted. Restart the dashboard manually if configuration still looks stale.',
+            'workers': started,
+        }
+    except Exception as e:
+        return {'ok': False, 'error': str(e)[:400]}
+
+
 def maybe_auto_start_workers():
     """
     Start worker manager + handlers when the dashboard starts (same as POST /api/workflow/agents/start).
@@ -1728,6 +1781,11 @@ def maybe_auto_start_workers():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _url_path(self) -> str:
+        """Strip ?query from request path — BaseHTTPRequestHandler.path may include it."""
+        q = self.path.find('?')
+        return self.path if q < 0 else self.path[:q]
+
     def _json_response(self, code, obj):
         data = json.dumps(obj).encode()
         self.send_response(code)
@@ -1742,7 +1800,8 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(body)
 
     def do_GET(self):
-        if self.path == '/api/snapshot':
+        p = self._url_path()
+        if p == '/api/snapshot':
             try:
                 self._json_response(200, load_snapshot())
             except Exception as e:
@@ -1750,18 +1809,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': err_msg, 'code': 'ES_CONNECTION'})
             return
 
-        if self.path == '/api/workflow/workers':
+        if p == '/api/workflow/workers':
             self._json_response(200, {'workers': load_workers()})
             return
 
-        if self.path == '/api/workflow/agents/status':
+        if p == '/api/workflow/agents/status':
             try:
                 self._json_response(200, agents_status())
             except Exception as e:
                 self._json_response(502, {'error': str(e)[:200]})
             return
 
-        if self.path == '/api/settings/llm':
+        if p == '/api/settings/llm':
             try:
                 import llm_settings
                 data = llm_settings.get_llm_settings_response(WORKSPACE_ROOT)
@@ -1770,7 +1829,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
             return
 
-        if self.path == '/api/settings/repos':
+        if p == '/api/settings/repos':
             try:
                 import repo_settings
                 data = repo_settings.get_repo_settings_response(WORKSPACE_ROOT)
@@ -1779,7 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
             return
 
-        if self.path == '/api/settings/agent-models':
+        if p == '/api/settings/agent-models':
             try:
                 import agent_models_settings
                 data = agent_models_settings.get_agent_models_response(WORKSPACE_ROOT)
@@ -1788,7 +1847,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
             return
 
-        queue_match = re.match(r'^/api/queue/([^/]+)$', self.path)
+        queue_match = re.match(r'^/api/queue/([^/]+)$', p)
         if queue_match:
             repo_id = queue_match.group(1)
             try:
@@ -1797,7 +1856,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:200]})
             return
 
-        history_match = re.match(r'^/api/tasks/([^/]+)/history$', self.path)
+        history_match = re.match(r'^/api/tasks/([^/]+)/history$', p)
         if history_match:
             task_id = history_match.group(1)
             try:
@@ -1811,7 +1870,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, data)
             return
 
-        task_git_match = re.match(r'^/api/tasks/([^/]+)/git$', self.path)
+        task_git_match = re.match(r'^/api/tasks/([^/]+)/git$', p)
         if task_git_match:
             task_id = task_git_match.group(1)
             try:
@@ -1834,7 +1893,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        task_diff_match = re.match(r'^/api/tasks/([^/]+)/diff$', self.path)
+        task_diff_match = re.match(r'^/api/tasks/([^/]+)/diff$', p)
         if task_diff_match:
             task_id = task_diff_match.group(1)
             try:
@@ -1845,7 +1904,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, data)
             return
 
-        task_commits_match = re.match(r'^/api/tasks/([^/]+)/commits$', self.path)
+        task_commits_match = re.match(r'^/api/tasks/([^/]+)/commits$', p)
         if task_commits_match:
             task_id = task_commits_match.group(1)
             try:
@@ -1856,7 +1915,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, data)
             return
 
-        project_match = re.match(r'^/api/projects/([^/]+)$', self.path)
+        project_match = re.match(r'^/api/projects/([^/]+)$', p)
         if project_match:
             proj_id = project_match.group(1)
             registry = load_projects_registry()
@@ -1867,7 +1926,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, proj)
             return
 
-        session_match = re.match(r'^/api/intake/session/([^/]+)$', self.path)
+        session_match = re.match(r'^/api/intake/session/([^/]+)$', p)
         if session_match:
             session = load_session(session_match.group(1))
             if not session:
@@ -2080,13 +2139,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(500, {'error': str(exc)[:300]})
             return
 
-        if self.path.startswith('/api/'):
-            self.send_response(404)
-            self.end_headers()
+        if p.startswith('/api/'):
+            self._json_response(404, {'error': 'Not found', 'path': self.path})
             return
 
         # Try to serve static asset first
-        asset_path = STATIC_ROOT / self.path.lstrip('/')
+        asset_path = STATIC_ROOT / p.lstrip('/')
         if asset_path.is_file():
             if asset_path.suffix in ('.js', '.mjs'):
                 content_type = 'application/javascript'
@@ -2118,7 +2176,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self):
-        if self.path == '/api/settings/llm':
+        p = self._url_path()
+        if p == '/api/settings/llm':
             try:
                 import llm_settings
                 payload = self._read_json_body()
@@ -2143,7 +2202,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'restartRequired': True})
             return
 
-        if self.path == '/api/settings/llm/credentials':
+        if p == '/api/settings/llm/credentials':
             try:
                 import llm_credentials_store as lcs
                 import llm_settings
@@ -2169,7 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'restartRequired': bool(env_updates)})
             return
 
-        if self.path == '/api/settings/llm/oauth/refresh':
+        if p == '/api/settings/llm/oauth/refresh':
             try:
                 import llm_settings
                 ok, msg, extra = llm_settings.do_oauth_refresh(WORKSPACE_ROOT)
@@ -2182,7 +2241,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'message': msg, 'restartRequired': True, **(extra or {})})
             return
 
-        if self.path == '/api/settings/repos':
+        if p == '/api/settings/repos':
             try:
                 import repo_settings
                 payload = self._read_json_body()
@@ -2200,7 +2259,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'restartRequired': True})
             return
 
-        if self.path == '/api/settings/agent-models':
+        if p == '/api/settings/agent-models':
             try:
                 import agent_models_settings
                 payload = self._read_json_body()
@@ -2222,7 +2281,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'restartRequired': False})
             return
 
-        if self.path == '/api/workflow/agents/stop':
+        if p == '/api/settings/restart-services':
+            try:
+                result = restart_flume_services()
+                code = 200 if result.get('ok') else 500
+                self._json_response(code, result)
+            except Exception as e:
+                self._json_response(500, {'ok': False, 'error': str(e)[:400]})
+            return
+
+        if p == '/api/workflow/agents/stop':
             try:
                 result = agents_stop()
             except Exception as e:
@@ -2231,7 +2299,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, result)
             return
 
-        if self.path == '/api/workflow/agents/start':
+        if p == '/api/workflow/agents/start':
             try:
                 result = agents_start()
             except Exception as e:
@@ -2241,7 +2309,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ── Repo branch management (local branch list/delete) ────────────────
-        repo_branches_delete_match = re.match(r'^/api/repos/([^/]+)/branches/delete$', self.path)
+        repo_branches_delete_match = re.match(r'^/api/repos/([^/]+)/branches/delete$', p)
         if repo_branches_delete_match:
             repo_id = urllib.parse.unquote(repo_branches_delete_match.group(1))
             try:
@@ -2259,7 +2327,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, result)
             return
 
-        if self.path == '/api/intake':
+        if p == '/api/intake':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2302,7 +2370,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(201, {'ok': True, 'task': doc, 'es': res})
             return
 
-        if self.path == '/api/intake/plan':
+        if p == '/api/intake/plan':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2319,7 +2387,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'plan': plan, 'planSource': 'placeholder'})
             return
 
-        if self.path == '/api/intake/commit':
+        if p == '/api/intake/commit':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2339,7 +2407,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Planning Session Endpoints ---
 
-        if self.path == '/api/intake/session':
+        if p == '/api/intake/session':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2364,7 +2432,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        msg_match = re.match(r'^/api/intake/session/([^/]+)/message$', self.path)
+        msg_match = re.match(r'^/api/intake/session/([^/]+)/message$', p)
         if msg_match:
             session_id = msg_match.group(1)
             try:
@@ -2394,7 +2462,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        commit_match = re.match(r'^/api/intake/session/([^/]+)/commit$', self.path)
+        commit_match = re.match(r'^/api/intake/session/([^/]+)/commit$', p)
         if commit_match:
             session_id = commit_match.group(1)
             session = load_session(session_id)
@@ -2420,7 +2488,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # --- Bulk work item operations (archive / delete) ---
 
-        if self.path == '/api/tasks/bulk-update':
+        if p == '/api/tasks/bulk-update':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2472,7 +2540,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'result': res, 'deleted_branches': deleted_branches})
             return
 
-        create_pr_match = re.match(r'^/api/tasks/([^/]+)/create-pr$', self.path)
+        create_pr_match = re.match(r'^/api/tasks/([^/]+)/create-pr$', p)
         if create_pr_match:
             task_id = create_pr_match.group(1)
             try:
@@ -2484,7 +2552,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(code, result)
             return
 
-        gitflow_match = re.match(r'^/api/projects/([^/]+)/gitflow$', self.path)
+        gitflow_match = re.match(r'^/api/projects/([^/]+)/gitflow$', p)
         if gitflow_match:
             proj_id = gitflow_match.group(1)
             try:
@@ -2507,7 +2575,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'project': proj})
             return
 
-        delete_project_match = re.match(r'^/api/projects/([^/]+)/delete$', self.path)
+        delete_project_match = re.match(r'^/api/projects/([^/]+)/delete$', p)
         if delete_project_match:
             proj_id = delete_project_match.group(1)
             # Basic safety against path traversal / unexpected IDs.
@@ -2593,7 +2661,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': str(e)[:300]})
                 return
 
-        transition_match = re.match(r'^/api/tasks/([^/]+)/transition$', self.path)
+        transition_match = re.match(r'^/api/tasks/([^/]+)/transition$', p)
         if transition_match:
             task_id = transition_match.group(1)
             try:
@@ -2619,7 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200, {'ok': True, 'task': updated})
             return
 
-        if self.path == '/api/projects':
+        if p == '/api/projects':
             try:
                 payload = self._read_json_body()
             except json.JSONDecodeError:
@@ -2722,8 +2790,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(201, {'ok': True, 'project': entry})
             return
 
-        self.send_response(404)
-        self.end_headers()
+        self._json_response(404, {'error': 'Not found', 'path': self.path})
 
 
 if __name__ == '__main__':
