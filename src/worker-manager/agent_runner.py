@@ -357,6 +357,11 @@ def run_implementer(
         for call in tool_calls:
             fn_name = call.get('function', {}).get('name', '')
             fn_args = call.get('function', {}).get('arguments', {})
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except Exception:
+                    fn_args = {}
             call_id = call.get('id', '')
 
             # Emit a human-readable progress note for each tool use

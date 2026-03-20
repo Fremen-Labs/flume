@@ -526,6 +526,7 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
     tool_calls = []
     for tc in (choice_msg.get('tool_calls') or []):
         args = tc['function']['arguments']
+        # Keep OpenAI's raw JSON string for tool_calls in message history
         tool_calls.append({
             'id': tc.get('id'),
             'type': tc.get('type') or 'function',
