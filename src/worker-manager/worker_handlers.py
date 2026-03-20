@@ -428,6 +428,14 @@ def compute_ready_for_repo(repo):
                         patch['owner'] = 'implementer'
                 if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
                     patch['requires_code'] = True
+                # If this task depends on a completed task with a commit, inherit commit metadata
+                if not src.get('commit_sha') and deps:
+                    dep = by_id.get(deps[0])
+                    if dep and dep.get('commit_sha'):
+                        patch['commit_sha'] = dep.get('commit_sha')
+                        patch['commit_message'] = dep.get('commit_message')
+                        patch['branch'] = dep.get('branch')
+                        patch['worktree'] = dep.get('worktree')
             update_task_doc(src['_es_id'], patch)
             src.update(patch)  # update local view
             changed += 1
