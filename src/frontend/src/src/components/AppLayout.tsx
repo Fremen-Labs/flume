@@ -103,7 +103,7 @@ export function AppLayout() {
           <Outlet />
         </div>
         <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center text-center">
-          <span>Flume — multi-agent planning, implementation, and review.</span>
+          <span>Flume: multi-agent planning, implementation, and review.</span>
         </footer>
       </main>
     </div>

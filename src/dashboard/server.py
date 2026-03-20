@@ -239,6 +239,14 @@ def call_ollama(messages):
     """Call the configured LLM and return the assistant's response text."""
     # Re-read .env so Settings / codex-oauth changes apply without restarting the server.
     load_legacy_dotenv_into_environ(_SRC_ROOT)
+    # OAuth tokens often live only in OpenBao; .env may intentionally clear LLM_API_KEY.
+    # Reload effective LLM_* (same as workers) so Plan New Work does not get 401 after a dotenv wipe.
+    try:
+        from workspace_llm_env import sync_llm_env_from_workspace
+
+        sync_llm_env_from_workspace(WORKSPACE_ROOT)
+    except Exception:
+        pass
     import llm_client
 
     return llm_client.chat(
@@ -332,7 +340,7 @@ def create_planning_session(repo, prompt):
         plan = simple_plan(repo, prompt)
         message = (
             "I've created an initial breakdown based on your request. "
-            "Feel free to refine it — you can edit items directly or ask me to adjust anything."
+            "Feel free to refine it: you can edit items directly or ask me to adjust anything."
         )
 
     if not plan or not plan.get('epics'):
@@ -380,6 +388,11 @@ def refine_session(session_id, user_text, current_plan):
             hint = (
                 ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
                 'Save Settings again or run ./flume restart after changing .env.'
+            )
+        elif '401' in err or 'Unauthorized' in err:
+            hint = (
+                ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
+                '"Refresh OAuth token", or run ./flume codex-oauth refresh, then save settings.'
             )
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
         plan = None

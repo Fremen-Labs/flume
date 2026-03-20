@@ -585,17 +585,31 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     }
 
 
+def _looks_like_openai_platform_api_key(value: str) -> bool:
+    """Distinguish sk-… API keys from OAuth access tokens (often JWT) stored in LLM_API_KEY."""
+    t = (value or "").strip()
+    return t.startswith("sk-") or t.startswith("sk_")
+
+
 def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
     """Build full GET /api/settings/llm response: catalog, current settings, oauth status."""
     pairs = load_effective_pairs(workspace_root)
     provider = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
     model = pairs.get("LLM_MODEL", "llama3.2").strip()
     base_url = pairs.get("LLM_BASE_URL", "").strip()
-    api_key_set = bool(pairs.get("LLM_API_KEY", "").strip())
+    raw_api_key = (pairs.get("LLM_API_KEY") or "").strip()
+    api_key_set = bool(raw_api_key)
+    platform_api_key = _looks_like_openai_platform_api_key(raw_api_key)
     oauth_state = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
     oauth_token_url = pairs.get("OPENAI_OAUTH_TOKEN_URL", "https://auth.openai.com/oauth/token").strip()
 
-    auth_mode = "oauth" if (oauth_state and provider == "openai" and not api_key_set) else "api_key"
+    # Codex OAuth persists the access token in LLM_API_KEY; that must not force "API Key" UI mode.
+    if provider == "openai" and platform_api_key:
+        auth_mode = "api_key"
+    elif provider == "openai" and oauth_state:
+        auth_mode = "oauth"
+    else:
+        auth_mode = "api_key"
 
     route_type = "local"
     host = "127.0.0.1"
@@ -625,7 +639,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             "host": host,
             "port": port,
             "basePath": base_path,
-            "apiKey": "***" if api_key_set and auth_mode == "api_key" else "",
+            "apiKey": "***" if api_key_set and auth_mode == "api_key" and platform_api_key else "",
             "oauthStateFile": oauth_state or str(resolve_oauth_state_path(workspace_root, "")),
             "oauthTokenUrl": oauth_token_url,
         },
