@@ -275,6 +275,21 @@ OAuth access tokens are honored on OpenAI’s **`/v1/responses`** endpoint; **`/
 
 If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (e.g. `http://127.0.0.1:11434`), older builds could POST your OAuth bearer to the wrong host and get **401**. Current Flume ignores localhost / `:11434` bases for official OpenAI; you can also **clear `LLM_BASE_URL`** in `.env` when using hosted OpenAI.
 
+### Headless servers, remote SSH, and CI (same ideas as Codex CLI)
+
+The [Codex CLI](https://github.com/openai/codex) uses **browser OAuth** by default: an authorize URL, an HTML sign-in page, then a redirect to a **loopback callback** (e.g. `http://localhost:1455/auth/callback`) where a short-lived local server receives the `code` and exchanges it for tokens (stored in **`~/.codex/auth.json`**). That matches Flume’s **`login-browser`** / **`login-paste`** (Flume writes **`<flume-root>/.openai-oauth.json`** and can sync **`.env`**).
+
+| Situation | Typical approach | In Flume |
+|-----------|------------------|----------|
+| **GUI on same machine** | `codex login` opens browser → localhost callback | `./flume codex-oauth login-browser` |
+| **No browser on the server** | Open authorize URL on another device; still need the **localhost** redirect URL to complete PKCE | `./flume codex-oauth login-paste` (paste full `http://localhost:1455/auth/callback?...` back into SSH) |
+| **SSH tunnel** | Forward the random/high port to the server | `ssh -L <port>:127.0.0.1:<port> user@host` then open the printed URL on your laptop |
+| **Device code** | `codex login --device-auth` (code + URL on any browser) | `./flume codex-oauth login` — often **no** `api.responses.write`; **Plan New Work** may still **401**; prefer browser or import |
+| **Login on a laptop, run Flume on a server** | Copy **`~/.codex/auth.json`** (e.g. `scp`) | Run **`codex login`** locally, then **`./flume codex-oauth import`** on the server (or copy `auth.json` and import) |
+| **No ChatGPT OAuth** | Platform **API key** | **Settings → LLM → API Key** (`sk-…`); uses **`/v1/chat/completions`**, not the ChatGPT OAuth bearer path |
+
+Account or org policies (e.g. device auth allowed in ChatGPT / Codex settings) apply the same way as for the official CLI.
+
 ### Error: `Missing scopes: api.responses.write`
 
 The access token must include **API scopes** (e.g. `model.request`, `api.responses.write`), not only `openid` / `profile` / `email`.
@@ -306,7 +321,7 @@ OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not a
 
 3. **Device code** (`./flume codex-oauth login`) may still work for some accounts; if you see this 401, prefer **`login-browser`**.
 
-Optional **`OPENAI_OAUTH_SCOPES`** / **`OPENAI_OAUTH_ORIGINATOR`** — see **Advanced** under OpenAI OAuth.
+Optional **`OPENAI_OAUTH_SCOPES`**, **`OPENAI_OAUTH_AUTHORIZE_SCOPES`**, **`OPENAI_OAUTH_ORIGINATOR`** — see **Advanced** under OpenAI OAuth.
 
 ### Recommended: Flume CLI (from the Flume install directory)
 
@@ -363,15 +378,17 @@ Same behavior without the Flume CLI:
 ```bash
 python3 install/setup/codex_oauth_login.py login --flume-root /path/to/flume
 python3 install/setup/codex_oauth_login.py login-browser --flume-root /path/to/flume
+python3 install/setup/codex_oauth_login.py login-paste --flume-root /path/to/flume
 bash install/setup/openai-oauth.sh refresh
 ```
 
 ### Advanced
 
 - **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
-- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh + **`login-browser`** authorize URL. Default is a **minimal** set (`openid profile email offline_access model.request api.model.read api.responses.write`) so consent is less likely to drop API scopes. To add Codex connector scopes, append e.g. `api.connectors.read api.connectors.invoke`. Empty string omits `scope` from device/refresh only.
-- **`OPENAI_OAUTH_RESOURCE`** — Optional. If set (non-empty), appended as **`resource`** on **`login-browser`** `/oauth/authorize` only. **Not** sent to `/oauth/token` — OpenAI’s token endpoint returns **`unknown_parameter`** for `resource` on refresh and code exchange.
-- **`OPENAI_OAUTH_ORIGINATOR`** — `originator` query param for **`login-browser`** (default `codex_cli_rs`, matches Codex CLI).
+- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for **device login** (`login`) and **token refresh** only. Default includes `model.request`, `api.model.read`, `api.responses.write`. Empty string omits `scope` from those requests. **Not** used for **`login-browser`** / **`login-paste`** (see below).
+- **`OPENAI_OAUTH_AUTHORIZE_SCOPES`** — scopes for **`login-browser`** and **`login-paste`** GET `/oauth/authorize` only. Default matches **official Codex** (`openid profile email offline_access api.connectors.read api.connectors.invoke`). OpenAI returns **`invalid_scope`** if you request e.g. `model.request` on authorize — do not copy `OPENAI_OAUTH_SCOPES` here.
+- **`OPENAI_OAUTH_RESOURCE`** — Optional. If set (non-empty), appended as **`resource`** on browser **`/oauth/authorize`** only. **Not** sent to `/oauth/token` — OpenAI’s token endpoint returns **`unknown_parameter`** for `resource` on refresh and code exchange.
+- **`OPENAI_OAUTH_ORIGINATOR`** — `originator` query param for browser authorize (default `codex_cli_rs`, matches Codex CLI).
 - State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).
 
 Updates `.env` (and can sync sensitive fields to OpenBao via Settings when OpenBao is enabled).

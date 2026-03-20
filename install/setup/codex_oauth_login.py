@@ -15,8 +15,10 @@ Usage (from Flume repo root is recommended):
 
 Environment:
   OPENAI_OAUTH_CLIENT_ID   Override OAuth client id (default: same as openai/codex CLI)
-  OPENAI_OAUTH_SCOPES      Space-separated OAuth scopes (default includes api.responses.write).
+  OPENAI_OAUTH_SCOPES      Space-separated scopes for device login + token refresh.
                            Set to empty to omit scope from device/token requests (legacy).
+  OPENAI_OAUTH_AUTHORIZE_SCOPES  Browser /oauth/authorize only (login-browser, login-paste).
+                           Default matches codex-rs/login (connector scopes). Do not use model.request here.
   OPENAI_OAUTH_ORIGINATOR  Browser authorize URL (default: codex_cli_rs)
   OPENAI_OAUTH_RESOURCE    Optional: append resource=... to /oauth/authorize only (experimental).
                            Do NOT use on auth.openai.com token refresh — OpenAI returns unknown_parameter.
@@ -45,13 +47,17 @@ DEFAULT_ISSUER = "https://auth.openai.com"
 DEFAULT_TOKEN_URL = f"{DEFAULT_ISSUER}/oauth/token"
 USER_AGENT = "Flume/1.0 (codex-oauth-login; +https://github.com/Fremen-Labs/flume)"
 
-# Device + token exchange must request API scopes or access tokens only include openid/profile/email
-# and /v1/responses returns 401 "Missing scopes: api.responses.write" (see OpenAI Codex OAuth).
-# Override with OPENAI_OAUTH_SCOPES=""; omit from requests if you hit a server that rejects scope.
-# Connector scopes (Codex browser URL) are omitted by default — some consent flows drop API scopes
-# when combined; api.responses.write is required for /v1/responses.
+# Device-code + refresh_token POST body: broader scopes (IdP may ignore or accept on token endpoint).
+# Browser GET /oauth/authorize MUST use the allowlisted set from Codex — see DEFAULT_BROWSER_AUTHORIZE_SCOPES.
 DEFAULT_OAUTH_SCOPES = (
     "openid profile email offline_access model.request api.model.read api.responses.write"
+)
+
+# openai/codex codex-rs/login/src/server.rs build_authorize_url — only these are valid on /oauth/authorize
+# for client app_EMoamEEZ73f0CkXaXp7hrann. Requesting model.request (etc.) yields:
+#   error=invalid_scope "not allowed to request scope 'model.request'"
+DEFAULT_BROWSER_AUTHORIZE_SCOPES = (
+    "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
 
 
@@ -74,11 +80,17 @@ def _optional_authorize_resource() -> str | None:
 
 def _browser_authorize_scopes() -> str:
     """
-    Scopes sent on /oauth/authorize. OpenAI's device-code path often ignores JSON `scope` on
-    usercode/token, so tokens lack api.responses.write; the browser authorize URL fixes that.
+    Scopes for GET /oauth/authorize (login-browser, login-paste).
+
+    This must match what OpenAI allows for the public Codex client — same string as
+    codex-rs/login build_authorize_url. OPENAI_OAUTH_SCOPES is NOT used here (it includes
+    model.request, which triggers invalid_scope on authorize).
     """
-    s = _oauth_scopes_for_request()
-    return s if s else DEFAULT_OAUTH_SCOPES
+    raw = os.environ.get("OPENAI_OAUTH_AUTHORIZE_SCOPES")
+    if raw is not None:
+        s = str(raw).strip()
+        return s if s else DEFAULT_BROWSER_AUTHORIZE_SCOPES
+    return DEFAULT_BROWSER_AUTHORIZE_SCOPES
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -192,6 +204,39 @@ def _decode_auth_openai_error_paste(raw: str) -> str | None:
             "OpenAI returned an auth error page (payload could not be decoded).\n"
             "Try again; if it persists, contact help.openai.com with the request ID from the error page."
         )
+
+
+def _oauth_callback_redirect_error(raw: str) -> str | None:
+    """
+    If the user pasted .../auth/callback?error=... (OAuth failed after redirect), return a message.
+    """
+    s = raw.strip().strip('"').strip("'")
+    if "://" not in s:
+        return None
+    u = urllib.parse.urlparse(s)
+    path = u.path or ""
+    if "/auth/callback" not in path and not path.endswith("/callback"):
+        return None
+    q = urllib.parse.parse_qs(u.query, keep_blank_values=False)
+    err = (q.get("error") or [""])[0].strip()
+    if not err:
+        return None
+    desc = (q.get("error_description") or [""])[0].strip()
+    desc_plain = urllib.parse.unquote_plus(desc) if desc else ""
+    lines = [
+        f"OAuth redirect returned error={err!r}",
+        f"  {desc_plain}" if desc_plain else "",
+        "",
+    ]
+    if err == "invalid_scope":
+        lines.extend(
+            [
+                "The authorize URL requested a scope this client cannot use on /oauth/authorize.",
+                "Flume defaults to the same scope string as the official Codex CLI (connector scopes).",
+                "Upgrade to the latest Flume, or unset OPENAI_OAUTH_AUTHORIZE_SCOPES if you overrode it with model.request.",
+            ]
+        )
+    return "\n".join(line for line in lines if line is not None)
 
 
 def _exchange_localhost_authorization_code(
@@ -590,7 +635,7 @@ def cmd_login(args: argparse.Namespace) -> None:
 def cmd_login_browser(args: argparse.Namespace) -> None:
     """
     Full browser OAuth with localhost redirect (openai/codex login server pattern).
-    Sends API scopes on /oauth/authorize. Optional OPENAI_OAUTH_RESOURCE adds resource= to authorize only.
+    Authorize URL uses the same scope string as codex-rs/login (connector scopes). Optional OPENAI_OAUTH_RESOURCE.
     """
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
@@ -611,8 +656,8 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     print("Flume — ChatGPT / Codex OAuth (browser login, localhost callback)")
     print()
     print(
-        "This flow requests API scopes (model.request, api.responses.write, …) on /oauth/authorize. "
-        "Use this if device-code login still yields “Missing scopes” on /v1/responses."
+        "Authorize URL uses the same scopes as the official Codex CLI (openid + connector scopes). "
+        "OpenAI rejects model.request on /oauth/authorize — device-code login uses different scope rules."
     )
     print()
     print("Remote server: the browser must reach THIS host’s loopback on the printed port,")
@@ -646,8 +691,16 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
         httpd.server_close()
 
     if callback_box.get("error"):
-        detail = callback_box.get("detail", "")
-        raise SystemExit(f"OAuth failed: {callback_box.get('error')}" + (f" — {detail}" if detail else ""))
+        err = str(callback_box.get("error") or "")
+        detail = str(callback_box.get("detail") or "")
+        detail_plain = urllib.parse.unquote_plus(detail.replace("+", " ")) if detail else ""
+        msg = f"OAuth failed: {err}" + (f" — {detail_plain}" if detail_plain else "")
+        if err == "invalid_scope":
+            msg += (
+                "\n\nTip: /oauth/authorize only allows Codex connector scopes (see Flume DEFAULT_BROWSER_AUTHORIZE_SCOPES). "
+                "Unset OPENAI_OAUTH_AUTHORIZE_SCOPES if you pointed it at model.request / api.responses.write."
+            )
+        raise SystemExit(msg)
 
     auth_code = str(callback_box.get("code") or "").strip()
     if not auth_code:
@@ -736,8 +789,8 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     print("Flume — ChatGPT / Codex OAuth (paste redirect — for headless servers)")
     print()
     print(
-        "This flow requests API scopes on /oauth/authorize (same as login-browser), including "
-        "api.responses.write for Flume /v1/responses."
+        "Authorize URL matches the official Codex CLI (openid + api.connectors.*). "
+        "OpenAI does not allow model.request on /oauth/authorize — that produced invalid_scope on older Flume builds."
     )
     print()
     print(f"Redirect URI (must match what you paste later): {redirect_uri}")
@@ -772,6 +825,10 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     decoded_err = _decode_auth_openai_error_paste(raw)
     if decoded_err:
         raise SystemExit(decoded_err)
+
+    cb_err = _oauth_callback_redirect_error(raw)
+    if cb_err:
+        raise SystemExit(cb_err)
 
     try:
         auth_code, pasted_state = _parse_pasted_oauth_redirect(raw)
@@ -882,7 +939,7 @@ def main() -> None:
 
     pb = sub.add_parser(
         "login-browser",
-        help="Browser OAuth + localhost callback (requests API scopes; fixes Missing scopes on /v1/responses)",
+        help="Browser OAuth + localhost callback (Codex authorize scopes; use instead of device login for planner)",
     )
     pb.add_argument("--flume-root", type=str, default=None, help="Flume repository / package root")
     pb.add_argument(
