@@ -12,6 +12,8 @@ restarting the process (e.g. after Settings save, `flume codex-oauth`, or editin
   OPENAI_OAUTH_SCOPES       : Optional; space-separated scopes for refresh (defaults below)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time

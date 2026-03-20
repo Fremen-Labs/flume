@@ -1,6 +1,8 @@
 # Flume LLM settings — provider catalog, .env persistence, OAuth refresh.
 # Used by dashboard server for /api/settings/llm endpoints.
 
+from __future__ import annotations
+
 import json
 import os
 import re

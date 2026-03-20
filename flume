@@ -46,6 +46,27 @@ ensure_service_installed() {
     fi
 }
 
+# systemd --user start returns before the process binds; confirm it stays active (catches crash-on-import).
+_wait_dashboard_active() {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if systemctl --user is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.35
+    done
+    return 1
+}
+
+_show_dashboard_failure_logs() {
+    echo ""
+    echo "The dashboard service exited or failed to start. Recent logs:"
+    journalctl --user -u "${SERVICE_NAME}" -n 40 --no-pager 2>/dev/null || true
+    echo ""
+    echo "Tip: run the dashboard in the foreground to see the error:"
+    echo "  bash ${FLUME_ROOT}/src/dashboard/run.sh"
+}
+
 cmd_start() {
     ensure_service_installed
     if [ ! -f "${UNIT_FILE}" ]; then
@@ -54,6 +75,11 @@ cmd_start() {
     fi
     systemctl --user daemon-reload
     systemctl --user start "${SERVICE_NAME}"
+    if ! _wait_dashboard_active; then
+        echo "Error: Flume dashboard service is not running."
+        _show_dashboard_failure_logs
+        exit 1
+    fi
     echo "Flume dashboard started."
     DASHBOARD_PORT=$(grep -E '^DASHBOARD_PORT=' "${FLUME_ROOT}/.env" 2>/dev/null | cut -d= -f2- || echo "8765")
     echo "Open http://localhost:${DASHBOARD_PORT}"
@@ -130,6 +156,11 @@ cmd_restart() {
     ensure_service_installed
     systemctl --user daemon-reload
     systemctl --user restart "${SERVICE_NAME}" 2>/dev/null || systemctl --user start "${SERVICE_NAME}"
+    if ! _wait_dashboard_active; then
+        echo "Error: Flume dashboard service is not running after restart."
+        _show_dashboard_failure_logs
+        exit 1
+    fi
     echo "Flume dashboard restarted."
     if [ "${opt_all}" = true ]; then
         echo ""
