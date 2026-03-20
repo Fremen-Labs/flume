@@ -2660,6 +2660,25 @@ class Handler(BaseHTTPRequestHandler):
                         {'query': {'term': {'repo': proj_id}}},
                     )
 
+                    # Clear any workers still pointing at deleted tasks.
+                    try:
+                        if WORKER_STATE.exists():
+                            state = json.loads(WORKER_STATE.read_text())
+                            workers = state.get('workers', []) if isinstance(state, dict) else []
+                            changed = False
+                            for w in workers:
+                                if not isinstance(w, dict):
+                                    continue
+                                if w.get('current_task_id') in task_ids:
+                                    w['status'] = 'idle'
+                                    w['current_task_id'] = None
+                                    w['current_task_title'] = None
+                                    changed = True
+                            if changed:
+                                WORKER_STATE.write_text(json.dumps(state, indent=2) + '\n')
+                    except Exception:
+                        pass
+
                     # Delete failures/provenance by repo (they carry repo/project fields in worker).
                     es_post(
                         'agent-failure-records/_delete_by_query?conflicts=proceed',
