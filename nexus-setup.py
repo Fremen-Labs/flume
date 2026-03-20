@@ -167,8 +167,8 @@ def append_to_env(port):
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 es_url = "http://localhost:9200"
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"\\n\\033[93m[LOG] OpenSearch Probe Context: {e}\\033[0m\\n")
 
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
