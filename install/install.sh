@@ -4,7 +4,7 @@
 # Guides you through a complete Flume setup:
 #   Step 1: Verify dependencies
 #   Step 2: Install Elasticsearch (automatic when missing)
-#   Step 3: Install OpenBao CLI (best-effort)
+#   Step 3: Install OpenBao CLI & GitHub CLI (best-effort)
 #   Step 4: Configure .env
 #   Step 5: Create Elasticsearch indices
 #   Step 6: Set up workspace directories
@@ -160,9 +160,9 @@ if [ "$NEED_ES_BOOTSTRAP" = "true" ]; then
 fi
 
 # =============================================================================
-# Step 3: Install OpenBao (optional)
+# Step 3: Install OpenBao CLI & GitHub CLI (optional, best-effort)
 # =============================================================================
-step 3 "OpenBao CLI"
+step 3 "OpenBao & GitHub CLI"
 
 if command -v openbao >/dev/null 2>&1; then
     echo -e "${GREEN}OpenBao already installed:${NC} $(openbao version 2>/dev/null | head -n 1 || echo 'openbao')"
@@ -172,6 +172,17 @@ else
         sudo bash "${SCRIPT_DIR}/setup/install-openbao.sh" || echo -e "${YELLOW}OpenBao install skipped (continuing).${NC}"
     else
         bash "${SCRIPT_DIR}/setup/install-openbao.sh" || echo -e "${YELLOW}OpenBao install skipped (continuing).${NC}"
+    fi
+fi
+
+if command -v gh >/dev/null 2>&1; then
+    echo -e "${GREEN}GitHub CLI already installed:${NC} $(gh --version 2>/dev/null | head -n 1 || echo 'gh')"
+else
+    echo "Installing GitHub CLI (gh) (best-effort)."
+    if [ "$EUID" -ne 0 ]; then
+        sudo bash "${SCRIPT_DIR}/setup/install-gh.sh" || echo -e "${YELLOW}gh install skipped (continuing).${NC}"
+    else
+        bash "${SCRIPT_DIR}/setup/install-gh.sh" || echo -e "${YELLOW}gh install skipped (continuing).${NC}"
     fi
 fi
 

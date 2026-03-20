@@ -76,6 +76,7 @@ flume/
     ├── verify-deps.sh
     ├── install-elasticsearch.sh
     ├── install-openbao.sh
+    ├── install-gh.sh
     └── create-es-indices.sh
 ```
 
@@ -90,8 +91,8 @@ flume/
 | git | any | Agent code operations |
 | pgrep | any | Worker process detection |
 | curl | any | ES health checks |
-| OpenBao CLI | latest | Secrets CLI (optional, installed by installer if selected) |
-| gh (GitHub CLI) | any | PR creation (optional) |
+| OpenBao CLI | latest | Secrets CLI (optional; `install.sh` runs `setup/install-openbao.sh`) |
+| gh (GitHub CLI) | latest | PR creation (optional; `install.sh` runs `setup/install-gh.sh`) |
 | Node.js | 18+ | Rebuilding frontend from source (optional) |
 
 ---
@@ -241,6 +242,18 @@ Recommended flow:
 - Keep long-lived API tokens in OpenBao.
 - Complete Flume install with defaults.
 - Add/update provider keys after install from the Settings page and/or your OpenBao sync process.
+
+---
+
+## GitHub CLI (Optional)
+
+`install.sh` installs `gh` from the official [cli/cli](https://github.com/cli/cli) Linux `.tar.gz` release when missing. To install only `gh`:
+
+```bash
+sudo bash setup/install-gh.sh
+```
+
+Then authenticate (`gh auth login` or set `GH_TOKEN` in `.env`). See also the troubleshooting section below.
 
 ---
 
