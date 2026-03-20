@@ -284,6 +284,9 @@ def apply_runtime_config(workspace_root: Path) -> bool:
     addr, token = creds
     mount, path = openbao_mount_path(bootstrap)
     data = fetch_openbao_kv(addr, token, mount, path)
+    
+    elastic_data = fetch_openbao_kv(addr, token, mount, "flume_elastic")
+    data.update(elastic_data)
 
     # Merge KV into environment (KV wins over prior empty env for those keys)
     for key, val in data.items():
