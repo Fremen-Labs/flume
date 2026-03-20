@@ -46,6 +46,8 @@ export interface ApiWorker {
   /** LLM provider for this worker (from agent_models.json + env). */
   llm_provider?: string;
   preferred_llm_credential_id?: string;
+  /** Human-readable saved key / profile (from worker-manager state). */
+  llm_credential_label?: string;
   status: string;
   current_task_id: string | null;
   current_task_title?: string;

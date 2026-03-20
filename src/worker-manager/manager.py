@@ -13,6 +13,7 @@ if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
 from workspace_llm_env import resolve_cloud_agent_model, sync_llm_env_from_workspace  # noqa: E402
+import llm_credentials_store as lcs  # noqa: E402
 
 apply_runtime_config(_WS)
 
@@ -80,6 +81,8 @@ def load_agent_role_defs():
             host = (spec.get('executionHost') or host).strip() or host
             prov = (spec.get('provider') or prov).strip().lower() or prov
             cred_id = str(spec.get('credentialId') or spec.get('credential_id') or '').strip()
+        if not cred_id:
+            cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
         model = resolve_cloud_agent_model(prov, model, default_model)
         defs.append(
             {
@@ -241,7 +244,9 @@ def cycle():
             src = task.get('_source', {})
             pref_model = src.get('preferred_model') or worker['model']
             pref_prov = src.get('preferred_llm_provider') or worker.get('llm_provider')
-            pref_cred = src.get('preferred_llm_credential_id') or worker.get('llm_credential_id')
+            # Role config in agent_models.json must win: ES tasks kept an old preferred_llm_credential_id
+            # from the first claim, which ignored per-role key changes until the task completed.
+            pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             claim(
                 item_id,
                 worker['role'],
@@ -257,7 +262,12 @@ def cycle():
             snapshot['preferred_model'] = pref_model
             snapshot['preferred_llm_provider'] = pref_prov
             snapshot['preferred_llm_credential_id'] = pref_cred
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
             log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+        else:
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
         state['workers'].append(snapshot)
     save_state(state)
 

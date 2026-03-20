@@ -13,6 +13,19 @@ OLLAMA_CREDENTIAL_ID = "__ollama__"
 SETTINGS_DEFAULT_CREDENTIAL_ID = "__settings_default__"
 
 
+def resolve_credential_label(workspace_root: Path, cred_id: str) -> str:
+    """Short display name for UIs (worker snapshot, dashboards). No secrets."""
+    cid = (cred_id or "").strip()
+    if not cid or cid == SETTINGS_DEFAULT_CREDENTIAL_ID:
+        return "Settings (default)"
+    if cid == OLLAMA_CREDENTIAL_ID:
+        return "Ollama"
+    row = get_by_id(workspace_root, cid)
+    if row:
+        return str(row.get("label") or cid).strip() or cid
+    return cid
+
+
 def credentials_path(workspace_root: Path) -> Path:
     return workspace_root / "worker-manager" / "llm_credentials.json"
 

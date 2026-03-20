@@ -313,9 +313,10 @@ export default function AgentsPage() {
               <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
                 <DialogTitle>Agent models & hosts</DialogTitle>
                 <DialogDescription>
-                  Pick a <strong>vendor</strong>, then one of that vendor&apos;s <strong>saved keys</strong> (from
-                  Settings), then a model. Each agent role can use a different key. Workers pick up changes on the next
-                  manager cycle.
+                  Each <strong>row</strong> is one agent <strong>role</strong> (intake, implementer, …). Pick a{' '}
+                  <strong>vendor</strong>, then a <strong>saved API key</strong> (labeled in Settings → LLM), then a{' '}
+                  <strong>model</strong>. Roles can use different keys; the worker manager applies this on every cycle
+                  (no restart). The cards below show which key each worker is using.
                 </DialogDescription>
               </DialogHeader>
               <div className="px-6 flex-1 min-h-0 overflow-y-auto py-2 space-y-4">
@@ -608,7 +609,7 @@ export default function AgentsPage() {
                   </div>
                 )}
 
-                <div className="grid grid-cols-3 gap-2 relative z-10">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 relative z-10">
                   <div className="glass-surface p-2 rounded text-center min-w-0">
                     <div className="text-xs font-medium text-foreground truncate" title={worker.model ?? worker.preferred_model}>
                       {worker.model ?? worker.preferred_model ?? '—'}
@@ -620,6 +621,15 @@ export default function AgentsPage() {
                       {prov ?? '—'}
                     </div>
                     <div className="text-[10px] text-muted-foreground">Provider</div>
+                  </div>
+                  <div className="glass-surface p-2 rounded text-center min-w-0">
+                    <div
+                      className="text-xs font-medium text-foreground truncate"
+                      title={worker.llm_credential_label ?? worker.preferred_llm_credential_id ?? ''}
+                    >
+                      {worker.llm_credential_label ?? worker.preferred_llm_credential_id ?? '—'}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">API key</div>
                   </div>
                   <div className="glass-surface p-2 rounded text-center min-w-0">
                     <div className="text-xs font-medium text-foreground truncate" title={worker.execution_host}>
