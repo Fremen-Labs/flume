@@ -2,12 +2,12 @@
 # Flume — OpenBao installer (CLI binary)
 #
 # Installs the OpenBao CLI by downloading the latest (or requested) Linux
-# release artifact from GitHub and placing the `openbao` binary in
-# /usr/local/bin/openbao.
+# release artifact from GitHub and placing the binary in /usr/local/bin/openbao.
+# Upstream ships the binary as "bao"; Flume expects the command "openbao".
 #
 # Usage:
 #   sudo bash setup/install-openbao.sh
-#   OPENBAO_VERSION=v2.2.0 sudo bash setup/install-openbao.sh
+#   OPENBAO_VERSION=v2.5.1 sudo bash setup/install-openbao.sh
 
 set -euo pipefail
 
@@ -37,6 +37,15 @@ fi
 if command -v openbao >/dev/null 2>&1; then
     CURRENT_VER="$(openbao version 2>/dev/null | head -n 1 || true)"
     warn "OpenBao already appears installed: ${CURRENT_VER:-unknown version}"
+    exit 0
+fi
+
+# Upstream CLI is often installed as "bao"; Flume calls "openbao"
+if command -v bao >/dev/null 2>&1; then
+    BAO_PATH="$(command -v bao)"
+    info "Linking /usr/local/bin/openbao -> ${BAO_PATH}"
+    ln -sf "${BAO_PATH}" /usr/local/bin/openbao
+    success "openbao command available (symlink to bao)"
     exit 0
 fi
 
@@ -70,33 +79,49 @@ import urllib.request
 api_url = sys.argv[1]
 arch = sys.argv[2]
 
-with urllib.request.urlopen(api_url, timeout=20) as r:
+with urllib.request.urlopen(api_url, timeout=30) as r:
     data = json.load(r)
 
 assets = data.get("assets", [])
 candidates = []
+
+def arch_matches(filename: str) -> bool:
+    """OpenBao uses linux_amd64, Linux_x86_64, linux_arm64, Linux_arm64, etc."""
+    f = filename.lower()
+    if arch == "amd64":
+        return "amd64" in f or "x86_64" in f
+    if arch == "arm64":
+        return "arm64" in f
+    return False
+
 for a in assets:
-    name = (a.get("name") or "").lower()
+    name = a.get("name") or ""
     url = a.get("browser_download_url") or ""
-    if "linux" not in name:
+    if not url:
         continue
-    if arch not in name:
+    n = name.lower()
+    if "linux" not in n:
         continue
-    if not (name.endswith(".zip") or name.endswith(".tar.gz")):
+    if not arch_matches(name):
         continue
-    candidates.append((name, url))
+    if not (n.endswith(".zip") or n.endswith(".tar.gz")):
+        continue
+    if "sbom" in n or "gpgsig" in n or "sigstore" in n:
+        continue
+    # Prefer standard CLI bundle over HSM-specific builds
+    penalty = 0
+    if "bao-hsm" in n:
+        penalty += 100
+    if n.endswith(".zip"):
+        penalty += 1
+    candidates.append((penalty, len(name), name, url))
 
 if not candidates:
     print("", end="")
     sys.exit(0)
 
-# Prefer zip first, then tar.gz.
-def score(item):
-    name, _ = item
-    return (0 if name.endswith(".zip") else 1, len(name))
-
-candidates.sort(key=score)
-print(candidates[0][1], end="")
+candidates.sort()
+print(candidates[0][3], end="")
 PY
 )"
 
@@ -108,20 +133,10 @@ ASSET_FILE="${TMP_DIR}/openbao-archive"
 info "Downloading: ${ASSET_URL}"
 curl -fL "${ASSET_URL}" -o "${ASSET_FILE}"
 
-BIN_PATH=""
-if python3 - << 'PY' "${ASSET_URL}"
-import sys
-print("zip" if sys.argv[1].lower().endswith(".zip") else "other", end="")
-PY
-then
-    FILE_TYPE="$(python3 - << 'PY' "${ASSET_URL}"
-import sys
-print("zip" if sys.argv[1].lower().endswith(".zip") else "other", end="")
-PY
-)"
-else
-    FILE_TYPE="other"
-fi
+case "${ASSET_URL}" in
+    *.zip) FILE_TYPE="zip" ;;
+    *)     FILE_TYPE="tgz" ;;
+esac
 
 if [ "${FILE_TYPE}" = "zip" ]; then
     python3 - << 'PY' "${ASSET_FILE}" "${TMP_DIR}"
@@ -137,29 +152,39 @@ else
     tar -xzf "${ASSET_FILE}" -C "${TMP_DIR}"
 fi
 
-if [ -f "${TMP_DIR}/openbao" ]; then
-    BIN_PATH="${TMP_DIR}/openbao"
-else
-    BIN_PATH="$(
+BIN_PATH="$(
 python3 - << 'PY' "${TMP_DIR}"
 import os
 import sys
 
 root = sys.argv[1]
+# Prefer openbao, then bao (upstream name)
+found = []
 for base, _, files in os.walk(root):
-    if "openbao" in files:
-        print(os.path.join(base, "openbao"), end="")
-        break
+    for fname in files:
+        if fname not in ("openbao", "bao"):
+            continue
+        p = os.path.join(base, fname)
+        if os.path.isfile(p):
+            found.append(p)
+
+def key(p):
+    base = os.path.basename(p)
+    return (0 if base == "openbao" else 1, len(p))
+
+if not found:
+    sys.exit(0)
+found.sort(key=key)
+print(found[0], end="")
 PY
 )"
-fi
 
 if [ -z "${BIN_PATH}" ] || [ ! -f "${BIN_PATH}" ]; then
-    error "Downloaded artifact did not contain an openbao binary."
+    error "Downloaded artifact did not contain an openbao or bao binary."
 fi
 
 install -m 0755 "${BIN_PATH}" /usr/local/bin/openbao
-success "Installed OpenBao to /usr/local/bin/openbao"
+success "Installed OpenBao to /usr/local/bin/openbao (from upstream binary: $(basename "${BIN_PATH}"))"
 
 if command -v openbao >/dev/null 2>&1; then
     info "OpenBao version:"
@@ -167,4 +192,3 @@ if command -v openbao >/dev/null 2>&1; then
 else
     error "Installation completed but openbao is not on PATH."
 fi
-
