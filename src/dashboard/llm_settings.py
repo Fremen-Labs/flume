@@ -248,16 +248,35 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
         return False
 
 
+# Do not let a stale interactive shell (or old exports) override .env / OpenBao for LLM.
+# Worker processes are often started from a login shell that still has LLM_PROVIDER=ollama, etc.
+_SKIP_PROCESS_OVERLAY_FOR_LLM = frozenset(
+    {
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "LLM_API_KEY",
+        "OPENAI_OAUTH_STATE_FILE",
+        "OPENAI_OAUTH_TOKEN_URL",
+    }
+)
+
+
 def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     """
-    Load settings: .env (optional), process env (OpenBao hydration), then live OpenBao KV.
+    Load settings: .env (optional), selected process env keys, then live OpenBao KV.
     Values from OpenBao override earlier sources.
+
+    LLM-related keys are taken from .env + OpenBao only (not from inherited process env),
+    so worker manager/handlers match Settings even when the parent shell has old exports.
     """
     pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
     try:
         from flume_secrets import FLUME_ENV_KEYS
 
         for key in FLUME_ENV_KEYS:
+            if key in _SKIP_PROCESS_OVERLAY_FOR_LLM:
+                continue
             v = os.environ.get(key, "").strip()
             if v:
                 pairs[key] = v

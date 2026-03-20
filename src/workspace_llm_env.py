@@ -64,5 +64,15 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
                     continue
                 continue
             os.environ[key] = s
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            logf = wr / "worker-manager" / "llm_sync_errors.log"
+            logf.parent.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime, timezone
+
+            with logf.open("a", encoding="utf-8") as lf:
+                lf.write(
+                    f"{datetime.now(timezone.utc).isoformat()} sync_llm_env_from_workspace: {e!r}\n"
+                )
+        except OSError:
+            pass

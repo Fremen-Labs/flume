@@ -89,6 +89,24 @@ _workers_bounce() {
     export LOOM_WORKSPACE="${wr}"
     export PYTHONPATH="${wr}${PYTHONPATH:+:$PYTHONPATH}"
 
+    # Drop LLM exports from this shell so Python uses .env + OpenBao only (see load_effective_pairs).
+    unset LLM_PROVIDER LLM_MODEL LLM_BASE_URL LLM_API_KEY 2>/dev/null || true
+    unset OPENAI_OAUTH_STATE_FILE OPENAI_OAUTH_TOKEN_URL 2>/dev/null || true
+
+    # Same .env resolution as dashboard/worker run.sh (repo root wins over src/.env for dup keys).
+    REPO_ROOT="$(cd "${wr}/.." && pwd)"
+    if [ -f "${REPO_ROOT}/.env" ]; then
+        set -a
+        # shellcheck source=/dev/null
+        source "${REPO_ROOT}/.env"
+        set +a
+    elif [ -f "${wr}/.env" ]; then
+        set -a
+        # shellcheck source=/dev/null
+        source "${wr}/.env"
+        set +a
+    fi
+
     if [ -f "${wr}/memory/es/.env.local" ]; then
         set -a
         # shellcheck source=/dev/null
