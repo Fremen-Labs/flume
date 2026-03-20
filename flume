@@ -64,11 +64,64 @@ cmd_stop() {
     echo "Flume dashboard stopped."
 }
 
+# Bounce worker-manager + worker_handlers so LLM / code changes apply (separate from systemd dashboard).
+_workers_bounce() {
+    local wr mgr hdl
+    wr=""
+    if [ -f "${FLUME_ROOT}/src/worker-manager/manager.py" ]; then
+        wr="${FLUME_ROOT}/src"
+    elif [ -f "${FLUME_ROOT}/worker-manager/manager.py" ]; then
+        wr="${FLUME_ROOT}"
+    fi
+    if [ -z "${wr}" ]; then
+        echo "No worker-manager found under ${FLUME_ROOT} (expected src/worker-manager or worker-manager)."
+        return 1
+    fi
+    mgr="${wr}/worker-manager/manager.py"
+    hdl="${wr}/worker-manager/worker_handlers.py"
+    echo "Stopping worker processes matching:"
+    echo "  ${mgr}"
+    echo "  ${hdl}"
+    pkill -f "${mgr}" 2>/dev/null || true
+    pkill -f "${hdl}" 2>/dev/null || true
+    sleep 1
+
+    export LOOM_WORKSPACE="${wr}"
+    export PYTHONPATH="${wr}${PYTHONPATH:+:$PYTHONPATH}"
+
+    if [ -f "${wr}/memory/es/.env.local" ]; then
+        set -a
+        # shellcheck source=/dev/null
+        source "${wr}/memory/es/.env.local"
+        set +a
+    fi
+
+    echo "Starting worker manager + handlers (LOOM_WORKSPACE=${wr})..."
+    nohup python3 "${mgr}" >> "${wr}/worker-manager/manager.nohup.log" 2>&1 &
+    nohup python3 "${hdl}" >> "${wr}/worker-manager/handlers.nohup.log" 2>&1 &
+    echo "Workers started in background. Logs: ${wr}/worker-manager/manager.nohup.log and handlers.nohup.log"
+}
+
 cmd_restart() {
+    local opt_all=false
+    for arg in "$@"; do
+        if [ "${arg}" = "--all" ]; then
+            opt_all=true
+        fi
+    done
     ensure_service_installed
     systemctl --user daemon-reload
     systemctl --user restart "${SERVICE_NAME}" 2>/dev/null || systemctl --user start "${SERVICE_NAME}"
     echo "Flume dashboard restarted."
+    if [ "${opt_all}" = true ]; then
+        echo ""
+        _workers_bounce || true
+    else
+        echo ""
+        echo "Note: The dashboard was restarted, but worker-manager / worker_handlers were not."
+        echo "      They keep running until killed — use LLM/agent code from disk on next restart."
+        echo "      To restart them too:  ./flume restart --all"
+    fi
 }
 
 cmd_status() {
@@ -107,7 +160,7 @@ cmd_codex_oauth_help() {
     echo "  status           Show token metadata (secrets are not printed)"
     echo ""
     echo "After login or import: set Settings → LLM → OpenAI → OAuth, then:"
-    echo "  flume restart"
+    echo "  ./flume restart --all"
     echo ""
 }
 
@@ -159,7 +212,7 @@ cmd_help() {
     echo "Dashboard (systemd user service):"
     echo "  start     Start dashboard in background"
     echo "  stop      Stop dashboard"
-    echo "  restart   Restart dashboard"
+    echo "  restart [--all]  Restart dashboard; add --all to also restart worker manager + handlers"
     echo "  status    Show dashboard status"
     echo "  enable    Start dashboard automatically on login"
     echo "  disable   Don't start dashboard on login"
@@ -174,7 +227,10 @@ cmd_help() {
 case "${1:-help}" in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
-    restart) cmd_restart ;;
+    restart)
+        shift
+        cmd_restart "$@"
+        ;;
     status)  cmd_status ;;
     enable)  cmd_enable ;;
     disable) cmd_disable ;;

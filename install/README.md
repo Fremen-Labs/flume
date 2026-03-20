@@ -275,12 +275,14 @@ Flume can call OpenAI using a **ChatGPT (Codex) OAuth session** instead of a pla
 
 ```bash
 ./flume codex-oauth login
-./flume restart
+./flume restart --all
 ```
 
 Follow the browser URL and enter the one-time code. This writes **`<flume-root>/.openai-oauth.json`** and merges **`LLM_PROVIDER`**, **`LLM_API_KEY`** (access token), and **`OPENAI_OAUTH_STATE_FILE`** (absolute path) into **`.env`**.
 
-Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or rely on the updated `.env`) and ensure the dashboard/workers have been restarted.
+Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or rely on the updated `.env`).
+
+**`./flume restart` only restarts the dashboard (systemd).** Worker manager + worker handlers keep running until you run **`./flume restart --all`** (or stop/start them manually). Use **`--all`** after LLM, OAuth, or worker code changes so **Agent Operations** picks up the new model.
 
 **Package tarball** (extracted root): same commands — `./flume` lives next to `setup/`.
 
@@ -290,7 +292,7 @@ Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or rely on the
 codex login            # or: codex login --device-auth
 ./flume codex-oauth import
 ./flume codex-oauth refresh
-./flume restart
+./flume restart --all
 ```
 
 Imports **`~/.codex/auth.json`** (or **`$CODEX_HOME/auth.json`**) into Flume’s OAuth state file.
