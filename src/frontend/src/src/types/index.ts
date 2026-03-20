@@ -171,6 +171,8 @@ export interface LlmSettingsResponse {
   /** Saved labeled API keys (worker-manager/llm_credentials.json). */
   credentials: LlmCredentialSummary[];
   activeCredentialId: string;
+  /** Default saved key (same as activeCredentialId when omitted by older servers). */
+  defaultCredentialId?: string;
   oauthStatus: LlmOAuthStatus;
   restartRequired: boolean;
   openbaoInstalled?: boolean;
@@ -199,7 +201,7 @@ export interface LlmSettingsPayload {
 
 /** POST /api/settings/llm/credentials */
 export interface LlmCredentialActionPayload {
-  action: 'upsert' | 'delete' | 'activate' | 'patch';
+  action: 'upsert' | 'delete' | 'activate' | 'default' | 'patch';
   id?: string;
   label?: string;
   provider?: string;

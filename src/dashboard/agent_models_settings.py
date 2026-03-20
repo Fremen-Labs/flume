@@ -82,7 +82,7 @@ def provider_is_configured(
         cred = lcs.get_by_id(workspace_root, cid)
         if not cred:
             return False
-        cprov = str(cred.get("provider") or "").strip().lower()
+        cprov = lcs.normalize_provider_id(str(cred.get("provider") or "").strip().lower())
         if cprov != pid:
             return False
         key = str(cred.get("apiKey") or "").strip()
@@ -158,7 +158,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
         cid = str(c.get("id") or "").strip()
         if not cid:
             continue
-        pid = str(c.get("provider") or "").strip().lower()
+        pid = lcs.normalize_provider_id(str(c.get("provider") or "").strip().lower())
         cat = _catalog_entry(pid)
         if not cat and pid != "openai_compatible":
             continue
@@ -390,7 +390,9 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
         else:
             c = lcs.get_by_id(workspace_root, cred_id)
             prov = (
-                str(c.get("provider") or rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
+                lcs.normalize_provider_id(
+                    str(c.get("provider") or rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
+                )
                 if c
                 else (rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
             )

@@ -786,6 +786,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
         },
         "credentials": cred_list,
         "activeCredentialId": active_cred,
+        "defaultCredentialId": active_cred,
         "oauthStatus": oauth_status,
         "restartRequired": True,
         "openbaoInstalled": is_openbao_installed(),

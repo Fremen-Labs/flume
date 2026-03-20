@@ -259,7 +259,8 @@ export default function AgentsPage() {
   const canPickCredentials = selectableCredentials.length > 0;
 
   const vendorOptions = useMemo(() => {
-    const ids = [...new Set(selectableCredentials.map((g) => g.providerId))];
+    // Every saved key + settings default row — not only "configured" rows — so all vendors appear.
+    const ids = [...new Set(allCredentials.map((g) => g.providerId))].sort();
     return ids.map((id) => ({
       id,
       label:
@@ -268,7 +269,7 @@ export default function AgentsPage() {
           .replace(/_/g, ' ')
           .replace(/\b\w/g, (ch) => ch.toUpperCase()),
     }));
-  }, [selectableCredentials, selectableProviders]);
+  }, [allCredentials, selectableProviders]);
 
   const updateRole = (roleId: string, patch: Partial<RoleForm>) => {
     setRoleForm((prev) => {
@@ -285,19 +286,37 @@ export default function AgentsPage() {
   };
 
   const onVendorChange = (roleId: string, vendorId: string) => {
-    const keys = selectableCredentials.filter((g) => g.providerId === vendorId);
-    const first = keys[0];
-    if (!first) return;
+    const keys = allCredentials.filter((g) => g.providerId === vendorId);
+    const firstReady = keys.find((g) => g.configured);
+    if (firstReady) {
+      updateRole(roleId, {
+        provider: vendorId,
+        credentialId: firstReady.credentialId,
+        model: firstReady.models[0]?.id ?? '',
+      });
+      return;
+    }
+    const settingsDef = allCredentials.find((g) => g.credentialId === SETTINGS_DEFAULT_CREDENTIAL_ID);
+    if (settingsDef?.configured && settingsDef.providerId === vendorId) {
+      updateRole(roleId, {
+        provider: vendorId,
+        credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
+        model: settingsDef.models[0]?.id ?? '',
+      });
+      return;
+    }
+    const fallback = keys[0];
+    if (!fallback) return;
     updateRole(roleId, {
       provider: vendorId,
-      credentialId: first.credentialId,
-      model: first.models[0]?.id ?? '',
+      credentialId: fallback.credentialId,
+      model: fallback.models[0]?.id ?? '',
     });
   };
 
   const onCredentialPick = (roleId: string, credentialId: string) => {
-    const g = selectableCredentials.find((x) => x.credentialId === credentialId);
-    if (!g) return;
+    const g = allCredentials.find((x) => x.credentialId === credentialId);
+    if (!g || !g.configured) return;
     updateRole(roleId, {
       provider: g.providerId,
       credentialId,
@@ -523,13 +542,16 @@ export default function AgentsPage() {
                   agentCfg.roleIds.map((roleId) => {
                     const spec = roleForm[roleId];
                     if (!spec) return null;
-                    const keysThisVendor = selectableCredentials.filter((g) => g.providerId === spec.provider);
+                    const keysThisVendor = allCredentials.filter((g) => g.providerId === spec.provider);
+                    const readyKeys = keysThisVendor.filter((k) => k.configured);
                     const credGroup =
-                      keysThisVendor.find((g) => g.credentialId === spec.credentialId) ?? keysThisVendor[0];
+                      keysThisVendor.find((g) => g.credentialId === spec.credentialId) ??
+                      readyKeys[0] ??
+                      keysThisVendor[0];
                     const group = credGroup;
-                    const keySelectValue = keysThisVendor.some((k) => k.credentialId === spec.credentialId)
+                    const keySelectValue = readyKeys.some((k) => k.credentialId === spec.credentialId)
                       ? spec.credentialId
-                      : (keysThisVendor[0]?.credentialId ?? '');
+                      : (readyKeys[0]?.credentialId ?? '');
                     const allowCustom = group?.allowCustomModelId === true;
                     const useModelInput = allowCustom || !group?.models?.length;
                     return (
@@ -562,20 +584,31 @@ export default function AgentsPage() {
                               <p className="text-[11px] text-muted-foreground py-1">
                                 No keys for this vendor — add them in Settings → LLM for that provider.
                               </p>
+                            ) : readyKeys.length === 0 ? (
+                              <p className="text-[11px] text-destructive/90 py-1">
+                                No API key pasted yet for this provider. Open Settings → LLM, select this provider, and
+                                save a key — grayed labels below are previews only.
+                              </p>
                             ) : (
                               <Select
-                                value={keySelectValue}
+                                value={keySelectValue || readyKeys[0]!.credentialId}
                                 onValueChange={(v) => onCredentialPick(roleId, v)}
                               >
                                 <SelectTrigger className="h-9">
-                                  <SelectValue placeholder="Key" />
+                                  <SelectValue placeholder="Saved key" />
                                 </SelectTrigger>
                                 <SelectContent>
                                   {keysThisVendor.map((g) => (
-                                    <SelectItem key={g.credentialId} value={g.credentialId}>
+                                    <SelectItem
+                                      key={g.credentialId}
+                                      value={g.credentialId}
+                                      disabled={!g.configured}
+                                      className={!g.configured ? 'opacity-50' : undefined}
+                                    >
                                       {g.shortLabel ?? g.label}
                                       {g.keySuffix ? ` · ···${g.keySuffix}` : ''}
-                                      {g.credentialId === SETTINGS_DEFAULT_CREDENTIAL_ID ? ' (default)' : ''}
+                                      {g.credentialId === SETTINGS_DEFAULT_CREDENTIAL_ID ? ' (Settings default)' : ''}
+                                      {!g.configured ? ' — add key in Settings' : ''}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>

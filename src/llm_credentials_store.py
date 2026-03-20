@@ -15,6 +15,20 @@ SETTINGS_DEFAULT_CREDENTIAL_ID = "__settings_default__"
 # OpenAI ChatGPT/Codex OAuth only (uses OPENAI_OAUTH_* from env — no row in llm_credentials.json).
 OPENAI_OAUTH_CREDENTIAL_ID = "__openai_oauth__"
 
+# Map mis-tagged rows in llm_credentials.json to catalog / LLM client ids.
+_PROVIDER_ALIASES: dict[str, str] = {
+    "google": "gemini",
+    "google-ai": "gemini",
+    "google_ai": "gemini",
+    "googleaistudio": "gemini",
+    "generativelanguage": "gemini",
+}
+
+
+def normalize_provider_id(pid: str) -> str:
+    p = (pid or "").strip().lower()
+    return _PROVIDER_ALIASES.get(p, p)
+
 
 def resolve_credential_label(workspace_root: Path, cred_id: str) -> str:
     """Short display name for UIs (worker snapshot, dashboards). No secrets."""
@@ -36,7 +50,7 @@ def credentials_path(workspace_root: Path) -> Path:
 
 
 def _default_doc() -> dict[str, Any]:
-    return {"version": 1, "activeCredentialId": "", "credentials": []}
+    return {"version": 1, "activeCredentialId": "", "defaultCredentialId": "", "credentials": []}
 
 
 def load_document(workspace_root: Path) -> dict[str, Any]:
@@ -49,6 +63,10 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return _default_doc()
         data.setdefault("version", 1)
         data.setdefault("activeCredentialId", "")
+        data.setdefault("defaultCredentialId", "")
+        # Migrate legacy field: default is the preferred name for "fallback key" semantics.
+        if not str(data.get("defaultCredentialId") or "").strip() and str(data.get("activeCredentialId") or "").strip():
+            data["defaultCredentialId"] = str(data.get("activeCredentialId") or "").strip()
         creds = data.get("credentials")
         if not isinstance(creds, list):
             data["credentials"] = []
@@ -83,11 +101,12 @@ def list_public_credentials(workspace_root: Path) -> list[dict[str, Any]]:
         if not cid:
             continue
         key = str(c.get("apiKey") or "").strip()
+        prov_raw = str(c.get("provider") or "").strip().lower()
         out.append(
             {
                 "id": cid,
                 "label": str(c.get("label") or cid).strip() or cid,
-                "provider": str(c.get("provider") or "").strip().lower(),
+                "provider": normalize_provider_id(prov_raw),
                 "keySuffix": _key_suffix(key),
                 "hasKey": bool(key),
                 "baseUrl": str(c.get("baseUrl") or "").strip(),
@@ -131,7 +150,7 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
     if not c:
         return None
     key = str(c.get("apiKey") or "").strip()
-    prov = str(c.get("provider") or "openai").strip().lower()
+    prov = normalize_provider_id(str(c.get("provider") or "openai").strip().lower())
     base = str(c.get("baseUrl") or "").strip()
     if not key:
         # OpenAI OAuth-only rows (or env OAuth) — empty api_key lets llm_client refresh from state file.
@@ -246,18 +265,25 @@ def delete_credential(workspace_root: Path, cred_id: str) -> bool:
     doc["credentials"] = creds
     if str(doc.get("activeCredentialId") or "") == cred_id:
         doc["activeCredentialId"] = ""
+    if str(doc.get("defaultCredentialId") or "") == cred_id:
+        doc["defaultCredentialId"] = ""
     save_document(workspace_root, doc)
     return True
 
 
 def set_active_credential_id(workspace_root: Path, cred_id: str) -> None:
+    """Persist the default saved key (syncs legacy activeCredentialId for older readers)."""
     doc = load_document(workspace_root)
-    doc["activeCredentialId"] = (cred_id or "").strip()
+    cid = (cred_id or "").strip()
+    doc["defaultCredentialId"] = cid
+    doc["activeCredentialId"] = cid
     save_document(workspace_root, doc)
 
 
 def get_active_credential_id(workspace_root: Path) -> str:
-    return str(load_document(workspace_root).get("activeCredentialId") or "").strip()
+    """Default saved credential id (used for LLM_* sync and agent Settings-default fallback)."""
+    doc = load_document(workspace_root)
+    return str(doc.get("defaultCredentialId") or doc.get("activeCredentialId") or "").strip()
 
 
 def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str, str]:
@@ -282,7 +308,7 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
     key = str(c.get("apiKey") or "").strip()
     if not key:
         raise ValueError("Credential has no API key")
-    prov = str(c.get("provider") or "openai").strip().lower()
+    prov = normalize_provider_id(str(c.get("provider") or "openai").strip().lower())
     base = str(c.get("baseUrl") or "").strip()
     out: dict[str, str] = {
         "LLM_PROVIDER": prov,
@@ -301,7 +327,7 @@ def apply_credentials_action(
 ) -> tuple[bool, str, Optional[dict[str, str]]]:
     """
     Handle credential CRUD from API. Returns (ok, error, env_updates_or_none).
-    env_updates are merged into .env/OpenBao when activating or upserting with a key.
+    env_updates are merged into .env/OpenBao when activating (set default) or saving Settings with a new key.
     """
     action = str(payload.get("action") or "").strip().lower()
     if action == "delete":
@@ -312,7 +338,7 @@ def apply_credentials_action(
             return False, "Credential not found", None
         return True, "", None
 
-    if action == "activate":
+    if action in ("activate", "default"):
         cid = str(payload.get("id") or "").strip()
         if not cid:
             return False, "id is required", None
@@ -370,11 +396,7 @@ def apply_credentials_action(
             new_id = upsert_credential(workspace_root, cred_id, label, provider, api_key, base_url)
         except ValueError as e:
             return False, str(e), None
-        set_active_credential_id(workspace_root, new_id)
-        try:
-            updates = build_activation_env_updates(workspace_root, new_id)
-        except ValueError as e:
-            return False, str(e), None
-        return True, "", updates
+        # Do not auto-set default key — user chooses "Set as default" or saves from Settings.
+        return True, "", None
 
-    return False, "action must be upsert, delete, activate, or patch", None
+    return False, "action must be upsert, delete, activate, default, or patch", None

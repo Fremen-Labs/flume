@@ -172,9 +172,14 @@ export default function SettingsPage() {
     models.find((m) => m.id === (effectiveSettings.model ?? ''))?.name ?? effectiveSettings.model ?? '';
 
   const credentialsForProvider = useMemo(
-    () => (data?.credentials ?? []).filter((c) => c.provider === providerId),
+    () =>
+      (data?.credentials ?? []).filter(
+        (c) => (c.provider || '').toLowerCase() === (providerId || '').toLowerCase(),
+      ),
     [data?.credentials, providerId],
   );
+
+  const defaultCredId = data?.defaultCredentialId ?? data?.activeCredentialId ?? '';
 
   /** Saved server profile (before you change the Provider dropdown). */
   const persistedProvider = data?.settings?.provider ?? 'ollama';
@@ -474,10 +479,11 @@ export default function SettingsPage() {
                       Saved API keys for {providerName}
                     </Label>
                     <p className="text-[11px] text-muted-foreground leading-snug">
-                      Only keys for the <strong>selected provider</strong> are listed. Each label must be unique per
-                      vendor. Keys live in{' '}
+                      Only keys for the <strong>provider you picked above</strong> appear here (not keys for other
+                      vendors). Each label must be unique per provider. Keys live in{' '}
                       <code className="text-[10px]">worker-manager/llm_credentials.json</code>.{' '}
-                      <strong>Use</strong> copies a key into the active profile (LLM_*).
+                      <strong>Set as default</strong> applies that key to the global LLM profile (LLM_*) and is the
+                      fallback for agent roles that use &quot;Settings (default)&quot;.
                     </p>
                     {credentialsForProvider.length === 0 && (
                       <p className="text-xs text-muted-foreground italic py-1">
@@ -495,9 +501,9 @@ export default function SettingsPage() {
                             <span className="font-mono text-[11px] text-muted-foreground">
                               {c.hasKey ? `···${c.keySuffix || '••••'}` : 'empty'}
                             </span>
-                            {data?.activeCredentialId === c.id && (
+                            {defaultCredId === c.id && (
                               <span className="text-[10px] font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
-                                Active
+                                Default
                               </span>
                             )}
                           </div>
@@ -509,10 +515,13 @@ export default function SettingsPage() {
                               className="h-8"
                               disabled={!!credBusy}
                               onClick={() =>
-                                void runCredAction({ action: 'activate', id: c.id }, 'Active profile updated.')
+                                void runCredAction(
+                                  { action: 'activate', id: c.id },
+                                  'Default key updated — LLM profile and agent fallback use this key.',
+                                )
                               }
                             >
-                              Use
+                              Set as default
                             </Button>
                             <Button
                               type="button"
@@ -606,8 +615,9 @@ export default function SettingsPage() {
                         onChange={(e) => updateForm({ credentialLabel: e.target.value })}
                       />
                       <p className="text-[11px] text-muted-foreground">
-                        Unique among all <strong>{providerName}</strong> keys. When you paste a new API key and Save, it
-                        is stored for this provider and becomes the active profile.
+                        Unique among all <strong>{providerName}</strong> keys. Save stores the key for this provider; use{' '}
+                        <strong>Set as default</strong> on a saved row if you want it to drive the global LLM profile and
+                        agent &quot;Settings (default)&quot; fallback.
                       </p>
                     </div>
                     <div className="space-y-2">
