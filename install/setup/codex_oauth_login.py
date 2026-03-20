@@ -32,6 +32,7 @@ import hashlib
 import html
 import json
 import os
+import select
 import ssl
 import sys
 import time
@@ -132,6 +133,56 @@ def _build_browser_authorize_url(
         params.append(("resource", res))
     qs = urllib.parse.urlencode(params)
     return f"{issuer.rstrip('/')}/oauth/authorize?{qs}"
+
+
+def _stdin_paste_finishes_login_browser(raw: str, oauth_state: str, callback_box: dict[str, str]) -> bool:
+    """
+    If the user pastes a full localhost callback URL into the terminal (browser redirected on
+    another machine, or URL was copied from chat), validate state and set callback_box['code'].
+
+    Returns True if waiting should stop (success). Returns False to keep waiting (wrong shape / mismatch).
+    Raises SystemExit on fatal paste (OpenAI error page, OAuth error query).
+    """
+    raw = raw.strip()
+    if not raw:
+        return False
+    if "/auth/callback" not in raw and "code=" not in raw:
+        print(
+            "Ignoring input — paste the full line starting with http://localhost:.../auth/callback?code=...",
+            file=sys.stderr,
+        )
+        return False
+
+    decoded_err = _decode_auth_openai_error_paste(raw)
+    if decoded_err:
+        raise SystemExit(decoded_err)
+
+    cb_err = _oauth_callback_redirect_error(raw)
+    if cb_err:
+        raise SystemExit(cb_err)
+
+    try:
+        auth_code, pasted_state = _parse_pasted_oauth_redirect(raw)
+    except ValueError as e:
+        print(f"Could not parse callback URL: {e}", file=sys.stderr)
+        return False
+
+    if not pasted_state:
+        raise SystemExit(
+            "Paste must include state= (copy the full redirect URL from the address bar, not only code=)."
+        )
+
+    if pasted_state != oauth_state:
+        print(
+            "OAuth state mismatch — this callback URL does not match THIS login attempt.\n"
+            "Use only the authorize link printed above in this same run, sign in, then paste the new callback URL here.",
+            file=sys.stderr,
+        )
+        return False
+
+    callback_box.clear()
+    callback_box["code"] = auth_code
+    return True
 
 
 def _parse_pasted_oauth_redirect(raw: str) -> tuple[str, str]:
@@ -732,14 +783,44 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
             webbrowser.open(auth_url)
         except Exception:
             pass
-    print("Waiting for authorization (15 minutes max)...\n")
+    print("Waiting for authorization (15 minutes max)...")
+    print()
+    print(
+        "Tip: The browser must open the callback on THIS machine (where this terminal runs). "
+        "If you signed in elsewhere or only have the redirect link (e.g. from chat), paste the full URL here "
+        f"and press Enter — it must start with http://localhost:{port}/auth/callback?..."
+    )
+    print(
+        "If you already closed this command, run login-browser again: callback URLs are tied to this session’s "
+        "PKCE verifier and cannot be reused after exit."
+    )
+    print()
 
     deadline = time.monotonic() + 15 * 60
+    # On Windows, select() does not support stdin; HTTP callback only (use login-paste for remote paste).
+    use_stdin_select = sys.stdin.isatty() and sys.platform != "win32"
+
     try:
         while time.monotonic() < deadline:
             if callback_box.get("code") or callback_box.get("error"):
                 break
-            httpd.handle_request()
+            if use_stdin_select:
+                try:
+                    readable, _, _ = select.select([httpd.socket, sys.stdin], [], [], 0.5)
+                except (ValueError, OSError):
+                    use_stdin_select = False
+                    readable = []
+                if sys.stdin in readable:
+                    line = sys.stdin.readline()
+                    if _stdin_paste_finishes_login_browser(line, oauth_state, callback_box):
+                        break
+                if httpd.socket in readable and not (
+                    callback_box.get("code") or callback_box.get("error")
+                ):
+                    httpd.handle_request()
+            else:
+                httpd.timeout = 0.5
+                httpd.handle_request()
     finally:
         httpd.server_close()
 
