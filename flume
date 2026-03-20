@@ -203,6 +203,7 @@ cmd_codex_oauth_help() {
     echo ""
     echo "Commands:"
     echo "  login (default)  Device-code sign-in; writes .openai-oauth.json and updates .env"
+    echo "  login-browser    Browser + localhost callback (API scopes for /v1/responses)"
     echo "  import           Import from official Codex CLI session (~/.codex/auth.json)"
     echo "  bootstrap        Try Codex cache then optional legacy profile import; refresh + .env"
     echo "  refresh          Refresh access token using saved refresh token"
@@ -230,6 +231,13 @@ cmd_codex_oauth() {
                 exit 1
             fi
             python3 "${py}" login --flume-root "${FLUME_ROOT}" "$@"
+            ;;
+        login-browser)
+            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
+                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
+                exit 1
+            fi
+            python3 "${py}" login-browser --flume-root "${FLUME_ROOT}" "$@"
             ;;
         import|import-codex)
             if [ -z "${py}" ] || [ ! -f "${py}" ]; then
@@ -268,7 +276,7 @@ cmd_help() {
     echo "  logs      Tail dashboard logs (journalctl -f)"
     echo ""
     echo "OpenAI ChatGPT / Codex OAuth:"
-    echo "  codex-oauth [login|import|bootstrap|refresh|status]"
+    echo "  codex-oauth [login|login-browser|import|bootstrap|refresh|status]"
     echo "  Run \"flume codex-oauth help\" for details."
     echo ""
 }

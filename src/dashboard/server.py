@@ -392,10 +392,9 @@ def refine_session(session_id, user_text, current_plan):
         elif '401' in err or 'Unauthorized' in err:
             if 'Missing scopes' in err or 'api.responses.write' in err:
                 hint = (
-                    ' OAuth token is missing API scopes (refresh alone will not fix this). Run '
-                    './flume codex-oauth login again on Flume ≥ this fix, or: codex login (browser) then '
-                    './flume codex-oauth import. Optional: set OPENAI_OAUTH_SCOPES in .env if your IdP '
-                    'requires a custom scope list.'
+                    ' OAuth token is missing API scopes (refresh will not fix this). Run '
+                    './flume codex-oauth login-browser on a machine where the browser can hit localhost, '
+                    'or: codex login then ./flume codex-oauth import. Device-code login often omits API scopes.'
                 )
             else:
                 hint = (

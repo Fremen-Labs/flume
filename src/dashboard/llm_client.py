@@ -226,9 +226,9 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if e.code == 401 and 'openai.com' in (url or '').lower():
             if 'Missing scopes' in body or 'api.responses.write' in body:
                 msg += (
-                    ' Hint: OAuth token lacks API scopes (not fixed by refresh alone). Run a new device '
-                    'login: ./flume codex-oauth login (Flume requests model.request + api.responses.write), '
-                    'or browser login: codex login then ./flume codex-oauth import.'
+                    ' Hint: OAuth token lacks API scopes (refresh cannot fix). Run '
+                    './flume codex-oauth login-browser (browser + localhost callback), or '
+                    'codex login then ./flume codex-oauth import. Device-code login often omits API scopes.'
                 )
             else:
                 msg += (

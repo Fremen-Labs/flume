@@ -277,21 +277,38 @@ If **`LLM_PROVIDER=openai`** but **`LLM_BASE_URL`** still points at **Ollama** (
 
 ### Error: `Missing scopes: api.responses.write`
 
-The access token must include **API scopes** (e.g. `model.request`, `api.responses.write`), not only `openid` / `profile` / `email`. Older Flume device login did not request those scopes.
+The access token must include **API scopes** (e.g. `model.request`, `api.responses.write`), not only `openid` / `profile` / `email`.
 
-1. **Upgrade Flume** to a build that includes scope support, then run **`./flume codex-oauth login`** again (new device consent). **`Refresh OAuth` / `./flume codex-oauth refresh`** alone usually **cannot** add scopes to tokens minted without them.
-2. Or use a **current Codex CLI** browser login: **`codex login`**, then **`./flume codex-oauth import`** (then refresh if needed).
+OpenAI’s **device-code** flow (`./flume codex-oauth login`) often **does not attach** those API scopes to the token, even if Flume sends a `scope` field. **`Refresh OAuth` cannot add scopes** that were never granted.
 
-Optional **`OPENAI_OAUTH_SCOPES`** in `.env` overrides the default scope list; set it **empty** to omit the `scope` parameter (legacy IdP behavior).
+**Fix (pick one):**
+
+1. **Recommended — browser login built into Flume** (localhost callback + PKCE, same idea as `codex login`):
+
+   ```bash
+   ./flume codex-oauth login-browser
+   ./flume restart --all
+   ```
+
+   Run this on a machine where your **browser can reach `http://127.0.0.1:<port>`** (or use SSH port-forwarding from your laptop to that port). The script prints the exact URL.
+
+2. **Official Codex CLI**: **`codex login`** (browser), then **`./flume codex-oauth import`**.
+
+3. **Device code** (`./flume codex-oauth login`) may still work for some accounts; if you see this 401, prefer **`login-browser`**.
+
+Optional **`OPENAI_OAUTH_SCOPES`** / **`OPENAI_OAUTH_ORIGINATOR`** — see **Advanced** under OpenAI OAuth.
 
 ### Recommended: Flume CLI (from the Flume install directory)
 
 ```bash
-./flume codex-oauth login
+./flume codex-oauth login-browser   # best for ChatGPT + /v1/responses (API scopes)
+# or: ./flume codex-oauth login    # device code; may lack api.responses.write
 ./flume restart --all
 ```
 
-Follow the browser URL and enter the one-time code. This writes **`<flume-root>/.openai-oauth.json`** and merges **`LLM_PROVIDER`**, **`LLM_API_KEY`** (access token), and **`OPENAI_OAUTH_STATE_FILE`** (absolute path) into **`.env`**.
+**`login-browser`:** opens (or prints) an **authorize** URL; after you sign in, the browser redirects to **localhost** and Flume writes **`<flume-root>/.openai-oauth.json`** and updates **`.env`** (unless `--no-sync-env`).
+
+**`login`:** follow the **Codex device** URL and enter the one-time code.
 
 Then set **Settings → LLM → OpenAI → Auth mode → OAuth** (or rely on the updated `.env`).
 
@@ -331,13 +348,15 @@ Same behavior without the Flume CLI:
 
 ```bash
 python3 install/setup/codex_oauth_login.py login --flume-root /path/to/flume
+python3 install/setup/codex_oauth_login.py login-browser --flume-root /path/to/flume
 bash install/setup/openai-oauth.sh refresh
 ```
 
 ### Advanced
 
 - **`OPENAI_OAUTH_CLIENT_ID`** — override the public OAuth client id (default matches openai/codex).
-- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh (defaults include `api.responses.write`; empty string omits `scope` from requests).
+- **`OPENAI_OAUTH_SCOPES`** — space-separated scopes for device login + refresh + **`login-browser`** authorize URL (defaults include `api.responses.write`; empty string omits `scope` from device/refresh only).
+- **`OPENAI_OAUTH_ORIGINATOR`** — `originator` query param for **`login-browser`** (default `codex_cli_rs`, matches Codex CLI).
 - State file path defaults to **repo/package root** so it works with **`LOOM_WORKSPACE`** = `src/` (dashboard and workers resolve relative paths against the repo root first).
 
 Updates `.env` (and can sync sensitive fields to OpenBao via Settings when OpenBao is enabled).
