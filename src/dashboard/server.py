@@ -133,8 +133,13 @@ def es_search(index, body):
         },
         method='GET',
     )
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
 
 
 def es_index(index, doc):
