@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import {
   LayoutDashboard, FolderKanban, ListTodo, Bot, Activity, BarChart3,
-  Settings, ChevronLeft, ChevronRight, Zap, Radar, Sun, Moon
+  Settings, ChevronLeft, ChevronRight, Zap, Radar, Sun, Moon, Shield
 } from 'lucide-react';
 import { SidebarNavItem } from '@/components/SidebarNavItem';
 import { MeshBackground } from '@/components/MeshBackground';
@@ -18,6 +18,7 @@ const navItems = [
   { to: '/agents', icon: Bot, label: 'Agents' },
   { to: '/activity', icon: Activity, label: 'Activity' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
+  { to: '/security', icon: Shield, label: 'Security' },
 ];
 
 export function AppLayout() {

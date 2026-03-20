@@ -933,9 +933,44 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
 
 
 def load_workers():
-    if WORKER_STATE.exists():
-        return json.loads(WORKER_STATE.read_text()).get('workers', [])
-    return []
+    if not WORKER_STATE.exists():
+        return []
+    try:
+        data = json.loads(WORKER_STATE.read_text())
+        workers = data.get('workers', [])
+    except Exception:
+        return []
+        
+    try:
+        agg_res = es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {
+                'by_worker': {
+                    'terms': {'field': 'worker_name.keyword', 'size': 500},
+                    'aggs': {
+                        'total_input': {'sum': {'field': 'input_tokens'}},
+                        'total_output': {'sum': {'field': 'output_tokens'}}
+                    }
+                },
+                'total_elastro_savings': {
+                    'sum': {'field': 'savings'}
+                }
+            }
+        })
+        buckets = agg_res.get('aggregations', {}).get('by_worker', {}).get('buckets', [])
+        totals = {}
+        for b in buckets:
+            totals[b.get('key')] = {
+                'input': int(b.get('total_input', {}).get('value', 0)),
+                'output': int(b.get('total_output', {}).get('value', 0))
+            }
+        for w in workers:
+            w['input_tokens'] = totals.get(w['name'], {}).get('input', 0)
+            w['output_tokens'] = totals.get(w['name'], {}).get('output', 0)
+    except Exception:
+        pass
+        
+    return workers
 
 
 def priority_rank(priority: str) -> int:
@@ -1563,6 +1598,16 @@ def load_snapshot():
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     }).get('hits', {}).get('hits', [])
+    elastro_savings = 0
+    try:
+        agg_res = es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
+        })
+        elastro_savings = int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
+    except Exception:
+        pass
+
     return {
         'workers': load_workers(),
         'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks],
@@ -1571,6 +1616,7 @@ def load_snapshot():
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance],
         'repos': load_repos(),
         'projects': load_projects_registry(),
+        'elastro_savings': elastro_savings,
     }
 
 
@@ -1784,6 +1830,36 @@ class Handler(BaseHTTPRequestHandler):
                 import agent_models_settings
                 data = agent_models_settings.get_agent_models_response(WORKSPACE_ROOT)
                 self._json_response(200, data)
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+            return
+
+        if self.path == '/api/security':
+            try:
+                from flume_secrets import fetch_openbao_kv
+                addr = os.environ.get("OPENBAO_ADDR", "")
+                token = os.environ.get("OPENBAO_TOKEN", "")
+                mount = os.environ.get("OPENBAO_MOUNT", "secret")
+                path = os.environ.get("OPENBAO_PATH", "flume")
+                secrets = fetch_openbao_kv(addr, token, mount, path) if addr and token else {}
+                masked_secrets = {str(k): "<SECURE STRING>" for k in secrets.keys()}
+
+                audits = []
+                try:
+                    res = es_search('agent-security-audits', {
+                        "size": 100,
+                        "sort": [{"@timestamp": {"order": "desc"}}]
+                    })
+                    audits = [hit["_source"] for hit in res.get("hits", {}).get("hits", [])]
+                except Exception as es_err:
+                    import logging
+                    logging.getLogger("dashboard_server").debug(f"Audit log missing: {es_err}")
+
+                self._json_response(200, {
+                    "vault_active": bool(addr and token),
+                    "openbao_keys": masked_secrets,
+                    "audit_logs": audits
+                })
             except Exception as e:
                 self._json_response(502, {'error': str(e)[:300]})
             return
@@ -2719,6 +2795,17 @@ class Handler(BaseHTTPRequestHandler):
             }
             registry.append(entry)
             save_projects_registry(registry)
+            
+            try:
+                subprocess.Popen(
+                    ['elastro', 'rag', 'ingest', str(target_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+            except Exception:
+                pass
+                
             self._json_response(201, {'ok': True, 'project': entry})
             return
 
