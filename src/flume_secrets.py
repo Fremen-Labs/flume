@@ -176,7 +176,42 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
         if not isinstance(data, dict):
             logger.warning("OpenBao returned invalid data payload layout.")
             return {}
-        return {str(k): "" if v is None else str(v) for k, v in data.items()}
+        
+        res_data = {str(k): "" if v is None else str(v) for k, v in data.items()}
+        
+        # --- Native Elasticsearch Security Auditing ---
+        es_url = res_data.get("ES_URL") or os.environ.get("ES_URL", "")
+        es_key = res_data.get("ES_API_KEY") or os.environ.get("ES_API_KEY", "")
+        if es_url and es_key:
+            import urllib.request
+            import time
+            import ssl
+            audit_doc = {
+                "@timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "message": f"OpenBao KV securely accessed at {secret_ref}",
+                "agent_roles": os.environ.get("FLUME_PROCESS_ROLE", "system"),
+                "worker_name": os.environ.get("WORKER_NAME", "daemon"),
+                "secret_path": secret_ref,
+                "keys_retrieved": list(res_data.keys())
+            }
+            try:
+                req = urllib.request.Request(
+                    f"{es_url.rstrip('/')}/agent-security-audits/_doc",
+                    data=json.dumps(audit_doc).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
+                    method="POST"
+                )
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
+                    if response.status not in (200, 201):
+                        logger.warning(f"Security audit log dropped natively: {response.status}")
+            except Exception as audit_e:
+                logger.warning(f"Failed to post OpenBao security checkout audit to Elasticsearch: {audit_e}")
+        # ----------------------------------------------
+        
+        return res_data
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError) as e:
         logger.error(f"Critical OpenBao fetch exception: {e}")
         return {}

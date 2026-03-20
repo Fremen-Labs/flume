@@ -4,7 +4,8 @@ import os
 import ssl
 import sys
 import time
-import urllib.request
+import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -272,12 +273,57 @@ def cycle():
     save_state(state)
 
 
+def elastro_watchdog():
+    log('elastro watchdog starting')
+    file_mtimes = {}
+    registry_path = _WS / 'projects.json'
+    while True:
+        try:
+            if registry_path.exists():
+                registry = json.loads(registry_path.read_text())
+                projects = registry.get('projects') if isinstance(registry, dict) else registry
+                if isinstance(projects, list):
+                    for p in projects:
+                        if not isinstance(p, dict):
+                            continue
+                        workspace_dir = Path(p.get('path') or str(_WS / p.get('id', '')))
+                        if not workspace_dir.exists() or not workspace_dir.is_dir():
+                            continue
+                        
+                        for root, dirs, files in os.walk(workspace_dir):
+                            if any(ignored in root for ignored in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']):
+                                continue
+                            for f in files:
+                                filepath = Path(root) / f
+                                try:
+                                    mtime = filepath.stat().st_mtime
+                                except Exception:
+                                    continue
+                                
+                                last_mtime = file_mtimes.get(str(filepath))
+                                if last_mtime is not None and mtime > last_mtime:
+                                    try:
+                                        subprocess.Popen(
+                                            ['elastro', 'rag', 'update', str(filepath)],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL
+                                        )
+                                        log(f'watchdog: triggered elastro rag update for {filepath.name}')
+                                    except Exception:
+                                        pass
+                                file_mtimes[str(filepath)] = mtime
+        except Exception as e:
+            log(f'watchdog loop error: {e}')
+        time.sleep(5)
+
+
 def main():
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         raise SystemExit(
             'ES_API_KEY is required. Store it in OpenBao (KV secret/flume) or .env — see install/flume.config.example.json'
         )
     log('worker manager starting')
+    threading.Thread(target=elastro_watchdog, daemon=True).start()
     while True:
         try:
             cycle()

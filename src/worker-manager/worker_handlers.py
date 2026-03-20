@@ -870,6 +870,8 @@ def handle_reviewer_worker(task, es_id):
 
 def run_worker(worker):
     try:
+        os.environ['FLUME_WORKER_NAME'] = worker.get('name', 'unknown')
+        os.environ['FLUME_WORKER_ROLE'] = worker.get('role', 'unknown')
         task_id = worker.get('current_task_id')
         if not task_id and worker.get('role') != 'pm':
             return True
