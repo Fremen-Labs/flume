@@ -142,6 +142,124 @@
     --grid-line-color: rgba(0, 0, 0, 0.03);
     --mesh-base: 0 0% 98%;
   }
+
+  /* ─── RETRO SKIN (dark) ─── */
+  [data-skin='retro'] {
+    --background: 30 15% 8%;
+    --foreground: 45 30% 88%;
+
+    --card: 30 12% 10%;
+    --card-foreground: 45 30% 88%;
+
+    --popover: 30 12% 10%;
+    --popover-foreground: 45 30% 88%;
+
+    --primary: 38 92% 50%;
+    --primary-foreground: 30 15% 8%;
+
+    --secondary: 35 25% 45%;
+    --secondary-foreground: 45 30% 88%;
+
+    --muted: 30 10% 16%;
+    --muted-foreground: 35 20% 50%;
+
+    --accent: 30 12% 18%;
+    --accent-foreground: 45 30% 88%;
+
+    --destructive: 0 65% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 85 45% 40%;
+    --success-foreground: 30 15% 8%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 30 15% 8%;
+
+    --border: 35 20% 25% / 0.5;
+    --input: 35 15% 20% / 0.6;
+    --ring: 38 92% 50%;
+
+    --sidebar-background: 30 15% 6%;
+    --sidebar-foreground: 45 25% 75%;
+    --sidebar-primary: 38 92% 50%;
+    --sidebar-primary-foreground: 30 15% 8%;
+    --sidebar-accent: 30 10% 16%;
+    --sidebar-accent-foreground: 45 30% 88%;
+    --sidebar-border: 35 20% 25% / 0.5;
+    --sidebar-ring: 38 92% 50%;
+
+    --glass-bg: 30 12% 10%;
+    --glass-border: 35 20% 25% / 0.5;
+    --glass-glow: 38 92% 50% / 0.15;
+
+    --glass-card-bg: rgba(40, 32, 24, 0.85);
+    --glass-card-border: rgba(180, 140, 80, 0.2);
+    --glass-card-shadow: rgba(0, 0, 0, 0.4);
+    --glass-card-inset: rgba(255, 220, 160, 0.04);
+    --glass-sidebar-bg: rgba(30, 24, 18, 0.9);
+    --glass-sidebar-border: rgba(180, 140, 80, 0.15);
+    --grid-line-color: rgba(180, 140, 80, 0.08);
+    --mesh-base: 30 15% 8%;
+  }
+
+  /* ─── RETRO SKIN (light) ─── */
+  [data-skin='retro'].light {
+    --background: 40 25% 96%;
+    --foreground: 30 20% 18%;
+
+    --card: 45 30% 99%;
+    --card-foreground: 30 20% 18%;
+
+    --popover: 45 30% 99%;
+    --popover-foreground: 30 20% 18%;
+
+    --primary: 32 85% 42%;
+    --primary-foreground: 45 30% 98%;
+
+    --secondary: 35 25% 45%;
+    --secondary-foreground: 45 30% 98%;
+
+    --muted: 40 20% 90%;
+    --muted-foreground: 35 15% 40%;
+
+    --accent: 45 25% 92%;
+    --accent-foreground: 30 20% 18%;
+
+    --destructive: 0 65% 48%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 85 45% 32%;
+    --success-foreground: 45 30% 98%;
+
+    --warning: 38 85% 42%;
+    --warning-foreground: 45 30% 98%;
+
+    --border: 35 25% 80%;
+    --input: 35 20% 85%;
+    --ring: 32 85% 42%;
+
+    --sidebar-background: 42 28% 97%;
+    --sidebar-foreground: 30 15% 35%;
+    --sidebar-primary: 32 85% 42%;
+    --sidebar-primary-foreground: 45 30% 98%;
+    --sidebar-accent: 45 25% 92%;
+    --sidebar-accent-foreground: 30 20% 18%;
+    --sidebar-border: 35 25% 85%;
+    --sidebar-ring: 32 85% 42%;
+
+    --glass-bg: 45 30% 99%;
+    --glass-border: 35 25% 85%;
+    --glass-glow: 32 85% 42% / 0.12;
+
+    --glass-card-bg: rgba(255, 248, 235, 0.9);
+    --glass-card-border: rgba(180, 140, 80, 0.25);
+    --glass-card-shadow: rgba(120, 90, 50, 0.08);
+    --glass-card-inset: rgba(255, 255, 255, 0.7);
+    --glass-sidebar-bg: rgba(255, 250, 240, 0.95);
+    --glass-sidebar-border: rgba(180, 140, 80, 0.2);
+    --grid-line-color: rgba(180, 140, 80, 0.06);
+    --mesh-base: 40 25% 96%;
+  }
 }
 
 @layer base {

@@ -1,6 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-skin="default">
   <head>
+    <script>
+      (function(){try{var t=localStorage.getItem('theme'),s=localStorage.getItem('skin');if(t==='light')document.documentElement.classList.add('light');if(s==='retro'||s==='default')document.documentElement.setAttribute('data-skin',s);}catch(e){}})();
+    </script>
     <meta charset="UTF-8" />
     <title>AI Delivery Command Center</title>
     <meta name="description" content="Next-generation AI operations center for autonomous software delivery orchestration">
