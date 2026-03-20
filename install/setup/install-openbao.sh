@@ -26,6 +26,9 @@ if [ "${EUID}" -ne 0 ]; then
     error "This script must be run as root (use: sudo $0)"
 fi
 
+# sudo often uses secure_path without /usr/local/bin; we install there anyway.
+export PATH="/usr/local/bin:/usr/local/sbin:${PATH}"
+
 if ! command -v python3 >/dev/null 2>&1; then
     error "python3 is required to resolve/download OpenBao release assets."
 fi
@@ -183,12 +186,13 @@ if [ -z "${BIN_PATH}" ] || [ ! -f "${BIN_PATH}" ]; then
     error "Downloaded artifact did not contain an openbao or bao binary."
 fi
 
-install -m 0755 "${BIN_PATH}" /usr/local/bin/openbao
-success "Installed OpenBao to /usr/local/bin/openbao (from upstream binary: $(basename "${BIN_PATH}"))"
+OPENBAO_INSTALL_BIN="/usr/local/bin/openbao"
+install -m 0755 "${BIN_PATH}" "${OPENBAO_INSTALL_BIN}"
+success "Installed OpenBao to ${OPENBAO_INSTALL_BIN} (from upstream binary: $(basename "${BIN_PATH}"))"
 
-if command -v openbao >/dev/null 2>&1; then
+if [ -x "${OPENBAO_INSTALL_BIN}" ]; then
     info "OpenBao version:"
-    openbao version || true
+    "${OPENBAO_INSTALL_BIN}" version || true
 else
-    error "Installation completed but openbao is not on PATH."
+    error "Installation completed but ${OPENBAO_INSTALL_BIN} is missing or not executable."
 fi
