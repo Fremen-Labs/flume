@@ -271,6 +271,8 @@ ENV_FILE=/path/to/flume/.env bash install/setup/create-es-indices.sh
 
 Flume can call OpenAI using a **ChatGPT (Codex) OAuth session** instead of a platform API key. The flow matches the official [Codex CLI](https://github.com/openai/codex) device login (`codex login --device-auth`).
 
+OAuth access tokens are honored on OpenAI’s **`/v1/responses`** endpoint; **`/v1/chat/completions`** returns **401** for those bearers. Flume routes OAuth sessions through **Responses** automatically and keeps **`sk-…` platform API keys** on **chat/completions**.
+
 ### Recommended: Flume CLI (from the Flume install directory)
 
 ```bash

@@ -77,6 +77,85 @@ def _effective_base_url(rt: dict) -> str:
     return rt['base_url']
 
 
+def _looks_like_openai_platform_api_key(key: str) -> bool:
+    t = (key or '').strip()
+    return t.startswith('sk-') or t.startswith('sk_')
+
+
+def _openai_bearer_uses_responses_api(rt: dict) -> bool:
+    """
+    ChatGPT / Codex OAuth access tokens work on /v1/responses; /v1/chat/completions returns 401.
+    """
+    if rt['provider'] != 'openai':
+        return False
+    key = (rt.get('api_key') or '').strip()
+    if _looks_like_openai_platform_api_key(key):
+        return False
+    return True
+
+
+def _chat_messages_to_responses_input(messages: list) -> list:
+    out = []
+    for msg in messages:
+        role = msg.get('role') or 'user'
+        content = msg.get('content', '')
+        api_role = 'developer' if role == 'system' else role
+        if isinstance(content, list):
+            out.append({'role': api_role, 'content': content})
+        else:
+            out.append(
+                {
+                    'role': api_role,
+                    'content': [{'type': 'input_text', 'text': str(content)}],
+                }
+            )
+    return out
+
+
+def _responses_output_text(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ''
+    status = (data.get('status') or '').strip().lower()
+    if status in ('failed', 'cancelled', 'incomplete'):
+        err = data.get('error')
+        msg = ''
+        if isinstance(err, dict):
+            msg = str(err.get('message') or err.get('code') or err)
+        elif isinstance(err, str):
+            msg = err
+        if msg:
+            raise RuntimeError(msg)
+    top = data.get('output_text')
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    parts: list[str] = []
+    for item in data.get('output') or []:
+        if item.get('type') != 'message':
+            continue
+        for block in item.get('content') or []:
+            if block.get('type') == 'output_text':
+                parts.append(str(block.get('text') or ''))
+            elif isinstance(block.get('text'), str):
+                parts.append(block['text'])
+    out = ''.join(parts).strip()
+    if not out and status == 'completed':
+        raise RuntimeError('OpenAI Responses API returned no output text')
+    return out
+
+
+def _openai_responses_chat(messages, model, temperature, max_tokens, rt: dict) -> str:
+    url = _effective_base_url(rt).rstrip('/') + '/v1/responses'
+    payload: dict = {
+        'model': model,
+        'input': _chat_messages_to_responses_input(messages),
+        'temperature': temperature,
+    }
+    if max_tokens and max_tokens > 0:
+        payload['max_output_tokens'] = max_tokens
+    data = _post(url, payload, _openai_headers(rt), timeout=120)
+    return _responses_output_text(data)
+
+
 def _post(url, payload, extra_headers=None, timeout=120):
     headers = {'Content-Type': 'application/json'}
     if extra_headers:
@@ -197,6 +276,8 @@ def _openai_headers(rt: dict):
 
 
 def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
+    if _openai_bearer_uses_responses_api(rt):
+        return _openai_responses_chat(messages, model, temperature, max_tokens, rt)
     url = _effective_base_url(rt) + '/v1/chat/completions'
     data = _post(
         url,
