@@ -2756,6 +2756,19 @@ class Handler(BaseHTTPRequestHandler):
                 # `git clone` doesn't attempt interactive username/password prompts.
                 git_url = repo_url
                 gh_token = load_effective_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
+                if not gh_token:
+                    # Fall back to Settings token store and persist it to repo-root .env
+                    # so worker processes have GH_TOKEN available.
+                    try:
+                        from github_tokens_store import ensure_migrated_from_env, get_active_token_plain
+                        from llm_settings import save_env_key
+
+                        ensure_migrated_from_env(WORKSPACE_ROOT)
+                        gh_token = get_active_token_plain(WORKSPACE_ROOT).strip()
+                        if gh_token:
+                            save_env_key(WORKSPACE_ROOT.parent, 'GH_TOKEN', gh_token)
+                    except Exception:
+                        gh_token = gh_token
                 if (gh_token.startswith('"') and gh_token.endswith('"')) or (gh_token.startswith("'") and gh_token.endswith("'")):
                     gh_token = gh_token[1:-1].strip()
                 if gh_token and repo_url.startswith('https://github.com/'):
