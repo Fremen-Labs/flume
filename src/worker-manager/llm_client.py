@@ -512,12 +512,11 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
     tool_calls = []
     for tc in (choice_msg.get('tool_calls') or []):
         args = tc['function']['arguments']
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                pass
-        tool_calls.append({'function': {'name': tc['function']['name'], 'arguments': args}})
+        tool_calls.append({
+            'id': tc.get('id'),
+            'type': tc.get('type') or 'function',
+            'function': {'name': tc['function']['name'], 'arguments': args},
+        })
     usage = data.get('usage', {})
     _record_telemetry(rt['provider'], model, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
     return {
