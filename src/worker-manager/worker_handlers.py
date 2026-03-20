@@ -108,15 +108,18 @@ def write_doc(index, doc):
 def append_agent_note(es_id: str, note: str) -> None:
     """Append a live progress note to the task's agent_log field (capped at 100 entries)."""
     try:
+        ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
             'script': {
                 'source': (
                     'if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }'
                     'ctx._source.agent_log.add(params.entry);'
                     'if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }'
+                    'ctx._source.updated_at = params.touch;'
+                    'ctx._source.last_update = params.touch;'
                 ),
                 'lang': 'painless',
-                'params': {'entry': {'ts': now_iso(), 'note': note}},
+                'params': {'entry': {'ts': ts, 'note': note}, 'touch': ts},
             }
         }, method='POST')
     except Exception:
