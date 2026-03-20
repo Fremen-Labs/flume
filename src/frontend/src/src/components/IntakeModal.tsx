@@ -276,6 +276,8 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   const [sessionId, setSessionId] = useState('');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [plan, setPlan] = useState<Plan>({ epics: [] });
+  /** 'placeholder' = skeleton from server when LLM failed or returned no plan; 'llm' = model-produced tree */
+  const [planSource, setPlanSource] = useState<'llm' | 'placeholder' | null>(null);
   const [chatInput, setChatInput] = useState('');
   const [error, setError] = useState('');
   const [commitCount, setCommitCount] = useState(0);
@@ -290,6 +292,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setSessionId('');
       setMessages([]);
       setPlan({ epics: [] });
+      setPlanSource(null);
       setChatInput('');
       setError('');
       setCommitCount(0);
@@ -317,6 +320,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setSessionId(data.sessionId);
       setMessages(data.messages ?? []);
       setPlan(data.plan ?? { epics: [] });
+      setPlanSource(
+        data.planSource === 'placeholder' || data.planSource === 'llm' ? data.planSource : null,
+      );
       setPhase('chat');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to connect to planner');
@@ -346,6 +352,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       if (!res.ok) throw new Error(data.error ?? 'Failed to send message');
       setMessages(data.messages ?? []);
       if (data.plan?.epics?.length) setPlan(data.plan);
+      if (data.planSource === 'placeholder' || data.planSource === 'llm') {
+        setPlanSource(data.planSource);
+      }
     } catch (e: unknown) {
       // Remove thinking msg and show error
       setMessages(prev => prev.filter(m => m !== thinkingMsg));
@@ -410,6 +419,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
               {phase === 'chat' && epicCount > 0 && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 border border-primary/20 text-primary">
                   {epicCount} epic{epicCount !== 1 ? 's' : ''} · {taskCount} task{taskCount !== 1 ? 's' : ''}
+                </span>
+              )}
+              {phase === 'chat' && planSource === 'placeholder' && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/35 text-amber-200">
+                  Placeholder breakdown (not from AI)
                 </span>
               )}
             </div>
@@ -525,6 +539,13 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                       <span className="text-xs font-semibold text-foreground">Work Breakdown</span>
                       <span className="text-[10px] text-muted-foreground">Click any item to edit</span>
                     </div>
+                    {planSource === 'placeholder' && (
+                      <div className="px-4 py-2 text-[11px] text-amber-200/90 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
+                        This tree is a <strong>placeholder template</strong> (your epic title comes from the first line of
+                        your prompt). It is <strong>not</strong> from the model until the planner runs successfully — fix
+                        LLM settings, then start a new plan or refine in chat.
+                      </div>
+                    )}
 
                     <div className="flex-1 overflow-y-auto p-4">
                       <PlanTree plan={plan} onChange={setPlan} />
@@ -566,7 +587,15 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                 </div>
                 <div className="flex gap-3">
                   <button
-                    onClick={() => { setPhase('prompt'); setPrompt(''); setSessionId(''); setMessages([]); setPlan({ epics: [] }); setCommitted(false); }}
+                    onClick={() => {
+                      setPhase('prompt');
+                      setPrompt('');
+                      setSessionId('');
+                      setMessages([]);
+                      setPlan({ epics: [] });
+                      setPlanSource(null);
+                      setCommitted(false);
+                    }}
                     className="px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
                   >
                     Plan more work

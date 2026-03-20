@@ -246,8 +246,11 @@ def _post(url, payload, extra_headers=None, timeout=120):
         if e.code == 401 and 'openai.com' in (url or '').lower():
             if 'Missing scopes' in body or 'api.responses.write' in body:
                 msg += (
-                    ' Hint: Run ./flume codex-oauth login-browser, then ./flume restart --all. '
-                    'Or: codex login then ./flume codex-oauth import. Check Settings → LLM for JWT scopes.'
+                    ' Hint: Your token is valid but lacks api.responses.write (refresh cannot add it). '
+                    'Run ./flume codex-oauth login-browser from the Flume install dir, then ./flume restart --all. '
+                    'If you already did, ensure Settings → LLM “OAuth state file” matches that JSON path and '
+                    'clear any stale LLM_API_KEY in .env so the new consent is used. '
+                    'Settings → LLM shows decoded JWT scopes.'
                 )
             else:
                 msg += (
@@ -355,8 +358,24 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
     )
 
 
+def _openai_bearer_for_request(rt: dict) -> str:
+    """
+    Prefer OAuth state file over LLM_API_KEY for ChatGPT/Codex tokens — .env can hold a stale JWT
+    after login-browser updates `.openai-oauth.json`.
+    """
+    api_key = (rt.get('api_key') or '').strip()
+    oauth_file = (rt.get('oauth_state_file') or '').strip()
+    if (
+        rt['provider'] == 'openai'
+        and oauth_file
+        and not _looks_like_openai_platform_api_key(api_key)
+    ):
+        return _refresh_oauth_access_token(rt) or api_key
+    return api_key or _refresh_oauth_access_token(rt)
+
+
 def _openai_headers(rt: dict):
-    key = rt['api_key'] or _refresh_oauth_access_token(rt)
+    key = _openai_bearer_for_request(rt)
     if not key:
         raise RuntimeError(
             'LLM_API_KEY is empty and OpenAI OAuth token refresh is not configured. '

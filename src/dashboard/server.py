@@ -300,6 +300,27 @@ def parse_llm_response(raw_text):
     return _strip_json_blocks(cleaned), None
 
 
+def _planner_llm_error_hint(err: str) -> str:
+    """Short user-facing hint after a planner LLM call fails (OAuth, connectivity, etc.)."""
+    if 'Connection refused' in err or 'Errno 111' in err:
+        return (
+            ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
+            'Save Settings again or run ./flume restart after changing .env.'
+        )
+    if '401' in err or 'Unauthorized' in err:
+        if 'Missing scopes' in err or 'api.responses.write' in err:
+            return (
+                ' OAuth token is missing API scopes (refresh will not fix this). Run '
+                './flume codex-oauth login-browser, then ./flume restart --all. Or: codex login then '
+                './flume codex-oauth import. Settings → LLM shows decoded JWT scopes.'
+            )
+        return (
+            ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
+            '"Refresh OAuth token", or run ./flume codex-oauth refresh, then save settings.'
+        )
+    return ''
+
+
 def build_llm_messages(session):
     """Build the Ollama message list from a session's conversation history."""
     msgs = [{'role': 'system', 'content': PLANNER_SYSTEM_PROMPT}]
@@ -333,25 +354,44 @@ def create_planning_session(repo, prompt):
     }
 
     llm_messages = build_llm_messages(session)
+    message = None
+    plan = None
+    llm_error = None
     try:
         raw = call_ollama(llm_messages)
         message, plan = parse_llm_response(raw)
     except Exception as e:
-        plan = simple_plan(repo, prompt)
-        message = (
-            "I've created an initial breakdown based on your request. "
-            "Feel free to refine it: you can edit items directly or ask me to adjust anything."
-        )
+        llm_error = str(e)[:200]
 
-    if not plan or not plan.get('epics'):
-        plan = simple_plan(repo, prompt)
-        if not message:
+    if llm_error:
+        hint = _planner_llm_error_hint(llm_error)
+        message = (
+            f"The planner could not reach the language model ({llm_error}).{hint}\n\n"
+            "Below is an editable PLACEHOLDER outline derived only from your prompt — "
+            "not an AI-generated breakdown. Edit the tree manually or fix LLM auth and start a new plan."
+        )
+        plan = placeholder_plan(repo, prompt)
+        plan_source = 'placeholder'
+    elif not plan or not plan.get('epics'):
+        plan = placeholder_plan(repo, prompt)
+        plan_source = 'placeholder'
+        prior = (message or '').strip()
+        if prior:
             message = (
-                "Here's an initial breakdown of your request. "
-                "Let me know what you'd like to change."
+                f"{prior}\n\n"
+                "Note: The model did not return a valid plan JSON, so the work breakdown below is a "
+                "placeholder template you can edit manually."
             )
+        else:
+            message = (
+                "The model did not return a usable plan structure. "
+                "Below is an editable placeholder template; try again or adjust your LLM settings."
+            )
+    else:
+        plan_source = 'llm'
 
     session['draftPlan'] = plan
+    session['draftPlanSource'] = plan_source
     session['messages'].append({
         'from': 'agent',
         'text': message,
@@ -383,29 +423,13 @@ def refine_session(session_id, user_text, current_plan):
         message, plan = parse_llm_response(raw)
     except Exception as e:
         err = str(e)[:200]
-        hint = ''
-        if 'Connection refused' in err or 'Errno 111' in err:
-            hint = (
-                ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
-                'Save Settings again or run ./flume restart after changing .env.'
-            )
-        elif '401' in err or 'Unauthorized' in err:
-            if 'Missing scopes' in err or 'api.responses.write' in err:
-                hint = (
-                    ' OAuth token is missing API scopes (refresh will not fix this). Run '
-                    './flume codex-oauth login-browser, then ./flume restart --all. Or: codex login then '
-                    './flume codex-oauth import. Settings → LLM shows decoded JWT scopes.'
-                )
-            else:
-                hint = (
-                    ' For ChatGPT/Codex OAuth, the access token may be expired: open Settings → LLM and use '
-                    '"Refresh OAuth token", or run ./flume codex-oauth refresh, then save settings.'
-                )
+        hint = _planner_llm_error_hint(err)
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
         plan = None
 
     if plan and plan.get('epics'):
         session['draftPlan'] = plan
+        session['draftPlanSource'] = 'llm'
     else:
         plan = session['draftPlan']
 
@@ -420,11 +444,11 @@ def refine_session(session_id, user_text, current_plan):
     return session
 
 
-def simple_plan(repo: str, prompt: str):
+def placeholder_plan(repo: str, prompt: str):
     """
-    Temporary planner: generate a minimal epic/feature/story/task tree
-    from a free-text prompt. This can be replaced by a real OpenClaw
-    Intake/Planner agent later.
+    Minimal epic/feature/story/task skeleton when the LLM is unavailable or returns no plan.
+
+    Titles are intentionally labeled as placeholders so the UI is not mistaken for AI output.
     """
     title = (prompt.splitlines()[0] or 'New request').strip()
     if len(title) > 80:
@@ -443,19 +467,19 @@ def simple_plan(repo: str, prompt: str):
                 'features': [
                     {
                         'id': feature_id,
-                        'title': 'Initial implementation',
+                        'title': '[Placeholder] Rename this feature',
                         'stories': [
                             {
                                 'id': story_id,
-                                'title': 'Implement core flow',
+                                'title': '[Placeholder] Rename this story',
                                 'acceptanceCriteria': [
-                                    'Core path works end-to-end',
-                                    'Basic happy-path tests are passing',
+                                    '[Placeholder] Add acceptance criteria',
+                                    '[Placeholder] Add another criterion',
                                 ],
                                 'tasks': [
                                     {
                                         'id': task_id,
-                                        'title': 'Implement core logic and tests',
+                                        'title': '[Placeholder] Add a concrete task',
                                     }
                                 ],
                             }
@@ -465,6 +489,10 @@ def simple_plan(repo: str, prompt: str):
             }
         ],
     }
+
+
+# Backward-compatible name for scripts/tests
+simple_plan = placeholder_plan
 
 
 def get_next_id_sequence(prefix: str) -> int:
@@ -2253,8 +2281,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 return
-            plan = simple_plan(repo, prompt)
-            self._json_response(200, {'ok': True, 'plan': plan})
+            plan = placeholder_plan(repo, prompt)
+            self._json_response(200, {'ok': True, 'plan': plan, 'planSource': 'placeholder'})
             return
 
         if self.path == '/api/intake/commit':
@@ -2298,6 +2326,7 @@ class Handler(BaseHTTPRequestHandler):
                 'sessionId': session['id'],
                 'messages': session['messages'],
                 'plan': session['draftPlan'],
+                'planSource': session.get('draftPlanSource', 'llm'),
             })
             return
 
@@ -2327,6 +2356,7 @@ class Handler(BaseHTTPRequestHandler):
                 'sessionId': session['id'],
                 'messages': session['messages'],
                 'plan': session['draftPlan'],
+                'planSource': session.get('draftPlanSource', 'llm'),
             })
             return
 
