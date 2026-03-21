@@ -1,5 +1,5 @@
 # Labeled GitHub PATs (multiple). Stored in worker-manager/github_tokens.json.
-# The active token is mirrored to GH_TOKEN in .env / OpenBao for git clone and gh CLI.
+# The active token is mirrored to GH_TOKEN in OpenBao for git clone and gh CLI.
 
 from __future__ import annotations
 
@@ -77,8 +77,13 @@ def ensure_migrated_from_env(workspace_root: Path) -> None:
 
 
 def _sync_active_to_env(workspace_root: Path) -> None:
-    from llm_settings import _update_env_keys
+    from llm_settings import _openbao_enabled, _update_env_keys
 
+    enabled, _ = _openbao_enabled(workspace_root)
+    if not enabled:
+        raise RuntimeError(
+            "OpenBao is required for GH_TOKEN storage. Configure OPENBAO_ADDR/OPENBAO_TOKEN first."
+        )
     plain = get_active_token_plain(workspace_root)
     _update_env_keys(workspace_root, {ENV_GH_TOKEN: plain})
 

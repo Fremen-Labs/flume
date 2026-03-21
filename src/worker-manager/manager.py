@@ -9,6 +9,7 @@ import threading
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 _WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
 if str(_WS) not in sys.path:
@@ -121,6 +122,9 @@ def es_request(path, body=None, method='GET'):
     if body is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(body).encode()
+        # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
+        if method == 'GET':
+            method = 'POST'
     req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, context=ctx) as resp:
         raw = resp.read().decode()
@@ -139,7 +143,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'tester':
         must = [
-            {'term': {'status': 'review'}},
+            {'term': {'status': 'ready'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'tester'}},
                 {'term': {'owner': 'tester'}},
@@ -147,7 +151,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'reviewer':
         must = [
-            {'term': {'status': 'review'}},
+            {'term': {'status': 'ready'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'reviewer'}},
                 {'term': {'owner': 'reviewer'}},
@@ -228,10 +232,101 @@ def save_state(state):
     STATE.write_text(json.dumps(state, indent=2) + '\n')
 
 
+def _task_stale_seconds(src: dict) -> Optional[float]:
+    """Seconds since updated_at or last_update, or None if not parseable."""
+    for k in ('updated_at', 'last_update'):
+        t = src.get(k)
+        if not t:
+            continue
+        s = str(t).replace('Z', '+00:00')
+        try:
+            parsed = datetime.fromisoformat(s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - parsed).total_seconds()
+        except Exception:
+            continue
+    return None
+
+
+def requeue_stuck_implementer_tasks() -> int:
+    """
+    Implementer tasks left in status=running with a stale updated_at/last_update are
+    reset to ready so handlers can retry (crashed worker, failed ES lookups, hung LLM).
+
+    Disabled when FLUME_STUCK_IMPLEMENTER_SECONDS is 0. Default 600 (10 minutes).
+    Progress notes now bump last_update; a healthy run refreshes this every LLM step.
+    """
+    sec = int(os.environ.get('FLUME_STUCK_IMPLEMENTER_SECONDS', '600'))
+    if sec <= 0:
+        return 0
+    body = {
+        'size': 30,
+        'query': {
+            'bool': {
+                'must': [
+                    {'term': {'status': 'running'}},
+                    {
+                        'bool': {
+                            'should': [
+                                {'term': {'assigned_agent_role': 'implementer'}},
+                                {'term': {'owner': 'implementer'}},
+                            ],
+                            'minimum_should_match': 1,
+                        },
+                    },
+                ],
+            },
+        },
+    }
+    try:
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+    except Exception:
+        return 0
+    n = 0
+    for h in res.get('hits', {}).get('hits', []):
+        src = h.get('_source', {})
+        stale = _task_stale_seconds(src)
+        if stale is None or stale < sec:
+            continue
+        es_doc_id = h.get('_id')
+        if not es_doc_id:
+            continue
+        try:
+            es_request(
+                f'/{TASK_INDEX}/_update/{es_doc_id}',
+                {
+                    'doc': {
+                        'status': 'ready',
+                        'active_worker': None,
+                        'queue_state': 'queued',
+                        'updated_at': now_iso(),
+                        'last_update': now_iso(),
+                    }
+                },
+                method='POST',
+            )
+            tid = src.get('id', es_doc_id)
+            log(
+                f"requeued stuck implementer task {tid} (no timestamp refresh for {stale:.0f}s; "
+                f"threshold={sec}s, set FLUME_STUCK_IMPLEMENTER_SECONDS=0 to disable)"
+            )
+            n += 1
+        except Exception as e:
+            log(f"failed to requeue stuck task {src.get('id')}: {e}")
+    return n
+
+
 def cycle():
     # Re-merge .env + OpenBao, then same LLM_* resolution as the dashboard (load_effective_pairs).
     apply_runtime_config(_WS)
     sync_llm_env_from_workspace(_WS)
+    try:
+        rq = requeue_stuck_implementer_tasks()
+        if rq:
+            log(f"stuck-implementer sweep: requeued {rq} task(s)")
+    except Exception as e:
+        log(f"stuck-implementer sweep error: {e}")
     workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
@@ -244,10 +339,12 @@ def cycle():
             task = hits[0]
             item_id = task.get('_id')
             src = task.get('_source', {})
-            pref_model = src.get('preferred_model') or worker['model']
-            pref_prov = src.get('preferred_llm_provider') or worker.get('llm_provider')
-            # Role config in agent_models.json must win: ES tasks kept an old preferred_llm_credential_id
-            # from the first claim, which ignored per-role key changes until the task completed.
+            # Role config in agent_models.json must win when a worker claims a task.
+            # Older tasks may carry stale preferred_model / provider / credential values from
+            # queue generation or a previous claim; re-stamping them here keeps runtime settings
+            # authoritative and prevents task-local defaults from overriding the Agents UI.
+            pref_model = worker['model']
+            pref_prov = worker.get('llm_provider')
             pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             claim(
                 item_id,
