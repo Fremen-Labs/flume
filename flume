@@ -160,9 +160,16 @@ cmd_update() {
 
     step_start "Mapping dependency telemetry graphs (pip)"
     if [ -d "flume-env" ]; then source flume-env/bin/activate; fi
-    if ! { python3 -m pip install --user --break-system-packages -r install/requirements.txt > /dev/null 2>&1 || python3 -m pip install --user -r install/requirements.txt > /dev/null 2>&1; }; then
-        step_fail "Python dependency resolution failed!"
-        exit 1
+    if [ -f "requirements.txt" ]; then
+        if ! { python3 -m pip install --user --break-system-packages -r requirements.txt > /dev/null 2>&1 || python3 -m pip install --user -r requirements.txt > /dev/null 2>&1; }; then
+            step_fail "Python dependency resolution failed!"
+            exit 1
+        fi
+    elif [ -f "install/requirements.txt" ]; then
+        if ! { python3 -m pip install --user --break-system-packages -r install/requirements.txt > /dev/null 2>&1 || python3 -m pip install --user -r install/requirements.txt > /dev/null 2>&1; }; then
+            step_fail "Python dependency resolution failed!"
+            exit 1
+        fi
     fi
     step_done "Python dependencies locked natively"
 
