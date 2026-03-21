@@ -17,6 +17,8 @@ interface SecurityData {
 
 export default function SecurityPage() {
   const [data, setData] = useState<SecurityData | null>(null);
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
