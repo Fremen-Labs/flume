@@ -123,6 +123,8 @@ PROVIDER_CATALOG = [
             {"id": "o1", "name": "o1"},
             {"id": "o1-mini", "name": "o1 Mini"},
             {"id": "gpt-5.4", "name": "GPT-5.4 (Codex)"},
+            {"id": "gpt-5.3", "name": "GPT-5.3 (Codex)"},
+            {"id": "gpt-5.2", "name": "GPT-5.2 (Codex)"},
         ],
     },
     {

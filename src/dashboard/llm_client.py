@@ -443,15 +443,20 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
+    payload = {
+        'model': model,
+        'messages': messages,
+        'tools': tools,
+        'temperature': temperature,
+    }
+    if max_tokens:
+        if str(model).startswith('gpt-5'):
+            payload['max_completion_tokens'] = max_tokens
+        else:
+            payload['max_tokens'] = max_tokens
     data = _post(
         url,
-        {
-            'model': model,
-            'messages': messages,
-            'tools': tools,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-        },
+        payload,
         _openai_headers(rt),
         timeout=180,
     )
@@ -601,3 +606,4 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
     if prov == 'anthropic':
         return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens, rt)
     return _openai_chat_tools(messages, tools, m, temperature, max_tokens, rt)
+
