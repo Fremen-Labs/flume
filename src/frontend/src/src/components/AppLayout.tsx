@@ -40,20 +40,24 @@ export function AppLayout() {
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-primary/20 to-transparent" />
 
         {/* Logo */}
-        <div className="flex items-center gap-2.5 px-4 h-16 border-b border-border">
+        <div className="flex items-center gap-2.5 px-4 h-16 border-b border-border overflow-hidden">
           <div className="w-8 h-8 rounded-lg bg-primary/15 flex items-center justify-center flex-shrink-0 breathing">
             <Zap className="w-4 h-4 text-primary icon-glow-active" />
           </div>
           <AnimatePresence>
             {!collapsed && (
-              <motion.span
+              <motion.div
                 initial={{ opacity: 0, width: 0 }}
                 animate={{ opacity: 1, width: 'auto' }}
                 exit={{ opacity: 0, width: 0 }}
-                className="text-sm font-bold tracking-tight text-foreground overflow-hidden whitespace-nowrap"
+                className="overflow-hidden whitespace-nowrap flex items-center"
               >
-                Flume
-              </motion.span>
+                <img
+                  src="/branding/flume-wordmark.png"
+                  alt="Flume"
+                  className="h-5 w-auto max-w-[128px] object-contain"
+                />
+              </motion.div>
             )}
           </AnimatePresence>
         </div>
