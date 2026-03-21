@@ -368,12 +368,15 @@ _ensure_codex_runtime() {
 
 _print_codex_next_steps() {
     echo ""
-    echo "Next steps:"
-    echo "  1) Complete OAuth:  ./flume codex-oauth login-browser"
-    echo "     (or headless:     ./flume codex-oauth login-paste)"
-    echo "  2) Open Flume at http://localhost:${DASHBOARD_PORT:-8765}"
-    echo "  3) Settings → LLM → OpenAI → OAuth"
-    echo "  4) Agents → pick OpenAI OAuth or any saved API-key provider per role"
+    echo "Flume is ready."
+    echo ""
+    echo "Open the web app and configure providers in Settings:"
+    echo "  http://localhost:${DASHBOARD_PORT:-8765}"
+    echo "  Settings → LLM → add API keys or choose your preferred provider"
+    echo ""
+    echo "Optional: enable ChatGPT / Codex subscription OAuth:"
+    echo "  Browser-based host:  ./flume codex-oauth login-browser"
+    echo "  Headless host:       ./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html"
     echo ""
 }
 
