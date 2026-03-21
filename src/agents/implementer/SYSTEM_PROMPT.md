@@ -32,6 +32,7 @@ Tasks like "verify approach", "validate design decision", "confirm requirements"
 
 ## Rules
 - Always read a file before writing it — never overwrite blindly.
+- You MUST search AST using `elastro search <query>` via `run_shell` before modifying complex code to locate references natively.
 - Write complete file contents for any file you modify, not partial patches.
 - Keep code changes focused on the task; do not refactor unrelated code.
 - Do not run `git` commands — committing is handled automatically.
