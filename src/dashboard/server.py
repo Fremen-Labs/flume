@@ -3055,7 +3055,7 @@ class Handler(BaseHTTPRequestHandler):
                 'repoUrl': repo_url,
                 'path': str(target_path),
                 'created_at': datetime.utcnow().isoformat() + 'Z',
-                'gitflow': {'autoPrOnApprove': True, 'defaultBranch': None},
+                'gitflow': payload.get('gitflow', {'autoPrOnApprove': True, 'defaultBranch': None}),
             }
             registry.append(entry)
             save_projects_registry(registry)
