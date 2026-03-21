@@ -272,23 +272,53 @@ RULES:
 """
 
 
-def call_ollama(messages):
-    """Call the configured LLM and return the assistant's response text."""
-    # Re-read .env so Settings / codex-oauth changes apply without restarting the server.
+def _planner_should_use_codex_app_server() -> bool:
+    provider = (os.environ.get('LLM_PROVIDER') or '').strip().lower()
+    if provider != 'openai':
+        return False
+    force = (os.environ.get('FLUME_PLANNER_USE_CODEX_APP_SERVER') or 'auto').strip().lower()
+    if force in ('0', 'false', 'off', 'no'):
+        return False
+    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
+    api_key = (os.environ.get('LLM_API_KEY') or '').strip()
+    if not has_oauth and not (force in ('1', 'true', 'on', 'yes')):
+        return False
+    if api_key.startswith('sk-') or api_key.startswith('sk_'):
+        return False
+    try:
+        import codex_app_server
+
+        st = codex_app_server.status()
+        return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
+    except Exception:
+        return False
+
+
+def call_planner_model(messages):
+    """Call the configured planner backend and return the assistant response text."""
     load_legacy_dotenv_into_environ(_SRC_ROOT)
-    # OAuth tokens often live only in OpenBao; .env may intentionally clear LLM_API_KEY.
-    # Reload effective LLM_* (same as workers) so Plan New Work does not get 401 after a dotenv wipe.
     try:
         from workspace_llm_env import sync_llm_env_from_workspace
 
         sync_llm_env_from_workspace(WORKSPACE_ROOT)
     except Exception:
         pass
-    import llm_client
 
+    model = os.environ.get('LLM_MODEL', LLM_MODEL)
+    if _planner_should_use_codex_app_server():
+        import codex_app_server_client
+
+        return codex_app_server_client.planner_chat(
+            messages,
+            model=model,
+            cwd=str(WORKSPACE_ROOT),
+            timeout=180,
+        )
+
+    import llm_client
     return llm_client.chat(
         messages,
-        model=os.environ.get('LLM_MODEL', LLM_MODEL),
+        model=model,
         temperature=0.3,
         max_tokens=8192,
     )
@@ -463,7 +493,7 @@ def refine_session(session_id, user_text, current_plan):
 
     llm_messages = build_llm_messages(session)
     try:
-        raw = call_ollama(llm_messages)
+        raw = call_planner_model(llm_messages)
         message, plan = parse_llm_response(raw)
     except Exception as e:
         err = str(e)[:200]

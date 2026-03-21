@@ -700,8 +700,8 @@ export default function SettingsPage() {
                 {effectiveSettings.authMode === 'oauth' && providerId === 'openai' && (
                   <div className="space-y-4 p-4 rounded-lg bg-muted/50 border border-amber-500/25">
                     <p className="text-xs text-amber-800 dark:text-amber-200/95 leading-relaxed font-medium">
-                      <strong>Plan New Work</strong> (text planning) auto-routes through the <strong>Codex CLI</strong>{' '}
-                      (<code className="text-[11px]">codex app-server</code> on stdio) so you can use{' '}
+                      <strong>Plan New Work</strong> now auto-routes through the <strong>Codex CLI</strong>{' '}
+                      (<code className="text-[11px]">codex app-server</code> on stdio when OAuth + Codex auth are present) so you can use{' '}
                       <strong>ChatGPT/Codex subscription OAuth</strong> without a platform <code className="text-[11px]">sk-</code>{' '}
                       key. Install Node, <code className="text-[11px]">npm i -g @openai/codex</code> or <code className="text-[11px]">npx</code>, run{' '}
                       <code className="text-[11px]">codex login</code> so <code className="text-[11px]">~/.codex/auth.json</code>{' '}
