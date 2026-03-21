@@ -152,7 +152,7 @@ cmd_update() {
     step_start "Synchronizing local tracking schemas (git pull)"
     git stash > /dev/null 2>&1 || true
     git checkout main > /dev/null 2>&1 || true
-    if ! git pull origin main > /dev/null 2>&1; then
+    if ! git pull --rebase origin main > /dev/null 2>&1; then
         step_fail "Failed to synchronize upstream logic!"
         exit 1
     fi
