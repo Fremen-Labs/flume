@@ -45,10 +45,10 @@ An AI-powered agent workflow platform: plan, implement, test, and review code ch
 
 ```bash
 cd ~/flume          # git clone root, or extracted package directory
-bash setup.sh
+./flume setup
 ```
 
-`setup.sh` runs `install/install.sh` (git) or `install.sh` (package), then (on git clones) builds the frontend, ensures ES credentials, creates indices, installs the **systemd user** dashboard service, and starts it.
+`./flume setup` installs dependencies when possible, runs the installer, builds the frontend, starts the dashboard in the background, starts Codex app-server in the background, and prints the next OAuth step.
 
 Control the dashboard:
 

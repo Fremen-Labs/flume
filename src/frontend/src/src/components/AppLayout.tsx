@@ -19,7 +19,6 @@ const navItems = [
   { to: '/activity', icon: Activity, label: 'Activity' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
   { to: '/security', icon: Shield, label: 'Security' },
-  { to: '/codex', icon: MessageSquareCode, label: 'Codex' },
 ];
 
 export function AppLayout() {
@@ -107,6 +106,10 @@ export function AppLayout() {
         <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center text-center">
           <span>Flume: multi-agent planning, implementation, and review.</span>
         </footer>
+      </main>
+    </div>
+  );
+} </footer>
       </main>
     </div>
   );

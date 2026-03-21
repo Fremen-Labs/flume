@@ -339,13 +339,33 @@ Optional **`OPENAI_OAUTH_SCOPES`**, **`OPENAI_OAUTH_AUTHORIZE_SCOPES`**, **`OPEN
 
 ### Recommended: Flume CLI (from the Flume install directory)
 
+**Browser-based host (recommended):**
+
 ```bash
-./flume codex-oauth login-browser   # best when the Flume host can open localhost in a browser
-# or (headless / OpenClaw-style paste-back):
-./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
-# or: ./flume codex-oauth login    # device code; may lack api.responses.write
-./flume codex-app-server           # optional: start Codex app-server (codex or npx fallback)
+./flume setup
+./flume codex-oauth login-browser
 ./flume restart --all
+```
+
+**Headless / remote host:**
+
+```bash
+./flume setup
+./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
+./flume restart --all
+```
+
+**Fallback device-code flow (less reliable for API scopes):**
+
+```bash
+./flume codex-oauth login
+./flume restart --all
+```
+
+Optional check:
+
+```bash
+./flume codex-app-server status
 ```
 
 **`login-browser`:** opens (or prints) an **authorize** URL; after you sign in, the browser redirects to **localhost** and Flume writes **`<flume-root>/.openai-oauth.json`**. If OpenBao is configured, Flume also syncs **`OPENAI_OAUTH_STATE_JSON`** into KV so runtime refresh can stay OpenBao-backed; `.env` keeps only non-secret routing fields.
