@@ -93,8 +93,9 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
         cbase = str(c.get("baseUrl") or "").strip()
         if cbase and prov == "openai_compatible":
             os.environ["LLM_BASE_URL"] = cbase
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.error(f'Agent swarm captured suppressed exception: {e}')
 
 
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
