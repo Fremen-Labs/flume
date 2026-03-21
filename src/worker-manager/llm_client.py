@@ -496,11 +496,25 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
+    # Ensure tool_calls in prior assistant messages include type/id for OpenAI
+    norm_messages = []
+    for m in messages:
+        if isinstance(m, dict) and m.get('tool_calls'):
+            tc_norm = []
+            for idx, tc in enumerate(m.get('tool_calls') or []):
+                tc = dict(tc)
+                tc.setdefault('id', f'call_{idx}')
+                tc.setdefault('type', 'function')
+                tc_norm.append(tc)
+            m = dict(m)
+            m['tool_calls'] = tc_norm
+        norm_messages.append(m)
+
     data = _post(
         url,
         {
             'model': model,
-            'messages': messages,
+            'messages': norm_messages,
             'tools': tools,
             'temperature': temperature,
             'max_tokens': max_tokens,
@@ -512,12 +526,12 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
     tool_calls = []
     for tc in (choice_msg.get('tool_calls') or []):
         args = tc['function']['arguments']
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                pass
-        tool_calls.append({'function': {'name': tc['function']['name'], 'arguments': args}})
+        # Keep OpenAI's raw JSON string for tool_calls in message history
+        tool_calls.append({
+            'id': tc.get('id'),
+            'type': tc.get('type') or 'function',
+            'function': {'name': tc['function']['name'], 'arguments': args},
+        })
     usage = data.get('usage', {})
     _record_telemetry(rt['provider'], model, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
     return {

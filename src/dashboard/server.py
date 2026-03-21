@@ -124,6 +124,7 @@ def save_projects_registry(registry):
 
 
 def es_search(index, body):
+    # POST is required for reliable JSON bodies (some stacks strip GET bodies).
     req = urllib.request.Request(
         f"{ES_URL}/{index}/_search",
         data=json.dumps(body).encode(),
@@ -131,7 +132,7 @@ def es_search(index, body):
             'Content-Type': 'application/json',
             'Authorization': f'ApiKey {ES_API_KEY}',
         },
-        method='GET',
+        method='POST',
     )
     try:
         with urllib.request.urlopen(req, context=ctx) as resp:
@@ -140,6 +141,36 @@ def es_search(index, body):
         if e.code == 404:
             return {}
         raise
+
+
+def find_task_doc_by_logical_id(logical_id: str):
+    """
+    Return (es_id, source) for a work item in agent-task-records.
+
+    Documents are usually upserted with PUT .../_doc/<logical_id>, so the ES _id
+    matches the logical id. Older or reindexed data may only match on the `id`
+    field — try `term` (keyword), `id.keyword` (dynamic mapping), and
+    `match_phrase` (text mapping) so history / git / PR endpoints stay consistent
+    with the snapshot list.
+    """
+    tid = (logical_id or '').strip()
+    if not tid:
+        return None, None
+    attempts = [
+        {'ids': {'values': [tid]}},
+        {'term': {'id': tid}},
+        {'term': {'id.keyword': tid}},
+        {'match_phrase': {'id': tid}},
+    ]
+    for query in attempts:
+        try:
+            hits = es_search('agent-task-records', {'size': 1, 'query': query}).get('hits', {}).get('hits', [])
+            if hits:
+                h = hits[0]
+                return h.get('_id'), h.get('_source', {})
+        except Exception:
+            continue
+    return None, None
 
 
 def es_index(index, doc):
@@ -1016,13 +1047,9 @@ def queue_for_repo(repo_id: str):
 
 
 def transition_task(task_id: str, status: str, owner=None, needs_human=None):
-    find_res = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not find_res:
+    es_id, _src = find_task_doc_by_logical_id(task_id)
+    if not es_id:
         return None
-    es_id = find_res[0].get('_id')
     doc = {
         'status': status,
         'updated_at': datetime.utcnow().isoformat() + 'Z',
@@ -1033,18 +1060,17 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         doc['assigned_agent_role'] = owner
     if needs_human is not None:
         doc['needs_human'] = bool(needs_human)
+    if status == 'ready':
+        doc['implementer_consecutive_llm_failures'] = 0
     es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
     return {'_id': es_id, 'id': task_id, **doc}
 
 
 def task_history(task_id: str):
-    task_hits = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not task_hits:
+    es_id, src = find_task_doc_by_logical_id(task_id)
+    if not src:
         return None
-    task = {'_id': task_hits[0].get('_id'), **task_hits[0].get('_source', {})}
+    task = {'_id': es_id, **src}
 
     events = []
 
@@ -1296,14 +1322,7 @@ def resolve_default_branch(repo_path: Path, override: Optional[str] = None) -> s
 
 def get_task_doc(task_id: str):
     """Fetch a single task document from ES by logical id."""
-    hits = es_search('agent-task-records', {
-        'size': 1,
-        'query': {'term': {'id': task_id}},
-    }).get('hits', {}).get('hits', [])
-    if not hits:
-        return None, None
-    h = hits[0]
-    return h.get('_id'), h.get('_source', {})
+    return find_task_doc_by_logical_id(task_id)
 
 
 def create_task_pr(task_id: str) -> dict:
@@ -2736,6 +2755,14 @@ class Handler(BaseHTTPRequestHandler):
                 # If we have a GitHub token configured, inject it into HTTPS clone URLs so
                 # `git clone` doesn't attempt interactive username/password prompts.
                 git_url = repo_url
+                from llm_settings import _openbao_enabled
+
+                enabled, _ = _openbao_enabled(WORKSPACE_ROOT)
+                if not enabled:
+                    self._json_response(412, {
+                        'error': 'OpenBao is required for GitHub tokens. Configure OPENBAO_ADDR/OPENBAO_TOKEN and store GH_TOKEN in KV.'
+                    })
+                    return
                 gh_token = load_effective_pairs(WORKSPACE_ROOT).get('GH_TOKEN', '').strip()
                 if (gh_token.startswith('"') and gh_token.endswith('"')) or (gh_token.startswith("'") and gh_token.endswith("'")):
                     gh_token = gh_token[1:-1].strip()

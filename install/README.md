@@ -178,6 +178,8 @@ Then:
 
 By default the **dashboard auto-starts** the worker manager and agent handlers when it launches (`FLUME_AUTO_START_WORKERS=1` in `.env`). To run workers only manually or on another host, set **`FLUME_AUTO_START_WORKERS=0`** and use `bash src/worker-manager/run.sh` (git) or `bash worker-manager/run.sh` (package).
 
+**Implementer LLM failure loop:** if the model never returns a response, the worker re-queues the task to `ready`, which the manager immediately claims again — an endless `running` loop. **`FLUME_IMPLEMENTER_MAX_LLM_FAILURES`** (default **3**, `.env` / OpenBao) blocks the task with `needs_human` after that many consecutive failures. Set to **`0`** to disable the cap (old behavior). Moving a task to **`ready`** via the API (e.g. Unblock) **resets** the counter. **`FLUME_STUCK_IMPLEMENTER_SECONDS`** (default **600**, **`0`** disables) re-queues implementer tasks stuck in `running` with a stale timestamp.
+
 ---
 
 ## Configuration

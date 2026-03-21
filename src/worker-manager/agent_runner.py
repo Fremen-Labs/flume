@@ -4,13 +4,19 @@ import os
 import subprocess
 import sys
 import urllib.request
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+import importlib.util
 
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+HERE = Path(__file__).resolve().parent
+BASE = Path(os.environ.get('LOOM_WORKSPACE', str(HERE.parent)))
+# Ensure worker-manager-local modules win over dashboard siblings with the same names.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+    sys.path.insert(1, str(BASE))
 import llm_credentials_store as lcs  # noqa: E402
 
 AGENTS_ROOT = BASE / 'agents'
@@ -226,15 +232,30 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR running shell command: {e}'
 
 
+_LLM_CLIENT = None
+
+
+def _load_llm_client():
+    global _LLM_CLIENT
+    if _LLM_CLIENT and getattr(_LLM_CLIENT, '__file__', '') == str(HERE / 'llm_client.py'):
+        return _LLM_CLIENT
+    path = HERE / 'llm_client.py'
+    spec = importlib.util.spec_from_file_location('worker_manager_llm_client', path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+    _LLM_CLIENT = mod
+    return mod
+
+
 def _call_ollama_tools(
     messages: list,
     tools: list,
     model: str,
     task: Optional[dict[str, Any]] = None,
 ) -> Optional[dict]:
-    import sys
-    import llm_client
     try:
+        llm_client = _load_llm_client()
         kw = _task_llm_kw(task)
         return llm_client.chat_with_tools(
             messages,
@@ -299,16 +320,35 @@ def run_implementer(
         _progress(f'Thinking… (step {_iteration + 1})')
         raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model, task=task)
         if not raw:
+            # Backoff before retrying to avoid tight error loops (e.g., rate limits)
+            time.sleep(min(2 + _iteration, 8))
             _progress('LLM returned no response — stopping.')
-            break
+            return AgentResult(
+                action='implementer_failed',
+                summary='LLM returned no response — stopping.',
+                artifacts=[],
+                metadata={
+                    'source': 'llm_no_response',
+                    'commit_sha': '',
+                    'commit_message': '',
+                },
+            )
 
         message = raw.get('message', {})
         tool_calls = message.get('tool_calls') or []
 
+        # Normalize tool call shape (OpenAI requires type + id on follow-up turns)
+        norm_calls = []
+        for idx, call in enumerate(tool_calls):
+            call = dict(call)
+            call.setdefault('id', f'call_{idx}')
+            call.setdefault('type', 'function')
+            norm_calls.append(call)
+
         # Append assistant turn
         assistant_msg: dict[str, Any] = {'role': 'assistant', 'content': message.get('content') or ''}
-        if tool_calls:
-            assistant_msg['tool_calls'] = tool_calls
+        if norm_calls:
+            assistant_msg['tool_calls'] = norm_calls
         messages.append(assistant_msg)
 
         if not tool_calls:
@@ -320,6 +360,11 @@ def run_implementer(
         for call in tool_calls:
             fn_name = call.get('function', {}).get('name', '')
             fn_args = call.get('function', {}).get('arguments', {})
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except Exception:
+                    fn_args = {}
             call_id = call.get('id', '')
 
             # Emit a human-readable progress note for each tool use
