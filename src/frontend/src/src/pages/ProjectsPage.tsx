@@ -78,7 +78,10 @@ export default function ProjectsPage() {
       const body: { name: string; repoUrl?: string } = { name };
       if (repoUrl) body.repoUrl = repoUrl;
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
       const res = await fetch('/api/projects', {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
