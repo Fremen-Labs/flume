@@ -432,7 +432,7 @@ def create_planning_session(repo, prompt):
     plan = None
     llm_error = None
     try:
-        raw = call_ollama(llm_messages)
+        raw = call_planner_model(llm_messages)
         message, plan = parse_llm_response(raw)
     except Exception as e:
         llm_error = str(e)[:200]
