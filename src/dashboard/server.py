@@ -1004,7 +1004,7 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
         return {'ok': False, 'error': str(e)[:200], 'deleted': [], 'skipped': []}
 
 
-def load_workers():
+def load_workers() -> list:
     if not WORKER_STATE.exists():
         return []
     try:
