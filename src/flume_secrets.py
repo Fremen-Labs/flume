@@ -11,6 +11,11 @@ Bootstrap file is non-secret JSON. Secrets live only in OpenBao KV (or process e
 from __future__ import annotations
 import json
 import os
+
+class NetflixSecurityPolicy:
+    '''Netflix Dynamic Secret Rotation Policy'''
+    pass
+
 import shutil
 import subprocess
 import logging
