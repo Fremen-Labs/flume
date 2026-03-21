@@ -212,7 +212,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "configured": True,
                 "models": list(openai_entry.get("models") or []),
                 "allowCustomModelId": False,
-                "hint": "Uses OPENAI_OAUTH_STATE_FILE from Settings / .env (not the platform API key).",
+                "hint": "Uses ChatGPT / Codex OAuth. Workers and planner can route through Codex app-server; model selection still applies per role.",
             }
         )
 

@@ -18,6 +18,7 @@ if str(HERE) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(1, str(BASE))
 import llm_credentials_store as lcs  # noqa: E402
+import codex_app_server_bridge as codex_bridge  # noqa: E402
 
 AGENTS_ROOT = BASE / 'agents'
 
@@ -62,6 +63,24 @@ def _task_llm_kw(task: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not pov:
         return {}
     return {'provider_override': pov, 'base_url_override': None}
+
+
+def _task_uses_codex_app_server(task: Optional[dict[str, Any]]) -> bool:
+    if not task:
+        return False
+    cred_id = str(task.get('preferred_llm_credential_id') or '').strip()
+    if cred_id == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
+        return codex_bridge.codex_auth_present() and codex_bridge.codex_available()
+    if cred_id and cred_id not in ('', lcs.SETTINGS_DEFAULT_CREDENTIAL_ID):
+        return False
+    provider = (task.get('preferred_llm_provider') or '').strip().lower()
+    if provider and provider != 'openai':
+        return False
+    api_key = (os.environ.get('LLM_API_KEY') or '').strip()
+    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
+    if provider == 'openai' and has_oauth and not (api_key.startswith('sk-') or api_key.startswith('sk_')):
+        return codex_bridge.codex_auth_present() and codex_bridge.codex_available()
+    return False
 
 
 def _call_ollama(
@@ -269,6 +288,76 @@ def _call_ollama_tools(
         print(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
         return None
 
+def _codex_json_schema_implementer() -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'properties': {
+            'summary': {'type': 'string'},
+            'commit_message': {'type': 'string'},
+            'artifacts': {'type': 'array', 'items': {'type': 'string'}},
+        },
+        'required': ['summary', 'commit_message', 'artifacts'],
+        'additionalProperties': False,
+    }
+
+
+def _codex_json_schema_tester() -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'properties': {
+            'action': {'type': 'string'},
+            'summary': {'type': 'string'},
+            'bugs': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'title': {'type': 'string'},
+                        'objective': {'type': 'string'},
+                        'severity': {'type': 'string'},
+                    },
+                    'required': ['title', 'objective', 'severity'],
+                    'additionalProperties': False,
+                },
+            },
+        },
+        'required': ['action', 'summary', 'bugs'],
+        'additionalProperties': False,
+    }
+
+
+def _codex_json_schema_reviewer() -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'properties': {
+            'verdict': {'type': 'string'},
+            'summary': {'type': 'string'},
+        },
+        'required': ['verdict', 'summary'],
+        'additionalProperties': False,
+    }
+
+
+def _codex_json_schema_pm() -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'properties': {
+            'action': {'type': 'string'},
+            'summary': {'type': 'string'},
+        },
+        'required': ['action', 'summary'],
+        'additionalProperties': False,
+    }
+
+
+def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd: str) -> dict[str, Any] | None:
+    try:
+        return codex_bridge.run_turn_json(prompt, model=model, cwd=cwd, output_schema=schema, timeout=300)
+    except Exception as e:
+        print(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return None
+
+
 def run_implementer(
     task: dict[str, Any],
     repo_path: Optional[str] = None,
@@ -283,6 +372,42 @@ def run_implementer(
                 on_progress(note)
             except Exception:
                 pass
+
+    if _task_uses_codex_app_server(task) and repo_path:
+        _progress('Using Codex app-server backend…')
+        prompt = (
+            f"SYSTEM PROMPT:\n{system_prompt}\n\n"
+            "You are operating inside the repository at the provided cwd. Make any needed file edits directly. "
+            "When finished, return ONLY JSON matching the required schema.\n\n"
+            f"TASK JSON:\n{json.dumps(task, indent=2)}\n\n"
+            f"REPO PATH: {repo_path}\n\n"
+            "If task.requires_code is true, you must make real code edits before finishing. "
+            "Set artifacts to the list of changed file paths relative to the repo root when possible."
+        )
+        response = _run_codex_json_task(
+            prompt,
+            _codex_json_schema_implementer(),
+            model=model,
+            cwd=repo_path,
+        )
+        if response and isinstance(response, dict):
+            return AgentResult(
+                action='handoff_to_tester',
+                summary=str(response.get('summary') or 'Implementation completed.').strip() or 'Implementation completed.',
+                artifacts=[str(x) for x in (response.get('artifacts') or []) if str(x).strip()],
+                metadata={
+                    'source': 'codex_app_server',
+                    'commit_sha': '',
+                    'commit_message': str(response.get('commit_message') or '').strip(),
+                },
+            )
+        _progress('Codex app-server returned no usable response — stopping.')
+        return AgentResult(
+            action='implementer_failed',
+            summary='Codex app-server returned no usable response — stopping.',
+            artifacts=[],
+            metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
+        )
 
     messages: list[dict] = [
         {'role': 'system', 'content': system_prompt},
@@ -472,7 +597,20 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
 
 def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     system_prompt = _load_system_prompt('pm-dispatcher')
-    response = _call_ollama(
+    if _task_uses_codex_app_server(task):
+        prompt = (
+            f"SYSTEM PROMPT:\n{system_prompt}\n\n"
+            'Return only JSON with action and summary. '\
+            f"TASK JSON:\n{json.dumps(task or {}, indent=2)}"
+        )
+        response = _run_codex_json_task(
+            prompt,
+            _codex_json_schema_pm(),
+            model=(task or {}).get('preferred_model') or _current_llm_model(),
+            cwd=str(BASE),
+        )
+    else:
+        response = _call_ollama(
         system_prompt,
         {
             'instruction': 'Return JSON: {"action":"compute_ready","summary":"..."}',

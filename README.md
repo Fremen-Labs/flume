@@ -56,6 +56,7 @@ Control the dashboard:
 ./flume start | stop | restart | status | logs | enable | disable
 ./flume codex-oauth login   # optional: ChatGPT / Codex OAuth for OpenAI
 ./flume codex-app-server    # optional: run Codex app-server (uses codex or npx fallback)
+# Worker roles can use either OpenAI OAuth/Codex app-server or any saved API-key provider.
 ```
 
 Open `http://<your-host>:8765`. The dashboard **starts workers automatically** by default (`FLUME_AUTO_START_WORKERS=1`). To run workers separately (or disable auto-start), set `FLUME_AUTO_START_WORKERS=0` and use:

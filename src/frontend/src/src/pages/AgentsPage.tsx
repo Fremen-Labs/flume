@@ -582,15 +582,15 @@ export default function AgentsPage() {
                             </Select>
                           </div>
                           <div className="space-y-1.5">
-                            <Label className="text-xs">Saved API key</Label>
+                            <Label className="text-xs">Credential</Label>
                             {keysThisVendor.length === 0 ? (
                               <p className="text-[11px] text-muted-foreground py-1">
                                 No keys for this vendor — add them in Settings → LLM for that provider.
                               </p>
                             ) : readyKeys.length === 0 ? (
                               <p className="text-[11px] text-destructive/90 py-1">
-                                No API key pasted yet for this provider. Open Settings → LLM, select this provider, and
-                                save a key — grayed labels below are previews only.
+                                No ready credential yet for this provider. Open Settings → LLM and either save an API key
+                                or configure OpenAI OAuth / Codex for this provider — grayed labels below are previews only.
                               </p>
                             ) : (
                               <Select
@@ -598,7 +598,7 @@ export default function AgentsPage() {
                                 onValueChange={(v) => onCredentialPick(roleId, v)}
                               >
                                 <SelectTrigger className="h-9">
-                                  <SelectValue placeholder="Saved key" />
+                                  <SelectValue placeholder="Credential" />
                                 </SelectTrigger>
                                 <SelectContent>
                                   {keysThisVendor.map((g) => (
