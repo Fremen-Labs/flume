@@ -3061,8 +3061,8 @@ class Handler(BaseHTTPRequestHandler):
             save_projects_registry(registry)
             if payload.get('description'):
                 try:
-                    from queue_manager import append_task
-                    append_task(safe_id, {'id': 'epic-' + safe_id, 'title': 'Epic: ' + name, 'description': payload['description'], 'status': 'inbox', 'owner': 'pm', 'needs_human': False, 'repo': safe_id})
+                    plan = {'epics': [{'title': 'Epic: ' + name, 'description': payload['description']}]}
+                    commit_plan(safe_id, plan)
                 except Exception as e:
                     pass
             
