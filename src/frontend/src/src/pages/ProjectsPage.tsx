@@ -89,7 +89,10 @@ export default function ProjectsPage() {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error ?? data.detail ?? 'Failed to create project');
+        const parts = [data.error, data.detail, data.hint].filter(
+          (x: unknown) => typeof x === 'string' && x.trim(),
+        ) as string[];
+        throw new Error(parts.length ? parts.join('\n\n') : 'Failed to create project');
       }
 
       setCreateOpen(false);
@@ -298,7 +301,7 @@ export default function ProjectsPage() {
             {createError && (
               <div className="flex items-start gap-2 text-destructive text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{createError}</span>
+                <span className="whitespace-pre-wrap break-words min-w-0">{createError}</span>
               </div>
             )}
           </div>

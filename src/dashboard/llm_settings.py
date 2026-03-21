@@ -354,6 +354,10 @@ _SKIP_PROCESS_OVERLAY_FOR_LLM = frozenset(
     }
 )
 
+# Repo tokens from .env / OpenBao must not be overridden by a stale GH_TOKEN in the shell
+# or systemd environment left over from an old session.
+_REPO_CREDS_FROM_FILE_FIRST = frozenset({"GH_TOKEN", "ADO_TOKEN", "ADO_ORG_URL"})
+
 
 def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     """
@@ -371,8 +375,12 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
             if key in _SKIP_PROCESS_OVERLAY_FOR_LLM:
                 continue
             v = os.environ.get(key, "").strip()
-            if v:
-                pairs[key] = v
+            if not v:
+                continue
+            if key in _REPO_CREDS_FROM_FILE_FIRST:
+                if str(pairs.get(key, "") or "").strip():
+                    continue
+            pairs[key] = v
     except ImportError:
         pass
     bao_vals = _openbao_get_all(workspace_root)

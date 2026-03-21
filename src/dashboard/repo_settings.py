@@ -7,15 +7,12 @@ from pathlib import Path
 from typing import Any
 
 # Reuse the same settings helpers from llm_settings.py
-from llm_settings import load_effective_pairs, _update_env_keys  # type: ignore
+from llm_settings import load_effective_pairs  # type: ignore
 
 import ado_tokens_store as ats  # type: ignore
 import github_tokens_store as gts  # type: ignore
 
 MASK = "***"
-
-ENV_ADO_TOKEN = "ADO_TOKEN"
-ENV_ADO_ORG_URL = "ADO_ORG_URL"
 
 
 def get_repo_settings_response(workspace_root: Path) -> dict[str, Any]:
