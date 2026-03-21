@@ -88,7 +88,7 @@ export default function SecurityPage() {
           subtitle="OpenBao Agent Connection"
         />
         <GlassMetricCard
-          title="Registered Keys"
+          title="Unique Vault Secrets"
           value={rootKeys.length}
           icon={Key}
           subtitle="Vaulted Identity Certificates"
