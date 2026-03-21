@@ -6,6 +6,7 @@ import sys
 import time
 import subprocess
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -319,8 +320,6 @@ def elastro_watchdog():
                                             mod_bytes = filepath.stat().st_size
                                             if total_bytes > mod_bytes:
                                                 savings = (total_bytes - mod_bytes) // 4
-                                                import urllib.request
-                                                import json
                                                 es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
                                                 es_key = os.environ.get('ES_API_KEY', '')
                                                 if es_key and es_url:

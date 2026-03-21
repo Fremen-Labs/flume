@@ -105,12 +105,16 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
         return
     if str(wr) not in sys.path:
         sys.path.insert(0, str(wr))
+    added_dash = False
     if str(dash) not in sys.path:
         sys.path.insert(0, str(dash))
+        added_dash = True
     try:
         from llm_settings import load_effective_pairs
 
         pairs = load_effective_pairs(wr)
+        if added_dash:
+            sys.path.remove(str(dash))
         for key in _LLM_SYNC_KEYS:
             v = pairs.get(key)
             if v is None:

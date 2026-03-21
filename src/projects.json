@@ -1,3 +1,15 @@
 {
-  "projects": []
+  "projects": [
+    {
+      "id": "test-project",
+      "name": "test-project",
+      "repoUrl": "/Users/mentat-bot-01/mentat/fremenlabs/flume-test-repo",
+      "path": "/Users/mentat-bot-01/mentat/fremenlabs/flume-epic7/src/test-project",
+      "created_at": "2026-03-21T00:28:50.476211Z",
+      "gitflow": {
+        "autoPrOnApprove": true,
+        "defaultBranch": null
+      }
+    }
+  ]
 }

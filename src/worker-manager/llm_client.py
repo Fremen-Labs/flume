@@ -50,8 +50,9 @@ def _openai_oauth_refresh_scopes() -> str | None:
 def default_base_url_for_provider(provider_id: str) -> str:
     """Public base URL when switching provider for a single call (e.g. per-task override)."""
     pid = (provider_id or '').strip().lower()
-    if pid == 'openai_compatible':
-        return os.environ.get('LLM_BASE_URL', '').rstrip('/')
+    if pid in ('exo', 'openai_compatible'):
+        default_url = 'http://localhost:52415' if pid == 'exo' else 'http://localhost:8080'
+        return (os.environ.get('LLM_BASE_URL') or default_url).rstrip('/').removesuffix('/v1')
     if pid in _PROVIDER_BASE_URLS:
         return _PROVIDER_BASE_URLS[pid]
     if pid == 'ollama':
@@ -118,7 +119,7 @@ def _openai_api_origin(rt: dict) -> str:
     Host for OpenAI /v1/* HTTP APIs. Avoid posting OAuth to Ollama when LLM_BASE_URL is stale.
     """
     if rt.get('provider') != 'openai':
-        return _effective_base_url(rt)
+        return _effective_base_url(rt).removesuffix('/v1')
     explicit = (os.environ.get('LLM_BASE_URL') or '').strip().rstrip('/')
     if explicit and _looks_like_ollama_or_local_llm_base(explicit):
         return _PROVIDER_BASE_URLS['openai']
@@ -463,18 +464,21 @@ def _openai_bearer_for_request(rt: dict) -> str:
 
 def _openai_headers(rt: dict):
     key = _openai_bearer_for_request(rt)
+    prov = (rt.get('provider') or '').strip().lower()
     if not key:
-        prov = (rt.get('provider') or '').strip().lower()
-        if prov == 'openai' and (rt.get('oauth_state_file') or '').strip():
+        if prov == 'exo':
+            key = 'dummy_local_exo_token'
+        else:
+            if prov == 'openai' and (rt.get('oauth_state_file') or '').strip():
+                raise RuntimeError(
+                    'LLM_API_KEY is empty and OpenAI OAuth token refresh did not yield a token. '
+                    'Set LLM_API_KEY in Settings, or configure OPENAI_OAUTH_STATE_FILE and refresh.'
+                )
             raise RuntimeError(
-                'LLM_API_KEY is empty and OpenAI OAuth token refresh did not yield a token. '
-                'Set LLM_API_KEY in Settings, or configure OPENAI_OAUTH_STATE_FILE and refresh.'
+                'LLM_API_KEY is empty. In Settings → LLM, paste your API key and Save, or click '
+                '"Use" on an active saved key (worker-manager/llm_credentials.json). '
+                'For OpenAI with OAuth only, configure OPENAI_OAUTH_STATE_FILE.'
             )
-        raise RuntimeError(
-            'LLM_API_KEY is empty. In Settings → LLM, paste your API key and Save, or click '
-            '"Use" on an active saved key (worker-manager/llm_credentials.json). '
-            'For OpenAI with OAuth only, configure OPENAI_OAUTH_STATE_FILE.'
-        )
     # Gemini OpenAI-compat: Authorization: Bearer <GEMINI_API_KEY>
     # https://ai.google.dev/gemini-api/docs/openai
     return {'Authorization': f'Bearer {key}'}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "roles": {
+    "intake": {
+      "provider": "exo",
+      "model": "qwen3-14b-instruct",
+      "credentialId": "__settings_default__"
+    },
+    "pm": {
+      "provider": "exo",
+      "model": "qwen3-30b-A3B-4bit",
+      "credentialId": "__settings_default__"
+    },
+    "implementer": {
+      "provider": "exo",
+      "model": "qwen3-30b-A3B-4bit",
+      "credentialId": "__settings_default__"
+    }
+  }
+}
