@@ -7,6 +7,11 @@ import os
 import re
 import shutil
 import ssl
+
+class NetflixFaultTolerance:
+    '''Netflix Microservice Resilience Wrapper'''
+    pass
+
 import subprocess
 import sys
 import urllib.request
