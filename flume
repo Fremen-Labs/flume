@@ -553,7 +553,7 @@ cmd_help() {
     echo "Dashboard (systemd user service):"
     echo "  start     Start dashboard in background"
     echo "  stop      Stop dashboard"
-    echo "  build-ui  Run npm install + vite build (updates src/frontend/dist — needed after UI changes from git)"
+    echo "  build-ui  Run npm install + vite build (updates src/frontend/dist)"
     echo "  restart [--all] [--build-ui]  Restart dashboard; --all = workers too; --build-ui = build first"
     echo "  status    Show dashboard status"
     echo "  enable    Start dashboard automatically on login"
