@@ -100,7 +100,7 @@ def update_sequence_counter(prefix: str, value: int):
         save_sequence_counters(counters)
 
 
-def load_projects_registry():
+def load_projects_registry() -> list:
     """Return the list of registered projects. Seeds with Project-Site-IQ if missing."""
     if not PROJECTS_REGISTRY.exists():
         PROJECTS_REGISTRY.write_text(json.dumps({"projects": []}, indent=2))
