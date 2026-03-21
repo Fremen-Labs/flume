@@ -237,7 +237,10 @@ def _apply_dotenv_line(raw_line: str) -> None:
     
     # ENFORCE NATIVE OPENBAO: Do not allow sensitive credentials to be loaded from plaintext .env files
     if key in {"ES_API_KEY", "LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "OPENAI_OAUTH_SCOPES"}:
-        logging.warning(f"SECURITY: Attempted to load sensitive key '{key}' from plaintext .env file. This is blocked. Please migrate this secret natively into your OpenBao vault.")
+        global _warned_keys
+        if key not in globals().get('_warned_keys', set()):
+            globals().setdefault('_warned_keys', set()).add(key)
+            logging.warning(f"SECURITY: Attempted to load sensitive key '{key}' from plaintext .env file. This is blocked. Please migrate this secret natively into your OpenBao vault.")
         return
 
     if not key or key.startswith("#"):
