@@ -204,8 +204,14 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
     try:
         p = _resolve_path(args.get('path', ''), repo_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(args.get('content', ''))
-        return f'OK: wrote {len(args.get("content", ""))} chars to {p}'
+        content = args.get('content', '')
+        if p.name.endswith('.py'):
+            try:
+                compile(content, p.name, 'exec')
+            except SyntaxError as e:
+                return f'ERROR writing file: Meta-Critic Python Syntax Check Failed at line {e.lineno}: {e.msg}'
+        p.write_text(content)
+        return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
 

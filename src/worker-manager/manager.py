@@ -32,8 +32,8 @@ ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
-POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
-WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '1'))
+POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
+WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '15'))
 
 ROLE_ORDER = [
     'intake',
