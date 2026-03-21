@@ -488,11 +488,10 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
     if _openai_bearer_uses_responses_api(rt):
         return _openai_responses_chat(messages, model, temperature, max_tokens, rt)
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
-    data = _post(
-        url,
-        {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
-        _openai_headers(rt),
-    )
+    payload = {'model': model, 'messages': messages, 'temperature': temperature}
+    if max_tokens:
+        payload['max_completion_tokens' if str(model).startswith('gpt-5') else 'max_tokens'] = max_tokens
+    data = _post(url, payload, _openai_headers(rt))
     usage = data.get('usage', {})
     _record_telemetry(rt['provider'], model, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
     return (data['choices'][0]['message'].get('content') or '').strip()
