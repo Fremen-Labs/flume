@@ -1817,6 +1817,10 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(body)
 
     def do_GET(self):
+        if self.path == '/api/codex-app-server/status':
+            self._json_response(200, {'status': 'offline', 'port': None})
+            return
+
         if self.path == '/api/snapshot':
             try:
                 self._json_response(200, load_snapshot())
