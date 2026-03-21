@@ -225,8 +225,10 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
     try:
+        import shlex
+        cmd_list = shlex.split(command)
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30, cwd=cwd,
+            cmd_list, shell=False, capture_output=True, text=True, timeout=30, cwd=cwd,
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:
