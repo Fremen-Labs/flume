@@ -1820,6 +1820,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(502, {'error': err_msg, 'code': 'ES_CONNECTION'})
             return
 
+        if self.path == '/api/system-state':
+            try:
+                workers = load_workers()
+                active = sum(1 for w in workers if w.get('status') == 'busy')
+                total = len(workers)
+                
+                data = {
+                    "status": "online",
+                    "activeStreams": active,
+                    "totalNodes": total,
+                    "standbyNodes": total - active,
+                    "workers": workers
+                }
+                self._json_response(200, data)
+            except Exception as e:
+                self._json_response(502, {'error': str(e)[:300]})
+            return
+
         if self.path == '/api/workflow/workers':
             self._json_response(200, {'workers': load_workers()})
             return
