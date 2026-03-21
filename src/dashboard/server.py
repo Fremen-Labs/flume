@@ -2956,7 +2956,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(409, {'error': f'A project named "{safe_id}" already exists'})
                 return
 
-            target_path = WORKSPACE_ROOT / safe_id
+            user_path = payload.get('path')
+            target_path = Path(user_path) if user_path else WORKSPACE_ROOT / safe_id
 
             if repo_url:
                 if target_path.exists():
