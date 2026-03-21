@@ -375,6 +375,44 @@ def _refresh_oauth_access_token(rt: dict) -> str:
     return new_access
 
 
+def _record_telemetry(provider: str, model: str, input_tokens: int, output_tokens: int):
+    try:
+        worker_name = os.environ.get('FLUME_WORKER_NAME')
+        if not worker_name or (not input_tokens and not output_tokens):
+            return
+        worker_role = os.environ.get('FLUME_WORKER_ROLE', 'unknown')
+        import ssl
+        from datetime import datetime, timezone
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        es_key = os.environ.get('ES_API_KEY', '')
+        if not es_key or not es_url:
+            return
+        ctx = None
+        if os.environ.get('ES_VERIFY_TLS', 'false').lower() != 'true':
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        doc = {
+            'worker_name': worker_name,
+            'worker_role': worker_role,
+            'provider': provider,
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'created_at': datetime.now(timezone.utc).isoformat()
+        }
+        req = urllib.request.Request(
+            f"{es_url}/agent-token-telemetry/_doc",
+            data=json.dumps(doc).encode(),
+            headers={'Content-Type': 'application/json', 'Authorization': f'ApiKey {es_key}'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=3):
+            pass
+    except Exception:
+        pass
+
+
 def _ollama_chat(messages, model, temperature, max_tokens, rt: dict):
     base = rt['base_url']
     data = _post(
@@ -386,6 +424,7 @@ def _ollama_chat(messages, model, temperature, max_tokens, rt: dict):
             'options': {'temperature': temperature, 'num_predict': max_tokens},
         },
     )
+    _record_telemetry(rt['provider'], model, data.get('prompt_eval_count', 0), data.get('eval_count', 0))
     return data.get('message', {}).get('content', '')
 
 
@@ -402,6 +441,8 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
         },
         timeout=180,
     )
+    _record_telemetry(rt['provider'], model, data.get('prompt_eval_count', 0), data.get('eval_count', 0))
+    return data
 
 
 def _openai_bearer_for_request(rt: dict) -> str:
@@ -448,16 +489,32 @@ def _openai_chat(messages, model, temperature, max_tokens, rt: dict):
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
         _openai_headers(rt),
     )
+    usage = data.get('usage', {})
+    _record_telemetry(rt['provider'], model, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
     return (data['choices'][0]['message'].get('content') or '').strip()
 
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict):
     url = _openai_api_origin(rt).rstrip('/') + '/v1/chat/completions'
+    # Ensure tool_calls in prior assistant messages include type/id for OpenAI
+    norm_messages = []
+    for m in messages:
+        if isinstance(m, dict) and m.get('tool_calls'):
+            tc_norm = []
+            for idx, tc in enumerate(m.get('tool_calls') or []):
+                tc = dict(tc)
+                tc.setdefault('id', f'call_{idx}')
+                tc.setdefault('type', 'function')
+                tc_norm.append(tc)
+            m = dict(m)
+            m['tool_calls'] = tc_norm
+        norm_messages.append(m)
+
     data = _post(
         url,
         {
             'model': model,
-            'messages': messages,
+            'messages': norm_messages,
             'tools': tools,
             'temperature': temperature,
             'max_tokens': max_tokens,
@@ -469,12 +526,14 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens, rt: dict
     tool_calls = []
     for tc in (choice_msg.get('tool_calls') or []):
         args = tc['function']['arguments']
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                pass
-        tool_calls.append({'function': {'name': tc['function']['name'], 'arguments': args}})
+        # Keep OpenAI's raw JSON string for tool_calls in message history
+        tool_calls.append({
+            'id': tc.get('id'),
+            'type': tc.get('type') or 'function',
+            'function': {'name': tc['function']['name'], 'arguments': args},
+        })
+    usage = data.get('usage', {})
+    _record_telemetry(rt['provider'], model, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0))
     return {
         'message': {
             'role': 'assistant',
@@ -513,6 +572,8 @@ def _anthropic_chat(messages, model, temperature, max_tokens, rt: dict):
     if system:
         payload['system'] = system
     data = _post('https://api.anthropic.com/v1/messages', payload, _anthropic_headers(rt))
+    usage = data.get('usage', {})
+    _record_telemetry(rt['provider'], model, usage.get('input_tokens', 0), usage.get('output_tokens', 0))
     for block in data.get('content', []):
         if block.get('type') == 'text':
             return block['text']
@@ -555,6 +616,8 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens, rt: d
                     'arguments': block.get('input', {}),
                 }
             })
+    usage = data.get('usage', {})
+    _record_telemetry(rt['provider'], model, usage.get('input_tokens', 0), usage.get('output_tokens', 0))
     return {
         'message': {
             'role': 'assistant',

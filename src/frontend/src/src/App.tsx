@@ -13,6 +13,7 @@ import QueuePage from "@/pages/QueuePage";
 import ActivityPage from "@/pages/ActivityPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import SettingsPage from "@/pages/SettingsPage";
+import SecurityPage from "@/pages/SecurityPage";
 import MissionControlPage from "@/pages/MissionControlPage";
 import NotFound from "./pages/NotFound.tsx";
 
@@ -35,6 +36,7 @@ const App = () => (
               <Route path="/queue" element={<QueuePage />} />
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
+              <Route path="/security" element={<SecurityPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<NotFound />} />

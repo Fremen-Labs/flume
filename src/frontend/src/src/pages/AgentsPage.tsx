@@ -429,19 +429,24 @@ export default function AgentsPage() {
             {perRoleSummary && perRoleSummary.rows.length > 0 && (
               <div className="mt-4 space-y-3 max-w-4xl">
                 {perRoleSummary.allSame && (
-                  <div className="flex gap-2 rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
-                    <Info className="h-4 w-4 shrink-0 opacity-80 mt-0.5" />
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
-                      <p className="min-w-0 flex-1">
-                        <strong>Every role is identical</strong> (same provider, model, and key profile). Set each row
-                        differently — e.g. Intake = <code className="text-[10px]">gpt-4o-mini</code>, PM ={' '}
-                        <code className="text-[10px]">gpt-4o</code>, or different <strong>vendors</strong> via saved
-                        keys.
-                      </p>
-                      <Button type="button" size="sm" className="shrink-0" onClick={() => setConfigOpen(true)}>
-                        Open editor
-                      </Button>
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-border/80 bg-muted/30 px-5 py-4 glass-card-glow shadow-sm">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className="p-2 bg-primary/10 rounded-full shrink-0">
+                        <Info className="h-5 w-5 text-primary" />
+                      </div>
+                      <div className="space-y-1 min-w-0">
+                        <p className="text-[13px] font-semibold text-foreground tracking-tight">
+                          Identity Replication Detected
+                        </p>
+                        <p className="text-[13px] text-muted-foreground leading-relaxed">
+                          <strong>Every role is identical</strong> (same provider, model, and key profile). For optimal swarm execution, set each row differently — e.g. Intake = <code className="bg-muted px-1.5 py-0.5 rounded text-[11px] font-mono text-foreground/80">gpt-4o-mini</code>, PM ={' '}
+                          <code className="bg-muted px-1.5 py-0.5 rounded text-[11px] font-mono text-foreground/80">gpt-4o</code>, or map different <strong>vendors</strong> via saved keys.
+                        </p>
+                      </div>
                     </div>
+                    <Button variant="default" size="sm" className="shrink-0 font-medium h-9" onClick={() => setConfigOpen(true)}>
+                      Open Editor
+                    </Button>
                   </div>
                 )}
                 <div className="rounded-lg border border-border/40 bg-muted/5 overflow-hidden">
@@ -781,9 +786,17 @@ export default function AgentsPage() {
       )}
 
       {!isLoading && !error && workers.length === 0 && (
-        <div className="glass-card p-12 text-center text-sm text-muted-foreground">
-          <Bot className="w-8 h-8 mx-auto mb-3 opacity-30" />
-          No workers running. Start the worker manager to see agents here.
+        <div className="glass-card p-12 text-center flex flex-col items-center justify-center space-y-4">
+          <div className="relative">
+            <Bot className="w-10 h-10 text-primary/40 animate-pulse" />
+            <div className="absolute inset-0 bg-primary/20 w-10 h-10 blur-xl rounded-full animate-pulse" />
+          </div>
+          <div>
+            <h3 className="text-foreground font-semibold tracking-tight">Neural Agents Booting</h3>
+            <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
+              Please wait while the orchestrator daemons align the models and securely bind connections into the memory matrix.
+            </p>
+          </div>
         </div>
       )}
 
