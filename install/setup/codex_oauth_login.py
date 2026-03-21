@@ -479,28 +479,53 @@ def _write_flume_state(
 
 
 def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
-    env_path = flume_root / ".env"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    access = str(state.get("access") or "").strip()
+    state_json = json.dumps(state)
+    if not access:
+        return
+
+    src_root = flume_root / 'src'
+    if src_root.is_dir() and str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+    ob_enabled = False
+    try:
+        from flume_secrets import apply_runtime_config
+        import llm_settings
+
+        apply_runtime_config(src_root if src_root.is_dir() else flume_root)
+        ob_enabled, _pairs = llm_settings._openbao_enabled(src_root if src_root.is_dir() else flume_root)
+        if ob_enabled:
+            updates = {
+                'LLM_PROVIDER': 'openai',
+                'LLM_API_KEY': '',
+                'OPENAI_OAUTH_STATE_FILE': str(state_path),
+                'OPENAI_OAUTH_STATE_JSON': state_json,
+                'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
+            }
+            if llm_settings._openbao_put_many(src_root if src_root.is_dir() else flume_root, updates):
+                print('Synced OAuth state into OpenBao KV (OPENAI_OAUTH_STATE_JSON).')
+    except Exception as e:
+        print(f'OpenBao sync skipped: {e}')
+
+    env_path = flume_root / '.env'
     if not env_path.is_file():
         print(f"No {env_path} — set OPENAI_OAUTH_STATE_FILE in Settings or create .env.")
         return
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    access = str(state.get("access") or "").strip()
-    if not access:
-        return
-    lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
     updates = {
-        "LLM_PROVIDER": "openai",
-        "LLM_API_KEY": access,
-        "OPENAI_OAUTH_STATE_FILE": str(state_path),
-        "OPENAI_OAUTH_TOKEN_URL": str(state.get("token_url") or token_url),
+        'LLM_PROVIDER': 'openai',
+        'LLM_API_KEY': '' if ob_enabled else access,
+        'OPENAI_OAUTH_STATE_FILE': str(state_path),
+        'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
     }
     seen: set[str] = set()
     out: list[str] = []
     for line in lines:
-        if "=" not in line or line.strip().startswith("#"):
+        if '=' not in line or line.strip().startswith('#'):
             out.append(line)
             continue
-        key = line.split("=", 1)[0].strip()
+        key = line.split('=', 1)[0].strip()
         if key in updates:
             out.append(f"{key}={updates[key]}")
             seen.add(key)
@@ -509,7 +534,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     for k, v in updates.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    env_path.write_text('\n'.join(out) + '\n', encoding='utf-8')
     print(f"Updated {env_path}")
 
 

@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from flume_secrets import resolve_oauth_state_path
+from openai_oauth_state import load_state_from_env_or_file, save_state_to_env_or_file
 from typing import Any, Optional
 
 import llm_credentials_store
@@ -191,7 +192,7 @@ PROVIDER_CATALOG = [
 
 VALID_PROVIDERS = {p["id"] for p in PROVIDER_CATALOG}
 OAUTH_PROVIDERS = {"openai"}  # Only OpenAI supports OAuth Codex flow
-SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "ES_API_KEY"}
+SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "ES_API_KEY", "OPENAI_OAUTH_STATE_JSON"}
 
 # ─── .env load/save ────────────────────────────────────────────────────────────
 
@@ -593,10 +594,11 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     if not state_path.exists():
         return False, "OAuth state file not found", None
 
-    try:
-        state = json.loads(state_path.read_text())
-    except Exception as e:
-        return False, f"Invalid OAuth state file: {e}", None
+    state, source = load_state_from_env_or_file(state_path)
+    if not state:
+        if source == 'file':
+            return False, 'Invalid OAuth state file', None
+        return False, 'OAuth state not found', None
 
     refresh_token = str(state.get("refresh") or "").strip()
     client_id = str(state.get("client_id") or "").strip()
@@ -641,17 +643,17 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     expires_in = int(data.get("expires_in") or 0)
     if expires_in > 0:
         state["expires"] = now_ms + (expires_in * 1000)
-    state_path.write_text(json.dumps(state, indent=2))
+    saved_to, saved_path = save_state_to_env_or_file(state, state_path)
 
-    save_env_key(workspace_root, "LLM_API_KEY", new_access)
     save_env_key(workspace_root, "LLM_PROVIDER", "openai")
-
     ob_enabled, _ = _openbao_enabled(workspace_root)
     if ob_enabled:
-        _openbao_put_many(
-            workspace_root,
-            {"LLM_API_KEY": new_access, "LLM_PROVIDER": "openai"},
-        )
+        kv_updates = {"LLM_PROVIDER": "openai", "OPENAI_OAUTH_STATE_JSON": json.dumps(state)}
+        if saved_to == 'file' and saved_path:
+            kv_updates["OPENAI_OAUTH_STATE_FILE"] = saved_path
+        _openbao_put_many(workspace_root, kv_updates)
+    else:
+        save_env_key(workspace_root, "LLM_API_KEY", new_access)
 
     return True, "Token refreshed", {
         "access": new_access[:20] + "...",
@@ -667,10 +669,10 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     if not state_path.exists():
         return {"configured": False, "message": "OAuth state file not found"}
 
-    try:
-        state = json.loads(state_path.read_text())
-    except Exception:
-        return {"configured": False, "message": "Invalid OAuth state file"}
+    state, source = load_state_from_env_or_file(state_path)
+    if not state:
+        msg = 'Invalid OAuth state file' if source == 'file' else 'OAuth state not found'
+        return {"configured": False, "message": msg}
 
     has_refresh = bool(str(state.get("refresh") or "").strip())
     has_access = bool(str(state.get("access") or "").strip())
@@ -695,8 +697,10 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
         "accessTokenJwtLike": bool(dec.get("jwt_like")),
         "accessTokenJwtParsed": bool(dec.get("parsed")),
         "hasApiResponsesWrite": "api.responses.write" in scopes,
+        "hasModelRequestScope": "model.request" in scopes,
         "oauthScopesRequested": requested[:200] if requested else "",
         "oauthScopeStatus": scope_status,
+        "stateSource": source,
     }
 
 

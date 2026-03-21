@@ -6,6 +6,7 @@
 #   flume build-ui                    # compile React → src/frontend/dist (required after UI git pulls)
 #   flume restart [--all] [--build-ui]
 #   flume codex-oauth login | import | refresh | status
+#   flume codex-app-server [extra args...]
 
 set -euo pipefail
 
@@ -401,6 +402,28 @@ cmd_codex_oauth() {
     esac
 }
 
+cmd_codex_app_server() {
+    local py
+    py="${FLUME_ROOT}/src/dashboard/codex_app_server.py"
+    if [ ! -f "${py}" ]; then
+        py="${FLUME_ROOT}/dashboard/codex_app_server.py"
+    fi
+    if [ ! -f "${py}" ]; then
+        echo "Error: codex_app_server.py not found under ${FLUME_ROOT}." >&2
+        exit 1
+    fi
+    python3 - "$py" "$@" <<'PY'
+import runpy, sys
+path = sys.argv[1]
+extra = sys.argv[2:]
+mod = runpy.run_path(path)
+run_foreground = mod.get('run_foreground')
+if run_foreground is None:
+    raise SystemExit('run_foreground not exported')
+raise SystemExit(int(run_foreground(extra)))
+PY
+}
+
 cmd_help() {
     echo "Flume CLI — Dashboard service and OAuth"
     echo ""
@@ -420,6 +443,9 @@ cmd_help() {
     echo "  codex-oauth [login|login-browser|login-paste|import|bootstrap|refresh|status]"
     echo "  Run \"flume codex-oauth help\" for details."
     echo ""
+    echo "Codex app-server:"
+    echo "  codex-app-server [extra args...]   Run codex app-server on ${FLUME_CODEX_APP_SERVER_LISTEN:-ws://127.0.0.1:4500}"
+    echo ""
 }
 
 case "${1:-help}" in
@@ -437,6 +463,10 @@ case "${1:-help}" in
     codex-oauth)
         shift
         cmd_codex_oauth "$@"
+        ;;
+    codex-app-server)
+        shift
+        cmd_codex_app_server "$@"
         ;;
     help|--help|-h) cmd_help ;;
     *)

@@ -36,6 +36,7 @@ FLUME_ENV_KEYS = frozenset(
         "LLM_MODEL",
         "LLM_API_KEY",
         "OPENAI_OAUTH_STATE_FILE",
+        "OPENAI_OAUTH_STATE_JSON",
         "OPENAI_OAUTH_TOKEN_URL",
         "OPENAI_OAUTH_RESOURCE",
         "GH_TOKEN",

@@ -187,7 +187,7 @@ By default the **dashboard auto-starts** the worker manager and agent handlers w
 ### OpenBao-first (recommended)
 
 1. **`flume.config.json`** at the **Flume root** (created from `install/flume.config.example.json` by the installer). Contains **`openbao.addr`**, **`mount`**, **`path`**, and **`tokenFile`** (path to a file with the token, `chmod 600`).
-2. **KV** at e.g. **`secret/flume`** (configurable) holds key=value pairs matching **`.env` names**: `ES_URL`, `ES_API_KEY`, `ES_VERIFY_TLS`, `LLM_PROVIDER`, `LLM_API_KEY`, `GH_TOKEN`, `EXECUTION_HOST`, index names, etc.
+2. **KV** at e.g. **`secret/flume`** (configurable) holds key=value pairs matching **`.env` names**: `ES_URL`, `ES_API_KEY`, `ES_VERIFY_TLS`, `LLM_PROVIDER`, `LLM_API_KEY`, `OPENAI_OAUTH_STATE_JSON`, `GH_TOKEN`, `EXECUTION_HOST`, index names, etc.
 3. **Push ES bootstrap into OpenBao** (after ES install, if you have a token):
 
    ```bash
@@ -344,10 +344,11 @@ Optional **`OPENAI_OAUTH_SCOPES`**, **`OPENAI_OAUTH_AUTHORIZE_SCOPES`**, **`OPEN
 # or (headless / OpenClaw-style paste-back):
 ./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html
 # or: ./flume codex-oauth login    # device code; may lack api.responses.write
+./flume codex-app-server           # optional: start Codex app-server (codex or npx fallback)
 ./flume restart --all
 ```
 
-**`login-browser`:** opens (or prints) an **authorize** URL; after you sign in, the browser redirects to **localhost** and Flume writes **`<flume-root>/.openai-oauth.json`** and updates **`.env`** (unless `--no-sync-env`).
+**`login-browser`:** opens (or prints) an **authorize** URL; after you sign in, the browser redirects to **localhost** and Flume writes **`<flume-root>/.openai-oauth.json`**. If OpenBao is configured, Flume also syncs **`OPENAI_OAUTH_STATE_JSON`** into KV so runtime refresh can stay OpenBao-backed; `.env` keeps only non-secret routing fields.
 
 **`login-paste`:** for **headless** hosts: prints the authorize URL, optionally writes an HTML file with a clickable link; you complete login on another machine and **paste the redirect URL** from the address bar back into the terminal.
 

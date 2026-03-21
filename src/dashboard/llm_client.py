@@ -24,6 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from openai_oauth_state import load_state_from_env_or_file, save_state_to_env_or_file
+
 _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
     'anthropic': 'https://api.anthropic.com',
@@ -308,7 +310,9 @@ def _oauth_state_path(rt: dict):
 
 def _refresh_oauth_access_token(rt: dict) -> str:
     state_path = _oauth_state_path(rt)
-    if not state_path or not state_path.exists():
+    if state_path is None and not (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip():
+        return ''
+    if state_path is not None and (not state_path.exists()) and not (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip():
         return ''
     state = _load_json(state_path)
     refresh_token = str(state.get('refresh') or '').strip()
@@ -343,7 +347,7 @@ def _refresh_oauth_access_token(rt: dict) -> str:
     expires_in = int(data.get('expires_in') or 0)
     if expires_in > 0:
         state['expires'] = now_ms + (expires_in * 1000)
-    _save_json(state_path, state)
+    save_state_to_env_or_file(state, state_path)
     return new_access
 
 
