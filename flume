@@ -160,7 +160,7 @@ cmd_update() {
 
     step_start "Mapping dependency telemetry graphs (pip)"
     if [ -d "flume-env" ]; then source flume-env/bin/activate; fi
-    if ! python3 -m pip install -r install/requirements.txt > /dev/null 2>&1; then
+    if ! { python3 -m pip install --user --break-system-packages -r install/requirements.txt > /dev/null 2>&1 || python3 -m pip install --user -r install/requirements.txt > /dev/null 2>&1; }; then
         step_fail "Python dependency resolution failed!"
         exit 1
     fi
