@@ -390,7 +390,6 @@ cmd_codex_app_server() {
     export PYTHONPATH="${FLUME_ROOT}/src:${PYTHONPATH:-}"
     exec python3 -m dashboard.codex_app_server "$@"
 }
-}
 
 cmd_codex_app_server_foreground() {
     local py
