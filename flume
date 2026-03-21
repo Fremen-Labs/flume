@@ -150,39 +150,38 @@ cmd_update() {
     echo -e "${BOLD}Initiating Flume Rapid Update Cycle...${NC}\n"
 
     step_start "Synchronizing local tracking schemas (git pull)"
-    ( git stash > /dev/null 2>&1 || true
-      git checkout main > /dev/null 2>&1 || true
-      git pull origin main > /dev/null 2>&1 ) &
-    spinner $!
+    git stash > /dev/null 2>&1 || true
+    git checkout main > /dev/null 2>&1 || true
+    if ! git pull origin main > /dev/null 2>&1; then
+        step_fail "Failed to synchronize upstream logic!"
+        exit 1
+    fi
     step_done "Upstream tracking synchronized"
 
     step_start "Mapping dependency telemetry graphs (pip)"
-    ( if [ -d "flume-env" ]; then source flume-env/bin/activate; fi
-      python3 -m pip install -r install/requirements.txt > /dev/null 2>&1 || true ) &
-    spinner $!
+    if [ -d "flume-env" ]; then source flume-env/bin/activate; fi
+    if ! python3 -m pip install -r install/requirements.txt > /dev/null 2>&1; then
+        step_fail "Python dependency resolution failed!"
+        exit 1
+    fi
     step_done "Python dependencies locked natively"
 
     step_start "Compiling Vite static interface artifacts (npm build)"
-    ( cd src/frontend/src > /dev/null 2>&1 && npm install > /dev/null 2>&1 && npm run build > /dev/null 2>&1 ) &
-    spinner $!
+    if ! (cd src/frontend/src && npm install > /dev/null 2>&1 && npm run build > /dev/null 2>&1); then
+        step_fail "Vite compilation strictly crashed!"
+        exit 1
+    fi
     step_done "Vite compilation completely bounded"
 
-    step_start "Terminating legacy background daemons"
-    pkill -f "worker_handlers.py" || true
-    pkill -f "manager.py" || true
-    pkill -f "server.py" || true
+    step_start "Cycling Daemon Swarms (Restarting)"
+    cmd_stop > /dev/null 2>&1 || true
     sleep 2
-    step_done "Legacy daemon sockets flushed"
-
-    step_start "Relaunching asynchronous daemon swarm"
-    nohup python3 -u src/worker-manager/manager.py >> src/worker-manager/manager.log 2>&1 &
-    nohup python3 -u src/worker-manager/worker_handlers.py >> src/worker-manager/worker_handlers.log 2>&1 &
-    nohup python3 -u src/dashboard/server.py >> src/dashboard/server.log 2>&1 &
-    sleep 1 & spinner $!
-    step_done "Asynchronous daemon swarm successfully launched"
+    cmd_start > /dev/null 2>&1 || true
+    step_done "Swarm safely recycled"
 
     echo -e "\n${GREEN}${BOLD}Flume tracking successfully mapped to upstream bounds!${NC}"
 }
+
 
 cmd_install() {
     print_banner
