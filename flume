@@ -357,8 +357,7 @@ cmd_logs() {
         tail -f "${FLUME_ROOT}/dashboard.nohup.log" "${FLUME_ROOT}/src/worker-manager/manager.nohup.log"
         return
     fi
-<<<<<<< HEAD
-    journalctl --user -u "${SERVICE_NAME}" -f ${@+"$@"}
+    tail -f "${FLUME_ROOT}/dashboard.nohup.log" "${FLUME_ROOT}/src/worker-manager/manager.nohup.log"
 }
 
 cmd_codex_oauth_help() {
@@ -373,100 +372,24 @@ cmd_codex_oauth_help() {
     echo "  import           Import from official Codex CLI session (~/.codex/auth.json)"
     echo "  bootstrap        Try Codex cache then optional legacy profile import; refresh + .env"
     echo "  refresh          Refresh access token using saved refresh token"
-    echo "  status           Show token metadata (secrets are not printed)"
-    echo ""
-    echo "After login or import: set Settings → LLM → OpenAI → OAuth, then:"
-    echo "  ./flume restart --all"
-    echo ""
-}
-
-_ensure_codex_runtime() {
-    if command -v codex >/dev/null 2>&1; then
-        return 0
-    fi
-    if ! command -v npm >/dev/null 2>&1; then
-        echo "Warning: npm not found, so Codex CLI was not auto-installed. npx fallback may still work for app-server if available." >&2
-        return 0
-    fi
-    echo "Installing Codex CLI (npm -g @openai/codex)..."
-    npm install -g @openai/codex
-}
-
-_print_codex_next_steps() {
-    echo ""
-    echo "Flume is ready."
-    echo ""
-    echo "Open the web app and configure providers in Settings:"
-    echo "  http://localhost:${DASHBOARD_PORT:-8765}"
-    echo "  Settings → LLM → add API keys or choose your preferred provider"
-    echo ""
-    echo "Optional: enable ChatGPT / Codex subscription OAuth:"
-    echo "  Browser-based host:  ./flume codex-oauth login-browser"
-    echo "  Headless host:       ./flume codex-oauth login-paste --write-html /tmp/flume-oauth.html"
-    echo ""
+    echo "  status           Check auth status and environment"
 }
 
 cmd_codex_oauth() {
-    local py sh
-    py="$(_codex_oauth_py)"
-    sh="$(_openai_oauth_sh)"
-    local sub="${1:-login}"
-    [ "$#" -ge 1 ] && shift || true
+    export PYTHONPATH="${FLUME_ROOT}/src:${PYTHONPATH:-}"
+    if [ "$#" -eq 0 ]; then
+        python3 -m dashboard.codex_oauth "login"
+    elif [ "$1" == "help" ]; then
+        cmd_codex_oauth_help
+    else
+        python3 -m dashboard.codex_oauth "$@"
+    fi
+}
 
-    case "${sub}" in
-        help|-h|--help)
-            cmd_codex_oauth_help
-            ;;
-        login)
-            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
-                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
-                exit 1
-            fi
-            _ensure_codex_runtime
-            python3 "${py}" login --flume-root "${FLUME_ROOT}" "$@"
-            cmd_codex_app_server_start
-            _print_codex_next_steps
-            ;;
-        login-browser)
-            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
-                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
-                exit 1
-            fi
-            python3 "${py}" login-browser --flume-root "${FLUME_ROOT}" "$@"
-            ;;
-        login-paste)
-            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
-                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
-                exit 1
-            fi
-            python3 "${py}" login-paste --flume-root "${FLUME_ROOT}" "$@"
-            ;;
-        import|import-codex)
-            if [ -z "${py}" ] || [ ! -f "${py}" ]; then
-                echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
-                exit 1
-            fi
-            _ensure_codex_runtime
-            python3 "${py}" import-codex --flume-root "${FLUME_ROOT}" "$@"
-            cmd_codex_app_server_start
-            _print_codex_next_steps
-            ;;
-        refresh|status|bootstrap)
-            if [ -z "${sh}" ] || [ ! -f "${sh}" ]; then
-                echo "Error: openai-oauth.sh not found under ${FLUME_ROOT}."
-                exit 1
-            fi
-            bash "${sh}" "${sub}" "$@"
-            ;;
-        *)
-            echo "Unknown codex-oauth command: ${sub}" >&2
-            cmd_codex_oauth_help
-            exit 1
-            ;;
-    esac
-=======
-    journalctl --user -u "${SERVICE_NAME}" -f "$@"
->>>>>>> main
+cmd_codex_app_server() {
+    export PYTHONPATH="${FLUME_ROOT}/src:${PYTHONPATH:-}"
+    exec python3 -m dashboard.codex_app_server "$@"
+}
 }
 
 cmd_codex_app_server_foreground() {
