@@ -223,7 +223,7 @@ Configure in the **Settings** UI or via `.env` / OpenBao KV:
 
 **Multiple providers / keys:** In Settings, pick a **provider** (OpenAI, Gemini, …); the **Saved API keys** list shows **only keys for that provider** (change the provider dropdown to manage another vendor’s keys). Store **many labeled keys per vendor** (labels must be **unique per provider**). **Set as default** picks which saved row fills the global **LLM_*** profile and backs agent roles that use **Settings (default)**; saving a new key from the main form can still set the default. Keys live in **`worker-manager/llm_credentials.json`** (`defaultCredentialId` + legacy `activeCredentialId`). **Agents → Configure agent models** lists **every** saved key and **Settings default** so you assign a **specific credential** per role (not just provider/model); providers in the dialog come from those rows. The worker manager reads **`worker-manager/agent_models.json`** each poll. **Agent Operations** cards show the key **label**.
 
-ChatGPT/Codex OAuth: prefer **`./flume codex-oauth login-browser`** (see **OpenAI ChatGPT / Codex OAuth**); device **`login`** may lack `api.responses.write`. When Flume is using OpenAI + OAuth and a Codex session is present, **Plan New Work** and worker roles configured with the **OpenAI OAuth** credential can route through **`codex app-server`** automatically instead of the plain HTTP OpenAI path, while API-key-backed roles continue using their selected provider directly.
+ChatGPT/Codex OAuth: prefer **`./flume codex-oauth login-browser`** (see **OpenAI ChatGPT / Codex OAuth**); device **`login`** may lack `api.responses.write`. `./flume setup` starts **Codex app-server** in the background automatically, and successful OAuth/import commands restart that background process as needed. When Flume is using OpenAI + OAuth and a Codex session is present, **Plan New Work** and worker roles configured with the **OpenAI OAuth** credential can route through **`codex app-server`** automatically instead of the plain HTTP OpenAI path, while API-key-backed roles continue using their selected provider directly.
 
 After changes, **restart** dashboard and workers.
 
@@ -483,6 +483,11 @@ bash worker-manager/run.sh
 
 - Real-time dashboard and **snapshot** API
 - Multi-role agents (intake, PM, implementer, tester, reviewer, memory-updater)
+- Elasticsearch-backed task/memory indices
+- Settings UI for LLMs and repo integration
+- **systemd user** service via `./flume` CLI
+- **OpenBao-first** secrets with **legacy `.env`** support
+r)
 - Elasticsearch-backed task/memory indices
 - Settings UI for LLMs and repo integration
 - **systemd user** service via `./flume` CLI

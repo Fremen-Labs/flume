@@ -27,6 +27,17 @@ echo -e "${CYAN}${BOLD}║     Flume — One-command setup        ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════╝${NC}"
 echo ""
 
+ensure_codex_runtime() {
+    if command -v codex &>/dev/null; then
+        return 0
+    fi
+    if command -v npm &>/dev/null; then
+        echo ""
+        echo "Installing Codex CLI..."
+        npm install -g @openai/codex || true
+    fi
+}
+
 # Run installer (install.sh or install/install.sh)
 if [ -f "install/install.sh" ]; then
     echo "Running installer (git clone layout)..."
@@ -139,6 +150,8 @@ if es_credentials_valid && [ -n "${CREATE_INDICES_SCRIPT}" ]; then
     ENV_FILE="${ENV_FILE}" bash "${CREATE_INDICES_SCRIPT}" 2>/dev/null || true
 fi
 
+ensure_codex_runtime
+
 # Install and start dashboard as background service (only if ES is configured)
 if [ -f "flume" ] && es_credentials_valid; then
     chmod +x flume 2>/dev/null || true
@@ -150,6 +163,7 @@ if [ -f "flume" ] && es_credentials_valid; then
         echo ""
         echo "Starting dashboard in background..."
         ./flume start 2>/dev/null || bash flume start
+        ./flume codex-app-server start 2>/dev/null || true
     elif [ -f "setup/install-flume-service.sh" ]; then
         echo ""
         echo "Installing dashboard service..."
@@ -158,6 +172,7 @@ if [ -f "flume" ] && es_credentials_valid; then
         echo ""
         echo "Starting dashboard in background..."
         ./flume start 2>/dev/null || bash flume start
+        ./flume codex-app-server start 2>/dev/null || true
     fi
 fi
 
@@ -169,5 +184,10 @@ echo "  ./flume status   — Check status"
 echo "  ./flume stop     — Stop dashboard"
 echo "  ./flume restart  — Restart dashboard"
 echo "  ./flume logs     — View logs"
-echo "  ./flume codex-oauth login — ChatGPT/Codex OAuth for OpenAI (optional)"
+echo "  ./flume codex-app-server status — Check Codex app-server background status"
+echo ""
+echo "Next step for OpenAI subscription usage (Codex OAuth):"
+echo "  ./flume codex-oauth login-browser"
+echo ""
+echo "Then open the dashboard, choose Settings → LLM → OpenAI → OAuth, and restart if prompted."
 echo ""

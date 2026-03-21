@@ -14,6 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLUME_ROOT="${SCRIPT_DIR}"
 SERVICE_NAME="flume-dashboard"
 UNIT_FILE="${HOME}/.config/systemd/user/${SERVICE_NAME}.service"
+CODEX_APP_PID_FILE="${HOME}/.cache/flume/codex-app-server.pid"
+CODEX_APP_LOG_FILE="${HOME}/.cache/flume/codex-app-server.log"
 
 # Detect layout
 if [ -f "${FLUME_ROOT}/install/setup/install-flume-service.sh" ]; then
@@ -43,6 +45,10 @@ _openai_oauth_sh() {
 
 has_systemctl() {
     command -v systemctl >/dev/null 2>&1
+}
+
+ensure_cache_dir() {
+    mkdir -p "$(dirname "${CODEX_APP_PID_FILE}")"
 }
 
 ensure_service_installed() {
@@ -348,6 +354,29 @@ cmd_codex_oauth_help() {
     echo ""
 }
 
+_ensure_codex_runtime() {
+    if command -v codex >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "Warning: npm not found, so Codex CLI was not auto-installed. npx fallback may still work for app-server if available." >&2
+        return 0
+    fi
+    echo "Installing Codex CLI (npm -g @openai/codex)..."
+    npm install -g @openai/codex
+}
+
+_print_codex_next_steps() {
+    echo ""
+    echo "Next steps:"
+    echo "  1) Complete OAuth:  ./flume codex-oauth login-browser"
+    echo "     (or headless:     ./flume codex-oauth login-paste)"
+    echo "  2) Open Flume at http://localhost:${DASHBOARD_PORT:-8765}"
+    echo "  3) Settings → LLM → OpenAI → OAuth"
+    echo "  4) Agents → pick OpenAI OAuth or any saved API-key provider per role"
+    echo ""
+}
+
 cmd_codex_oauth() {
     local py sh
     py="$(_codex_oauth_py)"
@@ -364,7 +393,10 @@ cmd_codex_oauth() {
                 echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
                 exit 1
             fi
+            _ensure_codex_runtime
             python3 "${py}" login --flume-root "${FLUME_ROOT}" "$@"
+            cmd_codex_app_server_start
+            _print_codex_next_steps
             ;;
         login-browser)
             if [ -z "${py}" ] || [ ! -f "${py}" ]; then
@@ -385,7 +417,10 @@ cmd_codex_oauth() {
                 echo "Error: codex_oauth_login.py not found under ${FLUME_ROOT}."
                 exit 1
             fi
+            _ensure_codex_runtime
             python3 "${py}" import-codex --flume-root "${FLUME_ROOT}" "$@"
+            cmd_codex_app_server_start
+            _print_codex_next_steps
             ;;
         refresh|status|bootstrap)
             if [ -z "${sh}" ] || [ ! -f "${sh}" ]; then
@@ -402,7 +437,7 @@ cmd_codex_oauth() {
     esac
 }
 
-cmd_codex_app_server() {
+cmd_codex_app_server_foreground() {
     local py
     py="${FLUME_ROOT}/src/dashboard/codex_app_server.py"
     if [ ! -f "${py}" ]; then
@@ -424,10 +459,96 @@ raise SystemExit(int(run_foreground(extra)))
 PY
 }
 
+cmd_codex_app_server_status() {
+    ensure_cache_dir
+    if [ -f "${CODEX_APP_PID_FILE}" ]; then
+        local pid
+        pid="$(cat "${CODEX_APP_PID_FILE}" 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "Codex app-server is running in background (pid ${pid})."
+            echo "Log: ${CODEX_APP_LOG_FILE}"
+            return 0
+        fi
+    fi
+    echo "Codex app-server is not running in background."
+}
+
+cmd_codex_app_server_start() {
+    ensure_cache_dir
+    if [ -f "${CODEX_APP_PID_FILE}" ]; then
+        local pid
+        pid="$(cat "${CODEX_APP_PID_FILE}" 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "Codex app-server already running (pid ${pid})."
+            echo "Log: ${CODEX_APP_LOG_FILE}"
+            return 0
+        fi
+    fi
+    _ensure_codex_runtime
+    nohup bash -lc 'cd "$1" && ./flume codex-app-server' _ "${FLUME_ROOT}" > "${CODEX_APP_LOG_FILE}" 2>&1 &
+    echo $! > "${CODEX_APP_PID_FILE}"
+    sleep 1
+    echo "Started Codex app-server in background."
+    echo "PID: $(cat "${CODEX_APP_PID_FILE}")"
+    echo "Log: ${CODEX_APP_LOG_FILE}"
+}
+
+cmd_codex_app_server_stop() {
+    if [ ! -f "${CODEX_APP_PID_FILE}" ]; then
+        echo "Codex app-server is not running in background."
+        return 0
+    fi
+    local pid
+    pid="$(cat "${CODEX_APP_PID_FILE}" 2>/dev/null || true)"
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        kill "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${CODEX_APP_PID_FILE}"
+    echo "Codex app-server stopped."
+}
+
+cmd_codex_app_server_logs() {
+    ensure_cache_dir
+    touch "${CODEX_APP_LOG_FILE}"
+    tail -f "${CODEX_APP_LOG_FILE}"
+}
+
+cmd_codex_app_server() {
+    local sub="${1:-foreground}"
+    [ "$#" -ge 1 ] && shift || true
+    case "${sub}" in
+        start) cmd_codex_app_server_start "$@" ;;
+        stop) cmd_codex_app_server_stop ;;
+        restart) cmd_codex_app_server_stop ; cmd_codex_app_server_start "$@" ;;
+        status) cmd_codex_app_server_status ;;
+        logs) cmd_codex_app_server_logs ;;
+        foreground|run) cmd_codex_app_server_foreground "$@" ;;
+        *) cmd_codex_app_server_foreground "${sub}" "$@" ;;
+    esac
+}
+
+cmd_setup() {
+    if [ -f "${FLUME_ROOT}/setup.sh" ]; then
+        _ensure_codex_runtime
+        bash "${FLUME_ROOT}/setup.sh"
+        DASHBOARD_PORT=$(grep -E '^DASHBOARD_PORT=' "${FLUME_ROOT}/.env" 2>/dev/null | cut -d= -f2- || echo "8765")
+        cmd_codex_app_server_start
+        echo ""
+        echo "Flume is deployed and the Codex app-server is running in the background."
+        _print_codex_next_steps
+        return 0
+    fi
+    echo "Error: setup.sh not found under ${FLUME_ROOT}." >&2
+    exit 1
+}
+
 cmd_help() {
     echo "Flume CLI — Dashboard service and OAuth"
     echo ""
     echo "Usage: flume <command> [args...]"
+    echo ""
+    echo "Deployment / setup:"
+    echo "  setup     Install dependencies, build UI, start Flume, start Codex app-server in background"
     echo ""
     echo "Dashboard (systemd user service):"
     echo "  start     Start dashboard in background"
@@ -444,11 +565,13 @@ cmd_help() {
     echo "  Run \"flume codex-oauth help\" for details."
     echo ""
     echo "Codex app-server:"
-    echo "  codex-app-server [extra args...]   Run codex app-server on ${FLUME_CODEX_APP_SERVER_LISTEN:-ws://127.0.0.1:4500}"
+    echo "  codex-app-server start|stop|restart|status|logs"
+    echo "  codex-app-server [extra args...]   Run foreground app-server on ${FLUME_CODEX_APP_SERVER_LISTEN:-ws://127.0.0.1:4500}"
     echo ""
 }
 
 case "${1:-help}" in
+    setup)   cmd_setup ;;
     start)   cmd_start ;;
     stop)    cmd_stop ;;
     build-ui) cmd_build_ui ;;

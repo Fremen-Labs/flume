@@ -53,9 +53,10 @@ bash setup.sh
 Control the dashboard:
 
 ```bash
+./flume setup
 ./flume start | stop | restart | status | logs | enable | disable
-./flume codex-oauth login   # optional: ChatGPT / Codex OAuth for OpenAI
-./flume codex-app-server    # optional: run Codex app-server (uses codex or npx fallback)
+./flume codex-oauth login-browser   # recommended: ChatGPT / Codex OAuth for OpenAI
+./flume codex-app-server status     # background Codex app-server status
 # Worker roles can use either OpenAI OAuth/Codex app-server or any saved API-key provider.
 ```
 
@@ -127,5 +128,8 @@ cd src/frontend/src && npm install && npm run build
 **Required:** Python 3.9+, git, pgrep, curl, Elasticsearch 8.x (installed by installer or pre-provisioned).
 
 **Optional:** OpenBao **server** (you run it; installer installs **CLI**), `gh`, Node (frontend rebuild).
+
+See [`install/README.md`](install/README.md) for the full table and scripts.
+Node (frontend rebuild).
 
 See [`install/README.md`](install/README.md) for the full table and scripts.
