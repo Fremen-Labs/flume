@@ -168,7 +168,7 @@ export default function ProjectsPage() {
                 transition={{ delay: i * 0.05 }}
                 whileHover={{ y: -4, transition: { duration: 0.25 } }}
                 onClick={() => navigate(`/projects/${encodeURIComponent(project.id)}`)}
-                className="glass-card-glow cursor-pointer group relative overflow-hidden hover-lift"
+                className="glass-card hover-lift shadow-lg shadow-black/40 ring-1 ring-white/10 transition-all-glow cursor-pointer group relative overflow-hidden hover-lift"
               >
                 {/* Background */}
                 <div className="absolute inset-0">
@@ -240,7 +240,7 @@ export default function ProjectsPage() {
 
           {/* Empty state */}
           {filtered.length === 0 && !isLoading && (
-            <div className="col-span-full glass-card p-12 text-center text-sm text-muted-foreground">
+            <div className="col-span-full glass-card hover-lift shadow-lg shadow-black/40 ring-1 ring-white/10 transition-all p-12 text-center text-sm text-muted-foreground">
               <Plus className="w-8 h-8 mx-auto mb-3 opacity-30" />
               <p>
                 {search ? `No projects match "${search}"` : 'No projects yet. Create one with the “New Project” dialog.'}
