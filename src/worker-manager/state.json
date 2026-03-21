@@ -1,0 +1,86 @@
+{
+  "updated_at": "2026-03-21T02:20:01.229647+00:00",
+  "workers": [
+    {
+      "name": "intake-worker-1",
+      "role": "intake",
+      "model": "qwen3-14b-instruct",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.229658+00:00",
+      "status": "idle",
+      "current_task_id": null,
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    },
+    {
+      "name": "pm-worker-1",
+      "role": "pm",
+      "model": "qwen3-30b-A3B-4bit",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.231400+00:00",
+      "status": "idle",
+      "current_task_id": null,
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    },
+    {
+      "name": "implementer-worker-1",
+      "role": "implementer",
+      "model": "qwen3-30b-A3B-4bit",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.233249+00:00",
+      "status": "claimed",
+      "current_task_id": "task-2026-03-21T00:28:50.514422Z",
+      "current_task_title": "Create a python script named hello_world.py that prints Hello Flume",
+      "preferred_model": "qwen3-30b-A3B-4bit",
+      "preferred_llm_provider": "exo",
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    },
+    {
+      "name": "tester-worker-1",
+      "role": "tester",
+      "model": "qwen3-30b-A3B-4bit",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.249091+00:00",
+      "status": "idle",
+      "current_task_id": null,
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    },
+    {
+      "name": "reviewer-worker-1",
+      "role": "reviewer",
+      "model": "qwen3-30b-A3B-4bit",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.251311+00:00",
+      "status": "idle",
+      "current_task_id": null,
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    },
+    {
+      "name": "memory-updater-worker-1",
+      "role": "memory-updater",
+      "model": "qwen3-30b-A3B-4bit",
+      "execution_host": "localhost",
+      "llm_provider": "exo",
+      "llm_credential_id": "__settings_default__",
+      "heartbeat_at": "2026-03-21T02:20:01.252622+00:00",
+      "status": "idle",
+      "current_task_id": null,
+      "preferred_llm_credential_id": "__settings_default__",
+      "llm_credential_label": "Settings (default)"
+    }
+  ]
+}
