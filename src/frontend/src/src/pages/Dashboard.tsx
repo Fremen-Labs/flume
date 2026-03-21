@@ -51,7 +51,7 @@ export default function Dashboard() {
   const runningTasks = tasks.filter(t => t.status === 'running');
   const doneTasks = tasks.filter(t => t.status === 'done');
   const blockedTasks = tasks.filter(t => t.status === 'blocked');
-  const plannedTasks = tasks.filter(t => t.status === 'planned' || t.status === 'ready');
+  const plannedTasks = tasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox');
 
   // Derive recent activity from tasks sorted by last_update
   const recentActivity = [...tasks]
