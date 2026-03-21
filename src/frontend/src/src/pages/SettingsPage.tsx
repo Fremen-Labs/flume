@@ -1,7 +1,20 @@
 import { useState, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save, RefreshCw, AlertCircle, Palette, Sun, Moon, Terminal, Plus, Trash2, Star } from 'lucide-react';
+import {
+  Loader2,
+  Save,
+  RefreshCw,
+  AlertCircle,
+  Palette,
+  Sun,
+  Moon,
+  RotateCcw,
+  Terminal,
+  Plus,
+  Trash2,
+  Star,
+} from 'lucide-react';
 import { useTheme, type Skin } from '@/hooks/useTheme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,10 +39,36 @@ import type {
   AdoTokenActionPayload,
 } from '@/types';
 
+/** Avoid `res.json()` on empty bodies (e.g. legacy 404s, proxies, dropped connections). */
+async function parseJsonBody<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  if (!text.trim()) {
+    if (!res.ok) {
+      if (res.status === 404) {
+        throw new Error(
+          'HTTP 404 with an empty response usually means the browser did not reach this Flume dashboard Python server ' +
+            '(wrong URL/port, or a proxy in front returned 404), or the dashboard is still running an old server.py. ' +
+            'Use the same host/port as the UI (e.g. :8765), restart the dashboard from your current checkout, and hard-refresh.',
+        );
+      }
+      throw new Error(`Empty response body (HTTP ${res.status}).`);
+    }
+    return {} as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `Invalid JSON from server (HTTP ${res.status}): ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
+    );
+  }
+}
+
 async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
   const res = await fetch('/api/settings/llm');
-  if (!res.ok) throw new Error(`Settings fetch failed: ${res.status}`);
-  return res.json();
+  const data = await parseJsonBody<LlmSettingsResponse & { error?: string }>(res);
+  if (!res.ok) throw new Error(data?.error || `Settings fetch failed: ${res.status}`);
+  return data;
 }
 
 async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boolean; restartRequired: boolean }> {
@@ -38,9 +77,9 @@ async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boole
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await res.json();
+  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
-  return data;
+  return data as { ok: boolean; restartRequired: boolean };
 }
 
 async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean; restartRequired?: boolean }> {
@@ -49,9 +88,9 @@ async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await res.json();
+  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-  return data;
+  return data as { ok: boolean; restartRequired?: boolean };
 }
 
 async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
@@ -60,21 +99,65 @@ async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse
   return res.json();
 }
 
-async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
+async function refreshOAuth(): Promise<{ ok: boolean; message?: string; restartRequired?: boolean }> {
   const res = await fetch('/api/settings/llm/oauth/refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
-  const data = await res.json();
+  const data = await parseJsonBody<{ ok?: boolean; message?: string; restartRequired?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Refresh failed: ${res.status}`);
-  return data;
+  return data as { ok: boolean; message?: string; restartRequired?: boolean };
 }
 
 async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
   const res = await fetch('/api/settings/repos');
-  if (!res.ok) throw new Error(`Repo settings fetch failed: ${res.status}`);
-  return res.json();
+  const data = await parseJsonBody<RepoSettingsResponse & { error?: string }>(res);
+  if (!res.ok) throw new Error(data?.error || `Repo settings fetch failed: ${res.status}`);
+  return data;
+}
+
+async function restartFlumeServices(): Promise<{
+  ok: boolean;
+  mode?: string;
+  message?: string;
+  error?: string;
+}> {
+  const res = await fetch('/api/settings/restart-services', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const data = await parseJsonBody<{ ok?: boolean; mode?: string; message?: string; error?: string }>(res);
+  if (!res.ok) {
+    throw new Error(
+      data?.error ||
+        (res.status === 404
+          ? 'Restart API not found — restart the dashboard so server.py includes POST /api/settings/restart-services.'
+          : `Restart failed: ${res.status}`),
+    );
+  }
+  return data as { ok: boolean; mode?: string; message?: string; error?: string };
+}
+
+/** Survives leaving Settings and coming back (SPA remount). Cleared after restart succeeds. */
+const FLUME_PENDING_RESTART_KEY = 'flume-pending-service-restart';
+
+function readPendingRestartFlag(): boolean {
+  try {
+    return sessionStorage.getItem(FLUME_PENDING_RESTART_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setPendingRestartFlag(on: boolean) {
+  try {
+    if (on) sessionStorage.setItem(FLUME_PENDING_RESTART_KEY, '1');
+    else sessionStorage.removeItem(FLUME_PENDING_RESTART_KEY);
+  } catch {
+    /* private / quota */
+  }
 }
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
@@ -103,14 +186,21 @@ export default function SettingsPage() {
   const [credBusy, setCredBusy] = useState<string | null>(null);
   const [credMsg, setCredMsg] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
+  const [showRestartCta, setShowRestartCta] = useState(readPendingRestartFlag);
+  const [restartInfo, setRestartInfo] = useState<string | null>(null);
+  const [restartError, setRestartError] = useState<string | null>(null);
 
   const saveMutation = useMutation({
     mutationFn: saveLlmSettings,
-    onSuccess: () => {
+    onSuccess: (data) => {
       setSaveError(null);
       setSaveSuccess(true);
       queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setSaveSuccess(false), 3000);
+      if (data.restartRequired !== false) {
+        setPendingRestartFlag(true);
+        setShowRestartCta(true);
+      }
     },
     onError: (e: Error) => {
       setSaveError(e.message);
@@ -119,11 +209,15 @@ export default function SettingsPage() {
 
   const refreshMutation = useMutation({
     mutationFn: refreshOAuth,
-    onSuccess: () => {
+    onSuccess: (data) => {
       setRefreshError(null);
       setRefreshSuccess(true);
       queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setRefreshSuccess(false), 3000);
+      if (data.restartRequired !== false) {
+        setPendingRestartFlag(true);
+        setShowRestartCta(true);
+      }
     },
     onError: (e: Error) => {
       setRefreshError(e.message);
@@ -153,6 +247,34 @@ export default function SettingsPage() {
 
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
   const [repoSaveSuccess, setRepoSaveSuccess] = useState(false);
+
+  const restartServicesMutation = useMutation({
+    mutationFn: restartFlumeServices,
+    onSuccess: (data) => {
+      setRestartError(null);
+      setPendingRestartFlag(false);
+      setShowRestartCta(false);
+      setRestartInfo(data.message ?? 'Restart initiated.');
+      setTimeout(() => setRestartInfo(null), 12_000);
+    },
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        e instanceof TypeError ||
+        msg === 'Failed to fetch' ||
+        msg.includes('NetworkError') ||
+        msg.includes('Load failed')
+      ) {
+        setPendingRestartFlag(false);
+        setShowRestartCta(false);
+        setRestartError(null);
+        setRestartInfo('Connection closed — restart is probably running. Wait a few seconds and refresh the page.');
+        setTimeout(() => setRestartInfo(null), 12_000);
+        return;
+      }
+      setRestartError(msg);
+    },
+  });
 
   const effectiveSettings = { ...data?.settings, ...form };
   const providerId = effectiveSettings.provider ?? 'ollama';
@@ -224,7 +346,11 @@ export default function SettingsPage() {
     setCredMsg(null);
     setCredBusy(payload.action + (payload.id || ''));
     try {
-      await llmCredentialAction(payload);
+      const credRes = await llmCredentialAction(payload);
+      if (credRes.restartRequired) {
+        setPendingRestartFlag(true);
+        setShowRestartCta(true);
+      }
       setCredMsg(okMessage);
       await queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setCredMsg(null), 4000);
@@ -326,6 +452,52 @@ export default function SettingsPage() {
     <div className="p-6 lg:p-8 max-w-[800px] mx-auto space-y-8">
       <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
       <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
+
+      {showRestartCta && (
+        <div
+          className="rounded-xl border-2 border-amber-500/50 bg-amber-500/15 dark:bg-amber-950/40 px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between shadow-sm"
+          data-testid="settings-restart-services-cta"
+        >
+          <div className="space-y-1 min-w-0">
+            <p className="text-sm font-semibold text-foreground">Apply saved settings</p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Restart the dashboard and worker manager so workers and background tasks pick up LLM, credentials, and repo
+              tokens.
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="default"
+            className="shrink-0 font-semibold"
+            disabled={restartServicesMutation.isPending}
+            onClick={() => {
+              setRestartError(null);
+              setRestartInfo(null);
+              restartServicesMutation.mutate();
+            }}
+          >
+            {restartServicesMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RotateCcw className="h-4 w-4" />
+            )}
+            <span className="ml-2">Restart services</span>
+          </Button>
+        </div>
+      )}
+
+      {restartError && (
+        <p className="text-sm text-destructive flex items-center gap-2">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {restartError}
+        </p>
+      )}
+      {restartInfo && (
+        <p className="text-sm text-emerald-700 dark:text-emerald-400 flex items-center gap-2">
+          <RotateCcw className="h-4 w-4 shrink-0" />
+          {restartInfo}
+        </p>
+      )}
 
       <div className="glass-card p-6">
         <Accordion type="single" collapsible>
@@ -846,15 +1018,10 @@ export default function SettingsPage() {
                     <span className="text-sm text-destructive">{saveError}</span>
                   )}
                   {saveSuccess && (
-                    <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>
+                    <span className="text-sm text-green-600">Saved.</span>
                   )}
                 </div>
 
-                {data?.restartRequired && (
-                  <p className="text-xs text-muted-foreground">
-                    Restart the dashboard and worker manager for changes to take effect.
-                  </p>
-                )}
                 {data?.openbaoInstalled === false && (
                   <p className="text-xs text-destructive">
                     OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
@@ -971,10 +1138,10 @@ export default function SettingsPage() {
           <AccordionItem value="repo-tokens">
             <AccordionTrigger>
               <div className="flex items-center justify-between w-full">
-                <span>Repo Credentials</span>
+                <span>Repo credentials</span>
                 <span className="text-xs text-muted-foreground">
-                  {hasGhToken ? '✓' : ''}
-                  {hasAdoToken ? (hasGhToken ? ' / ADO ✓' : 'ADO ✓') : ''}
+                  {hasGhToken ? 'GitHub classic ✓' : ''}
+                  {hasAdoToken ? (hasGhToken ? ' · ADO ✓' : 'ADO ✓') : ''}
                 </span>
               </div>
             </AccordionTrigger>
@@ -1388,11 +1555,6 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {repoData?.restartRequired && (
-                  <p className="text-xs text-muted-foreground">
-                    Restart the dashboard and worker manager for changes to take effect.
-                  </p>
-                )}
                 {data?.openbaoInstalled === false && (
                   <p className="text-xs text-destructive">
                     OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.

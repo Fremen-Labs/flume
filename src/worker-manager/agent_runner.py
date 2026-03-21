@@ -197,9 +197,15 @@ _IMPLEMENTER_TOOLS = [
 
 def _resolve_path(path: str, repo_path: Optional[str]) -> Path:
     p = Path(path)
-    if p.is_absolute():
-        return p
-    return (Path(repo_path) / path) if repo_path else p
+    try:
+        base = Path(repo_path).resolve() if repo_path else Path('.').resolve()
+        final_path = (base / p).resolve() if not p.is_absolute() else p.resolve()
+        if not str(final_path).startswith(str(base)):
+            raise PermissionError('Path Traversal Attempt Halted.')
+        return final_path
+    except Exception:
+        raise PermissionError('Path Traversal Attempt Halted.')
+
 
 
 def _exec_read_file(args: dict, repo_path: Optional[str]) -> str:
@@ -217,8 +223,14 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
     try:
         p = _resolve_path(args.get('path', ''), repo_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(args.get('content', ''))
-        return f'OK: wrote {len(args.get("content", ""))} chars to {p}'
+        content = args.get('content', '')
+        if p.name.endswith('.py'):
+            try:
+                compile(content, p.name, 'exec')
+            except SyntaxError as e:
+                return f'ERROR writing file: Meta-Critic Python Syntax Check Failed at line {e.lineno}: {e.msg}'
+        p.write_text(content)
+        return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
 
@@ -238,8 +250,10 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
     try:
+        import shlex
+        cmd_list = shlex.split(command)
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30, cwd=cwd,
+            cmd_list, shell=False, capture_output=True, text=True, timeout=30, cwd=cwd,
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:

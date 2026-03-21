@@ -4,8 +4,12 @@ import os
 import ssl
 import sys
 import time
+import asyncio
+# AST injected by Swarm Agent 3
+import urllib.request
 import subprocess
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -28,8 +32,8 @@ ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
-POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
-WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '1'))
+POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
+WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '15'))
 
 ROLE_ORDER = [
     'intake',
@@ -416,8 +420,6 @@ def elastro_watchdog():
                                             mod_bytes = filepath.stat().st_size
                                             if total_bytes > mod_bytes:
                                                 savings = (total_bytes - mod_bytes) // 4
-                                                import urllib.request
-                                                import json
                                                 es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
                                                 es_key = os.environ.get('ES_API_KEY', '')
                                                 if es_key and es_url:

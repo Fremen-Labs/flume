@@ -78,7 +78,10 @@ export default function ProjectsPage() {
       const body: { name: string; repoUrl?: string } = { name };
       if (repoUrl) body.repoUrl = repoUrl;
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
       const res = await fetch('/api/projects', {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -86,7 +89,10 @@ export default function ProjectsPage() {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error ?? data.detail ?? 'Failed to create project');
+        const parts = [data.error, data.detail, data.hint].filter(
+          (x: unknown) => typeof x === 'string' && x.trim(),
+        ) as string[];
+        throw new Error(parts.length ? parts.join('\n\n') : 'Failed to create project');
       }
 
       setCreateOpen(false);
@@ -162,7 +168,7 @@ export default function ProjectsPage() {
                 transition={{ delay: i * 0.05 }}
                 whileHover={{ y: -4, transition: { duration: 0.25 } }}
                 onClick={() => navigate(`/projects/${encodeURIComponent(project.id)}`)}
-                className="glass-card-glow cursor-pointer group relative overflow-hidden hover-lift"
+                className="glass-card hover-lift shadow-lg shadow-black/40 ring-1 ring-white/10 transition-all-glow cursor-pointer group relative overflow-hidden hover-lift"
               >
                 {/* Background */}
                 <div className="absolute inset-0">
@@ -234,7 +240,7 @@ export default function ProjectsPage() {
 
           {/* Empty state */}
           {filtered.length === 0 && !isLoading && (
-            <div className="col-span-full glass-card p-12 text-center text-sm text-muted-foreground">
+            <div className="col-span-full glass-card hover-lift shadow-lg shadow-black/40 ring-1 ring-white/10 transition-all p-12 text-center text-sm text-muted-foreground">
               <Plus className="w-8 h-8 mx-auto mb-3 opacity-30" />
               <p>
                 {search ? `No projects match "${search}"` : 'No projects yet. Create one with the “New Project” dialog.'}
@@ -295,7 +301,7 @@ export default function ProjectsPage() {
             {createError && (
               <div className="flex items-start gap-2 text-destructive text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{createError}</span>
+                <span className="whitespace-pre-wrap break-words min-w-0">{createError}</span>
               </div>
             )}
           </div>

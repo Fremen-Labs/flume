@@ -528,6 +528,8 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
   // ── Shared branch state ──────────────────────────────────────────────────────
   const [branches, setBranches] = useState<string[]>([]);
   const [branch, setBranch] = useState('');
+  const [noGitMessage, setNoGitMessage] = useState<string | null>(null);
+  const [branchesFetchError, setBranchesFetchError] = useState('');
 
   // ── Browse-mode state ────────────────────────────────────────────────────────
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -556,17 +558,36 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
     setBranches([]);
     setBranch('');
     setCompareBranch('');
+    setNoGitMessage(null);
+    setBranchesFetchError('');
     fetch(`/api/repos/${encodeURIComponent(projectId)}/branches`)
-      .then(r => r.json())
-      .then((data: { default: string; branches: string[] }) => {
+      .then(async (r) => {
+        const data = (await r.json().catch(() => ({}))) as {
+          default?: string;
+          branches?: string[];
+          gitAvailable?: boolean;
+          message?: string;
+          error?: string;
+        };
+        if (!r.ok) {
+          throw new Error(data.error || `Failed to load repository (${r.status})`);
+        }
+        if (data.gitAvailable === false) {
+          setNoGitMessage(
+            data.message ||
+              'This project is not a Git repository. Add one by creating the project with a clone URL or run git init in the project folder.',
+          );
+          return;
+        }
         const list = data.branches ?? [];
         setBranches(list);
         setBranch(data.default ?? '');
-        // Default compare branch = second branch if available
-        const second = list.find(b => b !== (data.default ?? ''));
+        const second = list.find((b) => b !== (data.default ?? ''));
         setCompareBranch(second ?? data.default ?? '');
       })
-      .catch(() => {});
+      .catch((e: unknown) => {
+        setBranchesFetchError(e instanceof Error ? e.message : 'Failed to load branches');
+      });
   }, [open, projectId]);
 
   // ── Load tree when branch changes (browse mode) ──────────────────────────────
@@ -601,6 +622,8 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
       setBranches([]);
       setBranch('');
       setCompareBranch('');
+      setNoGitMessage(null);
+      setBranchesFetchError('');
       setTree([]);
       setSelectedPath('');
       setFileContent('');
@@ -710,6 +733,10 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           <DialogPrimitive.Title className="sr-only">
             {mode === 'browse' ? 'File Explorer' : 'Branch Compare'} — {projectName}
           </DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">
+            Browse files in the project Git repository, compare branches, and view diffs. Use the branch
+            selector when the project is a Git clone.
+          </DialogPrimitive.Description>
 
           {/* ── Header ── */}
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/8 bg-white/[0.02] shrink-0 gap-3">
@@ -789,6 +816,20 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
               <span className="sr-only">Close</span>
             </DialogPrimitive.Close>
           </div>
+
+          {(noGitMessage || branchesFetchError) && (
+            <div
+              className={cn(
+                'shrink-0 px-4 py-2.5 text-xs border-b flex items-start gap-2',
+                branchesFetchError
+                  ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                  : 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+              )}
+            >
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{branchesFetchError || noGitMessage}</span>
+            </div>
+          )}
 
           {/* ── Main Content ── */}
           <div className="flex-1 overflow-hidden">

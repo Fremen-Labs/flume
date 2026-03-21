@@ -192,6 +192,16 @@ def detect_hardware():
         
     return cpu_cores, ram_gb, gpu_name
 
+def probe_exo_cluster():
+    try:
+        req = urllib.request.Request("http://localhost:52415/v1/models", method="GET")
+        with urllib.request.urlopen(req, timeout=1) as response:
+            if response.status == 200:
+                return True
+    except Exception as e:
+        sys.stderr.write(f"\\n\\033[93m[LOG] Exo Cluster Probe Timeout/Error: {e}\\033[0m\\n")
+    return False
+
 def append_to_env(port):
     env_path = os.path.join(os.path.dirname(__file__), '.env')
     cpu_cores, ram_gb, gpu_name = detect_hardware()
@@ -215,6 +225,28 @@ def append_to_env(port):
             f"OPENBAO_ADDR=http://127.0.0.1:8200\n",
             f"ES_URL={es_url}\n"
         ]
+        
+        if probe_exo_cluster():
+            type_text(f"{GREEN}[EXO DETECTED]{NC} Local computing cluster found. Binding LLM architecture to Exo matrix natively.")
+            new_lines.extend([
+                "LLM_PROVIDER=exo\n",
+                "LLM_BASE_URL=http://localhost:52415/v1\n",
+                "LLM_MODEL=qwen3-30b-A3B-4bit\n"
+            ])
+            # Auto-assign roles natively
+            agent_models_path = os.path.join(os.path.dirname(__file__), "src", "worker-manager", "agent_models.json")
+            os.makedirs(os.path.dirname(agent_models_path), exist_ok=True)
+            exo_roles = {
+                "version": 1,
+                "roles": {
+                    "intake": {"provider": "exo", "model": "qwen3-14b-instruct", "credentialId": "__settings_default__"},
+                    "pm": {"provider": "exo", "model": "qwen3-30b-A3B-4bit", "credentialId": "__settings_default__"},
+                    "implementer": {"provider": "exo", "model": "qwen3-30b-A3B-4bit", "credentialId": "__settings_default__"}
+                }
+            }
+            with open(agent_models_path, "w") as f:
+                json.dump(exo_roles, f, indent=2)
+
         token_path = os.path.expanduser("~/.vault-token")
         if os.path.exists(token_path):
             with open(token_path, "r") as tf:
@@ -223,7 +255,7 @@ def append_to_env(port):
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
                 lines = f.readlines()
-            lines = [line for line in lines if not any(line.startswith(p) for p in ('DASHBOARD_PORT=', 'HOST_CPU_CORES=', 'HOST_RAM_GB=', 'HOST_GPU_NAME=', 'OPENBAO_ADDR=', 'OPENBAO_TOKEN=', 'ES_URL='))]
+            lines = [line for line in lines if not any(line.startswith(p) for p in ('DASHBOARD_PORT=', 'HOST_CPU_CORES=', 'HOST_RAM_GB=', 'HOST_GPU_NAME=', 'OPENBAO_ADDR=', 'OPENBAO_TOKEN=', 'ES_URL=', 'LLM_PROVIDER=', 'LLM_BASE_URL=', 'LLM_MODEL='))]
             lines.extend(new_lines)
             with open(env_path, 'w') as f:
                 f.writelines(lines)
