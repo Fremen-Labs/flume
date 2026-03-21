@@ -4,6 +4,9 @@ import os
 import ssl
 import sys
 import time
+import asyncio
+# AST injected by Swarm Agent 3
+import urllib.request
 import subprocess
 import threading
 from datetime import datetime, timezone
