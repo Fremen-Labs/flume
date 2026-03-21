@@ -94,7 +94,7 @@ export default function SecurityPage() {
           subtitle="Vaulted Identity Certificates"
         />
         <GlassMetricCard
-          title="Audit Traces"
+          title="Checkout Events"
           value={audit_logs?.length || 0}
           icon={Activity}
           subtitle="Checkout Events Tracked"
