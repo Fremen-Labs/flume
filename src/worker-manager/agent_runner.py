@@ -178,9 +178,15 @@ _IMPLEMENTER_TOOLS = [
 
 def _resolve_path(path: str, repo_path: Optional[str]) -> Path:
     p = Path(path)
-    if p.is_absolute():
-        return p
-    return (Path(repo_path) / path) if repo_path else p
+    try:
+        base = Path(repo_path).resolve() if repo_path else Path('.').resolve()
+        final_path = (base / p).resolve() if not p.is_absolute() else p.resolve()
+        if not str(final_path).startswith(str(base)):
+            raise PermissionError('Path Traversal Attempt Halted.')
+        return final_path
+    except Exception:
+        raise PermissionError('Path Traversal Attempt Halted.')
+
 
 
 def _exec_read_file(args: dict, repo_path: Optional[str]) -> str:
