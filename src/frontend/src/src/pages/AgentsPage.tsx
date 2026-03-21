@@ -395,7 +395,7 @@ export default function AgentsPage() {
           </div>
         </div>
 
-        <div className="rounded-lg border border-border/50 bg-muted/20 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="rounded-lg border border-border/50 bg-muted/30 backdrop-blur-2xl ring-1 ring-white/5 shadow-2xl px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <p className="text-sm text-muted-foreground leading-snug min-w-0">
             <span className="font-medium text-foreground">Per-role LLM</span>
             {' — '}
@@ -429,7 +429,7 @@ export default function AgentsPage() {
             {perRoleSummary && perRoleSummary.rows.length > 0 && (
               <div className="mt-4 space-y-3 max-w-4xl">
                 {perRoleSummary.allSame && (
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-border/80 bg-muted/30 px-5 py-4 glass-card-glow shadow-sm">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-border/80 bg-muted/30 px-5 py-4 glass-card-sweep border border-white/10 hover:border-white/30 transition-all duration-500 ease-out-glow shadow-sm">
                     <div className="flex items-center gap-3 min-w-0 flex-1">
                       <div className="p-2 bg-primary/10 rounded-full shrink-0">
                         <Info className="h-5 w-5 text-primary" />
@@ -786,7 +786,7 @@ export default function AgentsPage() {
       )}
 
       {!isLoading && !error && workers.length === 0 && (
-        <div className="glass-card p-12 text-center flex flex-col items-center justify-center space-y-4">
+        <div className="glass-card-sweep border border-white/10 hover:border-white/30 transition-all duration-500 ease-out p-12 text-center flex flex-col items-center justify-center space-y-4">
           <div className="relative">
             <Bot className="w-10 h-10 text-primary/40 animate-pulse" />
             <div className="absolute inset-0 bg-primary/20 w-10 h-10 blur-xl rounded-full animate-pulse" />
@@ -812,7 +812,7 @@ export default function AgentsPage() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.03 }}
                 whileHover={{ y: -3, transition: { duration: 0.2 } }}
-                className={`glass-card-glow p-5 hover-lift relative ${isActive ? 'agent-breathing' : ''}`}
+                className={`glass-card-sweep border border-white/10 hover:border-white/30 transition-all duration-500 ease-out-glow p-5 hover-lift relative ${isActive ? 'agent-breathing' : ''}`}
               >
                 <div className="flex items-start justify-between mb-3 relative z-10">
                   <div className="flex items-center gap-3">
