@@ -1,57 +1,58 @@
 <div align="center">
 
-# 🌊 FLUME
-### The Autonomous Engineering Frontier
+# FLUME
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
 [![Elasticsearch: 8.x](https://img.shields.io/badge/Elasticsearch-8.x-blue.svg)](https://www.elastic.co/)
 [![Backend: Python 3.9+](https://img.shields.io/badge/Backend-Python_3.9+-yellow.svg)](https://www.python.org/)
 [![Frontend: React & Vite](https://img.shields.io/badge/Frontend-React_18-cyan.svg)](https://reactjs.org/)
 
-*Plan, implement, test, and review production-grade codebase mutations using a relentlessly coordinated swarm of LLM agents running natively on your hardware.*
+*An AI-powered agent workflow platform for planning, implementing, testing, and reviewing codebase changes natively using local hardware clusters.*
 
 </div>
 
 ---
 
-## ⚡ The Swarm Deployment (Quick Start)
+## Quick Start
 
-We have engineered Flume to deploy its complex, multi-agent architecture **effortlessly**. Forget hunting for dependencies or wrestling with scripts; your entire local ecosystem is orchestrated by our unified Frontier CLI gateway.
+Flume provides a unified command-line interface (`flume`) to manage dependencies, configurations, and background services easily.
 
 ```bash
 # 1. Enter the Repository
 cd ~/flume
 
-# 2. Bootstrap the Frontier
+# 2. Install dependencies (Node, Python, Elasticsearch)
 ./flume install
 
-# 3. Configure your Telemetry
+# 3. Configure your environment (LLM Provider, Git Identity)
 ./flume onboard
 
-# 4. Awaken the Swarm
+# 4. Start the dashboard and background agent workers
 ./flume start
 ```
 
-*Your dashboard will immediately initialize at [http://localhost:8765](http://localhost:8765).*
+*The dashboard will be available at [http://localhost:8765](http://localhost:8765).*
 
 ---
 
-## 🛸 The Frontier Command Line
+## Command Line Interface (`./flume`)
 
-Whether you need to cleanly pull updates from the central repository, review background daemon logs natively, or forcefully bounce your LLM pipelines, everything routes securely through the **Flume CLI**:
+You can manage all lifecycle and daemon operations cleanly through the `./flume` executable:
 
-| Command | Execution Logic |
+| Command | Description |
 | :--- | :--- |
-| `./flume install` | Invokes the visual installer, aggressively auto-heals missing Node/Python dependencies, and synchronizes the Elasticsearch 8.x bootstrap. |
-| `./flume onboard` | Launches the interactive wizard. Securely maps your `Execution Host`, local Git identities, and preferred Inference Engine (Exo, Ollama, OpenAI). |
-| `./flume start` | Spins up the background React Interface and asynchronously triggers your Python agent pools natively. |
-| `./flume update` | Natively stashes your config, pulls `main`, re-bundles the Vite React telemetry loops, and elegantly restarts your daemon tracking in seconds. | 
+| `./flume install` | Runs the automated installer for dependencies, virtual environments, and the Elasticsearch bootstrap. |
+| `./flume onboard` | Interactive configuration wizard for your `.env` (LLM Provider, Git Identity, Execution Host). |
+| `./flume start` | Starts the background React Interface and Python agent worker daemons concurrently. |
+| `./flume update` | Pulls the latest `main` branch, rebuilds UI artifacts, and gracefully restarts processes. | 
+| `./flume status` | Display the explicit status of asynchronous background services. |
+| `./flume logs` | Tail system journal logs mapping dashboard and agent worker pools. |
 
 ---
 
-## 🏛 Ecosystem Architecture
+## Architecture Overview
 
-Flume abandons simplistic scripting in favor of an **Asynchronous Swarm Topology**. The agents (Planners, Implementers, Reviewers, Testers) function entirely independently, dynamically polling the unified Elasticsearch memory graph and offloading massive LLM generations gracefully to local hardware via Exo.
+Flume utilizes an asynchronous, multi-agent topology driven by Python multiprocessing. Agents (Planners, Implementers, Reviewers, Testers) function independently by polling a unified Elasticsearch graph, heavily leveraging dedicated git worktrees to isolate tasks.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -59,14 +60,14 @@ Flume abandons simplistic scripting in favor of an **Asynchronous Swarm Topology
 └────────────────────────────┬────────────────────────────────────┘
                              │ (WebSocket / REST JSON State)
 ┌────────────────────────────▼────────────────────────────────────┐
-│      [ Frontier CLI Gateway ] (`./flume` daemon manager)        │
-│  • Reads `flume.config.json` + `OpenBao` Vault Injections       │
+│      [ Flume CLI Gateway ] (`./flume` daemon manager)           │
+│  • Reads `flume.config.json` + `OpenBao` Vault Secrets          │
 └────────────┬───────────────────────────────┬────────────────────┘
              │                               │
        READ / WRITE                    SPAWN / ISOLATE
              ▼                               ▼
 ┌────────────────────────┐      ┌─────────────────────────────────┐
-│  [ The Knowledge Graph]│      │   [ The Autonomous Swarm ]      │
+│  [ The Knowledge Graph]│      │   [ The Agent Swarm ]           │
 │   Elasticsearch 8.x    │◄─────┤   Multiprocessing Agent Daemons │
 │   (System of Record)   │      │   (Isolated Python Workers)     │
 └────────────────────────┘      └────────────────┬────────────────┘
@@ -77,36 +78,17 @@ Flume abandons simplistic scripting in favor of an **Asynchronous Swarm Topology
                                 │ [ Execution Engine ]            │
                                 │ • Local Exo Cluster (Qwen)      │
                                 │ • Local Ollama Binary (Llama3)  │
+                                │ • OpenAI / Anthropic APIs       │
                                 └─────────────────────────────────┘
 ```
 
-> **Security First Context**: Secrets (like API keys) are **never** committed. The `flume.config.json` explicitly points all background workers toward secured OpenBao Vault endpoints memory-mounted over HTTP.
+> **Security Note**: Secrets such as API keys are not strictly required on disk. The system fully supports secure `OpenBao` Vault endpoints for injecting credentials via HTTP at runtime.
 
 ---
 
-## 🧬 Live Mission Control & Telemetry
+## Live Mission Control
 
-Flume natively ships with a breathtaking **React 18 User Interface**, engineered explicitly to track your multi-agent interactions beautifully.
+The React UI provides real-time visibility into the agent swarm operations natively:
 
-1. **Live Mission Radar**: Replaces obsolete mock-data UI grids with active `state.json` AST parsing, showing exactly which agents are idle, which files they are mutating, and dynamically pulsing as your codebases evolves.
-2. **OpenBao Hive Monitor**: Explicitly track LLM agent vault usage in real-time natively inside your `/security` layout.
-
----
-
-## 🛠 Advanced Features
-
-### Seamless Remote Updates
-We push new architectural frontiers constantly. Keeping your Swarm in sync with our `main` repository takes literally zero effort:
-```bash
-./flume update
-```
-
-### Headless Git Isolation
-When you assign a task to Flume, the internal `run_swarm.py` orchestrator checks out dedicated `git worktree` directories natively. Multiple agents can hack, validate via `meta-critic`, and dispatch GitHub Pull Requests completely parallel to one-another—all while leaving your IDE environment completely untouched!
-
-<div align="center">
-<br/>
-
-**Flume** 
-*Built for the Autonomous Age.*
-</div>
+1. **Live Mission Radar**: Actively parses `state.json` abstract syntax trees to show exactly which agents are resolving tasks, mapping modified files, and processing delivery workflows.
+2. **OpenBao Security Monitor**: Tracks agent vault checkouts and secret access rates continuously natively inside the `/security` layout.
