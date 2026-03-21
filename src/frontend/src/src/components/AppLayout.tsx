@@ -109,8 +109,4 @@ export function AppLayout() {
       </main>
     </div>
   );
-} </footer>
-      </main>
-    </div>
-  );
 }
