@@ -11,6 +11,12 @@
 
 set -euo pipefail
 
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+if [ "$UNAME_S" != "Linux" ]; then
+    echo "This helper currently supports Linux only. On macOS, use Docker or install/configure the service manually." >&2
+    exit 1
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

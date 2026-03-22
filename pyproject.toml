@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings",
     "click",
     "toml>=0.10.2",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,9 @@ dev = [
 
 [project.scripts]
 flume = "flume_cli.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["flume_cli*"]
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]

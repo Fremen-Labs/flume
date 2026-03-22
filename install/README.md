@@ -5,6 +5,8 @@ using a coordinated team of LLM agents, with a real-time dashboard.
 
 The **repository root README** is [`../README.md`](../README.md) (short overview + diagram). **This file** is the full install, architecture, and troubleshooting guide.
 
+> **Platform support (current):** Flume's **portable path** is Linux + macOS via `./flume install` + `./flume start` (Docker-backed services). Some **native helper scripts** in `install/setup/` are intentionally **Linux-only** for now (package install, systemd, native Elasticsearch/OpenBao helpers). Windows is deferred for a later pass.
+
 ---
 
 ## Architecture
@@ -69,7 +71,7 @@ This:
 2. On **git clones**, runs `npm install && npm run build` under `src/frontend/src` if `npm` exists.
 3. Loops until **`.env` has a valid `ES_API_KEY`** (or bootstrap applied), optionally invoking ES installers / bootstrap scripts.
 4. Runs **`create-es-indices.sh`** with `ENV_FILE` set.
-5. Installs **`flume-dashboard.service`** (systemd user) and runs **`./flume start`** when ES credentials are valid.
+5. Runs **`./flume start`** when credentials are valid. On Linux, optional systemd helper scripts are available; on macOS, use the CLI/Docker path directly.
 
 ### Option B — `install.sh` only
 
@@ -101,6 +103,31 @@ bash install.sh
 
 ---
 
+## Native run (host services; Linux/macOS)
+
+Use this when **Elasticsearch is already running on the machine** and **OpenBao is reachable on localhost**, and you **do not** want Docker Compose’s bundled Elasticsearch on a mapped host port. This host-mode path is intended for **Linux and macOS**. Linux has additional native helper scripts; macOS should generally use existing services or Docker rather than Linux package/service helpers.
+
+1. **Configure secrets** — at minimum a valid **`ES_API_KEY`** (and usually **`ES_URL`**) via **`.env`**, **`config.toml`** `[system]`, or **OpenBao KV** at `secret/flume`. For HTTPS with a self-signed certificate, set **`ES_VERIFY_TLS=false`** in the environment or `.env`.
+2. **Install** (once): `./flume install`
+3. **Start processes**: `./flume native`  
+   This runs **`install/setup/run-native.sh`**, which starts the dashboard and worker-manager under **`uv`**, with defaults:
+   - `ES_URL=https://127.0.0.1:9200`
+   - `OPENBAO_ADDR=http://127.0.0.1:8200`
+   - `ES_VERIFY_TLS=false`  
+   Override any of these by exporting them **before** `./flume native`.
+
+Logs: **`logs/dashboard.log`** and **`logs/worker-manager.log`** under the repo root.
+
+**Environment precedence:** Non-empty variables already set in the process environment take precedence over **`config.toml`** for the same keys, so you can point a single clone at host services without editing TOML.
+
+### Docker Compose (`./flume start`) — recommended portable path
+
+For **Linux and macOS**, this is the recommended first-run path. Compose maps the **bundled** Elasticsearch to host port **`9201`** by default (`FLUME_ES_HOST_PORT`, default `9201`) so it does not fight with a **system Elasticsearch** on **9200**. Containers still talk to **`http://elasticsearch:9200`** on the Docker network. OpenBao uses host **`8200`** by default (`FLUME_OPENBAO_HOST_PORT` to override). The dashboard uses host **`8765`** by default (`FLUME_DASHBOARD_HOST_PORT` to override — use this if **`./flume native`** or another app already uses **8765**). If **`./flume start` still fails** with “address already in use”, pick free ports, for example:
+
+`FLUME_ES_HOST_PORT=9202 FLUME_OPENBAO_HOST_PORT=8201 FLUME_DASHBOARD_HOST_PORT=8766 ./flume start`
+
+---
+
 ## Repository layouts
 
 ### Git clone (`~/flume`)
@@ -123,6 +150,7 @@ flume/
 │       ├── sync-bootstrap-to-openbao.sh
 │       ├── bootstrap-es-credentials.sh
 │       ├── create-es-indices.sh
+│       ├── run-native.sh
 │       ├── install-flume-service.sh
 │       └── flume-dashboard.service.template
 ├── flume                      ← CLI (systemd user dashboard)
@@ -161,6 +189,11 @@ Run: `bash dashboard/run.sh`, `bash worker-manager/run.sh`.
 
 ## Quick start (recap)
 
+**Recommended by platform:**
+- **Linux:** `./flume install` → `./flume start` (Docker), or native host mode if you intentionally manage host services
+- **macOS:** `./flume install` → `./flume start` (Docker)
+- **Windows:** later / not covered yet
+
 ```bash
 # Package:
 tar -xzf flume-<VERSION>.tar.gz && cd flume-<VERSION>/ && bash setup.sh
@@ -172,7 +205,7 @@ cd ~/flume && bash setup.sh
 Then:
 
 ```bash
-./flume start    # dashboard (background)
+./flume start    # recommended Linux/macOS path (Docker-backed)
 ./flume logs     # optional
 ```
 
@@ -229,7 +262,9 @@ After changes, **restart** dashboard and workers.
 
 ---
 
-## OpenBao CLI install
+## OpenBao CLI install (Linux helper)
+
+These helper scripts are **Linux-only** today. On macOS, use Docker / an existing OpenBao server, or install the CLI manually if you need it.
 
 ```bash
 sudo bash install/setup/install-openbao.sh    # git
@@ -252,6 +287,8 @@ gh auth login
 ---
 
 ## Elasticsearch
+
+Native install / repair helpers below are **Linux-only** today. On macOS, prefer Docker or point Flume at an existing cluster.
 
 Install / repair:
 
@@ -467,7 +504,7 @@ flume/
 
 | Issue | What to check |
 |-------|----------------|
-| Dashboard won’t start / **`ss` shows no `:8765`** | **`./flume start`** now errors if the service exits (prints a `journalctl` tail). Check `journalctl --user -u flume-dashboard -n 50`; run **`bash src/dashboard/run.sh`** in foreground. **Python ≥ 3.9**; modules using PEP 604 unions must include **`from __future__ import annotations`** or Python 3.9 crashes on import. |
+| Dashboard won’t start / port `8765` not listening | Use **`./flume start`** first (portable Docker path). For host/native runs, inspect `logs/dashboard.log` or run **`bash src/dashboard/run.sh`** in foreground. On Linux with the optional systemd helper, `journalctl --user -u flume-dashboard -n 50` is useful. **Python ≥ 3.9**; modules using PEP 604 unions must include **`from __future__ import annotations`** or Python 3.9 crashes on import. |
 | **`/api/snapshot` 502 / ES not configured** | `ES_API_KEY` in OpenBao KV or repo-root **`.env`** (`~/flume/.env`); not `AUTO_GENERATED_BY_INSTALLER`. If you have a stray **`src/.env`**, remove it or ensure **`flume/.env`** has the real key (repo root wins). Token file readable for OpenBao mode. **`./flume restart`** after changing secrets. |
 | OpenBao not loading | `openbao` on `PATH`; `OPENBAO_ADDR` + token; `flume.config.json` paths correct; `openbao kv get secret/flume` works manually. |
 | Indices missing | `bash install/setup/create-es-indices.sh`; template `agent-review-records.json` path in script. |

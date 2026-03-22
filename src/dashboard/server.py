@@ -22,14 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 
-# Flume Bootstrap Logic
-from es_bootstrap import ensure_es_indices, ensure_vault_credentials
-
-# Execute bootstrapping unconditionally so Gunicorn binds catch it natively
-ensure_vault_credentials()
-ensure_es_indices()
-
-# --- Legacy Env ---
+# --- Path + config.toml before ES/OpenBao bootstrap ---
 BASE = Path(__file__).resolve().parent
 _SRC_ROOT = BASE.parent
 if str(_SRC_ROOT) not in sys.path:
@@ -38,11 +31,15 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-
 from flume_secrets import apply_runtime_config, load_legacy_dotenv_into_environ  # noqa: E402
 
-# Merge .env (src then repo root, repo wins) + OpenBao KV; see flume_secrets.load_legacy_dotenv_into_environ
+# Merge TOML defaults into os.environ before ensure_vault_credentials / ensure_es_indices
 apply_runtime_config(_SRC_ROOT)
+
+from es_bootstrap import ensure_es_indices, ensure_vault_credentials  # noqa: E402
+
+ensure_vault_credentials()
+ensure_es_indices()
 
 from llm_settings import load_effective_pairs  # noqa: E402
 
@@ -53,8 +50,8 @@ HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(os.environ.get('LOOM_FRONTEND_DIST', str(Path(__file__).parent.parent / 'frontend' / 'dist')))
-WORKSPACE_ROOT = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
-WORKER_STATE = WORKSPACE_ROOT / 'worker-manager/state.json'
+WORKSPACE_ROOT = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent.parent)))
+WORKER_STATE = (WORKSPACE_ROOT / 'src' / 'worker-manager' / 'state.json') if (WORKSPACE_ROOT / 'src' / 'worker-manager').is_dir() else (WORKSPACE_ROOT / 'worker-manager' / 'state.json')
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
 
@@ -305,7 +302,7 @@ def _planner_should_use_codex_app_server() -> bool:
         import codex_app_server
 
         st = codex_app_server.status()
-        return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
+        return bool(st.get('flumeOAuthConfigured') or st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
     except Exception:
         return False
 
@@ -1688,8 +1685,8 @@ def load_snapshot():
 
 # ─── Agent process control ────────────────────────────────────────────────────
 
-WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'manager.py'
-WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'worker_handlers.py'
+WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'src' / 'worker-manager' / 'manager.py'
+WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'src' / 'worker-manager' / 'worker_handlers.py'
 WORKER_ENV_FILE = WORKSPACE_ROOT / 'memory' / 'es' / '.env.local'
 
 
@@ -1934,9 +1931,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self._url_path()
-        if p == '/api/codex-app-server/status':
-            self._json_response(200, {'status': 'offline', 'port': None})
-            return
 
         if p == '/api/snapshot':
             try:
@@ -2390,6 +2384,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+            return
+
+        # Missing bundles must not fall through to index.html (browser expects JS/CSS MIME types).
+        if p.endswith('.js') or p.endswith('.mjs') or p.endswith('.css'):
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            msg = b'static asset not found; rebuild UI (./flume install) or fix index.html hashes\n'
+            self.send_header('Content-Length', str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
             return
 
         # Fallback: serve index.html for client-side routing (/agents, /projects, etc.)

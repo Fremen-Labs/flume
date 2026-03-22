@@ -1,10 +1,36 @@
 #!/usr/bin/env bash
-# Flume CLI Gateway
+# Flume CLI Gateway — runs the Click CLI via uv (uv is bootstrapped on first use if needed).
 set -euo pipefail
 
-if ! command -v uv &> /dev/null; then
-    echo "Flume Enterprise requires 'uv'. Please install it via 'curl -LsSf https://astral.sh/uv/install.sh | sh'."
-    exit 1
-fi
+_flume_ensure_uv() {
+	if command -v uv &>/dev/null; then
+		return 0
+	fi
+	# Common install locations when ~/.local/bin is not yet on PATH
+	local _d
+	for _d in "${HOME}/.local/bin" "${HOME}/.cargo/bin"; do
+		if [[ -x "${_d}/uv" ]]; then
+			export PATH="${_d}:${PATH}"
+			return 0
+		fi
+	done
 
+	echo "Flume: installing uv (Python tool manager, one-time)…" >&2
+	if command -v curl &>/dev/null; then
+		curl -LsSf https://astral.sh/uv/install.sh | sh
+	elif command -v wget &>/dev/null; then
+		wget -qO- https://astral.sh/uv/install.sh | sh
+	else
+		echo "Flume needs curl or wget to download uv." >&2
+		exit 1
+	fi
+
+	export PATH="${HOME}/.local/bin:${PATH}"
+	if ! command -v uv &>/dev/null; then
+		echo "Flume: uv was installed but not found. Add ${HOME}/.local/bin to your PATH and retry." >&2
+		exit 1
+	fi
+}
+
+_flume_ensure_uv
 exec uv run flume "$@"

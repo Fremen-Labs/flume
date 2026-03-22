@@ -1,18 +1,24 @@
 # Secrets / local config
 .env
 .env.*
+# Provisioning-only (Elasticsearch / elastic admin; never commit)
+install/.es-bootstrap.env
+install/.elastic-admin.env
 
 # Logs
 *.log
+/logs/
 
 # Python
 __pycache__/
 *.pyc
 .pytest_cache/
+/flume.egg-info/
 
 # Node / frontend
 node_modules/
-dist/
+# Only ignore dist/ at repo root (release tarballs); src/frontend/dist is committed Vite output.
+/dist/
 .DS_Store
 
 # Optional: generated build artifacts

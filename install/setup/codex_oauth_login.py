@@ -40,6 +40,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from flume_secrets import resolve_oauth_state_path
 
 # Public client id from openai/codex codex-rs/login/src/auth/manager.rs (same as `codex login`).
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -447,6 +448,44 @@ def _exchange_authorization_code(
     return body
 
 
+def _jwt_payload(jwt_token: str) -> dict:
+    t = (jwt_token or '').strip()
+    if t.count('.') < 2:
+        return {}
+    try:
+        payload = t.split('.')[1]
+        payload += '=' * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except Exception:
+        return {}
+
+
+def _sync_codex_cli_auth(access: str, refresh: str, id_token: str, client_id: str) -> None:
+    payload = _jwt_payload(id_token or access)
+    auth_claims = payload.get('https://api.openai.com/auth') or {}
+    profile = payload.get('https://api.openai.com/profile') or {}
+    codex_home = Path.home() / '.codex'
+    codex_home.mkdir(parents=True, exist_ok=True)
+    auth_path = codex_home / 'auth.json'
+    data = {
+        'auth_mode': 'chatgpt',
+        'last_refresh': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'tokens': {
+            'access_token': access,
+            'refresh_token': refresh,
+            'id_token': id_token or access,
+            'account_id': str(auth_claims.get('chatgpt_account_id') or ''),
+            'chatgpt_account_id': str(auth_claims.get('chatgpt_account_id') or ''),
+            'chatgpt_user_id': str(auth_claims.get('chatgpt_user_id') or ''),
+            'chatgpt_plan_type': str(auth_claims.get('chatgpt_plan_type') or ''),
+            'user_id': str(auth_claims.get('user_id') or ''),
+            'email': str(profile.get('email') or ''),
+        },
+        'client_id': client_id,
+    }
+    auth_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+
+
 def _write_flume_state(
     state_path: Path,
     access: str,
@@ -491,7 +530,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     ob_enabled = False
     try:
         from flume_secrets import apply_runtime_config
-        import llm_settings
+        from dashboard import llm_settings
 
         apply_runtime_config(src_root if src_root.is_dir() else flume_root)
         ob_enabled, _pairs = llm_settings._openbao_enabled(src_root if src_root.is_dir() else flume_root)
@@ -499,7 +538,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
             updates = {
                 'LLM_PROVIDER': 'openai',
                 'LLM_API_KEY': '',
-                'OPENAI_OAUTH_STATE_FILE': str(state_path),
+                'OPENAI_OAUTH_STATE_FILE': '.agent/openai_oauth_state.json',
                 'OPENAI_OAUTH_STATE_JSON': state_json,
                 'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
             }
@@ -509,14 +548,12 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
         print(f'OpenBao sync skipped: {e}')
 
     env_path = flume_root / '.env'
-    if not env_path.is_file():
-        print(f"No {env_path} — set OPENAI_OAUTH_STATE_FILE in Settings or create .env.")
-        return
-    lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
+    existed = env_path.is_file()
+    lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines() if existed else []
     updates = {
         'LLM_PROVIDER': 'openai',
         'LLM_API_KEY': '' if ob_enabled else access,
-        'OPENAI_OAUTH_STATE_FILE': str(state_path),
+        'OPENAI_OAUTH_STATE_FILE': '.agent/openai_oauth_state.json',
         'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
     }
     seen: set[str] = set()
@@ -534,10 +571,8 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     for k, v in updates.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    env_path.write_text('\n'.join(out) + '\n', encoding='utf-8')
-    print(f"Updated {env_path}")
-
-
+    env_path.write_text("\n".join(out) + "\n", encoding='utf-8')
+    print(f"{'Updated' if existed else 'Created'} {env_path}")
 def _jwt_access_token_scopes(access_token: str) -> tuple[bool, list[str]]:
     """Decode JWT `scp` / `roles` without verifying the signature (CLI hint only)."""
     t = (access_token or "").strip()
@@ -622,7 +657,7 @@ def cmd_login(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -660,6 +695,7 @@ def cmd_login(args: argparse.Namespace) -> None:
     tokens = _exchange_authorization_code(issuer, client_id, auth_code, code_verifier)
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -673,6 +709,7 @@ def cmd_login(args: argparse.Namespace) -> None:
         expires_in,
         token_url,
         oauth_scopes_requested=_oauth_scopes_for_request() or "",
+        id_token=id_token,
     )
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
@@ -688,7 +725,7 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -759,6 +796,7 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     )
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -790,7 +828,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -900,6 +938,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     )
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -939,7 +978,7 @@ def cmd_import_codex(args: argparse.Namespace) -> None:
         client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
 
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -956,7 +995,7 @@ def cmd_import_codex(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
-    _write_flume_state(state_path, access, refresh, client_id, expires_in, token_url)
+    _write_flume_state(state_path, access, refresh, client_id, expires_in, token_url, id_token=id_token)
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
     print("Imported Codex CLI tokens into Flume OAuth state.")

@@ -61,13 +61,27 @@ def load_toml_config() -> dict[str, Any]:
             logger.warning(f"Failed parsing TOML config {config_path}: {e}")
     return data
 
-settings = FlumeSettings(**load_toml_config())
+
+def _toml_kwargs_respecting_environ() -> dict[str, Any]:
+    """Toml values only for keys not already set in the process environment."""
+    data = load_toml_config()
+    for key in list(data.keys()):
+        if str(os.environ.get(key, "")).strip():
+            del data[key]
+    return data
+
+
+settings = FlumeSettings(**_toml_kwargs_respecting_environ())
 
 def apply_runtime_config(workspace_root: Path | None = None) -> None:
     """Invoked globally by Flume daemon servers applying deterministic limits."""
     for key, value in settings.model_dump().items():
-        if value is not None and str(value).strip():
-            os.environ[key] = str(value)
+        if value is None or not str(value).strip():
+            continue
+        # Precedence: existing non-empty process env (e.g. systemd, docker -e) wins over config.toml
+        if str(os.environ.get(key, "")).strip():
+            continue
+        os.environ[key] = str(value)
 
 def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
     """Stub mapping bounding legacy calls safely inside server.py."""
@@ -121,4 +135,25 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
         return None
 
 def resolve_oauth_state_path(workspace_root: Path, state_file: str = "") -> Path:
-    return workspace_root / '.agent' / 'openai_oauth_state.json'
+    wr = workspace_root.resolve()
+    canonical = wr / '.agent' / 'openai_oauth_state.json'
+    raw = str(state_file or '').strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = wr / raw
+        if candidate.exists():
+            return candidate
+        # Compatibility for old host-absolute paths: keep basename inside the workspace.
+        basename = Path(raw).name
+        if basename:
+            local = wr / basename
+            if local.exists():
+                return local
+            agent_local = wr / '.agent' / basename
+            if agent_local.exists():
+                return agent_local
+    legacy = wr / '.openai-oauth.json'
+    if legacy.exists():
+        return legacy
+    return canonical

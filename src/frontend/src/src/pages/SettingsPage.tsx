@@ -1022,9 +1022,17 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {data?.openbaoInstalled === false && (
+                {data?.openbaoKvConfigured === false && (
                   <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
+                    OpenBao KV is not configured — set <code>OPENBAO_ADDR</code> and a token (
+                    <code>flume.config.json</code> <code>tokenFile</code> or <code>OPENBAO_TOKEN</code> in{' '}
+                    <code>.env</code>). Until then, sensitive settings fall back to <code>.env</code>.
+                  </p>
+                )}
+                {data?.openbaoKvConfigured === true && data?.openbaoInstalled === false && (
+                  <p className="text-xs text-muted-foreground">
+                    OpenBao is in use via HTTP (no CLI required in this process). Optional: install the CLI on the host
+                    for shell scripts such as <code>create-es-indices.sh</code>.
                   </p>
                 )}
               </div>
@@ -1081,7 +1089,29 @@ export default function SettingsPage() {
                   <p className="text-destructive">{String(codexAppError)}</p>
                 )}
                 {codexAppData && (
-                  <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                  <div className="space-y-3 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                    {!codexAppData.parseError && !codexAppData.tcpReachable && !codexAppData.codexAuthFilePresent && !codexAppData.flumeOAuthConfigured ? (
+                      <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 font-sans text-[12px] leading-relaxed text-emerald-800 dark:text-emerald-300">
+                        <strong>Optional setup:</strong> the dashboard is working normally. Codex app-server just has not been enabled on this machine yet.
+                        {codexAppData.flumeWillUseNpxFallback ? (
+                          <>
+                            {' '}
+                            Flume can start it with <code className="text-[10px]">npx</code> after you sign in — use{' '}
+                            <code className="text-[10px]">./flume codex-oauth login-browser</code> (or{' '}
+                            <code className="text-[10px]">./flume setup</code>
+                            ), not <code className="text-[10px]">codex login</code>, unless the global Codex CLI is on
+                            your <code className="text-[10px]">PATH</code>.
+                          </>
+                        ) : (
+                          <>
+                            {' '}
+                            Install Node (for <code className="text-[10px]">npx</code>) or the Codex CLI, then sign in via{' '}
+                            <code className="text-[10px]">./flume codex-oauth login-browser</code> or{' '}
+                            <code className="text-[10px]">./flume setup</code>.
+                          </>
+                        )}
+                      </div>
+                    ) : null}
                     <div>
                       <span className="text-muted-foreground">{codexAppData.envFlumeListen}</span>={codexAppData.listenUrl}
                     </div>
@@ -1101,15 +1131,35 @@ export default function SettingsPage() {
                     </div>
                     {codexAppData.flumeWillUseNpxFallback ? (
                       <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
-                        <strong>./flume codex-app-server</strong> will run{' '}
-                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
-                        <code className="text-[10px]">codex</code> required).
+                        <strong>Ready when you are:</strong> run <strong>./flume codex-app-server</strong> (or{' '}
+                        <code className="text-[10px]">./flume codex-app-server start</code>) to launch{' '}
+                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> — no global{' '}
+                        <code className="text-[10px]">codex</code> required.
                       </p>
                     ) : null}
+                    <div>
+                      <span className="font-medium text-foreground">Flume OAuth state:</span>{' '}
+                      {codexAppData.flumeOAuthConfigured ? 'configured' : (codexAppData.flumeOAuthStateFilePresent ? 'present but not wired' : 'missing')}
+                    </div>
                     <div>
                       <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
                       {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
                     </div>
+                    {!codexAppData.codexAuthFilePresent ? (
+                      <p className="font-sans text-[11px] text-muted-foreground">
+                        {codexAppData.flumeOAuthConfigured ? (
+                          <>
+                            Flume OAuth is configured for the dashboard/planner path. The Codex app-server still needs Codex-compatible auth at <code className="text-[10px]">~/.codex/auth.json</code>. Use <code className="text-[10px]">./flume codex-oauth import-codex</code> or <code className="text-[10px]">codex login</code> if you want the app-server itself.
+                          </>
+                        ) : (
+                          <>
+                            No Codex sign-in found yet. Use <code className="text-[10px]">./flume codex-oauth login-browser</code>{' '}
+                            or <code className="text-[10px]">./flume setup</code> (or <code className="text-[10px]">codex login</code>{' '}
+                            if the official CLI is installed). Then start the app-server as above.
+                          </>
+                        )}
+                      </p>
+                    ) : null}
                     {codexAppData.parseError ? (
                       <p className="text-amber-700 dark:text-amber-400">{codexAppData.parseError}</p>
                     ) : (
@@ -1118,7 +1168,9 @@ export default function SettingsPage() {
                         {codexAppData.tcpReachable ? (
                           <span className="text-green-600 dark:text-green-400">reachable</span>
                         ) : (
-                          <span className="text-amber-700 dark:text-amber-400">not listening (start ./flume codex-app-server)</span>
+                          <span className="text-amber-700 dark:text-amber-400">
+                            not listening yet (start with ./flume codex-app-server or ./flume codex-app-server start)
+                          </span>
                         )}
                       </div>
                     )}
@@ -1555,9 +1607,17 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {data?.openbaoInstalled === false && (
+                {data?.openbaoKvConfigured === false && (
                   <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
+                    OpenBao KV is not configured — set <code>OPENBAO_ADDR</code> and a token (
+                    <code>flume.config.json</code> <code>tokenFile</code> or <code>OPENBAO_TOKEN</code> in{' '}
+                    <code>.env</code>). Until then, sensitive settings fall back to <code>.env</code>.
+                  </p>
+                )}
+                {data?.openbaoKvConfigured === true && data?.openbaoInstalled === false && (
+                  <p className="text-xs text-muted-foreground">
+                    OpenBao is in use via HTTP (no CLI required in this process). Optional: install the CLI on the host
+                    for shell scripts such as <code>create-es-indices.sh</code>.
                   </p>
                 )}
               </div>
