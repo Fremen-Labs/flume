@@ -1685,8 +1685,8 @@ def load_snapshot():
 
 # ─── Agent process control ────────────────────────────────────────────────────
 
-WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'manager.py'
-WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'worker_handlers.py'
+WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'src' / 'worker-manager' / 'manager.py'
+WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'src' / 'worker-manager' / 'worker_handlers.py'
 WORKER_ENV_FILE = WORKSPACE_ROOT / 'memory' / 'es' / '.env.local'
 
 
