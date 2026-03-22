@@ -13,7 +13,10 @@ REQUIRED_INDICES = [
     "agent-task-records",
     "agent-security-audits",
     "agent-checkpoints",
-    "flume-elastro-graph"
+    "flume-elastro-graph",
+    "agent_semantic_memory",
+    "flow_tools",
+    "agent_knowledge"
 ]
 
 def ensure_es_indices():
