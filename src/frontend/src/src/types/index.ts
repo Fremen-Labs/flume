@@ -178,6 +178,8 @@ export interface LlmSettingsResponse {
   oauthStatus: LlmOAuthStatus;
   restartRequired: boolean;
   openbaoInstalled?: boolean;
+  /** True when addr + token + CLI allow KV read/write (flume.config.json tokenFile counts). */
+  openbaoKvConfigured?: boolean;
 }
 
 export type LlmSettingsCatalogItem = LlmProviderCatalogEntry;

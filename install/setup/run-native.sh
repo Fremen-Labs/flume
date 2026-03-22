@@ -16,7 +16,8 @@ export OPENBAO_ADDR="${OPENBAO_ADDR:-http://127.0.0.1:8200}"
 export ES_VERIFY_TLS="${ES_VERIFY_TLS:-false}"
 export DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
 export DASHBOARD_PORT="${DASHBOARD_PORT:-8765}"
-export PATH="${HOME}/.local/bin:${PATH}"
+# sudo-installed OpenBao CLI lives in /usr/local/bin; minimal PATHs (systemd/nohup) omit it.
+export PATH="/usr/local/bin:/usr/local/sbin:${HOME}/.local/bin:${PATH}"
 
 if ! command -v uv >/dev/null 2>&1; then
 	echo "uv not found. Run ./flume install first (it bootstraps uv) or add ~/.local/bin to PATH."

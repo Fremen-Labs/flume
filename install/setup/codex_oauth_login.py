@@ -491,7 +491,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     ob_enabled = False
     try:
         from flume_secrets import apply_runtime_config
-        import llm_settings
+        from dashboard import llm_settings
 
         apply_runtime_config(src_root if src_root.is_dir() else flume_root)
         ob_enabled, _pairs = llm_settings._openbao_enabled(src_root if src_root.is_dir() else flume_root)

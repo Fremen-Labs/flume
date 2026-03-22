@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import ssl
 import time
 import shutil
 import subprocess
@@ -238,8 +239,62 @@ def load_env_pairs(workspace_root: Path) -> dict[str, str]:
     return out
 
 
-def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
-    """Use process env + token file so Settings works after server hydrated from OpenBao."""
+def resolve_openbao_cli() -> str | None:
+    """
+    Path to the OpenBao/Vault-compatible CLI. systemd/Docker/no-login shells often omit
+    /usr/local/bin from PATH even when install-openbao.sh placed the binary there.
+    """
+    for name in ("openbao", "bao"):
+        p = shutil.which(name)
+        if p:
+            return p
+    for candidate in (
+        Path("/usr/local/bin/openbao"),
+        Path("/usr/local/bin/bao"),
+    ):
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def _apply_flume_config_openbao(workspace_root: Path, pairs: dict[str, str]) -> None:
+    """Merge repo-root flume.config.json openbao block (addr, mount, path, tokenFile)."""
+    cfg = workspace_root.resolve() / "flume.config.json"
+    if not cfg.is_file():
+        return
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return
+    ob = data.get("openbao") or {}
+    addr = str(ob.get("addr", "") or "").strip()
+    if addr:
+        pairs.setdefault("OPENBAO_ADDR", addr)
+    mount = str(ob.get("mount", "") or "").strip().strip("/")
+    if mount:
+        pairs.setdefault("OPENBAO_MOUNT", mount)
+    path = str(ob.get("path", "") or "").strip().strip("/")
+    if path:
+        pairs.setdefault("OPENBAO_PATH", path)
+    tf = str(ob.get("tokenFile", "") or "").strip()
+    if tf:
+        pairs.setdefault("OPENBAO_TOKEN_FILE", tf)
+        if not str(pairs.get("OPENBAO_TOKEN", "") or "").strip():
+            p = Path(tf).expanduser()
+            if p.is_file():
+                try:
+                    pairs["OPENBAO_TOKEN"] = p.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    pass
+
+
+def _merge_openbao_connection_from_env(workspace_root: Path) -> dict[str, str]:
+    """.env + flume.config.json + process env + token file (token file path from config or .env)."""
+    pairs = load_env_pairs(workspace_root)
+    _apply_flume_config_openbao(workspace_root, pairs)
     for k in ("OPENBAO_ADDR", "OPENBAO_TOKEN", "OPENBAO_MOUNT", "OPENBAO_PATH", "OPENBAO_TOKEN_FILE"):
         v = os.environ.get(k, "").strip()
         if v:
@@ -256,9 +311,10 @@ def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
 
 
 def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
-    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
-    if not shutil.which("openbao"):
-        return False, pairs
+    """
+    True when OpenBao addr + token are set (CLI optional — dashboard/workers use HTTP KV API as fallback).
+    """
+    pairs = _merge_openbao_connection_from_env(workspace_root)
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
     token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
     if not addr or not token:
@@ -267,7 +323,108 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
 
 
 def is_openbao_installed() -> bool:
-    return bool(shutil.which("openbao"))
+    """True if the openbao/bao CLI is visible (PATH or /usr/local/bin). KV still works without it via HTTP."""
+    return resolve_openbao_cli() is not None
+
+
+def _openbao_http_url(pairs: dict[str, str]) -> str:
+    addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip().rstrip("/")
+    mount = str(pairs.get("OPENBAO_MOUNT", "secret") or "secret").strip().strip("/")
+    path = str(pairs.get("OPENBAO_PATH", "flume") or "flume").strip().strip("/")
+    return f"{addr}/v1/{mount}/data/{path}"
+
+
+def _openbao_ssl_context_for_url(url: str) -> ssl.SSLContext | None:
+    """Lax TLS for local dev HTTPS (OpenBao/Vault); production should use proper certs or http://."""
+    try:
+        u = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    if u.scheme != "https":
+        return None
+    if os.environ.get("OPENBAO_SKIP_TLS_VERIFY", "").lower() in ("1", "true", "yes", "on"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    host = (u.hostname or "").lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
+
+
+def _openbao_kv_get_http(pairs: dict[str, str]) -> dict[str, str]:
+    token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
+    if not token:
+        return {}
+    url = _openbao_http_url(pairs)
+    req = urllib.request.Request(url, headers={"X-Vault-Token": token})
+    ctx = _openbao_ssl_context_for_url(url)
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+            payload = json.loads(r.read().decode("utf-8", errors="replace"))
+        data = payload.get("data", {}).get("data", {})
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items() if v is not None}
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        return {}
+    except Exception:
+        return {}
+
+
+def _openbao_kv_put_http(pairs: dict[str, str], merged: dict[str, str]) -> bool:
+    token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
+    if not token:
+        return False
+    url = _openbao_http_url(pairs)
+    str_data = {str(k): "" if v is None else str(v) for k, v in merged.items()}
+    body = json.dumps({"data": str_data}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "X-Vault-Token": token,
+            "Content-Type": "application/json",
+        },
+    )
+    ctx = _openbao_ssl_context_for_url(url)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+            return 200 <= (r.status or 0) < 300
+    except urllib.error.HTTPError as e:
+        return 200 <= e.code < 300
+    except Exception:
+        return False
+
+
+def _openbao_kv_read_raw(pairs: dict[str, str]) -> dict[str, str]:
+    """Prefer CLI; fall back to HTTP (Docker dashboard has no host openbao binary)."""
+    cli = resolve_openbao_cli()
+    if cli:
+        try:
+            secret_ref = _openbao_secret_ref(pairs)
+            proc = subprocess.run(
+                [cli, "kv", "get", "-format=json", secret_ref],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=_openbao_env(pairs),
+            )
+            if proc.returncode == 0:
+                payload = json.loads(proc.stdout or "{}")
+                data = payload.get("data", {}).get("data", {})
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items() if v is not None}
+        except Exception:
+            pass
+    return _openbao_kv_get_http(pairs)
 
 
 def _openbao_secret_ref(pairs: dict[str, str]) -> str:
@@ -292,22 +449,7 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
     enabled, pairs = _openbao_enabled(workspace_root)
     if not enabled:
         return {}
-    try:
-        secret_ref = _openbao_secret_ref(pairs)
-        proc = subprocess.run(
-            ["openbao", "kv", "get", "-format=json", secret_ref],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_openbao_env(pairs),
-        )
-        if proc.returncode != 0:
-            return {}
-        payload = json.loads(proc.stdout or "{}")
-        data = payload.get("data", {}).get("data", {})
-        return {str(k): str(v) for k, v in data.items() if v is not None}
-    except Exception:
-        return {}
+    return _openbao_kv_read_raw(pairs)
 
 
 def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
@@ -328,18 +470,25 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
             ):
                 continue
             merged[k] = v
-        secret_ref = _openbao_secret_ref(pairs)
-        cmd = ["openbao", "kv", "put", secret_ref]
-        for k, v in merged.items():
-            cmd.append(f"{k}={v}")
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=_openbao_env(pairs),
-        )
-        return proc.returncode == 0
+        cli = resolve_openbao_cli()
+        if cli:
+            try:
+                secret_ref = _openbao_secret_ref(pairs)
+                cmd = [cli, "kv", "put", secret_ref]
+                for k, v in merged.items():
+                    cmd.append(f"{k}={v}")
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    env=_openbao_env(pairs),
+                )
+                if proc.returncode == 0:
+                    return True
+            except Exception:
+                pass
+        return _openbao_kv_put_http(pairs, merged)
     except Exception:
         return False
 
@@ -370,7 +519,7 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     LLM-related keys are taken from .env + OpenBao only (not from inherited process env),
     so worker manager/handlers match Settings even when the parent shell has old exports.
     """
-    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
+    pairs = _merge_openbao_connection_from_env(workspace_root)
     try:
         from flume_secrets import FLUME_ENV_KEYS
 
@@ -756,6 +905,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             pass
 
     oauth_status = get_oauth_status(workspace_root) if provider == "openai" else {}
+    ob_kv_ok, _ = _openbao_enabled(workspace_root)
 
     # Any saved API key (Gemini, Anthropic, OpenAI sk-, etc.) shows as masked with last-4 hint.
     api_key_masked = ""
@@ -804,4 +954,5 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
         "oauthStatus": oauth_status,
         "restartRequired": True,
         "openbaoInstalled": is_openbao_installed(),
+        "openbaoKvConfigured": ob_kv_ok,
     }

@@ -1022,9 +1022,17 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {data?.openbaoInstalled === false && (
+                {data?.openbaoKvConfigured === false && (
                   <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
+                    OpenBao KV is not configured — set <code>OPENBAO_ADDR</code> and a token (
+                    <code>flume.config.json</code> <code>tokenFile</code> or <code>OPENBAO_TOKEN</code> in{' '}
+                    <code>.env</code>). Until then, sensitive settings fall back to <code>.env</code>.
+                  </p>
+                )}
+                {data?.openbaoKvConfigured === true && data?.openbaoInstalled === false && (
+                  <p className="text-xs text-muted-foreground">
+                    OpenBao is in use via HTTP (no CLI required in this process). Optional: install the CLI on the host
+                    for shell scripts such as <code>create-es-indices.sh</code>.
                   </p>
                 )}
               </div>
@@ -1555,9 +1563,17 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {data?.openbaoInstalled === false && (
+                {data?.openbaoKvConfigured === false && (
                   <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
+                    OpenBao KV is not configured — set <code>OPENBAO_ADDR</code> and a token (
+                    <code>flume.config.json</code> <code>tokenFile</code> or <code>OPENBAO_TOKEN</code> in{' '}
+                    <code>.env</code>). Until then, sensitive settings fall back to <code>.env</code>.
+                  </p>
+                )}
+                {data?.openbaoKvConfigured === true && data?.openbaoInstalled === false && (
+                  <p className="text-xs text-muted-foreground">
+                    OpenBao is in use via HTTP (no CLI required in this process). Optional: install the CLI on the host
+                    for shell scripts such as <code>create-es-indices.sh</code>.
                   </p>
                 )}
               </div>

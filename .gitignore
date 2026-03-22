@@ -1,6 +1,9 @@
 # Secrets / local config
 .env
 .env.*
+# Provisioning-only (Elasticsearch / elastic admin; never commit)
+install/.es-bootstrap.env
+install/.elastic-admin.env
 
 # Logs
 *.log
