@@ -1,6 +1,7 @@
 """Interactive prompts for `./flume install` (TTY only)."""
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,19 @@ NC = "\033[0m"
 
 def is_interactive_tty() -> bool:
     return bool(sys.stdin.isatty() and sys.stdout.isatty())
+
+
+def platform_family() -> str:
+    sysname = platform.system().lower()
+    if sysname == 'darwin':
+        return 'macos'
+    if sysname == 'linux':
+        return 'linux'
+    return sysname or 'unknown'
+
+
+def native_linux_helpers_supported() -> bool:
+    return platform_family() == 'linux'
 
 
 def run_credential_wizard(root: Path) -> CredentialMode:
@@ -114,8 +128,8 @@ def _run_sudo_setup_script(root: Path, *relative_parts: str) -> int:
 
 def ensure_platform_dependencies(root: Path, credential_mode: CredentialMode) -> None:
     """
-    For interactive installs: offer to run root setup scripts so OpenBao + Elasticsearch
-    match what new users need (CLI on PATH, local ES with bootstrap credentials).
+    For interactive installs: offer native Linux helper scripts when supported; otherwise
+    steer users toward the portable Docker / existing-service path.
     """
     if not is_interactive_tty():
         return

@@ -33,28 +33,28 @@ if command -v python3 &>/dev/null; then
         fail "python3 ${PY_VER} — version 3.9 or higher required"
     fi
 else
-    fail "python3 — not found (install: sudo dnf install python3  OR  sudo apt install python3)"
+    fail "python3 — not found (install via your platform package manager, Homebrew, or python.org)"
 fi
 
 # git
 if command -v git &>/dev/null; then
     ok "git $(git --version | awk '{print $3}')"
 else
-    fail "git — not found (install: sudo dnf install git  OR  sudo apt install git)"
+    fail "git — not found (install via your platform package manager or Homebrew)"
 fi
 
 # pgrep (procps)
 if command -v pgrep &>/dev/null; then
     ok "pgrep (procps)"
 else
-    fail "pgrep — not found (install: sudo dnf install procps-ng  OR  sudo apt install procps)"
+    fail "pgrep — not found (install procps/procps-ng on Linux; on macOS it should already exist)"
 fi
 
 # curl (needed by ES setup scripts)
 if command -v curl &>/dev/null; then
     ok "curl $(curl --version | head -1 | awk '{print $2}')"
 else
-    fail "curl — not found (install: sudo dnf install curl  OR  sudo apt install curl)"
+    fail "curl — not found (install via your platform package manager or Homebrew)"
 fi
 
 echo ""
@@ -91,7 +91,7 @@ if curl -sk "https://localhost:9200/_cluster/health" -u "elastic:*" &>/dev/null 
     ok "Elasticsearch — appears to be running at https://localhost:9200"
 else
     warn "Elasticsearch — not detected at https://localhost:9200"
-    echo "         Run setup/install-elasticsearch.sh to install it."
+    echo "         Use ./flume start (Docker) or configure an existing cluster. Native installer helpers are Linux-only."
 fi
 
 echo ""

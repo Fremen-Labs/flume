@@ -19,6 +19,12 @@
 
 set -euo pipefail
 
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+if [ "$UNAME_S" != "Linux" ]; then
+    echo "This helper currently supports Linux only. On macOS, use Docker or install/configure the service manually." >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BOOTSTRAP_ENV_FILE="${WORKSPACE_ROOT}/.es-bootstrap.env"
