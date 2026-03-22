@@ -84,7 +84,7 @@ You can manage all lifecycle and daemon operations cleanly through the `./flume`
 | `./flume install` | Runs the automated installer for dependencies, virtual environments, and the Elasticsearch bootstrap. |
 | `./flume onboard` | Interactive configuration wizard for your `.env` (LLM Provider, Git Identity, Execution Host). |
 | `./flume native` | Starts dashboard + worker-manager against **host** Elasticsearch and OpenBao (skips Docker Compose). |
-| `./flume start` | Starts the full stack via **Docker Compose** (bundled Elasticsearch, OpenBao, dashboard, workers). |
+| `./flume start` | Starts the full stack via **Docker Compose** (bundled Elasticsearch on host port **9201** by default, OpenBao on **8200**, dashboard, workers). |
 | `./flume update` | Pulls the latest `main` branch, rebuilds UI artifacts, and gracefully restarts processes. | 
 | `./flume status` | Display the explicit status of asynchronous background services. |
 | `./flume logs` | Tail system journal logs mapping dashboard and agent worker pools. |

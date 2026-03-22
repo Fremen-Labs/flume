@@ -44,22 +44,30 @@ def native_cmd():
 
 @cli.command()
 def start():
-    """Start the entire Flume ecosystem natively via Docker Compose (Netflix Architecture)"""
-    print_banner()
     click.echo(f"{CYAN}▶ Booting global Docker infrastructure...{NC}")
     try:
         subprocess.run(["docker", "compose", "up", "-d"], check=True)
+        es_host = os.environ.get("FLUME_ES_HOST_PORT", "9201")
         click.echo(f"{GREEN}✔ Ecosystem is active and scaled natively across all nodes.{NC}")
+        click.echo(
+            f"{CYAN}From the host, bundled Elasticsearch is at http://127.0.0.1:{es_host}/ "
+            f"(containers still use http://elasticsearch:9200).{NC}"
+        )
     except FileNotFoundError:
-        # Fallback if docker isn't installed
         click.echo(f"{CYAN}▶ Docker command missing. Initializing Native Process Swarms...{NC}")
         os.environ["FLUME_AUTO_START_WORKERS"] = "1"
         subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])
         subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"])
         click.echo(f"{GREEN}✔ Native Dashboard and OS Swarm spawned autonomously.{NC}")
     except subprocess.CalledProcessError:
-        # Fallback if docker is installed but daemon is offline
-        click.echo(f"{CYAN}▶ Docker daemon offline. Booting Native OS Swarm Matrix...{NC}")
+        click.echo(f"{CYAN}▶ Docker unavailable or compose failed. Booting Native OS Swarm Matrix...{NC}")
+        es_port = os.environ.get("FLUME_ES_HOST_PORT", "9201")
+        bao_port = os.environ.get("FLUME_OPENBAO_HOST_PORT", "8200")
+        click.echo(
+            f"{YELLOW}If host ports are in use, try {GREEN}./flume native{NC} or set "
+            f"{GREEN}FLUME_ES_HOST_PORT{NC}/{GREEN}FLUME_OPENBAO_HOST_PORT{NC} "
+            f"(ES→{es_port}, OpenBao→{bao_port}).{NC}"
+        )
         os.environ["FLUME_AUTO_START_WORKERS"] = "1"
         subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])
         subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"])

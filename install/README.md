@@ -118,6 +118,12 @@ Logs: **`logs/dashboard.log`** and **`logs/worker-manager.log`** under the repo 
 
 **Environment precedence:** Non-empty variables already set in the process environment take precedence over **`config.toml`** for the same keys, so you can point a single clone at host services without editing TOML.
 
+### Docker Compose (`./flume start`)
+
+Compose maps the **bundled** Elasticsearch to host port **`9201`** by default (`FLUME_ES_HOST_PORT`, default `9201`) so it does not fight with a **system Elasticsearch** on **9200**. Containers still talk to **`http://elasticsearch:9200`** on the Docker network. OpenBao uses host **`8200`** by default (`FLUME_OPENBAO_HOST_PORT` to override). If **`./flume start` still fails** with “address already in use”, pick free ports, for example:
+
+`FLUME_ES_HOST_PORT=9202 FLUME_OPENBAO_HOST_PORT=8201 ./flume start`
+
 ---
 
 ## Repository layouts
