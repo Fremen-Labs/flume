@@ -48,11 +48,13 @@ def start():
     try:
         subprocess.run(["docker", "compose", "up", "-d"], check=True)
         es_host = os.environ.get("FLUME_ES_HOST_PORT", "9201")
+        dash_host = os.environ.get("FLUME_DASHBOARD_HOST_PORT", "8765")
         click.echo(f"{GREEN}✔ Ecosystem is active and scaled natively across all nodes.{NC}")
         click.echo(
             f"{CYAN}From the host, bundled Elasticsearch is at http://127.0.0.1:{es_host}/ "
             f"(containers still use http://elasticsearch:9200).{NC}"
         )
+        click.echo(f"{CYAN}Dashboard (host): http://127.0.0.1:{dash_host}/{NC}")
     except FileNotFoundError:
         click.echo(f"{CYAN}▶ Docker command missing. Initializing Native Process Swarms...{NC}")
         os.environ["FLUME_AUTO_START_WORKERS"] = "1"
@@ -63,10 +65,12 @@ def start():
         click.echo(f"{CYAN}▶ Docker unavailable or compose failed. Booting Native OS Swarm Matrix...{NC}")
         es_port = os.environ.get("FLUME_ES_HOST_PORT", "9201")
         bao_port = os.environ.get("FLUME_OPENBAO_HOST_PORT", "8200")
+        dash_port = os.environ.get("FLUME_DASHBOARD_HOST_PORT", "8765")
         click.echo(
             f"{YELLOW}If host ports are in use, try {GREEN}./flume native{NC} or set "
-            f"{GREEN}FLUME_ES_HOST_PORT{NC}/{GREEN}FLUME_OPENBAO_HOST_PORT{NC} "
-            f"(ES→{es_port}, OpenBao→{bao_port}).{NC}"
+            f"{GREEN}FLUME_ES_HOST_PORT{NC}/{GREEN}FLUME_OPENBAO_HOST_PORT{NC}/"
+            f"{GREEN}FLUME_DASHBOARD_HOST_PORT{NC} "
+            f"(ES→{es_port}, OpenBao→{bao_port}, dashboard→{dash_port}).{NC}"
         )
         os.environ["FLUME_AUTO_START_WORKERS"] = "1"
         subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])

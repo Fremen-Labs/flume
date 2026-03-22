@@ -71,8 +71,9 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
+    # Override with FLUME_DASHBOARD_HOST_PORT if 8765 is already taken (e.g. ./flume native).
     ports:
-      - "${DASHBOARD_PORT:-8765}:8765"
+      - "${FLUME_DASHBOARD_HOST_PORT:-8765}:8765"
     environment:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src

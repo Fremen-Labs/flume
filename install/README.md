@@ -120,9 +120,9 @@ Logs: **`logs/dashboard.log`** and **`logs/worker-manager.log`** under the repo 
 
 ### Docker Compose (`./flume start`)
 
-Compose maps the **bundled** Elasticsearch to host port **`9201`** by default (`FLUME_ES_HOST_PORT`, default `9201`) so it does not fight with a **system Elasticsearch** on **9200**. Containers still talk to **`http://elasticsearch:9200`** on the Docker network. OpenBao uses host **`8200`** by default (`FLUME_OPENBAO_HOST_PORT` to override). If **`./flume start` still fails** with “address already in use”, pick free ports, for example:
+Compose maps the **bundled** Elasticsearch to host port **`9201`** by default (`FLUME_ES_HOST_PORT`, default `9201`) so it does not fight with a **system Elasticsearch** on **9200**. Containers still talk to **`http://elasticsearch:9200`** on the Docker network. OpenBao uses host **`8200`** by default (`FLUME_OPENBAO_HOST_PORT` to override). The dashboard uses host **`8765`** by default (`FLUME_DASHBOARD_HOST_PORT` to override — use this if **`./flume native`** or another app already uses **8765**). If **`./flume start` still fails** with “address already in use”, pick free ports, for example:
 
-`FLUME_ES_HOST_PORT=9202 FLUME_OPENBAO_HOST_PORT=8201 ./flume start`
+`FLUME_ES_HOST_PORT=9202 FLUME_OPENBAO_HOST_PORT=8201 FLUME_DASHBOARD_HOST_PORT=8766 ./flume start`
 
 ---
 
