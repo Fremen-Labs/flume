@@ -60,8 +60,10 @@ def start():
     if not provider:
         click.echo(f"{CYAN}▶ No local LLM detected! Halting for human intervention.{NC}")
         key = click.prompt("Enter OpenAI/Anthropic API Key to stash in OpenBao Vault", hide_input=True)
-        # Mocking Vault ingestion
-        click.echo(f"{GREEN}✔ Key stashed securely in OpenBao!{NC}")
+        with open('.env', 'a') as f:
+            f.write(f"\\nOPENAI_API_KEY={key}\\n")
+        os.environ['OPENAI_API_KEY'] = key
+        click.echo(f"{GREEN}✔ Key delegated to Docker bootstrap for OpenBao ingestion!{NC}")
         provider = "openai"
         base_url = "https://api.openai.com/v1"
     else:

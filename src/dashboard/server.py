@@ -30,6 +30,32 @@ class TaskClaimRequest(BaseModel):
 async def health_check():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
+@app.get("/api/vault/status")
+def vault_status():
+    import urllib.request
+    import urllib.error
+    openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+    vault_token = os.environ.get('VAULT_TOKEN', 'flume-dev-token')
+    try:
+        req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            health = json.loads(resp.read().decode())
+        
+        req2 = urllib.request.Request(f"{openbao_url}/v1/secret/data/flume/keys")
+        req2.add_header('X-Vault-Token', vault_token)
+        try:
+            with urllib.request.urlopen(req2, timeout=2) as resp2:
+                data = json.loads(resp2.read().decode())
+                keys = list(data.get('data', {}).get('data', {}).keys())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                keys = []
+            else:
+                raise
+        return {"status": "connected", "health": health, "keys_present": keys}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.post("/api/tasks/claim")
 async def claim_task(req: TaskClaimRequest):
     """
