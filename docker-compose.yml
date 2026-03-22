@@ -36,6 +36,26 @@ services:
       timeout: 5s
       retries: 5
 
+  bootstrap:
+    image: hashicorp/vault:1.15
+    container_name: flume-bootstrap
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      - VAULT_ADDR=http://openbao:8200
+      - VAULT_TOKEN=flume-dev-token
+    entrypoint: >
+      /bin/sh -c "
+        if vault kv get secret/flume/keys > /dev/null 2>&1; then
+          echo 'Idempotent Check Passed: Secrets already initialized.';
+        else
+          echo 'Cold Boot Detected: Bootstrapping new Flume secrets...';
+          vault secrets enable -path=secret kv-v2 || true;
+          vault kv put secret/flume/keys OPENAI_API_KEY=sk-mock FLUME_SYNC_TOKEN=mock-token;
+        fi
+      "
+
   dashboard:
     build:
       context: .
@@ -46,15 +66,19 @@ services:
         condition: service_healthy
       openbao:
         condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     volumes:
       - .:/app
     ports:
-      - "8765:8765"
+      - "${DASHBOARD_PORT:-8765}:8765"
     environment:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
-      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
+      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
     command: ["uv", "run", "python", "src/dashboard/server.py"]
 
   worker:
@@ -66,6 +90,8 @@ services:
         condition: service_healthy
       openbao:
         condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     volumes:
       - .:/app
       # Mount external worktrees or host directories organically for Netflix scale!
@@ -74,6 +100,8 @@ services:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
+      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
     command: ["uv", "run", "python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated

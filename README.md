@@ -96,8 +96,17 @@ Flume utilizes an asynchronous, multi-agent topology driven by Python multiproce
 
 ```bash
 cd ~/flume
+cp .env.example .env
 ./flume install
 ./flume start
+```
+
+### Docker Native Path (Containers)
+For Netflix-scale orchestration completely isolated within Docker, the entire cluster maps autonomously via standard compose directives relying exclusively on the provided environment templates:
+```bash
+cd ~/flume
+cp .env.example .env
+docker-compose up -d
 ```
 
 The `./flume install` command autonomously bypasses systemd bloat and validates Node bindings mapping directly onto isolated Python memory execution routes automatically finding Elastic and Vault dependencies perfectly.
