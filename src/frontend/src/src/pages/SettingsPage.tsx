@@ -1089,7 +1089,17 @@ export default function SettingsPage() {
                   <p className="text-destructive">{String(codexAppError)}</p>
                 )}
                 {codexAppData && (
-                  <div className="space-y-2 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                  <div className="space-y-3 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
+                    {!codexAppData.parseError && !codexAppData.tcpReachable && !codexAppData.codexAuthFilePresent ? (
+                      <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 font-sans text-[12px] leading-relaxed text-emerald-800 dark:text-emerald-300">
+                        <strong>Optional setup:</strong> the dashboard is working normally. Codex app-server just has not been enabled on this machine yet.
+                        {codexAppData.flumeWillUseNpxFallback ? (
+                          <> Flume can launch it later with <code className="text-[10px]">npx</code> once you sign in with <code className="text-[10px]">codex login</code>.</>
+                        ) : (
+                          <> Install Codex or Node later, then sign in with <code className="text-[10px]">codex login</code>.</>
+                        )}
+                      </div>
+                    ) : null}
                     <div>
                       <span className="text-muted-foreground">{codexAppData.envFlumeListen}</span>={codexAppData.listenUrl}
                     </div>
@@ -1109,7 +1119,7 @@ export default function SettingsPage() {
                     </div>
                     {codexAppData.flumeWillUseNpxFallback ? (
                       <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
-                        <strong>./flume codex-app-server</strong> will run{' '}
+                        <strong>Ready when you are:</strong> <strong>./flume codex-app-server</strong> will run{' '}
                         <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
                         <code className="text-[10px]">codex</code> required).
                       </p>
@@ -1118,6 +1128,11 @@ export default function SettingsPage() {
                       <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
                       {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
                     </div>
+                    {!codexAppData.codexAuthFilePresent ? (
+                      <p className="font-sans text-[11px] text-muted-foreground">
+                        No Codex sign-in found yet. Run <code className="text-[10px]">codex login</code> or complete <code className="text-[10px]">./flume setup</code> later if you want ChatGPT/Codex OAuth for coding and review.
+                      </p>
+                    ) : null}
                     {codexAppData.parseError ? (
                       <p className="text-amber-700 dark:text-amber-400">{codexAppData.parseError}</p>
                     ) : (
@@ -1126,7 +1141,7 @@ export default function SettingsPage() {
                         {codexAppData.tcpReachable ? (
                           <span className="text-green-600 dark:text-green-400">reachable</span>
                         ) : (
-                          <span className="text-amber-700 dark:text-amber-400">not listening (start ./flume codex-app-server)</span>
+                          <span className="text-amber-700 dark:text-amber-400">not listening yet (start later with ./flume codex-app-server)</span>
                         )}
                       </div>
                     )}
