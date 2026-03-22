@@ -135,4 +135,25 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
         return None
 
 def resolve_oauth_state_path(workspace_root: Path, state_file: str = "") -> Path:
-    return workspace_root / '.agent' / 'openai_oauth_state.json'
+    wr = workspace_root.resolve()
+    canonical = wr / '.agent' / 'openai_oauth_state.json'
+    raw = str(state_file or '').strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = wr / raw
+        if candidate.exists():
+            return candidate
+        # Compatibility for old host-absolute paths: keep basename inside the workspace.
+        basename = Path(raw).name
+        if basename:
+            local = wr / basename
+            if local.exists():
+                return local
+            agent_local = wr / '.agent' / basename
+            if agent_local.exists():
+                return agent_local
+    legacy = wr / '.openai-oauth.json'
+    if legacy.exists():
+        return legacy
+    return canonical

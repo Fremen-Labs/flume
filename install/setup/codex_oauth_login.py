@@ -499,7 +499,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
             updates = {
                 'LLM_PROVIDER': 'openai',
                 'LLM_API_KEY': '',
-                'OPENAI_OAUTH_STATE_FILE': str(state_path),
+                'OPENAI_OAUTH_STATE_FILE': '.agent/openai_oauth_state.json',
                 'OPENAI_OAUTH_STATE_JSON': state_json,
                 'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
             }
@@ -514,7 +514,7 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     updates = {
         'LLM_PROVIDER': 'openai',
         'LLM_API_KEY': '' if ob_enabled else access,
-        'OPENAI_OAUTH_STATE_FILE': str(state_path),
+        'OPENAI_OAUTH_STATE_FILE': '.agent/openai_oauth_state.json',
         'OPENAI_OAUTH_TOKEN_URL': str(state.get('token_url') or token_url),
     }
     seen: set[str] = set()
@@ -618,7 +618,7 @@ def cmd_login(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -684,7 +684,7 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -786,7 +786,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     issuer = (args.issuer or DEFAULT_ISSUER).rstrip("/")
     client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
@@ -935,7 +935,7 @@ def cmd_import_codex(args: argparse.Namespace) -> None:
         client_id = (os.environ.get("OPENAI_OAUTH_CLIENT_ID") or "").strip() or DEFAULT_CLIENT_ID
 
     flume_root = _detect_flume_root(Path(args.flume_root) if args.flume_root else None)
-    state_path = Path(args.state_file) if args.state_file else (flume_root / ".openai-oauth.json")
+    state_path = Path(args.state_file) if args.state_file else resolve_oauth_state_path(flume_root)
     if not state_path.is_absolute():
         state_path = flume_root / state_path
 
