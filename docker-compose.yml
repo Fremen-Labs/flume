@@ -71,10 +71,12 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
+      - ${HOME}/.codex:/root/.codex
     # Override with FLUME_DASHBOARD_HOST_PORT if 8765 is already taken (e.g. ./flume native).
     ports:
       - "${FLUME_DASHBOARD_HOST_PORT:-8765}:8765"
     environment:
+      - HOME=/root
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
@@ -96,9 +98,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
+      - ${HOME}/.codex:/root/.codex
       # Mount external worktrees or host directories organically for Netflix scale!
       - /Users/mentat-bot-01/mentat/fremenlabs:/workspace
     environment:
+      - HOME=/root
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
