@@ -448,6 +448,45 @@ def _exchange_authorization_code(
     return body
 
 
+def _jwt_payload(jwt_token: str) -> dict:
+    t = (jwt_token or '').strip()
+    if t.count('.') < 2:
+        return {}
+    try:
+        payload = t.split('.')[1]
+        payload += '=' * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except Exception:
+        return {}
+
+
+def _sync_codex_cli_auth(access: str, refresh: str, id_token: str, client_id: str) -> None:
+    payload = _jwt_payload(id_token or access)
+    auth_claims = payload.get('https://api.openai.com/auth') or {}
+    profile = payload.get('https://api.openai.com/profile') or {}
+    codex_home = Path.home() / '.codex'
+    codex_home.mkdir(parents=True, exist_ok=True)
+    auth_path = codex_home / 'auth.json'
+    data = {
+        'auth_mode': 'chatgpt',
+        'last_refresh': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'tokens': {
+            'access_token': access,
+            'refresh_token': refresh,
+            'id_token': id_token or access,
+            'account_id': str(auth_claims.get('chatgpt_account_id') or ''),
+            'chatgpt_account_id': str(auth_claims.get('chatgpt_account_id') or ''),
+            'chatgpt_user_id': str(auth_claims.get('chatgpt_user_id') or ''),
+            'chatgpt_plan_type': str(auth_claims.get('chatgpt_plan_type') or ''),
+            'user_id': str(auth_claims.get('user_id') or ''),
+            'email': str(profile.get('email') or ''),
+        },
+        'client_id': client_id,
+    }
+    auth_path.write_text(json.dumps(data, indent=2) + '
+', encoding='utf-8')
+
+
 def _write_flume_state(
     state_path: Path,
     access: str,
@@ -657,6 +696,7 @@ def cmd_login(args: argparse.Namespace) -> None:
     tokens = _exchange_authorization_code(issuer, client_id, auth_code, code_verifier)
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -670,6 +710,7 @@ def cmd_login(args: argparse.Namespace) -> None:
         expires_in,
         token_url,
         oauth_scopes_requested=_oauth_scopes_for_request() or "",
+        id_token=id_token,
     )
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
@@ -756,6 +797,7 @@ def cmd_login_browser(args: argparse.Namespace) -> None:
     )
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -897,6 +939,7 @@ def cmd_login_paste(args: argparse.Namespace) -> None:
     )
     access = str(tokens.get("access_token") or "").strip()
     refresh = str(tokens.get("refresh_token") or "").strip()
+    id_token = str(tokens.get("id_token") or "").strip()
     if not access or not refresh:
         raise SystemExit(f"Token response missing access/refresh: {list(tokens.keys())}")
 
@@ -953,7 +996,7 @@ def cmd_import_codex(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
-    _write_flume_state(state_path, access, refresh, client_id, expires_in, token_url)
+    _write_flume_state(state_path, access, refresh, client_id, expires_in, token_url, id_token=id_token)
     if args.sync_env:
         _merge_env(flume_root, state_path, token_url)
     print("Imported Codex CLI tokens into Flume OAuth state.")
