@@ -5,6 +5,7 @@ requests
 pydantic
 pydantic-settings
 click
+toml>=0.10.2
 
 [dev]
 pytest

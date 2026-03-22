@@ -33,9 +33,48 @@ cd ~/flume
 
 *The dashboard will be available at [http://localhost:8765](http://localhost:8765).*
 
+*The dashboard will be available at [http://localhost:8765](http://localhost:8765).*
+
 ---
 
-## Command Line Interface (`./flume`)
+## Docker (Recommended for Development & Testing)
+
+For isolated orchestration without host pollution, Netflix-grade deployment naturally relies on the containerized matrix natively via Docker Compose.
+
+1. **Clone the Hub**
+   ```bash
+   cd ~/flume
+   ```
+
+2. **Establish Environment Configurations**
+   Create the `.env` payload from the included template. Note the crucial overrides for local LLM reachability bridging across isolated proxy barriers:
+   ```bash
+   cp .env.example .env
+   # Ensure LOCAL_EXO_BASE_URL=http://host.docker.internal:52415/v1 is set accurately for host-based inference routing.
+   ```
+
+3. **Deploy the Architecture**
+   ```bash
+   docker compose up -d flow
+   ```
+
+4. **Boot Validation (Cold-Start Integrity)**
+   To rigorously test Cold-Start secret generation arrays flawlessly:
+   ```bash
+   docker compose down -v && docker compose up
+   ```
+
+5. **Diagnostic Traces**
+   Monitor real-time asynchronous background topologies:
+   ```bash
+   docker compose logs -f
+   ```
+
+> **State Persistence**: By default, Elasticsearch mappings (`es-data`), Vault token encryptions (`openbao-data`), and dynamic workspace nodes (`flume-config`) are mounted via rigid volume persistence bounds natively preserving index memory across restarts permanently.
+
+You can safely interact with the visual interface directly via **[http://localhost:8765](http://localhost:8765)**.
+
+---
 
 You can manage all lifecycle and daemon operations cleanly through the `./flume` executable:
 

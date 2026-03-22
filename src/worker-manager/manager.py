@@ -33,7 +33,8 @@ ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
-WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '15'))
+
+active_worker_processes = {}
 
 ROLE_ORDER = [
     'intake',
@@ -102,10 +103,28 @@ def load_agent_role_defs():
     return defs
 
 
+def get_dynamic_worker_limit() -> int:
+    try:
+        cores = os.cpu_count() or 4
+        # Reserve ~20% overhead for macOS Desktop & Elasticsearch buffers natively
+        available = max(1, int(cores * 0.8))
+        return available
+    except BaseException as os_err:
+        return 4
+
+
 def build_workers():
     workers = []
+    limit = get_dynamic_worker_limit()
+    raw = os.environ.get('WORKERS_PER_ROLE')
+    if raw:
+        try:
+            limit = int(raw)
+        except ValueError as err:
+            limit = get_dynamic_worker_limit()
+
     for role_def in load_agent_role_defs():
-        for idx in range(1, max(WORKERS_PER_ROLE, 1) + 1):
+        for idx in range(1, limit + 1):
             workers.append(
                 {
                     'name': f"{role_def['role']}-worker-{idx}",
@@ -372,6 +391,23 @@ def cycle():
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
         state['workers'].append(snapshot)
     save_state(state)
+    sync_worker_processes(state)
+
+
+def sync_worker_processes(state):
+    claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
+    for w in claimed:
+        name = w.get('name')
+        if not name:
+            continue
+        proc = active_worker_processes.get(name)
+        if proc is None or proc.poll() is not None:
+            active_worker_processes[name] = subprocess.Popen(
+                [sys.executable, str(BASE / 'worker_handlers.py'), name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
 
 
 def elastro_watchdog():

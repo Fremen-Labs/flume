@@ -30,8 +30,23 @@ def start():
     """Start the entire Flume ecosystem natively via Docker Compose (Netflix Architecture)"""
     print_banner()
     click.echo(f"{CYAN}▶ Booting global Docker infrastructure...{NC}")
-    subprocess.run(["docker", "compose", "up", "-d"], check=True)
-    click.echo(f"{GREEN}✔ Ecosystem is active and scaled natively across all nodes.{NC}")
+    try:
+        subprocess.run(["docker", "compose", "up", "-d"], check=True)
+        click.echo(f"{GREEN}✔ Ecosystem is active and scaled natively across all nodes.{NC}")
+    except FileNotFoundError:
+        # Fallback if docker isn't installed
+        click.echo(f"{CYAN}▶ Docker command missing. Initializing Native Process Swarms...{NC}")
+        os.environ["FLUME_AUTO_START_WORKERS"] = "1"
+        subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])
+        subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"])
+        click.echo(f"{GREEN}✔ Native Dashboard and OS Swarm spawned autonomously.{NC}")
+    except subprocess.CalledProcessError:
+        # Fallback if docker is installed but daemon is offline
+        click.echo(f"{CYAN}▶ Docker daemon offline. Booting Native OS Swarm Matrix...{NC}")
+        os.environ["FLUME_AUTO_START_WORKERS"] = "1"
+        subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])
+        subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"])
+        click.echo(f"{GREEN}✔ Native Dashboard and OS Swarm spawned autonomously.{NC}")
 
 @cli.command()
 def stop():
