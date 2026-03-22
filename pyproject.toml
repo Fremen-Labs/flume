@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings",
     "click",
     "toml>=0.10.2",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]
