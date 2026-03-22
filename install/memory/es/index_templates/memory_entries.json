@@ -1,0 +1,33 @@
+{
+  "index_patterns": ["agent-memory-entries*"],
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "default": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "stop"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "id": {"type": "keyword"},
+      "title": {"type": "text"},
+      "content": {"type": "text"},
+      "type": {"type": "keyword"},
+      "project": {"type": "keyword"},
+      "repo": {"type": "keyword"},
+      "scope": {"type": "keyword"},
+      "confidence": {"type": "float"},
+      "created_at": {"type": "date"},
+      "updated_at": {"type": "date"},
+      "status": {"type": "keyword"},
+      "tags": {"type": "keyword"},
+      "source": {"type": "keyword"}
+    }
+  }
+}

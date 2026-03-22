@@ -1,358 +1,124 @@
-"""
-Flume runtime configuration from OpenBao (preferred) with optional .env legacy support.
-
-Out-of-box flow:
-  1. Place flume.config.json at the repo root or next to src/ (see flume.config.example.json).
-  2. Put only OpenBao address + auth in bootstrap (token via OPENBAO_TOKEN_FILE is recommended).
-  3. Store ES_API_KEY, LLM_API_KEY, GH_TOKEN, and other install/runtime values in KV at mount/path.
-
-Bootstrap file is non-secret JSON. Secrets live only in OpenBao KV (or process env from your orchestrator).
-"""
-from __future__ import annotations
-import json
 import os
-
-class NetflixSecurityPolicy:
-    '''Netflix Dynamic Secret Rotation Policy'''
-    pass
-
-import shutil
-import subprocess
+import json
 import logging
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Keys merged from process environment into Settings / effective pairs (after OpenBao hydration).
-FLUME_ENV_KEYS = frozenset(
-    {
-        "ES_URL",
-        "ES_API_KEY",
-        "ES_VERIFY_TLS",
-        "ES_INDEX_TASKS",
-        "ES_INDEX_HANDOFFS",
-        "ES_INDEX_FAILURES",
-        "ES_INDEX_REVIEWS",
-        "ES_INDEX_PROVENANCE",
-        "ES_INDEX_MEMORY",
-        "DASHBOARD_HOST",
-        "DASHBOARD_PORT",
-        "LLM_PROVIDER",
-        "LLM_BASE_URL",
-        "LLM_MODEL",
-        "LLM_API_KEY",
-        "OPENAI_OAUTH_STATE_FILE",
-        "OPENAI_OAUTH_STATE_JSON",
-        "OPENAI_OAUTH_TOKEN_URL",
-        "OPENAI_OAUTH_RESOURCE",
-        "GH_TOKEN",
-        "ADO_TOKEN",
-        "ADO_ORG_URL",
-        "GIT_USER_NAME",
-        "GIT_USER_EMAIL",
-        "EXECUTION_HOST",
-        "WORKER_MANAGER_POLL_SECONDS",
-        "WORKERS_PER_ROLE",
-        "OPENBAO_ADDR",
-        "OPENBAO_TOKEN",
-        "OPENBAO_MOUNT",
-        "OPENBAO_PATH",
-    }
-)
+logger = logging.getLogger("flume_secrets")
 
-# Backward alias
-_KNOWN_CONFIG_KEYS = FLUME_ENV_KEYS
+class FlumeSettings(BaseSettings):
+    LLM_PROVIDER: str = "exo"
+    LLM_MODEL: str = "qwen3-30b-A3B-4bit"
+    LLM_BASE_URL: str = "http://host.docker.internal:52415/v1"
+    LLM_API_KEY: str = ""
+    GIT_USER_NAME: str = "FlumeAgent"
+    GIT_USER_EMAIL: str = "agent@flume.local"
+    ES_URL: str = "http://elasticsearch:9200"
+    ES_API_KEY: str = ""
+    ES_VERIFY_TLS: str = "false"
+    OPENBAO_ADDR: str = "http://openbao:8200"
+    OPENBAO_TOKEN: str = ""
+    DASHBOARD_HOST: str = "0.0.0.0"
+    DASHBOARD_PORT: int = 8765
+    WORKER_MANAGER_POLL_SECONDS: int = 2
+    WORKERS_PER_ROLE: int = 15
 
-
-def _expand_path(p: str) -> Path:
-    return Path(os.path.expanduser(os.path.expandvars(p))).resolve()
-
-
-def discover_bootstrap_paths(workspace_root: Path) -> list[Path]:
-    """Search workspace dir first, then parent (repo root), for flume.config.json."""
-    roots: list[Path] = []
-    wr = workspace_root.resolve()
-    parent = wr.parent.resolve()
-    for r in (wr, parent):
-        if r not in roots:
-            roots.append(r)
-    out: list[Path] = []
-    for r in roots:
-        cfg = r / "flume.config.json"
-        if cfg.is_file():
-            out.append(cfg)
-    return out
-
-
-def load_merged_bootstrap(workspace_root: Path) -> dict[str, Any]:
-    import logging
-    logger = logging.getLogger("flume_secrets")
-    merged: dict[str, Any] = {}
-    for p in discover_bootstrap_paths(workspace_root):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                merged.update(data)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning(f"Failed to read/parse bootstrap config {p}: {e}")
-            continue
-    return merged
-
-
-def _read_token_file(path_str: str) -> str:
-    if not path_str.strip():
-        return ""
-    p = _expand_path(path_str)
-    if not p.is_file():
-        return ""
-    return p.read_text(encoding="utf-8", errors="replace").strip()
-
-
-def resolve_openbao_credentials(
-    workspace_root: Path,
-    bootstrap: dict[str, Any],
-) -> tuple[str, str] | None:
-    """Return (addr, token) if OpenBao should be used; else None."""
-    ob = bootstrap.get("openbao")
-    if not isinstance(ob, dict):
-        ob = {}
-
-    addr = (
-        os.environ.get("OPENBAO_ADDR", "").strip()
-        or str(ob.get("addr", "")).strip()
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="allow",
     )
-    if not addr:
-        return None
 
-    token = os.environ.get("OPENBAO_TOKEN", "").strip()
-    if not token:
-        tf = (
-            os.environ.get("OPENBAO_TOKEN_FILE", "").strip()
-            or str(ob.get("tokenFile", "")).strip()
-        )
-        token = _read_token_file(tf)
-    if not token:
-        token = str(ob.get("token", "")).strip()
+FLUME_ENV_KEYS = frozenset(FlumeSettings.model_fields.keys())
 
-    if not token:
-        return None
+def load_toml_config() -> dict[str, Any]:
+    """Reads structured parameters from config.toml safely bridging Docker constraints."""
+    config_path = os.environ.get("FLUME_CONFIG", "config.toml")
+    data = {}
+    if os.path.exists(config_path):
+        try:
+            import tomllib
+            with open(config_path, "rb") as f:
+                raw = tomllib.load(f)
+            if 'llm' in raw:
+                data['LLM_PROVIDER'] = raw['llm'].get('provider', 'exo')
+                data['LLM_MODEL'] = raw['llm'].get('model', 'qwen3-30b-A3B-4bit')
+                data['LLM_BASE_URL'] = raw['llm'].get('base_url', '')
+                data['LLM_API_KEY'] = raw['llm'].get('api_key', '')
+            if 'git' in raw:
+                data['GIT_USER_NAME'] = raw['git'].get('user', 'FlumeAgent')
+                data['GIT_USER_EMAIL'] = raw['git'].get('email', '')
+            if 'system' in raw:
+                data['ES_URL'] = raw['system'].get('es_url', 'http://elasticsearch:9200')
+                data['ES_API_KEY'] = raw['system'].get('es_api_key', '')
+                data['OPENBAO_ADDR'] = raw['system'].get('openbao_url', 'http://openbao:8200')
+                data['OPENBAO_TOKEN'] = raw['system'].get('openbao_token', '')
+                
+        except Exception as e:
+            logger.warning(f"Failed parsing TOML config {config_path}: {e}")
+    return data
 
-    return addr, token
+settings = FlumeSettings(**load_toml_config())
 
-
-def openbao_mount_path(bootstrap: dict[str, Any]) -> tuple[str, str]:
-    ob = bootstrap.get("openbao")
-    if not isinstance(ob, dict):
-        ob = {}
-    mount = str(ob.get("mount", "secret") or "secret").strip().strip("/")
-    path = str(ob.get("path", "flume") or "flume").strip().strip("/")
-    return mount, path
-
-
-def _bao_subprocess_env(addr: str, token: str) -> dict[str, str]:
-    env = dict(os.environ)
-    env["BAO_ADDR"] = addr
-    env["BAO_TOKEN"] = token
-    env["VAULT_ADDR"] = addr
-    env["VAULT_TOKEN"] = token
-    env["OPENBAO_ADDR"] = addr
-    env["OPENBAO_TOKEN"] = token
-    return env
-
-
-def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, str]:
-    import logging
-    logger = logging.getLogger("flume_secrets")
-    if not shutil.which("openbao"):
-        logger.warning("openbao CLI is not installed or not in PATH.")
-        return {}
-    secret_ref = f"{mount}/{path}"
-    try:
-        proc = subprocess.run(
-            ["openbao", "kv", "get", "-format=json", secret_ref],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=_bao_subprocess_env(addr, token),
-        )
-        if proc.returncode != 0:
-            logger.error(f"openbao lookup failed (code {proc.returncode}): {proc.stderr}")
-            return {}
-        payload = json.loads(proc.stdout or "{}")
-        data = payload.get("data", {}).get("data", {})
-        if not isinstance(data, dict):
-            logger.warning("OpenBao returned invalid data payload layout.")
-            return {}
-        
-        res_data = {str(k): "" if v is None else str(v) for k, v in data.items()}
-        
-        # --- Native Elasticsearch Security Auditing ---
-        es_url = res_data.get("ES_URL") or os.environ.get("ES_URL", "")
-        es_key = res_data.get("ES_API_KEY") or os.environ.get("ES_API_KEY", "")
-        if es_url and es_key:
-            import urllib.request
-            import time
-            import ssl
-            audit_doc = {
-                "@timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "message": f"OpenBao KV securely accessed at {secret_ref}",
-                "agent_roles": os.environ.get("FLUME_PROCESS_ROLE", "system"),
-                "worker_name": os.environ.get("WORKER_NAME", "daemon"),
-                "secret_path": secret_ref,
-                "keys_retrieved": list(res_data.keys())
-            }
-            try:
-                req = urllib.request.Request(
-                    f"{es_url.rstrip('/')}/agent-security-audits/_doc",
-                    data=json.dumps(audit_doc).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
-                    method="POST"
-                )
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
-                    if response.status not in (200, 201):
-                        logger.warning(f"Security audit log dropped natively: {response.status}")
-            except Exception as audit_e:
-                logger.warning(f"Failed to post OpenBao security checkout audit to Elasticsearch: {audit_e}")
-        # ----------------------------------------------
-        
-        return res_data
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, TypeError) as e:
-        logger.error(f"Critical OpenBao fetch exception: {e}")
-        return {}
-
-
-def _apply_dotenv_line(raw_line: str) -> None:
-    """Parse one KEY=VAL line from a .env file into os.environ (last write wins)."""
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-        return
-    if line.startswith("export "):
-        line = line[7:].lstrip()
-    if "=" not in line:
-        return
-    key, _, val = line.partition("=")
-    key = key.strip()
-    
-    # ENFORCE NATIVE OPENBAO: Do not allow sensitive credentials to be loaded from plaintext .env files
-    if key in {"ES_API_KEY", "LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "OPENAI_OAUTH_SCOPES"}:
-        global _warned_keys
-        if key not in globals().get('_warned_keys', set()):
-            globals().setdefault('_warned_keys', set()).add(key)
-            logging.warning(f"SECURITY: Attempted to load sensitive key '{key}' from plaintext .env file. This is blocked. Please migrate this secret natively into your OpenBao vault.")
-        return
-
-    if not key or key.startswith("#"):
-        return
-    val = val.strip()
-    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
-        val = val[1:-1]
-    os.environ[key] = val
-
+def apply_runtime_config(workspace_root: Path | None = None) -> None:
+    """Invoked globally by Flume daemon servers applying deterministic limits."""
+    for key, value in settings.model_dump().items():
+        if value is not None and str(value).strip():
+            os.environ[key] = str(value)
 
 def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
-    """
-    Load ``<workspace>/.env`` then ``<repo-root>/.env`` into the process environment.
+    """Stub mapping bounding legacy calls safely inside server.py."""
+    pass
 
-    The repo root is ``workspace_root.parent`` (e.g. ``flume/.env`` when workspace is
-    ``flume/src``). **Later files override earlier keys**, so the repo root wins on
-    duplicates — matching ``run.sh`` (which prefers repo-root ``.env``) and
-    ``llm_settings.load_env_pairs``.
+def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, str] | None:
+    """Natively executes Vault queries strictly out of the box dynamically."""
+    url = f"{addr}/v1/{mount}/data/{path}"
+    req = urllib.request.Request(url, headers={"X-Vault-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            res = json.loads(r.read())
+            res_data = res.get("data", {}).get("data", {})
+            if not isinstance(res_data, dict):
+                res_data = {}
+            
+            # --- Native Elasticsearch Security Auditing ---
+            es_url = res_data.get("ES_URL") or os.environ.get("ES_URL", "")
+            es_key = res_data.get("ES_API_KEY") or os.environ.get("ES_API_KEY", "")
+            if es_url and es_key:
+                import time
+                import ssl
+                audit_doc = {
+                    "@timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "message": f"OpenBao KV securely accessed at {mount}/{path}",
+                    "agent_roles": os.environ.get("FLUME_PROCESS_ROLE", "system"),
+                    "worker_name": os.environ.get("WORKER_NAME", "daemon"),
+                    "secret_path": f"{mount}/{path}",
+                    "keys_retrieved": list(res_data.keys())
+                }
+                try:
+                    audit_req = urllib.request.Request(
+                        f"{es_url.rstrip('/')}/agent-security-audits/_doc",
+                        data=json.dumps(audit_doc).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
+                        method="POST"
+                    )
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    with urllib.request.urlopen(audit_req, timeout=5, context=ctx) as audit_res:
+                        if audit_res.status not in (200, 201):
+                            logger.warning(f"Security audit log dropped natively: {audit_res.status}")
+                except Exception as audit_e:
+                    logger.warning(f"Failed to post OpenBao security checkout audit to Elasticsearch: {audit_e}")
+            # ----------------------------------------------
+            
+            return res_data
+    except Exception as e:
+        logger.warning(f"Error fetching from OpenBao at {url}: {e}")
+        return None
 
-    This avoids a common bug: a stale ``src/.env`` must not shadow the real
-    ``flume/.env`` that the installer maintains.
-    """
-    wr = workspace_root.resolve()
-    for candidate in (wr / ".env", wr.parent / ".env"):
-        if not candidate.is_file():
-            continue
-        try:
-            text = candidate.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            import logging
-            logging.getLogger("flume_secrets").debug(f"Missing legacy env file {candidate}: {e}")
-            continue
-        for raw in text.splitlines():
-            _apply_dotenv_line(raw)
-
-
-def apply_runtime_config(workspace_root: Path) -> bool:
-    """
-    Load legacy ``.env`` files, then ``flume.config.json`` (if any), then OpenBao KV.
-
-    Returns True if OpenBao credentials were resolved and a KV read was attempted
-    (even if the secret was empty or missing keys).
-    """
-    load_legacy_dotenv_into_environ(workspace_root)
-    bootstrap = load_merged_bootstrap(workspace_root)
-    creds = resolve_openbao_credentials(workspace_root, bootstrap)
-    if not creds:
-        return False
-
-    addr, token = creds
-    mount, path = openbao_mount_path(bootstrap)
-    data = fetch_openbao_kv(addr, token, mount, path)
-    
-    elastic_data = fetch_openbao_kv(addr, token, mount, "flume_elastic")
-    data.update(elastic_data)
-
-    # Merge KV into environment (KV wins over prior empty env for those keys)
-    for key, val in data.items():
-        if val is None:
-            continue
-        s = str(val).strip()
-        if not s:
-            continue
-        os.environ[key] = s
-
-    # Ensure child processes and llm_settings see OpenBao connection
-    for k, v in (("OPENBAO_ADDR", addr), ("OPENBAO_TOKEN", token)):
-        os.environ[k] = v
-    os.environ["BAO_ADDR"] = addr
-    os.environ["BAO_TOKEN"] = token
-    os.environ["VAULT_ADDR"] = addr
-    os.environ["VAULT_TOKEN"] = token
-    os.environ.setdefault("OPENBAO_MOUNT", mount)
-    os.environ.setdefault("OPENBAO_PATH", path)
-    return True
-
-
-def resolve_oauth_state_path(workspace_root: Path, configured: str) -> Path:
-    """
-    Resolve ``OPENAI_OAUTH_STATE_FILE`` for git layout (workspace = ``src/``).
-
-    Relative paths check **repo root** (``workspace_root.parent``) first, then
-    ``workspace_root``, so ``.openai-oauth.json`` at the Flume root matches
-    installer defaults and ``codex_oauth_login.py`` output.
-    """
-    raw = (configured or "").strip()
-    rel = Path(raw) if raw else Path(".openai-oauth.json")
-    if rel.is_absolute():
-        return rel
-    wr = workspace_root.resolve()
-    for base in (wr.parent, wr):
-        cand = (base / rel).resolve()
-        if cand.is_file():
-            return cand
-    return (wr.parent / rel).resolve()
-
-
-def has_openbao_bootstrap(workspace_root: Path) -> bool:
-    """True if flume.config.json exists or OPENBAO_ADDR is set."""
-    if os.environ.get("OPENBAO_ADDR", "").strip():
-        return True
-    return bool(discover_bootstrap_paths(workspace_root))
-
-
-def has_legacy_dotenv(workspace_root: Path) -> bool:
-    wr = workspace_root.resolve()
-    for candidate in (wr / ".env", wr.parent / ".env"):
-        if candidate.is_file():
-            return True
-    return False
-
-
-def config_present(workspace_root: Path) -> bool:
-    """Either OpenBao bootstrap or a legacy .env file exists."""
-    return has_openbao_bootstrap(workspace_root) or has_legacy_dotenv(workspace_root)
+def resolve_oauth_state_path(workspace_root: Path, state_file: str = "") -> Path:
+    return workspace_root / '.agent' / 'openai_oauth_state.json'

@@ -1,3 +1,4 @@
+from elastro_sync import sync_ast
 #!/usr/bin/env python3
 import json
 import os
@@ -230,6 +231,14 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
             except SyntaxError as e:
                 return f'ERROR writing file: Meta-Critic Python Syntax Check Failed at line {e.lineno}: {e.msg}'
         p.write_text(content)
+        
+        # Native AST Integration mapping Elasticsearch automatically
+        try:
+            import elastro_sync
+            elastro_sync.sync_ast()
+        except:
+            pass
+
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'

@@ -1,0 +1,84 @@
+version: "3.8"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: flume-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  openbao:
+    image: hashicorp/vault:1.15
+    container_name: flume-openbao
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=flume-dev-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - openbao_data:/vault/file
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flume-dashboard
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      openbao:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    ports:
+      - "8765:8765"
+    environment:
+      - FLUME_CONFIG=/app/config.toml
+      - PYTHONPATH=/app/src
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+    command: ["uv", "run", "python", "src/dashboard/server.py"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      openbao:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      # Mount external worktrees or host directories organically for Netflix scale!
+      - /Users/mentat-bot-01/mentat/fremenlabs:/workspace
+    environment:
+      - FLUME_CONFIG=/app/config.toml
+      - PYTHONPATH=/app/src
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+    command: ["uv", "run", "python", "src/worker-manager/manager.py"]
+    deploy:
+      mode: replicated
+      replicas: 2
+
+volumes:
+  es_data:
+  openbao_data:

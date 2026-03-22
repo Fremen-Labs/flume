@@ -1,0 +1,26 @@
+{
+  "index_patterns": ["agent-failure-records*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "id": { "type": "keyword" },
+        "task_id": { "type": "keyword" },
+        "project": { "type": "keyword" },
+        "repo": { "type": "keyword" },
+        "error_class": { "type": "keyword" },
+        "summary": { "type": "text" },
+        "root_cause": { "type": "text" },
+        "fix_applied": { "type": "text" },
+        "confidence": { "type": "keyword" },
+        "recurrence_count": { "type": "integer" },
+        "created_at": { "type": "date" },
+        "updated_at": { "type": "date" }
+      }
+    }
+  }
+}

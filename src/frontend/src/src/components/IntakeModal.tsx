@@ -386,8 +386,8 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
 
   const epicCount = plan.epics?.length ?? 0;
   const taskCount = plan.epics?.reduce((a, ep) =>
-    a + ep.features?.reduce((b, f) =>
-      b + f.stories?.reduce((c, s) => c + (s.tasks?.length ?? 0), 0), 0) ?? 0, 0) ?? 0;
+    a + (ep.features?.reduce((b, f) =>
+      b + (f.stories?.reduce((c, s) => c + (s.tasks?.length ?? 0), 0) ?? 0), 0) ?? 0), 0) ?? 0;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>

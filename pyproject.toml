@@ -1,0 +1,30 @@
+[project]
+name = "flume"
+version = "0.1.0"
+description = "Autonomous Engineering Frontier"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask",
+    "flask-cors",
+    "elasticsearch",
+    "requests",
+    "pydantic",
+    "pydantic-settings",
+    "click"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "mypy",
+    "ruff"
+]
+
+[project.scripts]
+flume = "flume_cli.cli:cli"
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"

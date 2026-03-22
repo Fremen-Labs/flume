@@ -1,0 +1,24 @@
+{
+  "index_patterns": ["agent-provenance-records*"],
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "id": {"type": "keyword"},
+      "task_id": {"type": "keyword"},
+      "agent": {"type": "keyword"},
+      "model": {"type": "keyword"},
+      "execution_host": {"type": "keyword"},
+      "created_at": {"type": "date"},
+      "updated_at": {"type": "date"},
+      "input_tokens": {"type": "integer"},
+      "output_tokens": {"type": "integer"},
+      "duration_ms": {"type": "integer"},
+      "tool_calls": {"type": "keyword"},
+      "context_files": {"type": "keyword"},
+      "related_ids": {"type": "keyword"}
+    }
+  }
+}

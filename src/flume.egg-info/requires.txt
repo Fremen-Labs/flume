@@ -1,0 +1,13 @@
+flask
+flask-cors
+elasticsearch
+requests
+pydantic
+pydantic-settings
+click
+
+[dev]
+pytest
+pytest-asyncio
+mypy
+ruff

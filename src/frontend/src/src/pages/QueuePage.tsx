@@ -4,6 +4,7 @@ import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 
 const stages: { id: string; label: string }[] = [
+  { id: 'inbox', label: 'Inbox' },
   { id: 'planned', label: 'Planned' },
   { id: 'ready', label: 'Ready' },
   { id: 'running', label: 'Running' },
@@ -89,8 +90,8 @@ export default function QueuePage() {
                         className="glass-card p-3 hover-lift"
                       >
                         <div className="flex items-center gap-2 mb-1.5">
-                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.item_type ?? 'task']}`}>
-                            {(item.item_type ?? 'task').toUpperCase()}
+                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.work_item_type ?? item.item_type ?? 'task']}`}>
+                            {(item.work_item_type ?? item.item_type ?? 'task').toUpperCase()}
                           </span>
                           <StatusBadge status={item.priority} />
                         </div>

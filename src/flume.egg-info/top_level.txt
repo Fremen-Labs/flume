@@ -1,0 +1,17 @@
+ado_tokens_store
+agents
+codex_app_server_bridge
+dashboard
+elastro-netflix-test
+flume-enterprise-refactor
+flume_secrets
+frontend
+github_tokens_store
+llm_credentials_store
+memory
+openai_oauth_state
+plan-sessions
+run_swarm_epic34
+test-project
+worker-manager
+workspace_llm_env

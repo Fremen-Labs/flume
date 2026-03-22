@@ -28,7 +28,7 @@ STATE = BASE / 'state.json'
 AGENT_MODELS_FILE = BASE / 'agent_models.json'
 LOG = BASE / 'manager.log'
 
-ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
