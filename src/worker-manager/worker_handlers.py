@@ -483,6 +483,15 @@ def handle_pm_dispatcher_worker(task):
     task_id = task.get('id')
     es_id, _ = fetch_task_doc(task_id) if task_id else (None, None)
 
+    # Intelligent Task Scope & PM Hallucination Boundaries
+    active_model = task.get('preferred_model', 'gpt-4o').lower()
+    if 'gpt-4' in active_model or 'claude-3-opus' in active_model:
+        # High capacity models: chunk into component-level epics
+        task['chunking_strategy'] = 'epic_component_level'
+    else:
+        # Smaller models / local inferences: 20-line recursive functional scopes
+        task['chunking_strategy'] = '20_line_functional_scope'
+
     result = run_pm_dispatcher(task)
 
     if result.action == 'decompose' and getattr(result, 'subtasks', []):
