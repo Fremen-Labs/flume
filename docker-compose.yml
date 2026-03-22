@@ -28,11 +28,14 @@ services:
     environment:
       - VAULT_ADDR=http://openbao:8200
       - VAULT_TOKEN=flume-dev-token
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-""}
     entrypoint: >
       /bin/sh -c "
         echo 'Bootstrapping new Flume secrets & Topologies...';
         vault secrets enable -path=secret kv-v2 || true;
-        vault kv put secret/flume/keys ES_API_KEY=generated-secure-key OPENAI_API_KEY=sk-mock;
+        ES_KEY=$$(hexdump -vn 32 -e '1/1 \"%02x\"' /dev/urandom);
+        echo 'Generated Dynamic Elastic Token.';
+        vault kv put secret/flume/keys ES_API_KEY=$$ES_KEY OPENAI_API_KEY=$$OPENAI_API_KEY;
       "
 
   elasticsearch:
