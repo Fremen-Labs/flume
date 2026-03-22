@@ -483,8 +483,7 @@ def _sync_codex_cli_auth(access: str, refresh: str, id_token: str, client_id: st
         },
         'client_id': client_id,
     }
-    auth_path.write_text(json.dumps(data, indent=2) + '
-', encoding='utf-8')
+    auth_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
 
 def _write_flume_state(

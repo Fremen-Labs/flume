@@ -98,7 +98,7 @@ def _messages_to_prompt(messages: list[dict[str, Any]]) -> str:
             text = str(content or '')
         parts.append(f"[{role}]\n{text}")
     parts.append(
-        "Return only a JSON object matching the required schema with keys 'message' and 'plan'."
+        "Return only valid JSON with top-level keys 'message' and 'plan'. Do not wrap in markdown."
     )
     return "\n\n".join(parts)
 
@@ -216,7 +216,6 @@ async def _planner_chat_async(messages: list[dict[str, Any]], model: str, cwd: s
                 'model': model,
                 'personality': 'pragmatic',
                 'summary': 'concise',
-                'outputSchema': _planner_output_schema(),
             },
         }))
         while True:
