@@ -102,11 +102,16 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
     """Overlay os.environ with dashboard-equivalent LLM_* from load_effective_pairs."""
     wr = workspace_root.resolve()
+    src_root = wr / "src"
     dash = wr / "dashboard"
+    if not dash.is_dir() and (src_root / "dashboard").is_dir():
+        dash = src_root / "dashboard"
     if not dash.is_dir():
         return
     if str(wr) not in sys.path:
         sys.path.append(str(wr))
+    if src_root.is_dir() and str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
     added_dash = False
     if str(dash) not in sys.path:
         sys.path.insert(0, str(dash))
