@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -466,9 +467,56 @@ def compute_ready_for_repo(repo):
 
 
 def handle_pm_dispatcher_worker(task):
+    if not task:
+        return True
+
+    task_id = task.get('id')
+    es_id, _ = fetch_task_doc(task_id) if task_id else (None, None)
+
     result = run_pm_dispatcher(task)
+
+    if result.action == 'decompose' and getattr(result, 'subtasks', []):
+        count = 0
+        for st in result.subtasks:
+            child_id = f"{st.get('item_type', 'task')}-{uuid.uuid4().hex[:8]}"
+            doc = {
+                'id': child_id,
+                'parent_id': task_id,
+                'title': st.get('title', 'Generated Subtask'),
+                'objective': st.get('objective', ''),
+                'item_type': st.get('item_type', 'task'),
+                'repo': task.get('repo'),
+                'status': 'planned',
+                'owner': 'pm',
+                'assigned_agent_role': 'pm',
+                'depends_on': [],
+                'acceptance_criteria': [],
+                'artifacts': [],
+                'needs_human': False,
+                'created_at': now_iso(),
+                'updated_at': now_iso(),
+                'last_update': now_iso(),
+            }
+            write_doc(TASK_INDEX, doc)
+            count += 1
+
+        if es_id:
+            update_task_doc(es_id, {
+                'status': 'blocked',
+                'active_worker': None,
+                'queue_state': 'queued',
+            })
+            log(f"pm-dispatcher: decomposed {task_id} into {count} children; suspended parent.")
+        return True
+
     promoted = compute_ready_for_repo((task or {}).get('repo'))
-    log(f"pm-dispatcher: {result.summary}; promoted={promoted}")
+    log(f"pm-dispatcher: {result.summary[:200]}; promoted={promoted}")
+    
+    if es_id:
+        update_task_doc(es_id, {
+            'active_worker': None,
+            'queue_state': 'queued',
+        })
     return True
 
 
