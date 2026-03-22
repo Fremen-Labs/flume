@@ -66,23 +66,34 @@ def ensure_es_indices():
             logger.error(f"Failed to create index {index}: {e}")
 
 def ensure_vault_credentials():
+    es_api_key = os.environ.get("ES_API_KEY", "").strip()
+    vault_url = os.environ.get("OPENBAO_ADDR", "").strip()
+    vault_token = os.environ.get("OPENBAO_TOKEN", "").strip()
+
+    # Native fresh-install path: if Elasticsearch credentials already exist, do not block startup on OpenBao.
+    if es_api_key:
+        logger.info("Skipping OpenBao bootstrap because ES_API_KEY is already configured.")
+        return
+
+    # If OpenBao is not explicitly configured, skip quietly instead of assuming a container hostname.
+    if not vault_url:
+        logger.info("Skipping OpenBao bootstrap because OPENBAO_ADDR is not configured.")
+        return
+
     print("Initializing OpenBao (Vault) native bootstrap...", flush=True)
-    vault_url = os.environ.get("OPENBAO_ADDR", "http://openbao:8200").strip() or "http://openbao:8200"
-    vault_token = os.environ.get("OPENBAO_TOKEN", "flume-dev-token").strip() or "flume-dev-token"
     headers = {"X-Vault-Token": vault_token, "Content-Type": "application/json"}
-    
-    # Wait for OpenBao to come online and KV engine to mount before attempting writes
+
     import time
-    for attempt in range(40):
+    for attempt in range(10):
         try:
             req_sys = urllib.request.Request(f"{vault_url}/v1/sys/health")
             with urllib.request.urlopen(req_sys, timeout=2) as r:
                 pass
         except Exception as e:
             print(f"Vault not ready ({e}), waiting...", flush=True)
-            time.sleep(2)
+            time.sleep(1)
             continue
-            
+
         req_write = urllib.request.Request(
             f"{vault_url}/v1/secret/data/flume",
             headers=headers,
@@ -96,15 +107,15 @@ def ensure_vault_credentials():
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 print(f"Vault KV secret mount not fully initialized yet (404), retrying... ({attempt})", flush=True)
-                time.sleep(2)
+                time.sleep(1)
             else:
                 print(f"Failed to bootstrap Vault: {e}", flush=True)
                 return
         except Exception as e:
             print(f"Failed to reach Vault: {e}", flush=True)
-            time.sleep(2)
-            
-    print("Failed to provision OpenBao credentials after maximum retries.", flush=True)
+            time.sleep(1)
+
+    print("Skipping OpenBao bootstrap after retries; continuing with local configuration.", flush=True)
 
 if __name__ == "__main__":
     ensure_vault_credentials()

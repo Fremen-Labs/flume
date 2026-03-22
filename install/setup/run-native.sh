@@ -19,6 +19,15 @@ export DASHBOARD_PORT="${DASHBOARD_PORT:-8765}"
 # sudo-installed OpenBao CLI lives in /usr/local/bin; minimal PATHs (systemd/nohup) omit it.
 export PATH="/usr/local/bin:/usr/local/sbin:${HOME}/.local/bin:${PATH}"
 
+BOOTSTRAP_ENV="$ROOT/install/.es-bootstrap.env"
+if [[ -z "${ES_API_KEY:-}" ]] && [[ -f "$BOOTSTRAP_ENV" ]]; then
+	# Fresh-install convenience: reuse generated ES bootstrap credentials even before .env/OpenBao exists.
+	set -a
+	# shellcheck disable=SC1090
+	source "$BOOTSTRAP_ENV"
+	set +a
+fi
+
 if ! command -v uv >/dev/null 2>&1; then
 	echo "uv not found. Run ./flume install first (it bootstraps uv) or add ~/.local/bin to PATH."
 	exit 1
