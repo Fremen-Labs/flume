@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -300,18 +301,18 @@ def start():
         )
         click.echo(f"{CYAN}Dashboard (host): http://127.0.0.1:{dash_host}/{NC}")
     except FileNotFoundError:
-        click.echo(f"{CYAN}▶ Docker command missing. Initializing Native Process Swarms...{NC}")
+        click.echo(f"{CYAN}▶ Docker command missing. Falling back to native Flume processes...{NC}")
         os.environ["FLUME_AUTO_START_WORKERS"] = "1"
         subprocess.Popen(["uv", "run", "python", "src/dashboard/app.py"])
         subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"])
         click.echo(f"{GREEN}✔ Native Dashboard and OS Swarm spawned autonomously.{NC}")
     except subprocess.CalledProcessError:
-        click.echo(f"{CYAN}▶ Docker unavailable or compose failed. Booting Native OS Swarm Matrix...{NC}")
+        click.echo(f"{CYAN}▶ Docker unavailable or compose failed. Falling back to native Flume processes...{NC}")
         es_port = os.environ.get("FLUME_ES_HOST_PORT", "9201")
         bao_port = os.environ.get("FLUME_OPENBAO_HOST_PORT", "8200")
         dash_port = os.environ.get("FLUME_DASHBOARD_HOST_PORT", "8765")
         click.echo(
-            f"{YELLOW}If host ports are in use, try {GREEN}./flume native{NC} or set "
+            f"{YELLOW}If host ports are in use, try {GREEN}./flume native{NC} (Linux/macOS host mode) or set "
             f"{GREEN}FLUME_ES_HOST_PORT{NC}/{GREEN}FLUME_OPENBAO_HOST_PORT{NC}/"
             f"{GREEN}FLUME_DASHBOARD_HOST_PORT{NC} "
             f"(ES→{es_port}, OpenBao→{bao_port}, dashboard→{dash_port}).{NC}"
@@ -437,6 +438,19 @@ def _host_port_in_use(host: str, port: int) -> bool:
         return False
 
 
+def _platform_family() -> str:
+    sysname = platform.system().lower()
+    if sysname == 'darwin':
+        return 'macos'
+    if sysname == 'linux':
+        return 'linux'
+    return sysname or 'unknown'
+
+
+def _linux_native_supported() -> bool:
+    return _platform_family() == 'linux'
+
+
 def _host_es_credentials_look_configured(root: Path) -> bool:
     """Best-effort check that native host Elasticsearch on :9200 is actually usable.
 
@@ -541,7 +555,7 @@ def _post_install_start_flume(root: Path) -> None:
             dash_port = os.environ.get("FLUME_DASHBOARD_HOST_PORT", "8765")
             bao_port = os.environ.get("FLUME_OPENBAO_HOST_PORT", "8200")
             click.echo(
-                f"{YELLOW}docker compose up failed. Try {GREEN}./flume native{YELLOW} with host ES/OpenBao, "
+                f"{YELLOW}docker compose up failed. Try {GREEN}./flume native{YELLOW} with host services, "
                 f"or set {GREEN}FLUME_ES_HOST_PORT{YELLOW}, {GREEN}FLUME_OPENBAO_HOST_PORT{YELLOW}, "
                 f"{GREEN}FLUME_DASHBOARD_HOST_PORT{YELLOW} "
                 f"(defaults: ES→{es_port}, OpenBao→{bao_port}, dashboard→{dash_port}).{NC}",
@@ -554,8 +568,8 @@ def _post_install_start_flume(root: Path) -> None:
                     click.echo(f"{GREEN}✔ Native processes started.{NC}")
                 else:
                     click.echo(
-                        f"{YELLOW}Native start also failed ({rc}). Run {GREEN}./flume start{YELLOW} or "
-                        f"{GREEN}./flume native{YELLOW} after fixing the issue.{NC}",
+                        f"{YELLOW}Native start also failed ({rc}). Run {GREEN}./flume start{YELLOW} again after fixing Docker, or "
+                        f"{GREEN}./flume native{YELLOW} after fixing host prerequisites.{NC}",
                         err=True,
                     )
             return
@@ -576,7 +590,8 @@ def _post_install_start_flume(root: Path) -> None:
         )
         return
     click.echo(
-        f"{YELLOW}Docker not found; starting Flume natively (ensure ES_URL / ES_API_KEY are set).{NC}"
+        f"{YELLOW}Docker not found; starting Flume natively (ensure ES_URL / ES_API_KEY are set). "
+        f"This host-mode path is intended for Linux and macOS, not Windows.{NC}"
     )
     rc = subprocess.run(["bash", str(script)], cwd=root).returncode
     if rc != 0:

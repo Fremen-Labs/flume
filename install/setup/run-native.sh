@@ -24,8 +24,22 @@ if ! command -v uv >/dev/null 2>&1; then
 	exit 1
 fi
 
-if command -v ss >/dev/null 2>&1 && ss -tln 2>/dev/null | grep -q ':8765 '; then
-	echo "Port 8765 is already in use. Stop the other process or set DASHBOARD_PORT and ensure nothing else binds 8765."
+port_in_use() {
+	local port="$1"
+	if command -v ss >/dev/null 2>&1; then
+		ss -tln 2>/dev/null | grep -q ":${port} " && return 0
+	fi
+	if command -v lsof >/dev/null 2>&1; then
+		lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+	fi
+	if command -v netstat >/dev/null 2>&1; then
+		netstat -an 2>/dev/null | grep -E "[\.:]${port}[[:space:]].*LISTEN" >/dev/null 2>&1 && return 0
+	fi
+	return 1
+}
+
+if port_in_use "${DASHBOARD_PORT:-8765}"; then
+	echo "Port ${DASHBOARD_PORT:-8765} is already in use. Stop the other process or set DASHBOARD_PORT to a free port."
 	exit 1
 fi
 

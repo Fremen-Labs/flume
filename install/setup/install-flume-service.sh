@@ -4,6 +4,18 @@
 
 set -euo pipefail
 
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+if [ "$UNAME_S" != "Linux" ]; then
+    echo "This helper installs a systemd user service and currently supports Linux only." >&2
+    echo "On macOS, run Flume directly (./flume start or ./flume native) or use launchd manually." >&2
+    exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemctl not found. This helper requires systemd user services on Linux." >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 if [ -d "${INSTALL_DIR}/../src" ]; then
@@ -50,4 +62,4 @@ echo ""
 echo "To start automatically on login:"
 echo "  systemctl --user enable flume-dashboard"
 echo ""
-echo "Or use the flume CLI:  flume start"
+echo "Or use the flume CLI instead:  flume start  (portable)"
