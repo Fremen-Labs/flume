@@ -50,7 +50,7 @@ HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(os.environ.get('LOOM_FRONTEND_DIST', str(Path(__file__).parent.parent / 'frontend' / 'dist')))
-WORKSPACE_ROOT = Path(os.environ.get(LOOM_WORKSPACE, str(Path(__file__).parent.parent.parent)))
+WORKSPACE_ROOT = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent.parent)))
 WORKER_STATE = WORKSPACE_ROOT / 'worker-manager/state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
