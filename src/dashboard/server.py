@@ -22,14 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 
-# Flume Bootstrap Logic
-from es_bootstrap import ensure_es_indices, ensure_vault_credentials
-
-# Execute bootstrapping unconditionally so Gunicorn binds catch it natively
-ensure_vault_credentials()
-ensure_es_indices()
-
-# --- Legacy Env ---
+# --- Path + config.toml before ES/OpenBao bootstrap ---
 BASE = Path(__file__).resolve().parent
 _SRC_ROOT = BASE.parent
 if str(_SRC_ROOT) not in sys.path:
@@ -38,11 +31,15 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-
 from flume_secrets import apply_runtime_config, load_legacy_dotenv_into_environ  # noqa: E402
 
-# Merge .env (src then repo root, repo wins) + OpenBao KV; see flume_secrets.load_legacy_dotenv_into_environ
+# Merge TOML defaults into os.environ before ensure_vault_credentials / ensure_es_indices
 apply_runtime_config(_SRC_ROOT)
+
+from es_bootstrap import ensure_es_indices, ensure_vault_credentials  # noqa: E402
+
+ensure_vault_credentials()
+ensure_es_indices()
 
 from llm_settings import load_effective_pairs  # noqa: E402
 

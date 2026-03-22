@@ -61,13 +61,27 @@ def load_toml_config() -> dict[str, Any]:
             logger.warning(f"Failed parsing TOML config {config_path}: {e}")
     return data
 
-settings = FlumeSettings(**load_toml_config())
+
+def _toml_kwargs_respecting_environ() -> dict[str, Any]:
+    """Toml values only for keys not already set in the process environment."""
+    data = load_toml_config()
+    for key in list(data.keys()):
+        if str(os.environ.get(key, "")).strip():
+            del data[key]
+    return data
+
+
+settings = FlumeSettings(**_toml_kwargs_respecting_environ())
 
 def apply_runtime_config(workspace_root: Path | None = None) -> None:
     """Invoked globally by Flume daemon servers applying deterministic limits."""
     for key, value in settings.model_dump().items():
-        if value is not None and str(value).strip():
-            os.environ[key] = str(value)
+        if value is None or not str(value).strip():
+            continue
+        # Precedence: existing non-empty process env (e.g. systemd, docker -e) wins over config.toml
+        if str(os.environ.get(key, "")).strip():
+            continue
+        os.environ[key] = str(value)
 
 def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
     """Stub mapping bounding legacy calls safely inside server.py."""

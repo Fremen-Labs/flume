@@ -27,8 +27,9 @@ cd ~/flume
 # 3. Configure your environment (LLM Provider, Git Identity)
 ./flume onboard
 
-# 4. Start the dashboard and background agent workers
-./flume start
+# 4. Start the dashboard and background agent workers (pick one)
+./flume start          # Docker Compose: bundled Elasticsearch + OpenBao + services
+# ./flume native       # Host ES + OpenBao already running (no Compose); see install/README.md
 ```
 
 *The dashboard will be available at [http://localhost:8765](http://localhost:8765).*
@@ -82,7 +83,8 @@ You can manage all lifecycle and daemon operations cleanly through the `./flume`
 | :--- | :--- |
 | `./flume install` | Runs the automated installer for dependencies, virtual environments, and the Elasticsearch bootstrap. |
 | `./flume onboard` | Interactive configuration wizard for your `.env` (LLM Provider, Git Identity, Execution Host). |
-| `./flume start` | Starts the background React Interface and Python agent worker daemons concurrently. |
+| `./flume native` | Starts dashboard + worker-manager against **host** Elasticsearch and OpenBao (skips Docker Compose). |
+| `./flume start` | Starts the full stack via **Docker Compose** (bundled Elasticsearch, OpenBao, dashboard, workers). |
 | `./flume update` | Pulls the latest `main` branch, rebuilds UI artifacts, and gracefully restarts processes. | 
 | `./flume status` | Display the explicit status of asynchronous background services. |
 | `./flume logs` | Tail system journal logs mapping dashboard and agent worker pools. |

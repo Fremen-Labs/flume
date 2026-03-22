@@ -27,6 +27,21 @@ def cli():
     """Flume CLI — Autonomous Engineering Frontier"""
     pass
 
+@cli.command("native")
+def native_cmd():
+    """Start dashboard + worker-manager on the host (use when ES/OpenBao run locally, not via Compose)."""
+    print_banner()
+    root = Path(__file__).resolve().parent.parent
+    script = root / "install" / "setup" / "run-native.sh"
+    if not script.is_file():
+        click.echo(f"{YELLOW}Missing {script}{NC}", err=True)
+        raise SystemExit(1)
+    rc = subprocess.run(["bash", str(script)], cwd=root).returncode
+    if rc != 0:
+        raise SystemExit(rc)
+    click.echo(f"{GREEN}✔ Native processes started (see logs/ under the repo root).{NC}")
+
+
 @cli.command()
 def start():
     """Start the entire Flume ecosystem natively via Docker Compose (Netflix Architecture)"""

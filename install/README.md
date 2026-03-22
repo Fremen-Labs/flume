@@ -101,6 +101,25 @@ bash install.sh
 
 ---
 
+## Native run (host Elasticsearch + OpenBao)
+
+Use this when **Elasticsearch is already running on the machine** (for example the systemd service from `setup/install-elasticsearch.sh`) and **OpenBao is reachable on localhost**, and you **do not** want Docker Compose’s own Elasticsearch on port 9200 (which would conflict).
+
+1. **Configure secrets** — at minimum a valid **`ES_API_KEY`** (and usually **`ES_URL`**) via **`.env`**, **`config.toml`** `[system]`, or **OpenBao KV** at `secret/flume`. For HTTPS with a self-signed certificate, set **`ES_VERIFY_TLS=false`** in the environment or `.env`.
+2. **Install** (once): `./flume install`
+3. **Start processes**: `./flume native`  
+   This runs **`install/setup/run-native.sh`**, which starts the dashboard and worker-manager under **`uv`**, with defaults:
+   - `ES_URL=https://127.0.0.1:9200`
+   - `OPENBAO_ADDR=http://127.0.0.1:8200`
+   - `ES_VERIFY_TLS=false`  
+   Override any of these by exporting them **before** `./flume native`.
+
+Logs: **`logs/dashboard.log`** and **`logs/worker-manager.log`** under the repo root.
+
+**Environment precedence:** Non-empty variables already set in the process environment take precedence over **`config.toml`** for the same keys, so you can point a single clone at host services without editing TOML.
+
+---
+
 ## Repository layouts
 
 ### Git clone (`~/flume`)
@@ -123,6 +142,7 @@ flume/
 │       ├── sync-bootstrap-to-openbao.sh
 │       ├── bootstrap-es-credentials.sh
 │       ├── create-es-indices.sh
+│       ├── run-native.sh
 │       ├── install-flume-service.sh
 │       └── flume-dashboard.service.template
 ├── flume                      ← CLI (systemd user dashboard)

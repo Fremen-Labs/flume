@@ -1,10 +1,20 @@
 import os
 import json
 import logging
+import ssl
 import urllib.request
 import urllib.error
 
 logger = logging.getLogger("es_bootstrap")
+
+
+def _es_ssl_context():
+    if os.environ.get("ES_VERIFY_TLS", "false").lower() == "true":
+        return None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 REQUIRED_INDICES = [
     "flume-projects",
@@ -25,16 +35,18 @@ def ensure_es_indices():
     es_api_key = os.environ.get("ES_API_KEY", "")
     
     headers = {"Content-Type": "application/json"}
-    if es_api_key and "bypass" not in es_api_key:
+    if es_api_key:
         headers["Authorization"] = f"ApiKey {es_api_key}"
-        
+
+    es_ctx = _es_ssl_context()
+
     for index in REQUIRED_INDICES:
         url = f"{es_url}/{index}"
         
         # 1. Check if exists
         req_check = urllib.request.Request(url, headers=headers, method="HEAD")
         try:
-            with urllib.request.urlopen(req_check, timeout=5) as r:
+            with urllib.request.urlopen(req_check, timeout=5, context=es_ctx) as r:
                 if r.status == 200:
                     continue
         except urllib.error.HTTPError as e:
@@ -48,15 +60,15 @@ def ensure_es_indices():
         # 2. Create if missing (404)
         req_create = urllib.request.Request(url, headers=headers, method="PUT")
         try:
-            with urllib.request.urlopen(req_create, timeout=5) as r:
+            with urllib.request.urlopen(req_create, timeout=5, context=es_ctx) as r:
                 logger.info(f"Successfully bootstrapped ES Index natively: {index}")
         except Exception as e:
             logger.error(f"Failed to create index {index}: {e}")
 
 def ensure_vault_credentials():
     print("Initializing OpenBao (Vault) native bootstrap...", flush=True)
-    vault_url = os.environ.get("OPENBAO_ADDR", "http://openbao:8200")
-    vault_token = os.environ.get("OPENBAO_TOKEN", "flume-dev-token")
+    vault_url = os.environ.get("OPENBAO_ADDR", "http://openbao:8200").strip() or "http://openbao:8200"
+    vault_token = os.environ.get("OPENBAO_TOKEN", "flume-dev-token").strip() or "flume-dev-token"
     headers = {"X-Vault-Token": vault_token, "Content-Type": "application/json"}
     
     # Wait for OpenBao to come online and KV engine to mount before attempting writes
