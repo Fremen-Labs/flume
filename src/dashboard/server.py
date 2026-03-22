@@ -2389,6 +2389,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        # Missing bundles must not fall through to index.html (browser expects JS/CSS MIME types).
+        if p.endswith('.js') or p.endswith('.mjs') or p.endswith('.css'):
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            msg = b'static asset not found; rebuild UI (./flume install) or fix index.html hashes\n'
+            self.send_header('Content-Length', str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+
         # Fallback: serve index.html for client-side routing (/agents, /projects, etc.)
         index_path = STATIC_ROOT / 'index.html'
         if not index_path.exists():

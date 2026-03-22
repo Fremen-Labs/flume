@@ -14,7 +14,8 @@ __pycache__/
 
 # Node / frontend
 node_modules/
-dist/
+# Only ignore dist/ at repo root (release tarballs); src/frontend/dist is committed Vite output.
+/dist/
 .DS_Store
 
 # Optional: generated build artifacts
