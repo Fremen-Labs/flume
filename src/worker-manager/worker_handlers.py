@@ -1144,8 +1144,8 @@ def main():
                                 'needs_human': False,
                             })
                             log(f"released orphaned task={src.get('id')} (active_worker={aw})")
-                except Exception:
-                    pass
+                except BaseException as cleanup_err:
+                    log(f"Orphan task cleanup failed securely: {cleanup_err}")
 
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':

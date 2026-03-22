@@ -109,7 +109,7 @@ def get_dynamic_worker_limit() -> int:
         # Reserve ~20% overhead for macOS Desktop & Elasticsearch buffers natively
         available = max(1, int(cores * 0.8))
         return available
-    except Exception:
+    except BaseException as os_err:
         return 4
 
 
@@ -120,8 +120,8 @@ def build_workers():
     if raw:
         try:
             limit = int(raw)
-        except ValueError:
-            pass
+        except ValueError as err:
+            limit = get_dynamic_worker_limit()
 
     for role_def in load_agent_role_defs():
         for idx in range(1, limit + 1):
