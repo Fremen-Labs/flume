@@ -36,6 +36,7 @@ class AgentResult:
     artifacts: list[str] = field(default_factory=list)
     verdict: Optional[str] = None
     bugs: list[dict[str, Any]] = field(default_factory=list)
+    subtasks: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -366,8 +367,21 @@ def _codex_json_schema_pm() -> dict[str, Any]:
     return {
         'type': 'object',
         'properties': {
-            'action': {'type': 'string'},
+            'action': {'type': 'string', 'enum': ['decompose', 'compute_ready']},
             'summary': {'type': 'string'},
+            'subtasks': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'title': {'type': 'string'},
+                        'objective': {'type': 'string'},
+                        'item_type': {'type': 'string', 'enum': ['feature', 'story', 'task']},
+                    },
+                    'required': ['title', 'objective', 'item_type'],
+                    'additionalProperties': False,
+                }
+            }
         },
         'required': ['action', 'summary'],
         'additionalProperties': False,
@@ -619,12 +633,41 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
     )
 
 
+def _get_cluster_topology() -> dict[str, Any]:
+    state_file = BASE / 'worker-manager' / 'state.json'
+    if not state_file.exists():
+        return {'available_implementers': 1, 'target_models': ['unknown']}
+    try:
+        data = json.loads(state_file.read_text())
+        implementers = [w for w in (data.get('workers') or []) if w.get('role') == 'implementer']
+        models = list(set(w.get('model', 'unknown') for w in implementers))
+        return {'available_implementers': len(implementers), 'target_models': models}
+    except Exception:
+        return {'available_implementers': 1, 'target_models': ['unknown']}
+
 def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     system_prompt = _load_system_prompt('pm-dispatcher')
+    topology = _get_cluster_topology()
+    
+    instruction = (
+        f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"
+        f"- Available Implementer Nodes: {topology['available_implementers']}\n"
+        f"- Target Implementer Models: {', '.join(topology['target_models'])}\n\n"
+        "If the Implementer target models are local, highly quantized (e.g., qwen or llama), or generic, "
+        "you MUST tightly decompose this work into microscopic, heavily isolated sub-components (1 function/file per task) "
+        "so the LLMs do not hallucinate.\n"
+        "If the Implementer models are Frontier API models (e.g., gemini-pro, gpt-4), you may chunk the work "
+        "into broader architecture scopes.\n\n"
+        "If the task requires decomposition (e.g., it is a high-level Feature or Epic), return action='decompose' "
+        "and supply an array of subtasks (features, stories, or tasks).\n"
+        "If the task is already scoped at the lowest granular execution limit ('task'), return action='compute_ready' "
+        "to push it to the queue."
+    )
+    
     if _task_uses_codex_app_server(task):
         prompt = (
-            f"SYSTEM PROMPT:\n{system_prompt}\n\n"
-            'Return only JSON with action and summary. '\
+            f"SYSTEM PROMPT:\n{system_prompt}\n\n{instruction}\n\n"
+            'Return explicitly mapped JSON per the schema.\n'
             f"TASK JSON:\n{json.dumps(task or {}, indent=2)}"
         )
         response = _run_codex_json_task(
@@ -635,22 +678,24 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
         )
     else:
         response = _call_ollama(
-        system_prompt,
-        {
-            'instruction': 'Return JSON: {"action":"compute_ready","summary":"..."}',
-            'task': task or {},
-        },
-        model=(task or {}).get('preferred_model') or _current_llm_model(),
-        task=task,
-    )
+            system_prompt,
+            {
+                'instruction': instruction,
+                'task': task or {},
+            },
+            model=(task or {}).get('preferred_model') or _current_llm_model(),
+            task=task,
+        )
     if response and isinstance(response, dict):
         return AgentResult(
             action=response.get('action', 'compute_ready'),
             summary=response.get('summary', 'Computed readiness for queued tasks.'),
+            subtasks=response.get('subtasks') or [],
             metadata={'source': 'llm'},
         )
     return AgentResult(
         action='compute_ready',
         summary='Computed readiness for queued tasks (fallback).',
+        subtasks=[],
         metadata={'source': 'fallback'},
     )
