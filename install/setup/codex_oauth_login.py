@@ -40,6 +40,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from flume_secrets import resolve_oauth_state_path
 
 # Public client id from openai/codex codex-rs/login/src/auth/manager.rs (same as `codex login`).
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
