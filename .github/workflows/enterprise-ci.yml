@@ -76,14 +76,14 @@ jobs:
 
       - name: Execute Full Cluster Boot
         run: |
-          docker-compose up -d
+          docker compose up -d
           echo "Waiting 20 seconds for Elasticsearch and OpenBao to achieve service_healthy..."
           sleep 20
 
       - name: Validate Idempotent Vault Bootstrapping 
         run: |
           docker logs flume-bootstrap || true
-          docker-compose ps
+          docker compose ps
 
       - name: Native E2E Dashboard Health Assertion
         run: |
