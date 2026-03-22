@@ -1931,9 +1931,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self._url_path()
-        if p == '/api/codex-app-server/status':
-            self._json_response(200, {'status': 'offline', 'port': None})
-            return
 
         if p == '/api/snapshot':
             try:
