@@ -234,6 +234,7 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         
         # Native AST Integration mapping Elasticsearch automatically
         try:
+            subprocess.run(['elastro', 'update', str(p)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             import elastro_sync
             elastro_sync.sync_ast()
         except:

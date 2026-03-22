@@ -33,6 +33,10 @@ Tasks like "verify approach", "validate design decision", "confirm requirements"
 ## Rules
 - Always read a file before writing it — never overwrite blindly.
 - You MUST search AST using `elastro search <query>` via `run_shell` before modifying complex code to locate references natively.
+- **3-Index Semantic Memory Architecture**:
+  - `agent_semantic_memory`: Enforces tactical decay (TTL) purging ephemeral states. Rely on this to prevent vector space dilution.
+  - `flow_tools`: Implements strict toolchain versioning. Always cross-check tool versions against cryptographic file hashes here.
+  - `agent_knowledge`: Provides abstract Markdown instructions injected directly into the AST. Bridge instructions via AST Node-IDs organically.
 - Write complete file contents for any file you modify, not partial patches.
 - Keep code changes focused on the task; do not refactor unrelated code.
 - Do not run `git` commands — committing is handled automatically.
