@@ -227,6 +227,8 @@ def claim(
     worker_name=None,
     preferred_llm_provider=None,
     preferred_llm_credential_id=None,
+    seq_no=None,
+    primary_term=None,
 ):
     doc = {
         'status': 'running' if role != 'pm' else 'planned',
@@ -236,17 +238,23 @@ def claim(
         'updated_at': now_iso(),
         'last_update': now_iso(),
     }
-    if execution_host:
-        doc['execution_host'] = execution_host
-    if preferred_model:
-        doc['preferred_model'] = preferred_model
-    if preferred_llm_provider:
-        doc['preferred_llm_provider'] = preferred_llm_provider
-    if preferred_llm_credential_id:
-        doc['preferred_llm_credential_id'] = preferred_llm_credential_id
-    if worker_name:
-        doc['active_worker'] = worker_name
-    es_request(f'/{TASK_INDEX}/_update/{item_id}', {'doc': doc}, method='POST')
+    if execution_host: doc['execution_host'] = execution_host
+    if preferred_model: doc['preferred_model'] = preferred_model
+    if preferred_llm_provider: doc['preferred_llm_provider'] = preferred_llm_provider
+    if preferred_llm_credential_id: doc['preferred_llm_credential_id'] = preferred_llm_credential_id
+    if worker_name: doc['active_worker'] = worker_name
+    
+    endpoint = f'/{TASK_INDEX}/_update/{item_id}'
+    # Distributed Task Lease Coordinator: Prevent Thundering Herd via OCC Mutex Locks
+    if seq_no is not None and primary_term is not None:
+        endpoint += f'?if_seq_no={seq_no}&if_primary_term={primary_term}'
+        
+    try:
+        es_request(endpoint, {'doc': doc}, method='POST')
+        return True
+    except Exception as e:
+        log(f"Manager Mutex Lock Collision (409) prevented for task {item_id}: {e}")
+        return False
 
 
 def save_state(state):

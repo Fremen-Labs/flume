@@ -1,23 +1,6 @@
 version: "3.8"
 
 services:
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: flume-elasticsearch
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   openbao:
     image: hashicorp/vault:1.15
     container_name: flume-openbao
@@ -47,14 +30,30 @@ services:
       - VAULT_TOKEN=flume-dev-token
     entrypoint: >
       /bin/sh -c "
-        if vault kv get secret/flume/keys > /dev/null 2>&1; then
-          echo 'Idempotent Check Passed: Secrets already initialized.';
-        else
-          echo 'Cold Boot Detected: Bootstrapping new Flume secrets...';
-          vault secrets enable -path=secret kv-v2 || true;
-          vault kv put secret/flume/keys OPENAI_API_KEY=sk-mock FLUME_SYNC_TOKEN=mock-token;
-        fi
+        echo 'Bootstrapping new Flume secrets & Topologies...';
+        vault secrets enable -path=secret kv-v2 || true;
+        vault kv put secret/flume/keys ES_API_KEY=generated-secure-key OPENAI_API_KEY=sk-mock;
       "
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: flume-elasticsearch
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   dashboard:
     build:
@@ -94,7 +93,6 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
-      # Mount external worktrees or host directories organically for Netflix scale!
       - /Users/mentat-bot-01/mentat/fremenlabs:/workspace
     environment:
       - FLUME_CONFIG=/app/config.toml
