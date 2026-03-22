@@ -286,7 +286,11 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "requests" },
     { name = "ruff", marker = "extra == 'dev'" },
+<<<<<<< HEAD
     { name = "toml", specifier = ">=0.10.2" },
+=======
+    { name = "toml" },
+>>>>>>> b223e704 (Fix out-of-the-box install: bootstrap uv, flume install, ES review template)
 ]
 provides-extras = ["dev"]
 

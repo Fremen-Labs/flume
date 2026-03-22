@@ -26,6 +26,9 @@ dev = [
 [project.scripts]
 flume = "flume_cli.cli:cli"
 
+[tool.setuptools.packages.find]
+include = ["flume_cli*"]
+
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
