@@ -134,8 +134,20 @@ def _extract_text_from_notification(msg: dict[str, Any]) -> str:
 async def _planner_chat_async(messages: list[dict[str, Any]], model: str, cwd: str | None = None, timeout: int = 180) -> str:
     if websockets is None:
         raise RuntimeError(f"Python package 'websockets' is required for planner Codex routing: {_WS_IMPORT_ERROR}")
+    codex_app_server.start_background_if_needed(Path(cwd or str(Path.cwd())))
     uri = codex_app_server.codex_listen_url()
     text_buf: list[str] = []
+    last_err = None
+    for _ in range(20):
+        try:
+            async with websockets.connect(uri, max_size=None, ping_interval=20, ping_timeout=120) as ws:
+                break
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(0.5)
+    else:
+        raise RuntimeError(str(last_err) if last_err else f'Could not connect to {uri}')
+
     async with websockets.connect(uri, max_size=None, ping_interval=20, ping_timeout=120) as ws:
         req_id = 1
         await ws.send(json.dumps({
