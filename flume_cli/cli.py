@@ -437,10 +437,61 @@ def _host_port_in_use(host: str, port: int) -> bool:
         return False
 
 
+def _host_es_credentials_look_configured(root: Path) -> bool:
+    """Best-effort check that native host Elasticsearch on :9200 is actually usable.
+
+    We do not require a live auth round-trip here, but we do require *some* credible
+    credential source instead of just an open TCP port.
+    """
+    env_api_key = (os.environ.get("ES_API_KEY") or "").strip()
+    if env_api_key and env_api_key != "AUTO_GENERATED_BY_INSTALLER":
+        return True
+
+    env_path = root / ".env"
+    if env_path.is_file():
+        try:
+            for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "ES_API_KEY":
+                    val = v.strip().strip('"').strip("'")
+                    if val and val != "AUTO_GENERATED_BY_INSTALLER":
+                        return True
+        except OSError:
+            pass
+
+    for extra in (root / "install" / ".es-bootstrap.env", root / "install" / ".elastic-admin.env"):
+        if extra.is_file():
+            return True
+
+    cfg = root / "flume.config.json"
+    if cfg.is_file():
+        try:
+            obj = json.loads(cfg.read_text(encoding="utf-8"))
+            ob = obj.get("openbao") or {}
+            tf = str(ob.get("tokenFile") or "").strip()
+            addr = str(ob.get("addr") or "").strip()
+            if tf:
+                token_path = Path(os.path.expanduser(tf))
+                if token_path.is_file() and addr:
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _host_es_native_ready(root: Path) -> bool:
+    return elasticsearch_reachable() and _host_es_credentials_look_configured(root)
+
+
 def _post_install_start_flume(root: Path) -> None:
     """
-    Bring up dashboard + workers: native run-native.sh if host ES answers on :9200,
-    otherwise Docker Compose. Skips if Compose dashboard is already running or port 8765 is taken.
+    Bring up dashboard + workers: native run-native.sh only if host ES on :9200 looks reachable *and*
+    credentials appear configured; otherwise Docker Compose. Skips if Compose dashboard is already
+    running or port 8765 is taken.
     """
     compose_up = _docker_compose_running_services(root)
     if "dashboard" in compose_up:
@@ -463,11 +514,11 @@ def _post_install_start_flume(root: Path) -> None:
         return
 
     script = root / "install" / "setup" / "run-native.sh"
-    if elasticsearch_reachable():
+    if _host_es_native_ready(root):
         if not script.is_file():
             click.echo(f"{YELLOW}Missing {script}; cannot start native Flume.{NC}", err=True)
             return
-        click.echo(f"{CYAN}▶ Starting Flume on the host (Elasticsearch on localhost:9200 detected)…{NC}")
+        click.echo(f"{CYAN}▶ Starting Flume on the host (Elasticsearch on localhost:9200 with credentials detected)…{NC}")
         rc = subprocess.run(["bash", str(script)], cwd=root).returncode
         if rc != 0:
             click.echo(
