@@ -147,7 +147,7 @@ def load_project_repo_path(repo_id):
 
 
 def ensure_task_branch(task):
-    """Create/switch to a per-task branch for implementer work and return branch name/path."""
+    """Create/switch to a per-task branch for implementer work and return branch name/path using Native Git Worktrees."""
     task_id = task.get('id') or 'task'
     repo_id = task.get('repo')
     repo_path = load_project_repo_path(repo_id)
@@ -156,9 +156,6 @@ def ensure_task_branch(task):
 
     item_type = (task.get('item_type') or '').lower()
     prefix = 'bugfix' if item_type == 'bug' or task_id.startswith('bug-') else 'feature'
-    # Branch reuse: for tasks within a story, key the branch off the story id
-    # so the whole story shares one git branch (prevents duplicated changes
-    # across task-by-task branches).
     parent_id = (task.get('parent_id') or '').lower()
     branch_key = task_id
     if item_type == 'task' and parent_id.startswith('story-'):
@@ -166,17 +163,30 @@ def ensure_task_branch(task):
 
     safe_task_id = ''.join(ch if ch.isalnum() or ch in ('-', '_', '/') else '-' for ch in branch_key).strip('-')
     branch = f"{prefix}/{safe_task_id}"
+    
+    # OS native topology: Mount sandboxes adjacent to original repo avoiding concurrent collisions
+    worktree_mgr_path = repo_path.parent / f"{repo_path.name}-worktrees"
+    worktree_path = worktree_mgr_path / task_id
+    
     try:
-        # Create (or reuse) and switch to the branch.
-        subprocess.run(
-            ['git', '-C', str(repo_path), 'checkout', '-B', branch],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return branch, str(repo_path)
+        if not worktree_mgr_path.exists():
+            os.makedirs(worktree_mgr_path, exist_ok=True)
+            
+        if worktree_path.exists() and (worktree_path / '.git').exists():
+            return branch, str(worktree_path)
+
+        # Check if the branch exists locally across the swarm
+        proc = subprocess.run(['git', '-C', str(repo_path), 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'])
+        branch_exists = (proc.returncode == 0)
+        
+        if branch_exists:
+            subprocess.run(['git', '-C', str(repo_path), 'worktree', 'add', str(worktree_path), branch], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(['git', '-C', str(repo_path), 'worktree', 'add', str(worktree_path), '-b', branch], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+        return branch, str(worktree_path)
     except Exception as e:
-        log(f"branch setup failed for task={task_id}: {e}")
+        log(f"worktree setup failed for task={task_id}: {e}")
         return None, str(repo_path)
 
 
@@ -685,11 +695,9 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
 
 
 def handle_implementer_worker(task, es_id):
-    # Resolve repo path without creating a branch yet — branches are only
-    # created when the agent actually writes files.
-    repo_id = task.get('repo')
-    repo_path_obj = load_project_repo_path(repo_id)
-    repo_path = str(repo_path_obj) if repo_path_obj and repo_path_obj.exists() else None
+    # Guarantee absolute node isolation immediately via Worktree Sandboxing
+    branch, worktree_path = ensure_task_branch(task)
+    repo_path = worktree_path or str(load_project_repo_path(task.get('repo')))
 
     # Clear any stale notes from previous runs, then write live progress to ES
     try:
@@ -748,8 +756,7 @@ def handle_implementer_worker(task, es_id):
                 has_changes = False
 
             if has_changes:
-                # Code was written — create branch and commit now
-                branch, _ = ensure_task_branch(task)
+                # Code was written inside the physically isolated worktree natively
                 if branch:
                     commit_sha = auto_commit_and_push(repo_path, branch, commit_message, task_id)
 
@@ -1105,7 +1112,12 @@ def main():
         raise SystemExit(
             'ES_API_KEY is required. Use OpenBao KV (secret/flume) or .env — see install/flume.config.example.json'
         )
-    log('worker handlers starting')
+    target_worker = sys.argv[1] if len(sys.argv) > 1 else None
+    if target_worker:
+        log(f'worker handler spawned targeting explicitly [{target_worker}]')
+    else:
+        log('worker handlers starting in fallback general mode')
+        
     while True:
         try:
             apply_runtime_config(_WS)
@@ -1114,28 +1126,31 @@ def main():
             claimed_workers = {w.get('name') for w in state.get('workers', []) if w.get('status') == 'claimed'}
 
             # Release orphaned tasks: active_worker set but no matching claimed worker
-            try:
-                res = es_request(
-                    f'/{TASK_INDEX}/_search',
-                    {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state': 'active'}}]}}},
-                    method='POST',
-                )
-                for h in res.get('hits', {}).get('hits', []):
-                    src = h.get('_source', {})
-                    aw = src.get('active_worker')
-                    if aw and aw not in claimed_workers:
-                        update_task_doc(h.get('_id'), {
-                            'status': 'ready',
-                            'queue_state': 'queued',
-                            'active_worker': None,
-                            'needs_human': False,
-                        })
-                        log(f"released orphaned task={src.get('id')} (active_worker={aw})")
-            except Exception:
-                pass
+            if not target_worker:
+                try:
+                    res = es_request(
+                        f'/{TASK_INDEX}/_search',
+                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state': 'active'}}]}}},
+                        method='POST',
+                    )
+                    for h in res.get('hits', {}).get('hits', []):
+                        src = h.get('_source', {})
+                        aw = src.get('active_worker')
+                        if aw and aw not in claimed_workers:
+                            update_task_doc(h.get('_id'), {
+                                'status': 'ready',
+                                'queue_state': 'queued',
+                                'active_worker': None,
+                                'needs_human': False,
+                            })
+                            log(f"released orphaned task={src.get('id')} (active_worker={aw})")
+                except Exception:
+                    pass
 
             for worker in state.get('workers', []):
                 if worker.get('status') == 'claimed':
+                    if target_worker and worker.get('name') != target_worker:
+                        continue
                     # Safety: if a task is stuck in running with no agent_log, release it
                     try:
                         task_id = worker.get('current_task_id')
