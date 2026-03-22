@@ -302,7 +302,7 @@ def _planner_should_use_codex_app_server() -> bool:
         import codex_app_server
 
         st = codex_app_server.status()
-        return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
+        return bool(st.get('flumeOAuthConfigured') or st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
     except Exception:
         return False
 

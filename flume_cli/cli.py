@@ -643,10 +643,14 @@ def codex_oauth_cmd(args):
         _restart_codex_app_server_after_oauth(root)
 
 
-@cli.group("codex-app-server")
-def codex_app_server_grp():
-    """Inspect or start the local Codex WebSocket app-server."""
-    pass
+@cli.group("codex-app-server", invoke_without_command=True)
+@click.pass_context
+def codex_app_server_grp(ctx: click.Context):
+    """Inspect or start the local Codex WebSocket app-server (same as ``start`` when no subcommand)."""
+    if ctx.invoked_subcommand is None:
+        root = _flume_repo_root()
+        os.chdir(root)
+        _bootstrap_codex_app_server(root, quiet=False)
 
 
 @codex_app_server_grp.command("status")

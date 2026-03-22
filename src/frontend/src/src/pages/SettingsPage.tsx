@@ -1090,13 +1090,25 @@ export default function SettingsPage() {
                 )}
                 {codexAppData && (
                   <div className="space-y-3 rounded-md border border-border/60 bg-muted/30 p-4 font-mono text-[12px] leading-relaxed">
-                    {!codexAppData.parseError && !codexAppData.tcpReachable && !codexAppData.codexAuthFilePresent ? (
+                    {!codexAppData.parseError && !codexAppData.tcpReachable && !codexAppData.codexAuthFilePresent && !codexAppData.flumeOAuthConfigured ? (
                       <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 font-sans text-[12px] leading-relaxed text-emerald-800 dark:text-emerald-300">
                         <strong>Optional setup:</strong> the dashboard is working normally. Codex app-server just has not been enabled on this machine yet.
                         {codexAppData.flumeWillUseNpxFallback ? (
-                          <> Flume can launch it later with <code className="text-[10px]">npx</code> once you sign in with <code className="text-[10px]">codex login</code>.</>
+                          <>
+                            {' '}
+                            Flume can start it with <code className="text-[10px]">npx</code> after you sign in — use{' '}
+                            <code className="text-[10px]">./flume codex-oauth login-browser</code> (or{' '}
+                            <code className="text-[10px]">./flume setup</code>
+                            ), not <code className="text-[10px]">codex login</code>, unless the global Codex CLI is on
+                            your <code className="text-[10px]">PATH</code>.
+                          </>
                         ) : (
-                          <> Install Codex or Node later, then sign in with <code className="text-[10px]">codex login</code>.</>
+                          <>
+                            {' '}
+                            Install Node (for <code className="text-[10px]">npx</code>) or the Codex CLI, then sign in via{' '}
+                            <code className="text-[10px]">./flume codex-oauth login-browser</code> or{' '}
+                            <code className="text-[10px]">./flume setup</code>.
+                          </>
                         )}
                       </div>
                     ) : null}
@@ -1119,18 +1131,33 @@ export default function SettingsPage() {
                     </div>
                     {codexAppData.flumeWillUseNpxFallback ? (
                       <p className="text-emerald-700 dark:text-emerald-400 font-sans text-[11px]">
-                        <strong>Ready when you are:</strong> <strong>./flume codex-app-server</strong> will run{' '}
-                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> (no global{' '}
-                        <code className="text-[10px]">codex</code> required).
+                        <strong>Ready when you are:</strong> run <strong>./flume codex-app-server</strong> (or{' '}
+                        <code className="text-[10px]">./flume codex-app-server start</code>) to launch{' '}
+                        <code className="text-[10px]">npx --yes @openai/codex app-server …</code> — no global{' '}
+                        <code className="text-[10px]">codex</code> required.
                       </p>
                     ) : null}
+                    <div>
+                      <span className="font-medium text-foreground">Flume OAuth state:</span>{' '}
+                      {codexAppData.flumeOAuthConfigured ? 'configured' : (codexAppData.flumeOAuthStateFilePresent ? 'present but not wired' : 'missing')}
+                    </div>
                     <div>
                       <span className="font-medium text-foreground">~/.codex/auth.json:</span>{' '}
                       {codexAppData.codexAuthFilePresent ? 'present' : 'missing'}
                     </div>
                     {!codexAppData.codexAuthFilePresent ? (
                       <p className="font-sans text-[11px] text-muted-foreground">
-                        No Codex sign-in found yet. Run <code className="text-[10px]">codex login</code> or complete <code className="text-[10px]">./flume setup</code> later if you want ChatGPT/Codex OAuth for coding and review.
+                        {codexAppData.flumeOAuthConfigured ? (
+                          <>
+                            Flume OAuth is configured for the dashboard/planner path. The Codex app-server still needs Codex-compatible auth at <code className="text-[10px]">~/.codex/auth.json</code>. Use <code className="text-[10px]">./flume codex-oauth import-codex</code> or <code className="text-[10px]">codex login</code> if you want the app-server itself.
+                          </>
+                        ) : (
+                          <>
+                            No Codex sign-in found yet. Use <code className="text-[10px]">./flume codex-oauth login-browser</code>{' '}
+                            or <code className="text-[10px]">./flume setup</code> (or <code className="text-[10px]">codex login</code>{' '}
+                            if the official CLI is installed). Then start the app-server as above.
+                          </>
+                        )}
                       </p>
                     ) : null}
                     {codexAppData.parseError ? (
@@ -1141,7 +1168,9 @@ export default function SettingsPage() {
                         {codexAppData.tcpReachable ? (
                           <span className="text-green-600 dark:text-green-400">reachable</span>
                         ) : (
-                          <span className="text-amber-700 dark:text-amber-400">not listening yet (start later with ./flume codex-app-server)</span>
+                          <span className="text-amber-700 dark:text-amber-400">
+                            not listening yet (start with ./flume codex-app-server or ./flume codex-app-server start)
+                          </span>
                         )}
                       </div>
                     )}

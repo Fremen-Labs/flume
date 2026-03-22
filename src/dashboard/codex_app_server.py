@@ -81,6 +81,9 @@ def status() -> dict[str, Any]:
     npx_path = _find_executable("npx")
     reachable, parse_error = tcp_reachable(listen)
     auth_path = Path.home() / '.codex' / 'auth.json'
+    oauth_state_env = (os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip()
+    oauth_state_path = Path(oauth_state_env).expanduser() if oauth_state_env else (Path.cwd() / '.openai-oauth.json')
+    oauth_state_present = oauth_state_path.is_file()
     return {
         'listenUrl': listen,
         'defaultListenUrl': DEFAULT_LISTEN_URL,
@@ -93,12 +96,15 @@ def status() -> dict[str, Any]:
         'tcpReachable': reachable,
         'parseError': parse_error,
         'codexAuthFilePresent': auth_path.is_file(),
+        'codexAuthFilePath': str(auth_path),
+        'flumeOAuthStateFileConfigured': bool(oauth_state_env),
+        'flumeOAuthStateFilePath': str(oauth_state_path),
+        'flumeOAuthStateFilePresent': oauth_state_present,
+        'flumeOAuthConfigured': oauth_state_present,
         'docsUrl': DOCS_URL,
         'envFlumeListen': ENV_LISTEN,
         'envCodexBin': ENV_BIN,
     }
-
-
 def launch_args(extra_args: list[str] | None = None) -> list[str]:
     listen = codex_listen_url()
     extra = list(extra_args or [])

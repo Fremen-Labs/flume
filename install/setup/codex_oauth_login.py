@@ -509,10 +509,8 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
         print(f'OpenBao sync skipped: {e}')
 
     env_path = flume_root / '.env'
-    if not env_path.is_file():
-        print(f"No {env_path} — set OPENAI_OAUTH_STATE_FILE in Settings or create .env.")
-        return
-    lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
+    existed = env_path.is_file()
+    lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines() if existed else []
     updates = {
         'LLM_PROVIDER': 'openai',
         'LLM_API_KEY': '' if ob_enabled else access,
@@ -534,10 +532,8 @@ def _merge_env(flume_root: Path, state_path: Path, token_url: str) -> None:
     for k, v in updates.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    env_path.write_text('\n'.join(out) + '\n', encoding='utf-8')
-    print(f"Updated {env_path}")
-
-
+    env_path.write_text("\n".join(out) + "\n", encoding='utf-8')
+    print(f"{'Updated' if existed else 'Created'} {env_path}")
 def _jwt_access_token_scopes(access_token: str) -> tuple[bool, list[str]]:
     """Decode JWT `scp` / `roles` without verifying the signature (CLI hint only)."""
     t = (access_token or "").strip()
