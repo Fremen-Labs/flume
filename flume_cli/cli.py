@@ -59,7 +59,59 @@ def _run_codex_oauth_script(root: Path, args: tuple[str, ...]) -> int:
     return subprocess.run(cmd, cwd=root, env=env).returncode
 
 
+def _docker_dashboard_exec_json(root: Path, py_expr: str) -> dict | None:
+    compose_up = _docker_compose_running_services(root)
+    if 'dashboard' not in compose_up:
+        return None
+    cmd = [
+        'docker', 'exec', 'flume-dashboard', 'python', '-c',
+        (
+            'import json; '
+            'from pathlib import Path; '
+            'from src.dashboard.codex_app_server import status, start_background_if_needed; '
+            f'result = ({py_expr}); '
+            'print(json.dumps(result))'
+        ),
+    ]
+    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads((proc.stdout or '').strip())
+    except Exception:
+        return None
+
+
 def _bootstrap_codex_app_server(root: Path, *, quiet: bool = False) -> None:
+    result = _docker_dashboard_exec_json(root, 'start_background_if_needed(Path("/app"))')
+    if result is not None:
+        for _ in range(6):
+            st = _docker_dashboard_exec_json(root, 'status()') or {}
+            if st.get('tcpReachable') is True:
+                result = {'started': False, 'reason': 'already_running', 'listenUrl': st.get('listenUrl')}
+                break
+            time.sleep(0.5)
+        if not quiet:
+            if result.get('started'):
+                click.echo(
+                    f"{GREEN}✔ Codex app-server started in dashboard container on {result.get('listenUrl')}{NC}"
+                )
+                click.echo(f"{CYAN}  Log: {result.get('logPath')}{NC}")
+            elif result.get('reason') == 'already_running':
+                click.echo(
+                    f"{CYAN}Codex app-server already reachable at {result.get('listenUrl')}.{NC}"
+                )
+            elif result.get('reason') == 'no_codex_npx':
+                click.echo(
+                    f"{YELLOW}Install Codex CLI or Node/npm (npx) to run the app-server; see {CYAN}install/README.md{YELLOW} (OAuth / Codex).{NC}"
+                )
+            elif result.get('reason') not in (None, 'already_running'):
+                click.echo(
+                    f"{YELLOW}Codex app-server not started: {result.get('reason')} {result.get('error', '')}{NC}".rstrip(),
+                    err=True,
+                )
+        return
+
     src = root / "src"
     if not src.is_dir():
         return
