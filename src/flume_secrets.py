@@ -16,7 +16,7 @@ class FlumeSettings(BaseSettings):
     LLM_API_KEY: str = ""
     GIT_USER_NAME: str = "FlumeAgent"
     GIT_USER_EMAIL: str = "agent@flume.local"
-    ES_URL: str = "http://elasticsearch:9200"
+    ES_URL: str = "https://localhost:9200"
     ES_API_KEY: str = ""
     ES_VERIFY_TLS: str = "false"
     OPENBAO_ADDR: str = "http://openbao:8200"
@@ -52,7 +52,7 @@ def load_toml_config() -> dict[str, Any]:
                 data['GIT_USER_NAME'] = raw['git'].get('user', 'FlumeAgent')
                 data['GIT_USER_EMAIL'] = raw['git'].get('email', '')
             if 'system' in raw:
-                data['ES_URL'] = raw['system'].get('es_url', 'http://elasticsearch:9200')
+                data['ES_URL'] = raw['system'].get('es_url', 'https://localhost:9200')
                 data['ES_API_KEY'] = raw['system'].get('es_api_key', '')
                 data['OPENBAO_ADDR'] = raw['system'].get('openbao_url', 'http://openbao:8200')
                 data['OPENBAO_TOKEN'] = raw['system'].get('openbao_token', '')

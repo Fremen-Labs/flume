@@ -4,12 +4,8 @@ import os
 import ssl
 import sys
 import time
-import asyncio
-# AST injected by Swarm Agent 3
-import urllib.request
 import subprocess
 import threading
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -28,13 +24,12 @@ STATE = BASE / 'state.json'
 AGENT_MODELS_FILE = BASE / 'agent_models.json'
 LOG = BASE / 'manager.log'
 
-ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
+ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
-POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
-
-active_worker_processes = {}
+POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
+WORKERS_PER_ROLE = int(os.environ.get('WORKERS_PER_ROLE', '1'))
 
 ROLE_ORDER = [
     'intake',
@@ -103,28 +98,10 @@ def load_agent_role_defs():
     return defs
 
 
-def get_dynamic_worker_limit() -> int:
-    try:
-        cores = os.cpu_count() or 4
-        # Reserve ~20% overhead for macOS Desktop & Elasticsearch buffers natively
-        available = max(1, int(cores * 0.8))
-        return available
-    except BaseException as os_err:
-        return 4
-
-
 def build_workers():
     workers = []
-    limit = get_dynamic_worker_limit()
-    raw = os.environ.get('WORKERS_PER_ROLE')
-    if raw:
-        try:
-            limit = int(raw)
-        except ValueError as err:
-            limit = get_dynamic_worker_limit()
-
     for role_def in load_agent_role_defs():
-        for idx in range(1, limit + 1):
+        for idx in range(1, max(WORKERS_PER_ROLE, 1) + 1):
             workers.append(
                 {
                     'name': f"{role_def['role']}-worker-{idx}",
@@ -391,23 +368,6 @@ def cycle():
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
         state['workers'].append(snapshot)
     save_state(state)
-    sync_worker_processes(state)
-
-
-def sync_worker_processes(state):
-    claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
-    for w in claimed:
-        name = w.get('name')
-        if not name:
-            continue
-        proc = active_worker_processes.get(name)
-        if proc is None or proc.poll() is not None:
-            active_worker_processes[name] = subprocess.Popen(
-                [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
 
 
 def elastro_watchdog():
@@ -456,6 +416,8 @@ def elastro_watchdog():
                                             mod_bytes = filepath.stat().st_size
                                             if total_bytes > mod_bytes:
                                                 savings = (total_bytes - mod_bytes) // 4
+                                                import urllib.request
+                                                import json
                                                 es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
                                                 es_key = os.environ.get('ES_API_KEY', '')
                                                 if es_key and es_url:
