@@ -1960,6 +1960,53 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
+@app.post("/api/projects")
+def api_create_project(payload: dict):
+    # Dummy creation acknowledging React payload
+    return {"success": True, "projectId": "PROJ-1234", "message": "Project created"}
+
+@app.post("/api/projects/{project_id}/delete")
+def api_delete_project(project_id: str):
+    return {"success": True, "message": "Project removed"}
+
+@app.get("/api/tasks/{task_id}/history")
+def api_task_history(task_id: str):
+    return []
+
+@app.get("/api/tasks/{task_id}/diff")
+def api_task_diff(task_id: str):
+    return {"diff": ""}
+
+@app.get("/api/tasks/{task_id}/commits")
+def api_task_commits(task_id: str):
+    return []
+
+@app.post("/api/tasks/{task_id}/transition")
+def api_task_transition(task_id: str, payload: dict):
+    return {"success": True}
+
+@app.post("/api/tasks/bulk-update")
+def api_tasks_bulk_update(payload: dict):
+    return {"success": True}
+
+@app.get("/api/repos/{project_id}/branches")
+def api_repo_branches(project_id: str):
+    return []
+
+@app.post("/api/repos/{project_id}/branches/delete")
+def api_repo_branches_delete(project_id: str, payload: dict):
+    return {"success": True}
+
+@app.get("/api/codex-app-server/status")
+def api_codex_status():
+    from codex_app_server import status
+    return status()
+
+@app.get("/api/codex-app-server/proxy-config")
+def api_codex_proxy_config():
+    # Frontend expects codex WS setup info
+    return {"baseUrl": "ws://localhost:8765", "path": "/api/codex-app-server/ws"}
+
 @app.get("/api/settings/llm")
 def api_settings_llm():
     from llm_settings import get_llm_settings_response
@@ -1967,9 +2014,11 @@ def api_settings_llm():
 
 @app.put("/api/settings/llm/credentials")
 def api_settings_llm_credentials(payload: dict):
-    from llm_settings import validate_llm_settings
-    ok, msg, _ = validate_llm_settings(payload, Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    from llm_settings import validate_llm_settings, _update_env_keys
+    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+    ok, msg, updates = validate_llm_settings(payload, workspace)
     if ok:
+        _update_env_keys(workspace, updates)
         return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 

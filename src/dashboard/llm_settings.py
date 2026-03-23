@@ -278,7 +278,7 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
 def is_openbao_installed() -> bool:
     import os
     import urllib.request
-    addr = os.environ.get("OPENBAO_ADDR", "http://127.0.0.1:8200").replace("openbao", "127.0.0.1")
+    addr = os.environ.get("FLUME_OPENBAO_ADDR", "http://127.0.0.1:8200")
     try:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
