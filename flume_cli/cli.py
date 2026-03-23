@@ -76,7 +76,7 @@ def start():
         
     try:
         click.echo(f"{CYAN}▶ Attempting isolated Docker orchestration...{NC}")
-        subprocess.run(["docker", "compose", "up", "-d"], check=True)
+        subprocess.run(["docker", "compose", "up", "-d", "--build"], check=True)
         click.echo(f"{GREEN}✔ Ecosystem is active with rigid OpenBao security topology.{NC}")
     except Exception:
         click.echo(f"{CYAN}▶ Docker fallback... Booting daemons natively via 'uv' locally...{NC}")
