@@ -2,11 +2,11 @@ version: "3.8"
 
 services:
   openbao:
-    image: hashicorp/vault:1.15
+    image: quay.io/openbao/openbao:latest
     container_name: flume-openbao
     environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=flume-dev-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - BAO_DEV_ROOT_TOKEN_ID=flume-dev-token
+      - BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200
     ports:
       - "8200:8200"
     cap_add:
@@ -14,46 +14,43 @@ services:
     volumes:
       - openbao_data:/vault/file
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   bootstrap:
-    image: hashicorp/vault:1.15
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: flume-bootstrap
     depends_on:
       openbao:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
     environment:
       - VAULT_ADDR=http://openbao:8200
       - VAULT_TOKEN=flume-dev-token
       - OPENAI_API_KEY=${OPENAI_API_KEY:-""}
-    entrypoint: >
-      /bin/sh -c "
-        echo 'Bootstrapping new Flume secrets & Topologies...';
-        vault secrets enable -path=secret kv-v2 || true;
-        ES_KEY=$$(hexdump -vn 32 -e '1/1 \"%02x\"' /dev/urandom);
-        echo 'Generated Dynamic Elastic Token.';
-        vault kv put secret/flume/keys ES_API_KEY=$$ES_KEY OPENAI_API_KEY=$$OPENAI_API_KEY;
-      "
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-flume-elastic-pass}
+    command: ["uv", "run", "python", "src/docker_bootstrap.py"]
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: flume-elasticsearch
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-flume-elastic-pass}
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "9200:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200 || exit 1"]
+      test: ["CMD-SHELL", "curl -u elastic:${ELASTIC_PASSWORD:-flume-elastic-pass} -s http://localhost:9200 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
