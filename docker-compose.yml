@@ -1,4 +1,3 @@
-version: "3.8"
 
 services:
   openbao:
@@ -101,6 +100,7 @@ services:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - LOOM_WORKSPACE=/workspace
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_OPENBAO_ADDR=http://openbao:8200
