@@ -78,8 +78,10 @@ def start():
         click.echo(f"{CYAN}▶ Attempting isolated Docker orchestration...{NC}")
         subprocess.run(["docker", "compose", "up", "-d", "--build"], check=True)
         click.echo(f"{GREEN}✔ Ecosystem is active with rigid OpenBao security topology.{NC}")
-    except Exception:
-        click.echo(f"{CYAN}▶ Docker fallback... Booting daemons natively via 'uv' locally...{NC}")
+    except Exception as e:
+        click.echo(f"{CYAN}▶ Docker daemon hit a strict security mismatch ({e}). Sweeping ghost containers to prevent socket locks...{NC}")
+        subprocess.run(["docker", "compose", "down"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo(f"{CYAN}▶ Fallback activated: Booting AI Orchestrator daemons natively via 'uv' locally...{NC}")
         import stat
         os.environ['FLUME_ES_URL'] = os.environ.get('FLUME_ES_URL', 'http://127.0.0.1:9200')
         os.environ['FLUME_OPENBAO_ADDR'] = os.environ.get('FLUME_OPENBAO_ADDR', 'http://127.0.0.1:8200')
