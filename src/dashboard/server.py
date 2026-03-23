@@ -45,10 +45,10 @@ apply_runtime_config(_SRC_ROOT)
 
 # Hydrate OpenBao Secrets Natively
 _vault_data = fetch_openbao_kv(
-    os.environ.get("FLUME_OPENBAO_ADDR", "http://openbao:8200"),
-    os.environ.get("VAULT_TOKEN", "flume-dev-token"),
-    "secret",
-    "flume/keys"
+    addr=os.environ.get("OPENBAO_ADDR", "http://openbao:8200"),
+    token=os.environ.get("OPENBAO_TOKEN", ""),
+    mount="secret",
+    path="flume/keys"
 )
 if _vault_data and "ES_API_KEY" in _vault_data:
     os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
