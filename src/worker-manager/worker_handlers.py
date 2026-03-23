@@ -55,7 +55,7 @@ def log(msg):
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {ES_API_KEY}'}
+    headers = {'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}'}
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -1147,7 +1147,7 @@ def main():
                 try:
                     res = es_request(
                         f'/{TASK_INDEX}/_search',
-                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state': 'active'}}]}}},
+                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state.keyword': 'active'}}]}}},
                         method='POST',
                     )
                     for h in res.get('hits', {}).get('hits', []):

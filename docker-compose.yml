@@ -76,10 +76,11 @@ services:
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - LOOM_FRONTEND_DIST=/app/dist
       - LOOM_WORKSPACE=/app
-      - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
       - FLUME_OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=flume-dev-token
     command: ["uv", "run", "python", "src/dashboard/server.py"]
 
   worker:
@@ -104,7 +105,9 @@ services:
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_OPENBAO_ADDR=http://openbao:8200
-    command: ["uv", "run", "python", "src/worker-manager/manager.py"]
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=flume-dev-token
+    command: ["bash", "src/worker-manager/run.sh"]
     deploy:
       mode: replicated
       replicas: 2

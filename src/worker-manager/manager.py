@@ -142,7 +142,10 @@ def build_workers():
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {ES_API_KEY}'}
+    es_key_val = os.environ.get("ES_API_KEY", "")
+    es_url_val = os.environ.get("ES_URL", "http://elasticsearch:9200").rstrip("/")
+    log(f"DEBUG: es_request hitting {es_url_val}{path} with payload: {json.dumps(body) if body else 'None'}")
+    headers = {'Authorization': f'ApiKey {es_key_val}'}
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -365,7 +368,7 @@ def cycle():
     try:
         res = es_request(
             f'/{TASK_INDEX}/_search',
-            {'size': 500, 'query': {'term': {'queue_state': 'active'}}},
+            {'size': 500, 'query': {'term': {'queue_state.keyword': 'active'}}},
             method='POST'
         )
         for h in res.get('hits', {}).get('hits', []):
@@ -536,7 +539,7 @@ def elastro_watchdog():
 
 
 def main():
-    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+    if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
         raise SystemExit(
             'ES_API_KEY is required. Store it in OpenBao (KV secret/flume) or .env — see install/flume.config.example.json'
         )

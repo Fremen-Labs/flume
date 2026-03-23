@@ -43,4 +43,5 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
     git config --global user.email "${GIT_USER_EMAIL}" 2>/dev/null || true
 fi
 
+python3 "${SCRIPT_DIR}/worker_handlers.py" &
 exec python3 "${SCRIPT_DIR}/manager.py"
