@@ -124,7 +124,8 @@ def build_workers():
             limit = get_dynamic_worker_limit()
 
     for role_def in load_agent_role_defs():
-        for idx in range(1, limit + 1):
+        active_limit = 1 if role_def['role'] == 'pm' else limit
+        for idx in range(1, active_limit + 1):
             workers.append(
                 {
                     'name': f"{role_def['role']}-worker-{idx}",
