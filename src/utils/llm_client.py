@@ -69,7 +69,9 @@ def _base_url():
     return _BASE_URL
 
 
-def _post(url, payload, extra_headers=None, timeout=120):
+import time
+
+def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
     headers = {'Content-Type': 'application/json'}
     if extra_headers:
         headers.update(extra_headers)
@@ -79,8 +81,25 @@ def _post(url, payload, extra_headers=None, timeout=120):
         headers=headers,
         method='POST',
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in [429, 500, 502, 503, 504]:
+                time.sleep(2 ** attempt)
+                continue
+            raise e
+        except urllib.error.URLError as e:
+            last_err = e
+            time.sleep(2 ** attempt)
+            continue
+            
+    if last_err:
+        raise last_err
 
 
 # ---------------------------------------------------------------------------
