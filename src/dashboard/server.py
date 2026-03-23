@@ -2033,11 +2033,22 @@ async def websocket_telemetry(websocket: WebSocket):
         active_connections.remove(websocket)
 
 # Static Mount for Frontend
+from fastapi.responses import FileResponse
+
 if STATIC_ROOT.exists():
-    app.mount("/", StaticFiles(directory=str(STATIC_ROOT), html=True), name="static")
+    asset_dir = STATIC_ROOT / "assets"
+    if asset_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa_catchall(full_path: str):
+        path = STATIC_ROOT / full_path
+        if path.is_file():
+            return FileResponse(path)
+        return FileResponse(STATIC_ROOT / "index.html")
 else:
-    @app.get("/")
-    def fallback_root():
+    @app.get("/{full_path:path}")
+    def fallback_root(full_path: str):
         return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
 if __name__ == "__main__":
