@@ -1,4 +1,4 @@
-name: Automate PyPI Release via ReleaseFlow
+name: Automate Releases via ReleaseFlow
 
 on:
   push:
@@ -7,11 +7,10 @@ on:
 
 jobs:
   validate-and-release:
-    name: Build, Scan, and Publish Python distribution to PyPI
+    name: Build, Scan, and Release via ReleaseFlow
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write # Required for OIDC and PyPI Trusted Publishing
 
     steps:
     - name: Checkout code
@@ -27,7 +26,7 @@ jobs:
     - name: Install build dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install build twine ruff bandit
+        pip install build ruff bandit
 
     - name: Set up Node.js
       uses: actions/setup-node@v4
@@ -112,10 +111,3 @@ jobs:
           security/sbom/*
           security/scans/*
           dist/*
-
-    - name: Publish to PyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        python -m twine upload --skip-existing dist/*
