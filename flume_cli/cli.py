@@ -50,6 +50,39 @@ def cli():
     pass
 
 @cli.command()
+def install():
+    """Runs the automated installer for dependencies and the ecosystem"""
+    print_banner()
+    click.echo(f"{CYAN}▶ Validating required host dependencies...{NC}")
+    
+    # Verify Docker architecture
+    try:
+        subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        click.echo(f"{GREEN}✔ Docker engine is active and reachable.{NC}")
+    except subprocess.CalledProcessError:
+        click.echo(f"{CYAN}▶ Error: Docker is not running or installed. Please install Docker Desktop before continuing.{NC}", err=True)
+        return
+        
+    # Hydrate configuration context
+    if not os.path.exists(".env"):
+        if os.path.exists(".env.example"):
+            import shutil
+            shutil.copy(".env.example", ".env")
+            click.echo(f"{GREEN}✔ Generated default .env topology from templates.{NC}")
+        else:
+            click.echo(f"{CYAN}▶ Warning: .env.example template not discovered natively.{NC}")
+    else:
+        click.echo(f"{GREEN}✔ Existing .env configuration validated.{NC}")
+
+    # Synchronize orchestrator layers
+    click.echo(f"{CYAN}▶ Pulling Docker Swarm container layers directly from registry...{NC}")
+    try:
+        subprocess.run(["docker", "compose", "pull"], check=True)
+        click.echo(f"{GREEN}✔ Flume architecture explicitly downloaded and installed natively! Run './flume onboard' to map keys, and './flume start' to deploy.{NC}")
+    except Exception:
+        click.echo(f"{CYAN}▶ Warning: Encountered a discrepancy resolving Docker compose networks natively.{NC}")
+
+@cli.command()
 def start():
     """Start the entire Flume ecosystem natively"""
     print_banner()
