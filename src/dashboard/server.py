@@ -1969,13 +1969,7 @@ def api_workflow_agents_status():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
-@app.post('/api/tasks/claim')
-def claim_task(req: dict):
-    return {"status": "claimed", "task_id": "mock_id"}
 
-@app.post('/api/tasks/complete')
-def complete_task(req: dict):
-    return {"status": "completed"}
 
 active_connections = []
 @app.websocket("/ws/telemetry")

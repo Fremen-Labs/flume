@@ -24,7 +24,7 @@ class FlumeSettings(BaseSettings):
     DASHBOARD_HOST: str = "0.0.0.0"
     DASHBOARD_PORT: int = 8765
     WORKER_MANAGER_POLL_SECONDS: int = 2
-    WORKERS_PER_ROLE: int = 15
+    WORKERS_PER_ROLE: int | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

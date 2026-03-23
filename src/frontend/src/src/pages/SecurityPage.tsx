@@ -91,7 +91,7 @@ export default function SecurityPage() {
           title="Unique Vault Secrets"
           value={rootKeys.length}
           icon={Key}
-          subtitle="Vaulted Identity Certificates"
+          subtitle="Vaulted Identity Properties"
         />
         <GlassMetricCard
           title="Checkout Events"
@@ -106,7 +106,7 @@ export default function SecurityPage() {
         <div className="lg:col-span-1 border border-border bg-card/50 rounded-xl p-6 shadow-sm overflow-hidden flex flex-col gap-4">
           <div className="flex items-center gap-2 mb-2">
             <Key className="w-5 h-5 text-primary" />
-            <h2 className="text-lg font-bold">Active Certificates</h2>
+            <h2 className="text-lg font-bold">Secure Vault KV Store</h2>
           </div>
           {rootKeys.length === 0 ? (
             <div className="text-muted-foreground text-sm italic">No keys actively stored in `secret/flume`.</div>
