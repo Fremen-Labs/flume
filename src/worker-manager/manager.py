@@ -213,6 +213,7 @@ def ready_items_for_role(role):
     body = {
         'size': 20,
         'query': {'bool': {'must': must}},
+        'seq_no_primary_term': True,
         'sort': [
             {'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}
         ]
@@ -358,11 +359,37 @@ def cycle():
             log(f"stuck-implementer sweep: requeued {rq} task(s)")
     except Exception as e:
         log(f"stuck-implementer sweep error: {e}")
+    busy_workers = {}
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_search',
+            {'size': 500, 'query': {'term': {'queue_state': 'active'}}},
+            method='POST'
+        )
+        for h in res.get('hits', {}).get('hits', []):
+            s = h.get('_source', {})
+            wn = s.get('active_worker')
+            if wn:
+                busy_workers[wn] = {'task_id': s.get('id', h.get('_id')), 'task_title': s.get('title')}
+    except Exception as e:
+        log(f"error fetching busy workers: {e}")
+
     workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
         snapshot['heartbeat_at'] = now_iso()
+        
+        if worker['name'] in busy_workers:
+            snapshot['status'] = 'claimed'
+            snapshot['current_task_id'] = busy_workers[worker['name']]['task_id']
+            snapshot['current_task_title'] = busy_workers[worker['name']]['task_title']
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            continue
+            
         snapshot['status'] = 'idle'
         snapshot['current_task_id'] = None
         hits = ready_items_for_role(worker['role'])

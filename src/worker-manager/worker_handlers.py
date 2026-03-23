@@ -418,39 +418,45 @@ def compute_ready_for_repo(repo):
     for item_id, src in by_id.items():
         if not item_id or src.get('status') != 'planned':
             continue
+        item_type = src.get('item_type', 'task')
         deps = src.get('depends_on') or []
-        if not deps:
-            # Epics with no deps and no outstanding children of type task are leaf — skip
-            continue
-        if all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
-            # Infer role/requirements for task items if missing
-            patch = {'status': 'ready'}
-            if src.get('item_type') == 'task':
-                title = (src.get('title') or '').lower()
-                if not src.get('assigned_agent_role'):
-                    if 'review' in title or 'approve' in title:
-                        patch['assigned_agent_role'] = 'reviewer'
-                        patch['owner'] = 'reviewer'
-                    elif 'test' in title or 'validate' in title or 'qa' in title:
-                        patch['assigned_agent_role'] = 'tester'
-                        patch['owner'] = 'tester'
-                    else:
-                        patch['assigned_agent_role'] = 'implementer'
-                        patch['owner'] = 'implementer'
-                if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
-                    patch['requires_code'] = True
-                # If this task depends on a completed task with a commit, inherit commit metadata
-                if not src.get('commit_sha') and deps:
-                    dep = by_id.get(deps[0])
-                    if dep and dep.get('commit_sha'):
-                        patch['commit_sha'] = dep.get('commit_sha')
-                        patch['commit_message'] = dep.get('commit_message')
-                        patch['branch'] = dep.get('branch')
-                        patch['worktree'] = dep.get('worktree')
-            update_task_doc(src['_es_id'], patch)
-            src.update(patch)  # update local view
-            changed += 1
-            log(f"compute_ready: promoted {item_id} to ready")
+        
+        if deps:
+            if not all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
+                continue
+        else:
+            if item_type != 'task':
+                continue
+        
+        # Infer role/requirements for task items if missing
+        patch = {'status': 'ready'}
+        if src.get('item_type') == 'task':
+            title = (src.get('title') or '').lower()
+            current_role = src.get('assigned_agent_role')
+            if not current_role or current_role == 'pm':
+                if 'review' in title or 'approve' in title:
+                    patch['assigned_agent_role'] = 'reviewer'
+                    patch['owner'] = 'reviewer'
+                elif 'test' in title or 'validate' in title or 'qa' in title:
+                    patch['assigned_agent_role'] = 'tester'
+                    patch['owner'] = 'tester'
+                else:
+                    patch['assigned_agent_role'] = 'implementer'
+                    patch['owner'] = 'implementer'
+            if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
+                patch['requires_code'] = True
+            # If this task depends on a completed task with a commit, inherit commit metadata
+            if not src.get('commit_sha') and deps:
+                dep = by_id.get(deps[0])
+                if dep and dep.get('commit_sha'):
+                    patch['commit_sha'] = dep.get('commit_sha')
+                    patch['commit_message'] = dep.get('commit_message')
+                    patch['branch'] = dep.get('branch')
+                    patch['worktree'] = dep.get('worktree')
+        update_task_doc(src['_es_id'], patch)
+        src.update(patch)  # update local view
+        changed += 1
+        log(f"compute_ready: promoted {item_id} to ready")
 
     # Pass 2: mark parent items 'done' when all their children are 'done'
     # Process from leaf parents up (epics last) using type ordering
