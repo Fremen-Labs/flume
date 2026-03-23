@@ -34,6 +34,10 @@ fi
 
 export LOOM_WORKSPACE="${REPO_ROOT}"
 export WORKER_MANAGER_POLL_SECONDS="${WORKER_MANAGER_POLL_SECONDS:-15}"
+PY_BIN="python3"
+if [ -x "${REPO_ROOT}/.venv/bin/python3" ]; then
+    PY_BIN="${REPO_ROOT}/.venv/bin/python3"
+fi
 
 # Apply git identity when present (non-secret; may come from OpenBao KV or .env)
 if [ -n "${GIT_USER_NAME:-}" ]; then
@@ -43,4 +47,4 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
     git config --global user.email "${GIT_USER_EMAIL}" 2>/dev/null || true
 fi
 
-exec python3 "${SCRIPT_DIR}/manager.py"
+exec "${PY_BIN}" "${SCRIPT_DIR}/manager.py"

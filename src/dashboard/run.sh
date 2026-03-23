@@ -40,4 +40,8 @@ fi
 
 export LOOM_WORKSPACE="${REPO_ROOT}"
 export LOOM_FRONTEND_DIST="${WORKSPACE_ROOT}/frontend/dist"
-exec python3 "${SCRIPT_DIR}/server.py"
+PY_BIN="python3"
+if [ -x "${REPO_ROOT}/.venv/bin/python3" ]; then
+    PY_BIN="${REPO_ROOT}/.venv/bin/python3"
+fi
+exec "${PY_BIN}" "${SCRIPT_DIR}/server.py"
