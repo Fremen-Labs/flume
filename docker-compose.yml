@@ -101,6 +101,7 @@ services:
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      - FLUME_OPENBAO_ADDR=http://openbao:8200
     command: ["uv", "run", "python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated
