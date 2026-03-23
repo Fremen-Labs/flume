@@ -144,5 +144,55 @@ def install():
     else:
         click.echo(f"{CYAN}▶ Skipping UI compile (source missing in this tree){NC}")
 
+@cli.command()
+def doctor():
+    """Diagnose ecosystem health, Vault seal status, ES indices, and active LLMs"""
+    print_banner()
+    click.echo(f"{CYAN}▶ Initiating Flume Ecosystem Diagnostics...{NC}")
+    
+    # 1. Docker Status
+    try:
+        out = subprocess.check_output(["docker", "compose", "ps", "--format", "json"]).decode()
+        if "flume-" in out:
+            click.echo(f"{GREEN}✔ Docker Compose Engine: Active & Bound{NC}")
+        else:
+            click.echo(f"{CYAN}⚠ Docker Compose Engine: Offline / Missing Containers{NC}")
+    except Exception:
+        click.echo(f"{CYAN}⚠ Docker Compose Engine: Not Running natively{NC}")
+
+    # 2. Vault Status
+    try:
+        resp = urllib.request.urlopen("http://localhost:8200/v1/sys/seal-status", timeout=2)
+        import json
+        data = json.loads(resp.read().decode())
+        if not data.get('sealed', True):
+            click.echo(f"{GREEN}✔ OpenBao Vault: Unsealed & Cryptographically Ready{NC}")
+        else:
+            click.echo(f"{CYAN}⚠ OpenBao Vault: Sealed or Error{NC}")
+    except Exception:
+        click.echo(f"{CYAN}⚠ OpenBao Vault: Offline (localhost:8200){NC}")
+
+    # 3. Elasticsearch Status
+    try:
+        resp = urllib.request.urlopen("http://localhost:9200/_cluster/health", timeout=2)
+        import json
+        data = json.loads(resp.read().decode())
+        status = data.get('status', 'red')
+        if status in ['green', 'yellow']:
+            click.echo(f"{GREEN}✔ Elasticsearch Nodes: Active ({status.title()}){NC}")
+        else:
+            click.echo(f"{CYAN}⚠ Elasticsearch Nodes: Degraded ({status.title()}){NC}")
+    except Exception:
+        click.echo(f"{CYAN}⚠ Elasticsearch Nodes: Offline (localhost:9200){NC}")
+
+    # 4. LLM Readiness
+    provider, url = check_llms()
+    if provider:
+        click.echo(f"{GREEN}✔ LLM Engine: Reached {provider.title()} synchronously on {url}{NC}")
+    else:
+        click.echo(f"{CYAN}⚠ LLM Engine: Neither Exo nor Ollama detected on local ports.{NC}")
+
+    click.echo(f"\n{BOLD}Diagnostic Scan Complete.{NC}")
+
 if __name__ == '__main__':
     cli()
