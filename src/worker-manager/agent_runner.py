@@ -14,7 +14,7 @@ from typing import Any, Optional
 import importlib.util
 
 HERE = Path(__file__).resolve().parent
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(HERE.parent)))
+BASE = HERE.parent
 # Ensure worker-manager-local modules win over dashboard siblings with the same names.
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
