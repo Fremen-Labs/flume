@@ -1,0 +1,113 @@
+name: Automate Releases via ReleaseFlow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate-and-release:
+    name: Build, Scan, and Release via ReleaseFlow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Needed for changelog generation
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build ruff bandit
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Build GUI Assets
+      run: |
+        cd src/frontend
+        npm ci
+        npm run build
+
+    - name: Code Quality - Syntax & Complexity (Ruff)
+      run: ruff check src/
+
+    - name: Security - SAST Vulnerability Scan (Bandit)
+      run: bandit -r src/ -ll -q || echo "Enforcement soft-fail."
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Run ReleaseFlow Generator
+      id: rflow
+      env:
+        RFLOW_ADO_PAT: ${{ secrets.RFLOW_ADO_PAT }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        RFLOW_AI_PROVIDER: "gemini"
+      run: |
+        echo "Fetching ReleaseFlow binary directly from Azure DevOps Artifacts..."
+        ORG="mentat-automation"
+        PROJECT="vorsam"
+        
+        git clone -b master https://$RFLOW_ADO_PAT@dev.azure.com/$ORG/$PROJECT/_git/ReleaseFlow /tmp/ReleaseFlow
+        cd /tmp/ReleaseFlow
+        
+        echo "Building rflow from source..."
+        make build
+        
+        sudo cp bin/rflow /usr/local/bin/rflow
+        sudo chmod +x /usr/local/bin/rflow
+        rflow version
+        
+        cd $GITHUB_WORKSPACE
+        
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        
+        CURRENT_VERSION=$(grep "^version =" pyproject.toml | awk -F'"' '{print $2}')
+        echo "$CURRENT_VERSION" > .version
+        echo "Extracted $CURRENT_VERSION from pyproject.toml. Triggering ReleaseFlow bump..."
+        
+        rflow manifest generate --config release.yaml --app-dir . --bump patch
+        
+        VERSION=$(cat .version)
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        
+        rflow sbom generate --manifest manifests/release-manifest.yaml
+        rflow scan directory --manifest manifests/release-manifest.yaml
+        rflow notes generate --version $VERSION --out-external release-notes.md --ai
+        
+    - name: Sync Version and Build Package
+      run: |
+        sed -i "s/^version = \".*\"/version = \"${{ env.VERSION }}\"/" pyproject.toml
+        
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add pyproject.toml
+        git commit -m "chore(release): bump version to ${{ env.VERSION }} [skip ci]" || true
+        git push origin main || true
+        
+        python -m build
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ env.VERSION }}
+        name: Release v${{ env.VERSION }}
+        body_path: release-notes.md
+        files: |
+          security/sbom/*
+          security/scans/*
+          dist/*
