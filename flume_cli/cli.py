@@ -133,9 +133,14 @@ def install():
     click.echo(f"{CYAN}▶ Compiling strict React artifacts for local routing...{NC}")
     target_dir = Path("src/frontend/src")
     if target_dir.exists():
-        subprocess.run(["npm", "install"], cwd="src/frontend/src", check=True)
-        subprocess.run(["npm", "run", "build"], cwd="src/frontend/src", check=True)
-        click.echo(f"{GREEN}✔ React GUI payload pre-compiled natively into dist/{NC}")
+        try:
+            subprocess.run(["npm", "install"], cwd="src/frontend/src", check=True)
+            subprocess.run(["npm", "run", "build"], cwd="src/frontend/src", check=True)
+            click.echo(f"{GREEN}✔ React GUI payload pre-compiled natively into dist/{NC}")
+        except FileNotFoundError:
+            click.echo(f"{CYAN}▶ Skipping native UI compile (Node.js/npm not found natively). Flume Backend active. Install npm to build the local frontend.{NC}")
+        except subprocess.CalledProcessError as e:
+            click.echo(f"{CYAN}▶ UI build encountered a compilation warning, bypassed for backend activation: {e}{NC}")
     else:
         click.echo(f"{CYAN}▶ Skipping UI compile (source missing in this tree){NC}")
 
