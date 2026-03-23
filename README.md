@@ -55,7 +55,7 @@ For isolated orchestration without host pollution, Netflix-grade deployment natu
 
 3. **Deploy the Architecture**
    ```bash
-   docker compose up -d flow
+   ./flume start
    ```
 
 4. **Boot Validation (Cold-Start Integrity)**
