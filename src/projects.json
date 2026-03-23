@@ -1,3 +1,12 @@
 {
-  "projects": []
+  "projects": [
+    {
+      "id": "flume-testing",
+      "path": "/Users/mentat-bot-01/mentat/fremenlabs/flume-testing/flume-testing",
+      "gitflow": {
+        "autoPrOnApprove": true,
+        "defaultBranch": "main"
+      }
+    }
+  ]
 }

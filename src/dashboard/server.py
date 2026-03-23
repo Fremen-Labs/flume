@@ -25,11 +25,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 
 # Flume Bootstrap Logic
-from es_bootstrap import ensure_es_indices, ensure_vault_credentials
-
-# Execute bootstrapping unconditionally so Gunicorn binds catch it natively
-ensure_vault_credentials()
-ensure_es_indices()
+# Flume Bootstrap Logic
+from es_bootstrap import ensure_es_indices
 
 # --- Legacy Env ---
 BASE = Path(__file__).resolve().parent
@@ -55,6 +52,9 @@ _vault_data = fetch_openbao_kv(
 )
 if _vault_data and "ES_API_KEY" in _vault_data:
     os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
+
+# Execute Elasticsearch Index Bootstrapping natively now that auth is fully populated
+ensure_es_indices()
 
 from llm_settings import load_effective_pairs  # noqa: E402
 
