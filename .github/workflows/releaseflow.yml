@@ -36,7 +36,7 @@ jobs:
     - name: Build GUI Assets
       run: |
         cd src/frontend
-        npm ci
+        npm install
         npm run build
 
     - name: Code Quality - Syntax & Complexity (Ruff)

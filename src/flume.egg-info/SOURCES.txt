@@ -22,6 +22,7 @@ src/flume.egg-info/dependency_links.txt
 src/flume.egg-info/entry_points.txt
 src/flume.egg-info/requires.txt
 src/flume.egg-info/top_level.txt
+src/frontend/src/node_modules/flatted/python/flatted.py
 src/memory/es/scripts/assign_model.py
 src/memory/es/scripts/attach_artifact.py
 src/memory/es/scripts/byrds_event_ingest.py
