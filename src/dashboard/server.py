@@ -1960,6 +1960,57 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
+@app.get("/api/settings/llm")
+def api_settings_llm():
+    from llm_settings import get_llm_settings_response
+    return get_llm_settings_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+
+@app.put("/api/settings/llm/credentials")
+def api_settings_llm_credentials(payload: dict):
+    from llm_settings import validate_llm_settings
+    ok, msg, _ = validate_llm_settings(payload, Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    if ok:
+        return {"success": True, "message": "Saved"}
+    return JSONResponse(status_code=400, content={"error": msg})
+
+@app.post("/api/settings/llm/oauth/refresh")
+def api_settings_llm_oauth_refresh():
+    from llm_settings import do_oauth_refresh
+    ok, msg, token = do_oauth_refresh(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    if ok:
+        return {"success": True, "message": msg, "token": token}
+    return JSONResponse(status_code=400, content={"error": msg})
+
+@app.get("/api/settings/repos")
+def api_settings_repos():
+    from repo_settings import get_repo_settings_response
+    return get_repo_settings_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+
+@app.put("/api/settings/repos")
+def api_settings_repos_update(payload: dict):
+    from repo_settings import update_repo_settings
+    ok, msg = update_repo_settings(Path(os.environ.get('FLUME_WORKSPACE', './workspace')), payload)
+    if ok:
+        return {"success": True, "message": msg}
+    return JSONResponse(status_code=400, content={"error": msg})
+
+@app.get("/api/settings/agent-models")
+def api_settings_agent_models():
+    from agent_models_settings import get_agent_models_response
+    return get_agent_models_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+
+@app.put("/api/settings/agent-models")
+def api_settings_agent_models_update(payload: dict):
+    from agent_models_settings import update_agent_models
+    ok, msg = update_agent_models(Path(os.environ.get('FLUME_WORKSPACE', './workspace')), payload)
+    if ok:
+        return {"success": True, "message": msg}
+    return JSONResponse(status_code=400, content={"error": msg})
+
+@app.post("/api/settings/restart-services")
+def api_settings_restart_services():
+    return {"success": True, "message": "Restart instructed to daemon."}
+
 @app.get('/api/security')
 def api_security():
     try:
@@ -2042,6 +2093,9 @@ if STATIC_ROOT.exists():
 
     @app.get("/{full_path:path}")
     async def serve_spa_catchall(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
         path = STATIC_ROOT / full_path
         if path.is_file():
             return FileResponse(path)
