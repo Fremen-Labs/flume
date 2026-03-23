@@ -1,3 +1,5 @@
+from utils.logger import get_logger
+logger = get_logger(__name__)
 from elastro_sync import sync_ast
 #!/usr/bin/env python3
 import json
@@ -310,7 +312,7 @@ def _call_ollama_tools(
             **kw,
         )
     except Exception as e:
-        print(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        logger.info(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
         return None
 
 def _codex_json_schema_implementer() -> dict[str, Any]:
@@ -392,7 +394,7 @@ def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd
     try:
         return codex_bridge.run_turn_json(prompt, model=model, cwd=cwd, output_schema=schema, timeout=300)
     except Exception as e:
-        print(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        logger.info(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
         return None
 
 

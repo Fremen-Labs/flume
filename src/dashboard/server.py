@@ -1,3 +1,5 @@
+from utils.logger import get_logger
+logger = get_logger(__name__)
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -1906,11 +1908,11 @@ def maybe_auto_start_workers():
         result = agents_start()
         started = result.get('started') or []
         if started:
-            print(f'Flume: auto-started workers: {started}')
+            logger.info(f'Flume: auto-started workers: {started}')
         elif result.get('already_running'):
-            print('Flume: workers already running (skipped auto-start).')
+            logger.info('Flume: workers already running (skipped auto-start).')
     except Exception as e:
-        print(f'Flume: warning — could not auto-start workers: {e}')
+        logger.info(f'Flume: warning — could not auto-start workers: {e}')
 
 
 
