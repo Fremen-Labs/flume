@@ -377,7 +377,9 @@ def cycle():
             pref_model = worker['model']
             pref_prov = worker.get('llm_provider')
             pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
-            claim(
+            
+            # Request the Mutex Lock via Elasticsearch _seq_no tracking to prevent swarms
+            if claim(
                 item_id,
                 worker['role'],
                 worker.get('execution_host'),
@@ -385,15 +387,24 @@ def cycle():
                 worker['name'],
                 pref_prov,
                 pref_cred,
-            )
-            snapshot['status'] = 'claimed'
-            snapshot['current_task_id'] = src.get('id', item_id)
-            snapshot['current_task_title'] = src.get('title')
-            snapshot['preferred_model'] = pref_model
-            snapshot['preferred_llm_provider'] = pref_prov
-            snapshot['preferred_llm_credential_id'] = pref_cred
-            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
-            log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+                seq_no=task.get('_seq_no'),
+                primary_term=task.get('_primary_term')
+            ):
+                snapshot['status'] = 'claimed'
+                snapshot['current_task_id'] = src.get('id', item_id)
+                snapshot['current_task_title'] = src.get('title')
+                snapshot['preferred_model'] = pref_model
+                snapshot['preferred_llm_provider'] = pref_prov
+                snapshot['preferred_llm_credential_id'] = pref_cred
+                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
+                log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+            else:
+                # OCC Mutex Lock denied (task snagged by a faster node in the cluster)
+                snapshot['status'] = 'idle'
+                wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+                snapshot['preferred_llm_credential_id'] = wcid
+                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            
         else:
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
