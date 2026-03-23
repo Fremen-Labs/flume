@@ -1956,6 +1956,7 @@ def api_system_state():
             "totalNodes": total,
             "standbyNodes": total - active,
             "workers": workers
+        }
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
