@@ -453,7 +453,7 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
       <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
 
-      {showRestartCta && (
+      {false && (
         <div
           className="rounded-xl border-2 border-amber-500/50 bg-amber-500/15 dark:bg-amber-950/40 px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between shadow-sm"
           data-testid="settings-restart-services-cta"
@@ -1551,15 +1551,9 @@ export default function SettingsPage() {
                 <div className="flex flex-wrap items-center gap-3 pt-4">
                   {repoSaveError && <span className="text-sm text-destructive">{repoSaveError}</span>}
                   {repoSaveSuccess && (
-                    <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>
+                     <span className="text-sm text-green-600">Saved. Applied dynamically to all agents.</span>
                   )}
                 </div>
-
-                {data?.openbaoInstalled === false && (
-                  <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
-                  </p>
-                )}
               </div>
             </AccordionContent>
           </AccordionItem>

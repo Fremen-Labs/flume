@@ -8,6 +8,7 @@ github_tokens_store
 llm_credentials_store
 memory
 openai_oauth_state
+plan-sessions
 test-project
 worker-manager
 workspace_llm_env

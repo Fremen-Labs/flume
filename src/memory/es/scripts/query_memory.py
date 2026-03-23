@@ -6,7 +6,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent.parent.parent))) / 'worker-manager'
+BASE = Path(__file__).resolve().parent.parent.parent.parent / 'worker-manager'
 LOG = BASE / 'memory_updater.log'
 
 ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')

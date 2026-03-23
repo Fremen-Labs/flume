@@ -1,3 +1,25 @@
+Metadata-Version: 2.4
+Name: flume
+Version: 0.1.14
+Summary: Autonomous Engineering Frontier
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: flask
+Requires-Dist: flask-cors
+Requires-Dist: elasticsearch
+Requires-Dist: requests
+Requires-Dist: pydantic
+Requires-Dist: pydantic-settings
+Requires-Dist: click
+Requires-Dist: toml>=0.10.2
+Requires-Dist: fastapi>=0.135.1
+Requires-Dist: uvicorn>=0.42.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+
 <div align="center">
 
 # FLUME
@@ -55,7 +77,7 @@ For isolated orchestration without host pollution, Netflix-grade deployment natu
 
 3. **Deploy the Architecture**
    ```bash
-   ./flume start
+   docker compose up -d flow
    ```
 
 4. **Boot Validation (Cold-Start Integrity)**

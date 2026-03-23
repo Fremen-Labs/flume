@@ -37,7 +37,7 @@ def get_repo_settings_response(workspace_root: Path) -> dict[str, Any]:
             "adoCredentials": ats.list_public_credentials(workspace_root),
             "activeAdoCredentialId": ats.get_active_credential_id(workspace_root),
         },
-        "restartRequired": True,
+        "restartRequired": False,
     }
 
 

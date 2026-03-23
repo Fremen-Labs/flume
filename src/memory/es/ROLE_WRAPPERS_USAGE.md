@@ -17,7 +17,7 @@ memory/es/scripts/reviewer_run.sh task-001 openclaw workspace approved "Looks go
 
 ## Memory Updater
 ```bash
-memory/es/scripts/memory_updater_run.sh "hybrid memory" ${LOOM_WORKSPACE}/MEMORY.md openclaw workspace
+memory/es/scripts/memory_updater_run.sh "hybrid memory" ${FLUME_WORKSPACE}/MEMORY.md openclaw workspace
 ```
 
 ## Intended Flow

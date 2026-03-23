@@ -32,7 +32,7 @@ if [ -n "${ENV_FILE}" ]; then
     set +a
 fi
 
-export LOOM_WORKSPACE="${WORKSPACE_ROOT}"
+export FLUME_WORKSPACE="${WORKSPACE_ROOT}"
 export WORKER_MANAGER_POLL_SECONDS="${WORKER_MANAGER_POLL_SECONDS:-15}"
 
 # Apply git identity when present (non-secret; may come from OpenBao KV or .env)
@@ -43,4 +43,5 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
     git config --global user.email "${GIT_USER_EMAIL}" 2>/dev/null || true
 fi
 
+python3 "${SCRIPT_DIR}/worker_handlers.py" &
 exec python3 "${SCRIPT_DIR}/manager.py"

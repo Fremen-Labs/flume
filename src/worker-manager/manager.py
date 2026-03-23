@@ -1,3 +1,5 @@
+from utils.logger import get_logger
+logger = get_logger(__name__)
 #!/usr/bin/env python3
 import json
 import os
@@ -14,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-_WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+_WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
@@ -124,7 +126,8 @@ def build_workers():
             limit = get_dynamic_worker_limit()
 
     for role_def in load_agent_role_defs():
-        for idx in range(1, limit + 1):
+        active_limit = 1 if role_def['role'] == 'pm' else limit
+        for idx in range(1, active_limit + 1):
             workers.append(
                 {
                     'name': f"{role_def['role']}-worker-{idx}",
@@ -139,7 +142,10 @@ def build_workers():
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {ES_API_KEY}'}
+    es_key_val = os.environ.get("ES_API_KEY", "")
+    es_url_val = os.environ.get("ES_URL", "http://elasticsearch:9200").rstrip("/")
+    log(f"DEBUG: es_request hitting {es_url_val}{path} with payload: {json.dumps(body) if body else 'None'}")
+    headers = {'Authorization': f'ApiKey {es_key_val}'}
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -212,6 +218,7 @@ def ready_items_for_role(role):
     body = {
         'size': 20,
         'query': {'bool': {'must': must}},
+        'seq_no_primary_term': True,
         'sort': [
             {'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}
         ]
@@ -348,8 +355,7 @@ def requeue_stuck_implementer_tasks() -> int:
 
 
 def cycle():
-    # Re-merge .env + OpenBao, then same LLM_* resolution as the dashboard (load_effective_pairs).
-    apply_runtime_config(_WS)
+    pass
     sync_llm_env_from_workspace(_WS)
     try:
         rq = requeue_stuck_implementer_tasks()
@@ -357,11 +363,37 @@ def cycle():
             log(f"stuck-implementer sweep: requeued {rq} task(s)")
     except Exception as e:
         log(f"stuck-implementer sweep error: {e}")
+    busy_workers = {}
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_search',
+            {'size': 500, 'query': {'term': {'queue_state.keyword': 'active'}}},
+            method='POST'
+        )
+        for h in res.get('hits', {}).get('hits', []):
+            s = h.get('_source', {})
+            wn = s.get('active_worker')
+            if wn:
+                busy_workers[wn] = {'task_id': s.get('id', h.get('_id')), 'task_title': s.get('title')}
+    except Exception as e:
+        log(f"error fetching busy workers: {e}")
+
     workers = build_workers()
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
         snapshot['heartbeat_at'] = now_iso()
+        
+        if worker['name'] in busy_workers:
+            snapshot['status'] = 'claimed'
+            snapshot['current_task_id'] = busy_workers[worker['name']]['task_id']
+            snapshot['current_task_title'] = busy_workers[worker['name']]['task_title']
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            continue
+            
         snapshot['status'] = 'idle'
         snapshot['current_task_id'] = None
         hits = ready_items_for_role(worker['role'])
@@ -376,7 +408,9 @@ def cycle():
             pref_model = worker['model']
             pref_prov = worker.get('llm_provider')
             pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
-            claim(
+            
+            # Request the Mutex Lock via Elasticsearch _seq_no tracking to prevent swarms
+            if claim(
                 item_id,
                 worker['role'],
                 worker.get('execution_host'),
@@ -384,15 +418,24 @@ def cycle():
                 worker['name'],
                 pref_prov,
                 pref_cred,
-            )
-            snapshot['status'] = 'claimed'
-            snapshot['current_task_id'] = src.get('id', item_id)
-            snapshot['current_task_title'] = src.get('title')
-            snapshot['preferred_model'] = pref_model
-            snapshot['preferred_llm_provider'] = pref_prov
-            snapshot['preferred_llm_credential_id'] = pref_cred
-            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
-            log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+                seq_no=task.get('_seq_no'),
+                primary_term=task.get('_primary_term')
+            ):
+                snapshot['status'] = 'claimed'
+                snapshot['current_task_id'] = src.get('id', item_id)
+                snapshot['current_task_title'] = src.get('title')
+                snapshot['preferred_model'] = pref_model
+                snapshot['preferred_llm_provider'] = pref_prov
+                snapshot['preferred_llm_credential_id'] = pref_cred
+                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
+                log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+            else:
+                # OCC Mutex Lock denied (task snagged by a faster node in the cluster)
+                snapshot['status'] = 'idle'
+                wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+                snapshot['preferred_llm_credential_id'] = wcid
+                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            
         else:
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
@@ -495,7 +538,17 @@ def elastro_watchdog():
 
 
 def main():
-    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+    apply_runtime_config(_WS)
+    from flume_secrets import fetch_openbao_kv
+    _vault_data = fetch_openbao_kv(
+        addr=os.environ.get("OPENBAO_ADDR", "http://openbao:8200"),
+        token=os.environ.get("OPENBAO_TOKEN", ""),
+        mount="secret",
+        path="flume/keys"
+    )
+    if _vault_data and "ES_API_KEY" in _vault_data:
+        os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
+    if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
         raise SystemExit(
             'ES_API_KEY is required. Store it in OpenBao (KV secret/flume) or .env — see install/flume.config.example.json'
         )

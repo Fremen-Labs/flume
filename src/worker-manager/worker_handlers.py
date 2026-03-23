@@ -1,3 +1,5 @@
+from utils.logger import get_logger
+logger = get_logger(__name__)
 #!/usr/bin/env python3
 import json
 import os
@@ -10,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-_WS = Path(os.environ.get('LOOM_WORKSPACE', str(Path(__file__).parent.parent)))
+_WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
@@ -53,7 +55,7 @@ def log(msg):
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {ES_API_KEY}'}
+    headers = {'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}'}
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -418,39 +420,45 @@ def compute_ready_for_repo(repo):
     for item_id, src in by_id.items():
         if not item_id or src.get('status') != 'planned':
             continue
+        item_type = src.get('item_type', 'task')
         deps = src.get('depends_on') or []
-        if not deps:
-            # Epics with no deps and no outstanding children of type task are leaf — skip
-            continue
-        if all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
-            # Infer role/requirements for task items if missing
-            patch = {'status': 'ready'}
-            if src.get('item_type') == 'task':
-                title = (src.get('title') or '').lower()
-                if not src.get('assigned_agent_role'):
-                    if 'review' in title or 'approve' in title:
-                        patch['assigned_agent_role'] = 'reviewer'
-                        patch['owner'] = 'reviewer'
-                    elif 'test' in title or 'validate' in title or 'qa' in title:
-                        patch['assigned_agent_role'] = 'tester'
-                        patch['owner'] = 'tester'
-                    else:
-                        patch['assigned_agent_role'] = 'implementer'
-                        patch['owner'] = 'implementer'
-                if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
-                    patch['requires_code'] = True
-                # If this task depends on a completed task with a commit, inherit commit metadata
-                if not src.get('commit_sha') and deps:
-                    dep = by_id.get(deps[0])
-                    if dep and dep.get('commit_sha'):
-                        patch['commit_sha'] = dep.get('commit_sha')
-                        patch['commit_message'] = dep.get('commit_message')
-                        patch['branch'] = dep.get('branch')
-                        patch['worktree'] = dep.get('worktree')
-            update_task_doc(src['_es_id'], patch)
-            src.update(patch)  # update local view
-            changed += 1
-            log(f"compute_ready: promoted {item_id} to ready")
+        
+        if deps:
+            if not all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
+                continue
+        else:
+            if item_type != 'task':
+                continue
+        
+        # Infer role/requirements for task items if missing
+        patch = {'status': 'ready'}
+        if src.get('item_type') == 'task':
+            title = (src.get('title') or '').lower()
+            current_role = src.get('assigned_agent_role')
+            if not current_role or current_role == 'pm':
+                if 'review' in title or 'approve' in title:
+                    patch['assigned_agent_role'] = 'reviewer'
+                    patch['owner'] = 'reviewer'
+                elif 'test' in title or 'validate' in title or 'qa' in title:
+                    patch['assigned_agent_role'] = 'tester'
+                    patch['owner'] = 'tester'
+                else:
+                    patch['assigned_agent_role'] = 'implementer'
+                    patch['owner'] = 'implementer'
+            if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
+                patch['requires_code'] = True
+            # If this task depends on a completed task with a commit, inherit commit metadata
+            if not src.get('commit_sha') and deps:
+                dep = by_id.get(deps[0])
+                if dep and dep.get('commit_sha'):
+                    patch['commit_sha'] = dep.get('commit_sha')
+                    patch['commit_message'] = dep.get('commit_message')
+                    patch['branch'] = dep.get('branch')
+                    patch['worktree'] = dep.get('worktree')
+        update_task_doc(src['_es_id'], patch)
+        src.update(patch)  # update local view
+        changed += 1
+        log(f"compute_ready: promoted {item_id} to ready")
 
     # Pass 2: mark parent items 'done' when all their children are 'done'
     # Process from leaf parents up (epics last) using type ordering
@@ -1117,7 +1125,18 @@ def run_worker(worker):
 
 
 def main():
-    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
+    apply_runtime_config(_WS)
+    from flume_secrets import fetch_openbao_kv
+    _vault_data = fetch_openbao_kv(
+        addr=os.environ.get("OPENBAO_ADDR", "http://openbao:8200"),
+        token=os.environ.get("OPENBAO_TOKEN", ""),
+        mount="secret",
+        path="flume/keys"
+    )
+    if _vault_data and "ES_API_KEY" in _vault_data:
+        os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
+        
+    if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
         raise SystemExit(
             'ES_API_KEY is required. Use OpenBao KV (secret/flume) or .env — see install/flume.config.example.json'
         )
@@ -1139,7 +1158,7 @@ def main():
                 try:
                     res = es_request(
                         f'/{TASK_INDEX}/_search',
-                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state': 'active'}}]}}},
+                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state.keyword': 'active'}}]}}},
                         method='POST',
                     )
                     for h in res.get('hits', {}).get('hits', []):
