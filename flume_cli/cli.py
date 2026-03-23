@@ -137,13 +137,24 @@ def start():
     provider, base_url = check_llms()
     if not provider:
         click.echo(f"{CYAN}▶ No local LLM detected! Halting for human intervention.{NC}")
-        key = click.prompt("Enter OpenAI/Anthropic API Key to stash in OpenBao Vault", hide_input=True)
-        with open('.env', 'a') as f:
-            f.write(f"\\nOPENAI_API_KEY={key}\\n")
-        os.environ['OPENAI_API_KEY'] = key
-        click.echo(f"{GREEN}✔ Key delegated to Docker bootstrap for OpenBao ingestion!{NC}")
-        provider = "openai"
-        base_url = "https://api.openai.com/v1"
+        chosen_provider = click.prompt("Select Provider (openai/anthropic/ollama)", default="openai")
+        
+        if chosen_provider.lower() in ["openai", "anthropic"]:
+            key = click.prompt(f"Enter {chosen_provider.capitalize()} API Key to stash in OpenBao Vault", hide_input=True)
+            env_key = f"{chosen_provider.upper()}_API_KEY"
+            if chosen_provider.lower() == "openai":
+                base_url = "https://api.openai.com/v1"
+            else:
+                base_url = "https://api.anthropic.com/v1"
+                
+            with open('.env', 'a') as f:
+                f.write(f"\\n{env_key}={key}\\n")
+            os.environ[env_key] = key
+        else:
+            base_url = click.prompt("LLM Base URL", default="http://localhost:11434/v1")
+            
+        click.echo(f"{GREEN}✔ Key delegated to Docker bootstrap conditionally for OpenBao ingestion!{NC}")
+        provider = chosen_provider
     else:
         click.echo(f"{GREEN}✔ Auto-discovered {provider} at {base_url}!{NC}")
         
