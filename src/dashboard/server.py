@@ -2012,6 +2012,16 @@ def api_settings_llm():
     from llm_settings import get_llm_settings_response
     return get_llm_settings_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
 
+@app.post("/api/settings/llm")
+def api_settings_llm_update(payload: dict):
+    from llm_settings import validate_llm_settings, _update_env_keys
+    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+    ok, msg, updates = validate_llm_settings(payload, workspace)
+    if ok:
+        _update_env_keys(workspace, updates)
+        return {"success": True, "message": "Saved"}
+    return JSONResponse(status_code=400, content={"error": msg})
+
 @app.put("/api/settings/llm/credentials")
 def api_settings_llm_credentials(payload: dict):
     from llm_settings import validate_llm_settings, _update_env_keys
