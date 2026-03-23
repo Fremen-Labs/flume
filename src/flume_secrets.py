@@ -122,3 +122,36 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
 
 def resolve_oauth_state_path(workspace_root: Path, state_file: str = "") -> Path:
     return workspace_root / '.agent' / 'openai_oauth_state.json'
+
+def hydrate_secrets_from_openbao() -> None:
+    """Natively bridges centralized OpenBao ingestion mapping strict JSON observability traces (PR 65 Compliance)."""
+    addr = os.environ.get("OPENBAO_ADDR", "http://openbao:8200")
+    token = os.environ.get("OPENBAO_TOKEN", "")
+    
+    if not token or not addr:
+        logger.warning(json.dumps({
+            "event": "openbao_config_missing",
+            "message": "Explicit OPENBAO_TOKEN natively missing from environment. Skipping hydration."
+        }))
+        return
+        
+    logger.info(json.dumps({
+        "event": "openbao_fetch_attempt",
+        "addr": addr,
+        "mount": "secret",
+        "path": "flume/keys"
+    }))
+    
+    data = fetch_openbao_kv(addr, token, "secret", "flume/keys")
+    if data and "ES_API_KEY" in data:
+        os.environ["ES_API_KEY"] = data["ES_API_KEY"]
+        logger.info(json.dumps({
+            "event": "openbao_fetch_success",
+            "message": "Vault seamlessly unlocked over HTTP layer.",
+            "keys_hydrated": list(data.keys())
+        }))
+    else:
+        logger.warning(json.dumps({
+            "event": "openbao_fetch_failure",
+            "message": "Vault returned empty structures or unreachable configurations cleanly bypassing crashes."
+        }))
