@@ -39,6 +39,31 @@ import type {
   AdoTokenActionPayload,
 } from '@/types';
 
+interface SystemSettingsPayload {
+  es_url: string;
+  es_api_key: string;
+  openbao_url: string;
+  vault_token: string;
+}
+
+async function fetchSystemSettings(): Promise<SystemSettingsPayload> {
+  const res = await fetch('/api/settings/system');
+  const data = await parseJsonBody<SystemSettingsPayload & { error?: string }>(res);
+  if (!res.ok) throw new Error(data?.error || `Settings fetch failed: ${res.status}`);
+  return data;
+}
+
+async function saveSystemSettings(payload: SystemSettingsPayload): Promise<{ status: string }> {
+  const res = await fetch('/api/settings/system', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await parseJsonBody<{ status?: string; error?: string }>(res);
+  if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
+  return data as { status: string };
+}
+
 /** Avoid `res.json()` on empty bodies (e.g. legacy 404s, proxies, dropped connections). */
 async function parseJsonBody<T>(res: Response): Promise<T> {
   const text = await res.text();
@@ -247,6 +272,37 @@ export default function SettingsPage() {
 
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
   const [repoSaveSuccess, setRepoSaveSuccess] = useState(false);
+
+  const {
+    data: sysData,
+    isLoading: sysIsLoading,
+    error: sysError,
+  } = useQuery<SystemSettingsPayload>({
+    queryKey: ['settings', 'system'],
+    queryFn: fetchSystemSettings,
+    staleTime: 30_000,
+  });
+
+  const [sysForm, setSysForm] = useState<Partial<SystemSettingsPayload>>({});
+  const [sysSaveError, setSysSaveError] = useState<string | null>(null);
+  const [sysSaveSuccess, setSysSaveSuccess] = useState(false);
+
+  const sysMutation = useMutation({
+    mutationFn: saveSystemSettings,
+    onSuccess: () => {
+      setSysSaveError(null);
+      setSysSaveSuccess(true);
+      queryClient.invalidateQueries({ queryKey: ['settings', 'system'] });
+      setTimeout(() => setSysSaveSuccess(false), 3000);
+      setPendingRestartFlag(true);
+      setShowRestartCta(true);
+    },
+    onError: (e: Error) => {
+      setSysSaveError(e.message);
+    },
+  });
+
+  const effectiveSys = { ...sysData, ...sysForm };
 
   const restartServicesMutation = useMutation({
     mutationFn: restartFlumeServices,
@@ -1553,6 +1609,109 @@ export default function SettingsPage() {
                   {repoSaveSuccess && (
                      <span className="text-sm text-green-600">Saved. Applied dynamically to all agents.</span>
                   )}
+                </div>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          <AccordionItem value="system-infrastructure">
+            <AccordionTrigger>
+              <div className="flex items-center justify-between w-full">
+                <span>System Infrastructure</span>
+                <span className="text-xs text-muted-foreground">
+                  ELK / Vault
+                </span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-6 pt-4">
+                {sysIsLoading && (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading system settings…
+                  </div>
+                )}
+                {sysError && (
+                  <p className="text-sm text-destructive">{String(sysError)}</p>
+                )}
+                
+                <div className="space-y-4">
+                  <div>
+                    <Label>Elasticsearch Configuration</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Provide external telemetry URLs when running dynamically outside the standard Docker topology.
+                    </p>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label className="text-xs">Elasticsearch URL</Label>
+                      <Input
+                        placeholder="http://127.0.0.1:9200"
+                        value={sysForm.es_url ?? effectiveSys.es_url ?? ''}
+                        onChange={(e) => setSysForm(p => ({ ...p, es_url: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">ES API Key</Label>
+                      <Input
+                        type="password"
+                        placeholder="Elasticsearch Key"
+                        value={sysForm.es_api_key ?? (effectiveSys.es_api_key === '***' ? '' : (effectiveSys.es_api_key ?? ''))}
+                        onChange={(e) => setSysForm(p => ({ ...p, es_api_key: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-border/40">
+                  <div>
+                    <Label>OpenBao Vault Configuration</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Point Flume to an existing Vault instance.
+                    </p>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label className="text-xs">Vault URL</Label>
+                      <Input
+                        placeholder="http://127.0.0.1:8200"
+                        value={sysForm.openbao_url ?? effectiveSys.openbao_url ?? ''}
+                        onChange={(e) => setSysForm(p => ({ ...p, openbao_url: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Root Token</Label>
+                      <Input
+                        type="password"
+                        placeholder="Vault Root Token"
+                        value={sysForm.vault_token ?? (effectiveSys.vault_token === '••••' ? '' : (effectiveSys.vault_token ?? ''))}
+                        onChange={(e) => setSysForm(p => ({ ...p, vault_token: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-4">
+                  <Button 
+                    onClick={() => {
+                      sysMutation.mutate({
+                        es_url: effectiveSys.es_url ?? 'http://127.0.0.1:9200',
+                        es_api_key: sysForm.es_api_key ?? (effectiveSys.es_api_key ?? ''),
+                        openbao_url: effectiveSys.openbao_url ?? 'http://127.0.0.1:8200',
+                        vault_token: sysForm.vault_token ?? (effectiveSys.vault_token ?? '')
+                      });
+                    }} 
+                    disabled={sysMutation.isPending}
+                  >
+                    {sysMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Save className="h-4 w-4" />
+                    )}
+                    Save System Config
+                  </Button>
+                  {sysSaveError && <span className="text-sm text-destructive">{sysSaveError}</span>}
+                  {sysSaveSuccess && <span className="text-sm text-green-600">Saved System Config. Restart dashboard and workers to apply.</span>}
                 </div>
               </div>
             </AccordionContent>
