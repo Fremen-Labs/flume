@@ -23,9 +23,21 @@ def print_banner():
 """)
 
 def check_memory():
+    import sys
     try:
-        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode().strip()
-        gb = int(out) // (1024**3)
+        if sys.platform == 'darwin':
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode().strip()
+            total_bytes = int(out)
+        elif sys.platform.startswith('linux'):
+            total_bytes = 16 * (1024**3)
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if 'MemTotal' in line:
+                        total_bytes = int(line.split()[1]) * 1024
+                        break
+        else:
+            total_bytes = 16 * (1024**3)
+        gb = total_bytes // (1024**3)
     except Exception:
         gb = 16
     if gb < 16: return {"impl": 1, "pm": 1, "rev": 0}
