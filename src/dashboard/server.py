@@ -41,10 +41,20 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-from flume_secrets import apply_runtime_config, load_legacy_dotenv_into_environ  # noqa: E402
+from flume_secrets import apply_runtime_config, fetch_openbao_kv  # noqa: E402
 
-# Merge .env (src then repo root, repo wins) + OpenBao KV; see flume_secrets.load_legacy_dotenv_into_environ
+# Merge .env config
 apply_runtime_config(_SRC_ROOT)
+
+# Hydrate OpenBao Secrets Natively
+_vault_data = fetch_openbao_kv(
+    os.environ.get("FLUME_OPENBAO_ADDR", "http://openbao:8200"),
+    os.environ.get("VAULT_TOKEN", "flume-dev-token"),
+    "secret",
+    "flume/keys"
+)
+if _vault_data and "ES_API_KEY" in _vault_data:
+    os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
 
 from llm_settings import load_effective_pairs  # noqa: E402
 
@@ -148,7 +158,7 @@ def es_search(index, body):
         data=json.dumps(body).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
         },
         method='POST',
     )
@@ -197,7 +207,7 @@ def es_index(index, doc):
         data=json.dumps(doc).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
         },
         method='POST',
     )
@@ -211,7 +221,7 @@ def es_upsert(index, doc_id, doc):
         data=json.dumps(doc).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
         },
         method='PUT',
     )
@@ -229,7 +239,7 @@ def es_post(path, body, method='POST'):
         data=json.dumps(body).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
         },
         method=method,
     )

@@ -10,6 +10,7 @@ flume_cli/__init__.py
 flume_cli/cli.py
 src/ado_tokens_store.py
 src/codex_app_server_bridge.py
+src/docker_bootstrap.py
 src/flume_secrets.py
 src/github_tokens_store.py
 src/llm_credentials_store.py
@@ -51,5 +52,6 @@ src/utils/logger.py
 src/worker-manager/agent_runner.py
 src/worker-manager/elastro_sync.py
 src/worker-manager/manager.py
+src/worker-manager/meta_critic.py
 src/worker-manager/worker_handlers.py
 tests/test_llm_client.py
