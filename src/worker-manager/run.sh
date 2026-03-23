@@ -32,7 +32,7 @@ if [ -n "${ENV_FILE}" ]; then
     set +a
 fi
 
-export LOOM_WORKSPACE="${WORKSPACE_ROOT}"
+export LOOM_WORKSPACE="${REPO_ROOT}"
 export WORKER_MANAGER_POLL_SECONDS="${WORKER_MANAGER_POLL_SECONDS:-15}"
 
 # Apply git identity when present (non-secret; may come from OpenBao KV or .env)

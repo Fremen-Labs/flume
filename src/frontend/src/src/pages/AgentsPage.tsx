@@ -436,10 +436,11 @@ export default function AgentsPage() {
                       </div>
                       <div className="space-y-1 min-w-0">
                         <p className="text-[13px] font-semibold text-foreground tracking-tight">
-                          Identity Replication Detected
+                          Shared Role Configuration
                         </p>
                         <p className="text-[13px] text-muted-foreground leading-relaxed">
-                          <strong>Every role is identical</strong> (same provider, model, and key profile). For optimal swarm execution, set each row differently — e.g. Intake = <code className="bg-muted px-1.5 py-0.5 rounded text-[11px] font-mono text-foreground/80">gpt-4o-mini</code>, PM ={' '}
+                          <strong>All roles currently use the same provider, model, and key profile.</strong> That’s okay.
+                          If you want more specialization later, you can set rows differently — e.g. Intake = <code className="bg-muted px-1.5 py-0.5 rounded text-[11px] font-mono text-foreground/80">gpt-4o-mini</code>, PM ={' '}
                           <code className="bg-muted px-1.5 py-0.5 rounded text-[11px] font-mono text-foreground/80">gpt-4o</code>, or map different <strong>vendors</strong> via saved keys.
                         </p>
                       </div>
