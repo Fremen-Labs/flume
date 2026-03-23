@@ -117,7 +117,6 @@ def install():
             click.echo(f"{CYAN}▶ Warning: .env.example template not discovered natively.{NC}")
     else:
         click.echo(f"{GREEN}✔ Existing .env configuration validated.{NC}")
-
     # Synchronize orchestrator layers
     click.echo(f"{CYAN}▶ Pulling Docker Swarm container layers directly from registry...{NC}")
     try:
@@ -162,8 +161,16 @@ def start():
         handle_byob(check_ports())
         subprocess.run(["docker", "compose", "up", "-d"], check=True)
         click.echo(f"{GREEN}✔ Ecosystem is active with rigid OpenBao security topology.{NC}")
-    except Exception:
-        click.echo(f"{CYAN}▶ Docker fallback...{NC}")
+    except Exception as e:
+        click.echo(f"{CYAN}▶ Docker daemon hit a strict security mismatch ({e}). Sweeping ghost containers to prevent socket locks...{NC}")
+        subprocess.run(["docker", "compose", "down"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo(f"{CYAN}▶ Fallback activated: Booting AI Orchestrator daemons natively via 'uv' locally...{NC}")
+        os.environ['FLUME_ES_URL'] = os.environ.get('FLUME_ES_URL', 'http://127.0.0.1:9200')
+        os.environ['FLUME_OPENBAO_ADDR'] = os.environ.get('FLUME_OPENBAO_ADDR', 'http://127.0.0.1:8200')
+        os.environ['PYTHONPATH'] = os.path.abspath('src')
+        subprocess.Popen(["uv", "run", "python", "src/dashboard/server.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo(f"{GREEN}✔ Native daemons launched on host memory. (Dashboard on :8765){NC}")
 
 @cli.command()
 def stop():

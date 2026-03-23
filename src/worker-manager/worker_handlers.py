@@ -1126,15 +1126,8 @@ def run_worker(worker):
 
 def main():
     apply_runtime_config(_WS)
-    from flume_secrets import fetch_openbao_kv
-    _vault_data = fetch_openbao_kv(
-        addr=os.environ.get("OPENBAO_ADDR", "http://openbao:8200"),
-        token=os.environ.get("OPENBAO_TOKEN", ""),
-        mount="secret",
-        path="flume/keys"
-    )
-    if _vault_data and "ES_API_KEY" in _vault_data:
-        os.environ["ES_API_KEY"] = _vault_data["ES_API_KEY"]
+    from flume_secrets import hydrate_secrets_from_openbao
+    hydrate_secrets_from_openbao()
         
     if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
         raise SystemExit(
