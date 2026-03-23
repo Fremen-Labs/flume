@@ -58,34 +58,44 @@ def start():
     
     provider, base_url = check_llms()
     if not provider:
-        click.echo(f"{CYAN}▶ No local LLM detected! Halting for human intervention.{NC}")
-        key = click.prompt("Enter OpenAI/Anthropic API Key to stash in OpenBao Vault", hide_input=True)
-        with open('.env', 'a') as f:
-            f.write(f"\\nOPENAI_API_KEY={key}\\n")
-        os.environ['OPENAI_API_KEY'] = key
-        click.echo(f"{GREEN}✔ Key delegated to Docker bootstrap for OpenBao ingestion!{NC}")
-        provider = "openai"
-        base_url = "https://api.openai.com/v1"
+        click.echo(f"{CYAN}▶ No local LLM detected! Flume natively awaits provider configuration.{NC}")
     else:
         click.echo(f"{GREEN}✔ Auto-discovered {provider} at {base_url}!{NC}")
         
     try:
+        click.echo(f"{CYAN}▶ Attempting isolated Docker orchestration...{NC}")
         subprocess.run(["docker", "compose", "up", "-d"], check=True)
         click.echo(f"{GREEN}✔ Ecosystem is active with rigid OpenBao security topology.{NC}")
     except Exception:
-        click.echo(f"{CYAN}▶ Docker fallback...{NC}")
+        click.echo(f"{CYAN}▶ Docker fallback... Booting daemons natively via 'uv' locally...{NC}")
+        import stat
+        os.environ['FLUME_ES_URL'] = os.environ.get('FLUME_ES_URL', 'http://127.0.0.1:9200')
+        os.environ['FLUME_OPENBAO_ADDR'] = os.environ.get('FLUME_OPENBAO_ADDR', 'http://127.0.0.1:8200')
+        subprocess.Popen(["uv", "run", "python", "src/dashboard/server.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["uv", "run", "python", "src/worker-manager/manager.py"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo(f"{GREEN}✔ Native daemons launched on host memory. (Dashboard on :8765){NC}")
 
 @cli.command()
 def stop():
     """Terminate the ecosystem."""
     click.echo(f"{CYAN}▶ Teardown of active orchestrator arrays...{NC}")
-    subprocess.run(["docker", "compose", "down"], check=True)
+    try:
+        subprocess.run(["docker", "compose", "down"], check=True)
+    except Exception:
+        pass
+    subprocess.run(["pkill", "-f", "worker_handlers\\.py"], capture_output=True)
+    subprocess.run(["pkill", "-f", "manager\\.py"], capture_output=True)
+    subprocess.run(["pkill", "-f", "server\\.py"], capture_output=True)
     click.echo(f"{GREEN}✔ Flume network offline.{NC}")
 
 @cli.command()
 def logs():
     """Tail active logs."""
-    subprocess.run(["docker", "compose", "logs", "-f"])
+    try:
+        subprocess.run(["docker", "compose", "logs", "-f"], check=True)
+    except Exception:
+        click.echo(f"{CYAN}▶ Tailing native dashboard logs (monitor flume-worker-logs/ for node details)...{NC}")
+        subprocess.run(["tail", "-f", "src/worker-manager/manager.log"])
 
 @cli.command()
 def onboard():
@@ -95,11 +105,27 @@ def onboard():
     config = {
         "llm": { "provider": "exo", "model": "qwen3-30b-A3B-4bit", "base_url": "http://localhost:52415/v1" },
         "git": { "user": "FlumeAgent", "email": "agent@flume.local" },
-        "system": { "es_url": "http://elasticsearch:9200", "openbao_url": "http://openbao:8200" }
+        "system": { "es_url": "http://127.0.0.1:9200", "openbao_url": "http://127.0.0.1:8200", "dashboard_url": "http://127.0.0.1:8765" }
     }
     with open("config.toml", "w") as f:
         toml.dump(config, f)
     click.echo(f"{GREEN}✔ Written config.toml.{NC}")
+
+@cli.command()
+def install():
+    """Runs the automated installer for dependencies, virtual environments, and GUI routines."""
+    print_banner()
+    click.echo(f"{CYAN}▶ Provisioning host environment dependencies via 'uv'...{NC}")
+    subprocess.run(["uv", "sync"], check=True)
+    
+    click.echo(f"{CYAN}▶ Compiling strict React artifacts for local routing...{NC}")
+    target_dir = Path("src/frontend/src")
+    if target_dir.exists():
+        subprocess.run(["npm", "install"], cwd="src/frontend/src", check=True)
+        subprocess.run(["npm", "run", "build"], cwd="src/frontend/src", check=True)
+        click.echo(f"{GREEN}✔ React GUI payload pre-compiled natively into dist/{NC}")
+    else:
+        click.echo(f"{CYAN}▶ Skipping UI compile (source missing in this tree){NC}")
 
 if __name__ == '__main__':
     cli()
