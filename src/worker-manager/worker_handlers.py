@@ -1,3 +1,5 @@
+from utils.logger import get_logger
+logger = get_logger(__name__)
 #!/usr/bin/env python3
 import json
 import os

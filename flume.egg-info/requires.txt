@@ -1,0 +1,16 @@
+flask
+flask-cors
+elasticsearch
+requests
+pydantic
+pydantic-settings
+click
+toml>=0.10.2
+fastapi>=0.135.1
+uvicorn>=0.42.0
+
+[dev]
+pytest
+pytest-asyncio
+mypy
+ruff
