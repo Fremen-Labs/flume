@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Flume CLI Gateway
+set -euo pipefail
+
+if ! command -v uv &> /dev/null; then
+    echo "Flume Enterprise requires 'uv'. Please install it via 'curl -LsSf https://astral.sh/uv/install.sh | sh'."
+    exit 1
+fi
+
+exec uv run flume "$@"
