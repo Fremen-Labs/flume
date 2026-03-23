@@ -28,17 +28,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install build ruff bandit
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
-
-    - name: Build GUI Assets
-      run: |
-        cd src/frontend
-        npm install
-        npm run build
-
     - name: Code Quality - Syntax & Complexity (Ruff)
       run: ruff check src/
 
