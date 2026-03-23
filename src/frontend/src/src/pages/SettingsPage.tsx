@@ -1551,15 +1551,9 @@ export default function SettingsPage() {
                 <div className="flex flex-wrap items-center gap-3 pt-4">
                   {repoSaveError && <span className="text-sm text-destructive">{repoSaveError}</span>}
                   {repoSaveSuccess && (
-                    <span className="text-sm text-green-600">Saved. Restart dashboard and workers to apply.</span>
+                     <span className="text-sm text-green-600">Saved. Applied dynamically to all agents.</span>
                   )}
                 </div>
-
-                {data?.openbaoInstalled === false && (
-                  <p className="text-xs text-destructive">
-                    OpenBao is not installed. Sensitive settings will be stored in an insecure local <code>.env</code> file.
-                  </p>
-                )}
               </div>
             </AccordionContent>
           </AccordionItem>

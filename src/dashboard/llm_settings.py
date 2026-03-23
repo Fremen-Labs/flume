@@ -257,23 +257,39 @@ def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
 
 def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
     pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
-    if not shutil.which("openbao"):
-        return False, pairs
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
     token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
     if not addr or not token:
         return False, pairs
+    
+    # Natively resolve 'openbao' hostname to '127.0.0.1' if running outside Docker
+    if "openbao" in addr:
+        import urllib.request
+        try:
+            urllib.request.urlopen(addr.replace("openbao", "127.0.0.1") + "/v1/sys/health", timeout=1)
+            addr = addr.replace("openbao", "127.0.0.1")
+            pairs["OPENBAO_ADDR"] = addr
+        except Exception:
+            pass
+            
     return True, pairs
 
 
 def is_openbao_installed() -> bool:
-    return bool(shutil.which("openbao"))
+    import os
+    import urllib.request
+    addr = os.environ.get("OPENBAO_ADDR", "http://127.0.0.1:8200").replace("openbao", "127.0.0.1")
+    try:
+        urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
+        return True
+    except Exception:
+        return False
 
 
 def _openbao_secret_ref(pairs: dict[str, str]) -> str:
     mount = str(pairs.get("OPENBAO_MOUNT", "secret") or "secret").strip().strip("/")
     path = str(pairs.get("OPENBAO_PATH", "flume") or "flume").strip().strip("/")
-    return f"{mount}/{path}"
+    return f"{mount}/data/{path}"
 
 
 def _openbao_env(pairs: dict[str, str]) -> dict[str, str]:
@@ -293,19 +309,17 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
     if not enabled:
         return {}
     try:
-        secret_ref = _openbao_secret_ref(pairs)
-        proc = subprocess.run(
-            ["openbao", "kv", "get", "-format=json", secret_ref],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_openbao_env(pairs),
-        )
-        if proc.returncode != 0:
-            return {}
-        payload = json.loads(proc.stdout or "{}")
-        data = payload.get("data", {}).get("data", {})
-        return {str(k): str(v) for k, v in data.items() if v is not None}
+        import urllib.request
+        import json
+        addr = pairs["OPENBAO_ADDR"].rstrip("/")
+        token = pairs["OPENBAO_TOKEN"]
+        secret_url = f"{addr}/v1/{_openbao_secret_ref(pairs)}"
+        
+        req = urllib.request.Request(secret_url, headers={"X-Vault-Token": token})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            payload = json.loads(r.read())
+            data = payload.get("data", {}).get("data", {})
+            return {str(k): str(v) for k, v in data.items() if v is not None}
     except Exception:
         return {}
 
@@ -315,31 +329,29 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
     if not enabled:
         return False
     try:
+        import urllib.request
+        import json
         existing = _openbao_get_all(workspace_root)
         merged = dict(existing)
         oauth_path_set = str(updates.get("OPENAI_OAUTH_STATE_FILE", "") or "").strip()
         for k, v in updates.items():
-            # OAuth form saves send LLM_API_KEY=""; do not wipe an existing Codex access token in KV.
-            # When switching to API key mode, OPENAI_OAUTH_STATE_FILE is cleared — then allow "".
-            if (
-                k == "LLM_API_KEY"
-                and not str(v or "").strip()
-                and oauth_path_set
-            ):
+            if k == "LLM_API_KEY" and not str(v or "").strip() and oauth_path_set:
                 continue
             merged[k] = v
-        secret_ref = _openbao_secret_ref(pairs)
-        cmd = ["openbao", "kv", "put", secret_ref]
-        for k, v in merged.items():
-            cmd.append(f"{k}={v}")
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=_openbao_env(pairs),
+            
+        addr = pairs["OPENBAO_ADDR"].rstrip("/")
+        token = pairs["OPENBAO_TOKEN"]
+        secret_url = f"{addr}/v1/{_openbao_secret_ref(pairs)}"
+        
+        payload = json.dumps({"data": merged}).encode("utf-8")
+        req = urllib.request.Request(
+            secret_url, 
+            data=payload, 
+            headers={"X-Vault-Token": token, "Content-Type": "application/json"},
+            method="POST"
         )
-        return proc.returncode == 0
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status in (200, 201, 204)
     except Exception:
         return False
 
