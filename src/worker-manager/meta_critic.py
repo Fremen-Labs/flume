@@ -42,6 +42,7 @@ Review the following PR diff. Focus critically on:
 4. Edge cases or security vulnerabilities.
 
 Output your code review strictly in GitHub-flavored markdown.
+CRITICAL INSTRUCTION: Your entire response must be strictly in English. Do NOT output any Russian, Cyrillic, or other foreign language characters under any circumstances.
 
 DIFF:
 ```diff
@@ -50,7 +51,7 @@ DIFF:
 """
     try:
         response = llm_client.chat([
-            {"role": "system", "content": "You are a senior python architecture reviewer."},
+            {"role": "system", "content": "You are a senior python architecture reviewer. Your output must be strictly in English."},
             {"role": "user", "content": prompt}
         ])
         
