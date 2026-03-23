@@ -92,9 +92,15 @@ def onboard():
     """Execute interactive workspace calibration"""
     print_banner()
     click.echo(f"{CYAN}Initializing secure TOML workspace configurations...{NC}")
+    provider = click.prompt("LLM Provider", default="exo")
+    model = click.prompt("Model Name", default="qwen3-30b-A3B-4bit")
+    base_url = click.prompt("Base URL", default="http://localhost:52415/v1")
+    git_user = click.prompt("Git Username", default="FlumeAgent")
+    git_email = click.prompt("Git Email", default="agent@flume.local")
+    
     config = {
-        "llm": { "provider": "exo", "model": "qwen3-30b-A3B-4bit", "base_url": "http://localhost:52415/v1" },
-        "git": { "user": "FlumeAgent", "email": "agent@flume.local" },
+        "llm": { "provider": provider, "model": model, "base_url": base_url },
+        "git": { "user": git_user, "email": git_email },
         "system": { "es_url": "http://elasticsearch:9200", "openbao_url": "http://openbao:8200" }
     }
     with open("config.toml", "w") as f:
