@@ -96,7 +96,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
-      - /Users/mentat-bot-01/mentat/fremenlabs:/workspace
+      - ..:/workspace
     environment:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
