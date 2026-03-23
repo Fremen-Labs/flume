@@ -30,6 +30,7 @@ jobs:
 
       - name: Run Meta-Critic Review
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_PROVIDER: gemini
           LLM_MODEL: gemini-2.5-pro
