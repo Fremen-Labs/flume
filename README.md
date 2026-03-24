@@ -1,12 +1,14 @@
 <div align="center">
 
 # FLUME
+## V3 Autonomous Edge Orchestrator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
 [![Elasticsearch: 8.x](https://img.shields.io/badge/Elasticsearch-8.x-blue.svg)](https://www.elastic.co/)
 [![Backend: Python 3.9+](https://img.shields.io/badge/Backend-Python_3.9+-yellow.svg)](https://www.python.org/)
-[![Frontend: React & Vite](https://img.shields.io/badge/Frontend-React_18-cyan.svg)](https://reactjs.org/)
+[![GUI: React & Vite](https://img.shields.io/badge/GUI-React_18-cyan.svg)](https://reactjs.org/)
 [![CLI: Go 1.21+](https://img.shields.io/badge/CLI-Go_1.21+-green.svg)](https://golang.org/)
+[![Docker: Required](https://img.shields.io/badge/Docker-Required-blue.svg)](https://www.docker.com/)
 
 *An AI-powered agent workflow platform for planning, implementing, testing, and reviewing codebase changes natively using local hardware clusters.*
 
@@ -14,11 +16,15 @@
 
 ---
 
-## ⚡ The V3 Edge Orchestrator
+## ⚡ The Native CLI vs Docker Architecture
 
-Flume is managed via a singular high-performance, totally zero-dependency Go CLI. The days of fighting virtual environments, orphaned Docker containers, and scattered Bash scripts are over. Welcome to the precise, asynchronous execution of the **Flume Autonomous Engineering Frontier**.
+The Flume V3 ecosystem is managed entirely by a singular, high-performance Go CLI (`flume`). This executable provides a pristine, zero-dependency interface to your terminal. 
 
-### Quick Start (Native Execution)
+**However, the execution engine strictly requires Docker.** 
+
+There is no pure-native fallback for the backend infrastructure. The Go CLI natively orchestrates a containerized matrix (Elasticsearch, OpenBao, Python Workers) to ensure total isolation from your host OS. You must have **Go 1.21+** and **Docker Desktop / OrbStack** installed.
+
+### Quick Start (Cold Boot)
 
 ```bash
 # 1. Download the ecosystem
@@ -29,7 +35,10 @@ cd flume
 go build -o flume cmd/flume/main.go
 sudo cp ./flume /usr/local/bin/flume
 
-# 3. Boot the Matrix
+# 3. Define the LLM Array
+cp .env.example .env
+
+# 4. Boot the Matrix
 flume start 
 ```
 
@@ -37,40 +46,50 @@ flume start
 
 ---
 
-## 💻 Elite Architecture Diagnostics
+## 🔒 State Persistence & Component Hydration
 
-The ecosystem relies on an intricate web of Elasticsearch indexers, OpenBao Cryptographic KMS nodes, and FastAPI Python Workers. The Go CLI manages the health bounds natively.
+The `flume` execution relies on a rigidly defined orchestration loop to protect your data across reboots.
+
+| Subsystem | Operation | Persistence |
+| :--- | :--- | :--- |
+| **OpenBao KMS** | Flume dynamically generates new Unseal Keys and Root Tokens natively on cold boot. These are violently injected into your `.env` locally. | Volatile (`flume destroy` wipes keys, but they regenerate flawlessly on next boot). |
+| **Elasticsearch** | The superuser password is encrypted, rotated, and mapped automatically into the Flume GUI and workers via the `.env` bridge. | Persistent Docker Volume (`flume_es_data`). |
+| **Flume AI Workers**| The FastAPI ecosystem runs perfectly containerized, executing parallel Git Worktrees natively through the graph. | Stateless Python Workers. |
+
+---
+
+## 💻 Elite Architecture Diagnostics
 
 | Command | Objective |
 | :--- | :--- |
 | `flume start` | Boots the ecosystem natively. Automatically hydrates secrets via OpenBao and proxies Elasticsearch safely into your `.env`. |
-| `flume destroy` | Executes the Annihilation Protocol. Completely obliterates all Docker bounds and violently cleanses cached volumes. |
-| `flume doctor` | Instantiates the `lipgloss` execution diagnostics telemetry array to assert backend component health directly inside your terminal. |
+| `flume destroy` | Executes the Annihilation Protocol. Completely obliterates all Docker bounds (`docker compose down -v`), violently cleansing cached OpenBao and Elasticsearch volumes. |
+| `flume doctor` | Instantiates a 90s Cyberpunk `lipgloss` telemetry array asserting Elasticsearch node counts, OpenBao locks, and OS architectures directly inside your terminal. |
 | `flume help` | Evaluates absolute CLI parameter geometries dynamically. |
 
-> **State Persistence Rule:** The `flume destroy` command strictly preserves your `./.env`, `projects.json`, and UI layout parameters while tearing down the local Docker daemons accurately. 
+> **State Persistence Rule:** The `flume destroy` command strictly preserves your `./.env`, `projects.json`, and UI layout parameters locally on your hard drive. 
 
 ---
 
-## 🏗️ Execution Topology
+## 🧠 LLM Inference Configurations (Exo / Ollama)
 
-Flume utilizes an asynchronous, multi-agent topology driven by Python multiprocessing that isolates explicit task nodes safely while polling the Elasticsearch graph securely.
+Flume supports executing AI pipelines natively using zero-cost local LLMs bypassing OpenAI. We highly recommend [Exo](https://github.com/exo-explore/exo) for Mac Unified Memory MLX clustering or Ollama. 
 
+Modify the following inside `.env`:
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│        [ Mission Control Dashboard ]  — Live Telemetry Radar    │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ (REST JSON State)
-┌────────────────────────────▼────────────────────────────────────┐
-│      [ Flume Go CLI Gateway ] (Global Binary Object)            │
-│  • Maps `docker-compose.yml` + `OpenBao` Vault Cryptography     │
-└────────────┬───────────────────────────────┬────────────────────┘
-             │                               │
-       READ / WRITE                    SPAWN / ISOLATE
-             ▼                               ▼
-┌────────────────────────┐      ┌─────────────────────────────────┐
-│  [ The Knowledge Graph]│      │   [ The Agent Swarm ]           │
-│   Elasticsearch 8.x    │◄─────┤   Multiprocessing Agent Daemons │
-│   (System of Record)   │      │   (Isolated Python Workers)     │
-└────────────────────────┘      └─────────────────────────────────┘
+# Exo Configuration (Host Network Bridge)
+LOCAL_EXO_BASE_URL=http://host.docker.internal:52415/v1
+
+# Ollama Configuration
+LOCAL_EXO_BASE_URL=http://host.docker.internal:11434/v1
 ```
+
+> **Note:** We use `host.docker.internal` explicitly because the Flume AI Workers live *inside* the Docker bridge and must reach out to your Mac's bare-metal localhost.
+
+---
+
+## 🚨 Troubleshooting & Docker Gotchas
+
+*   **`connection refused` on `flume start`**: OpenBao requires ~5 seconds to bootstrap. The Go CLI natively sleeps for this execution, but ultra-slow Mac machines might time out. Run `flume destroy` and `flume start` again.
+*   **Elasticsearch `vm.max_map_count` errors**: If running on raw Linux (not Mac/Orbstack), you MUST configure your sysctl to allow ES memory mapping: `sudo sysctl -w vm.max_map_count=262144`.
+*   **Lingering Port Collisions**: If `localhost:8765` is hanging, run `flume doctor` to check if a zombie Uvicorn process is eating the port. Use `flume destroy` to kill all stray containers.
