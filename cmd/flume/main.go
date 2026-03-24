@@ -15,7 +15,6 @@ import (
 var rootCmd = &cobra.Command{
 	Use:   "flume",
 	Short: "Autonomous Engineering Frontier - V3 Lipgloss Edge",
-	Long:  ui.CyberGradient("Flume Autonomous Engineering Orchestrator V3\nBringing zero-dependency Native Edge speed with 90s SciFi aesthetic."),
 }
 
 func init() {
