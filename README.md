@@ -71,11 +71,18 @@ The `flume` execution relies on a rigidly defined orchestration loop to protect 
 
 ---
 
-## 🧠 LLM Inference Configurations (Exo / Ollama)
+## 🧠 Multi-Provider LLM Intelligence
 
-Flume supports executing AI pipelines natively using zero-cost local LLMs bypassing OpenAI. We highly recommend [Exo](https://github.com/exo-explore/exo) for Mac Unified Memory MLX clustering or Ollama. 
+Flume is architected to be completely agnostic, supporting both bleeding-edge commercial models and high-performance local hardware inference. You can configure your model explicitly inside your `.env` using standard OpenAI-compatible formats.
 
-Modify the following inside `.env`:
+*   **OpenAI (Default):** Set `LLM_PROVIDER=openai` and provide `LLM_API_KEY=sk-...` to utilize GPT-4o arrays natively.
+*   **Anthropic:** Set `LLM_PROVIDER=anthropic` and provide `LLM_API_KEY=sk-ant-...` to utilize Claude 3.5 Sonnet context horizons smoothly.
+
+### Zero-Cost Local Inference (Exo & Ollama)
+Flume natively executes pipelines using zero-cost local LLMs bypassing OpenAI completely. We highly recommend [Exo](https://github.com/exo-explore/exo) for Apple Unified Memory MLX clustering, or **Ollama** for standard local CPU/GPU bounds.
+
+When executing locally, remember to set `LLM_PROVIDER=openai` (since Exo/Ollama use OpenAI-compatible REST shapes) and modify the base URL natively:
+
 ```text
 # Exo Configuration (Host Network Bridge)
 LOCAL_EXO_BASE_URL=http://host.docker.internal:52415/v1
@@ -84,7 +91,7 @@ LOCAL_EXO_BASE_URL=http://host.docker.internal:52415/v1
 LOCAL_EXO_BASE_URL=http://host.docker.internal:11434/v1
 ```
 
-> **Note:** We use `host.docker.internal` explicitly because the Flume AI Workers live *inside* the Docker bridge and must reach out to your Mac's bare-metal localhost.
+> **Note:** We use `host.docker.internal` explicitly instead of `localhost` because the Flume Python AI Workers live *inside* the Docker bridge and must route out to your Mac's bare-metal localhost to hit the local AI daemon safely.
 
 ---
 
