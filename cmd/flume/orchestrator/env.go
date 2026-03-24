@@ -28,10 +28,10 @@ OPENBAO_TOKEN=flume-dev-token
 # ------------------------------------------
 `
 	if config.Provider != "" {
-		content += fmt.Sprintf("FLUME_LLM_PROVIDER=%s\n", config.Provider)
+		content += fmt.Sprintf("LLM_PROVIDER=%s\n", config.Provider)
 	}
 	if config.APIKey != "" {
-		content += fmt.Sprintf("OPENAI_API_KEY=%s\n", config.APIKey)
+		content += fmt.Sprintf("LLM_API_KEY=%s\n", config.APIKey)
 	}
 
 	err := os.WriteFile(".env", []byte(content), 0644)

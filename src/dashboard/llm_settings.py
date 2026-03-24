@@ -278,7 +278,8 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
 def is_openbao_installed() -> bool:
     import os
     import urllib.request
-    addr = os.environ.get("FLUME_OPENBAO_ADDR", "http://127.0.0.1:8200")
+    _DEFAULT_VAULT = 'http://localhost:8200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://openbao:8200'
+    addr = os.environ.get("OPENBAO_ADDR", _DEFAULT_VAULT).rstrip("/")
     try:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
