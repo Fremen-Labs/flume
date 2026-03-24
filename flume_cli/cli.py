@@ -147,7 +147,7 @@ def start():
                 base_url = "https://api.anthropic.com/v1"
                 
             with open('.env', 'a') as f:
-                f.write(f"\\n{env_key}={key}\\n")
+                f.write(f"\n{env_key}={key}\n")
             os.environ[env_key] = key
         else:
             base_url = click.prompt("LLM Base URL", default="http://localhost:11434/v1")
