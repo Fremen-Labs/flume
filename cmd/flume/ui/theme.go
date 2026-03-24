@@ -23,7 +23,25 @@ var (
 	styleWarning = lipgloss.NewStyle().Foreground(colorHackerGold).Bold(true)
 	styleError   = lipgloss.NewStyle().Foreground(colorTerminalRed).Bold(true).Blink(true)
 	styleGradient = lipgloss.NewStyle().Foreground(colorNeonGreen).Background(lipgloss.Color("#000000"))
+
+	styleLogo = lipgloss.NewStyle().
+		Foreground(colorNeonGreen).
+		Bold(true).
+		Margin(1, 0, 1, 0)
 )
+
+// SciFiLogo returns the Flume Logo rendered with 90s Cyberpunk styling
+func SciFiLogo() string {
+	logo := `
+  ███████╗██╗     ██╗   ██╗███╗   ████╗███████╗
+  ██╔════╝██║     ██║   ██║████╗ ████║██╔════╝
+  █████╗  ██║     ██║   ██║██╔████╔██║█████╗  
+  ██╔══╝  ██║     ██║   ██║██║╚██╔╝██║██╔══╝  
+  ██║     ███████╗╚██████╔╝██║ ╚═╝ ██║███████╗
+  ╚═╝     ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝
+      :: AUTONOMOUS ENGINEERING FRONTIER :: `
+	return styleLogo.Render(logo)
+}
 
 // CyberGradient returns string rendered with the SciFi gradient
 func CyberGradient(str string) string {

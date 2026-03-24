@@ -24,6 +24,9 @@ func init() {
 }
 
 func main() {
+	// Execute the 90s SciFi Artifact Banner physically BEFORE TTY interception!
+	fmt.Println(ui.SciFiLogo())
+
 	// Enforce strict Google Context cancellation mechanics
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
