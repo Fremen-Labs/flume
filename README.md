@@ -21,14 +21,14 @@ Flume provides a unified command-line interface (`flume`) to manage dependencies
 # 1. Enter the Repository
 cd ~/flume
 
-# 2. Install dependencies (Node, Python, Elasticsearch)
-./flume install
+# 2. Compile the High-Performance Native Client
+go build -buildvcs=false -o flume cmd/flume/main.go
 
-# 3. Configure your environment (LLM Provider, Git Identity)
-./flume onboard
+# 3. Wipe any legacy Docker volumes cleanly
+./flume destroy
 
-# 4. Start the dashboard and background agent workers
-./flume start
+# 4. Boot the High-Performance native ecosystem (Elastic in Docker, Python Dashboard natively)
+./flume start --native
 ```
 
 *The dashboard will be available at [http://localhost:8765](http://localhost:8765).*
