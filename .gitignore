@@ -19,3 +19,4 @@ dist/
 *.tar.gz
 *.sha256
 
+flume
