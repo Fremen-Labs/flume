@@ -16,10 +16,10 @@ class FlumeSettings(BaseSettings):
     LLM_API_KEY: str = ""
     GIT_USER_NAME: str = "FlumeAgent"
     GIT_USER_EMAIL: str = "agent@flume.local"
-    ES_URL: str = "http://elasticsearch:9200"
+    ES_URL: str = "http://localhost:9200" if os.environ.get("FLUME_NATIVE_MODE") == "1" else "http://elasticsearch:9200"
     ES_API_KEY: str = ""
     ES_VERIFY_TLS: str = "false"
-    OPENBAO_ADDR: str = "http://openbao:8200"
+    OPENBAO_ADDR: str = "http://localhost:8200" if os.environ.get("FLUME_NATIVE_MODE") == "1" else "http://openbao:8200"
     OPENBAO_TOKEN: str = ""
     DASHBOARD_HOST: str = "0.0.0.0"
     DASHBOARD_PORT: int = 8765
@@ -44,21 +44,29 @@ def load_toml_config() -> dict[str, Any]:
             with open(config_path, "rb") as f:
                 raw = tomllib.load(f)
             if 'llm' in raw:
-                data['LLM_PROVIDER'] = raw['llm'].get('provider', 'exo')
-                data['LLM_MODEL'] = raw['llm'].get('model', 'qwen3-30b-A3B-4bit')
-                data['LLM_BASE_URL'] = raw['llm'].get('base_url', '')
-                data['LLM_API_KEY'] = raw['llm'].get('api_key', '')
+                if 'provider' in raw['llm']: data['LLM_PROVIDER'] = raw['llm']['provider']
+                if 'model' in raw['llm']: data['LLM_MODEL'] = raw['llm']['model']
+                if 'base_url' in raw['llm']: data['LLM_BASE_URL'] = raw['llm']['base_url']
+                if 'api_key' in raw['llm']: data['LLM_API_KEY'] = raw['llm']['api_key']
             if 'git' in raw:
-                data['GIT_USER_NAME'] = raw['git'].get('user', 'FlumeAgent')
-                data['GIT_USER_EMAIL'] = raw['git'].get('email', '')
+                if 'user' in raw['git']: data['GIT_USER_NAME'] = raw['git']['user']
+                if 'email' in raw['git']: data['GIT_USER_EMAIL'] = raw['git']['email']
             if 'system' in raw:
-                data['ES_URL'] = raw['system'].get('es_url', 'http://elasticsearch:9200')
-                data['ES_API_KEY'] = raw['system'].get('es_api_key', '')
-                data['OPENBAO_ADDR'] = raw['system'].get('openbao_url', 'http://openbao:8200')
-                data['OPENBAO_TOKEN'] = raw['system'].get('openbao_token', '')
-                
+                # Explicitly blocking the legacy docker defaults from hijacking OS arrays natively!
+                if 'es_url' in raw['system']: data['ES_URL'] = raw['system']['es_url']
+                if 'es_api_key' in raw['system']: data['ES_API_KEY'] = raw['system']['es_api_key']
+                if 'openbao_url' in raw['system']: data['OPENBAO_ADDR'] = raw['system']['openbao_url']
+                if 'openbao_token' in raw['system']: data['OPENBAO_TOKEN'] = raw['system']['openbao_token']
         except Exception as e:
             logger.warning(f"Failed parsing TOML config {config_path}: {e}")
+    
+    # Absolute override: If TOML explicitly mapped to docker, and we are native, enforce localhost regardless recursively
+    if os.environ.get("FLUME_NATIVE_MODE") == "1":
+        if "ES_URL" in data and "elasticsearch" in data["ES_URL"]:
+            data["ES_URL"] = "http://localhost:9200"
+        if "OPENBAO_ADDR" in data and "openbao" in data["OPENBAO_ADDR"]:
+            data["OPENBAO_ADDR"] = "http://localhost:8200"
+            
     return data
 
 settings = FlumeSettings(**load_toml_config())

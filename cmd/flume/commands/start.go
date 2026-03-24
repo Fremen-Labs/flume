@@ -69,7 +69,7 @@ var StartCmd = &cobra.Command{
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
-				dash.Env = append(os.Environ(), "PYTHONPATH=src")
+				dash.Env = append(os.Environ(), "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:9200", "OPENBAO_ADDR=http://localhost:8200")
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
 				dash.Run()

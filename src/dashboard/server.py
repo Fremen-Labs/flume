@@ -51,7 +51,8 @@ ensure_es_indices()
 
 from llm_settings import load_effective_pairs  # noqa: E402
 
-ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
+_DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
+ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
@@ -2194,6 +2195,9 @@ def vault_status():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+class TaskClaimRequest(BaseModel):
+    worker_id: str
+    
 @app.post("/api/tasks/claim")
 async def claim_task(req: TaskClaimRequest):
     """
