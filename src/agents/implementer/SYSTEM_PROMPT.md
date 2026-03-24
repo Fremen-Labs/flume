@@ -18,6 +18,14 @@ Each task object strictly conforms to the following JSON schema:
 }
 ```
 
+## Memory & State Isolation
+All stateful interactions across tasks MUST be routed through explicitly typed memory tool signatures to prevent state leakage globally. 
+- You do NOT possess implicit memory across task arrays.
+- To persist operational logic or retrieve cached context, you MUST execute the following strict signatures natively:
+    - `memory_write(namespace: "agent_semantic_memory" | "agent_knowledge", key: str, value: str, ttl: int)`
+    - `memory_read(namespace: "agent_semantic_memory" | "agent_knowledge", key: str)` -> returns `str`
+- Do NOT hallucinate abstract memory arrays. Rely strictly on `memory_read` and `memory_write` bounds.
+
 ## Task Types & Handlers
 
 ### Type: "analysis"
