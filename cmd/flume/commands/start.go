@@ -100,7 +100,7 @@ var StartCmd = &cobra.Command{
 }
 
 func init() {
-	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", "Explicitly declare LLM Provider")
-	StartCmd.Flags().StringVarP(&KeyFlag, "key", "k", "", "Explicitly declare LLM API Secret Key")
-	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native architecture with Git Worktrees")
+	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", ui.SuccessBlue("Explicitly declare LLM Provider (openai, ollama, exo)"))
+	StartCmd.Flags().StringVarP(&KeyFlag, "key", "k", "", ui.WarningGold("Explicitly declare LLM API Secret Key (Masked)"))
+	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, ui.CyberGradient("Launch Flume utilizing OS-native High-Performance Git Worktrees"))
 }
