@@ -150,6 +150,57 @@ _IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
+            'name': 'memory_read',
+            'description': 'Retrieve cached context natively from the semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                },
+                'required': ['namespace', 'key'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'memory_write',
+            'description': 'Persist operational logic natively into semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                    'value': {'type': 'string'},
+                    'ttl': {'type': 'integer', 'description': 'Time to live in seconds'}
+                },
+                'required': ['namespace', 'key', 'value'],
+            'name': 'multi_replace_file_content',
+            'description': 'Replace multiple non-contiguous chunks of text in a file. Use this for deterministic surgical code edits instead of raw bash loops.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string', 'description': 'Absolute or repo-relative file path'},
+                    'replacements': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'target_content': {'type': 'string', 'description': 'Exact string to find'},
+                                'replacement_content': {'type': 'string', 'description': 'Exact string to replace it with'}
+                            },
+                            'required': ['target_content', 'replacement_content']
+                        }
+                    }
+                },
+                'required': ['path', 'replacements'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'list_directory',
             'description': 'List files and subdirectories at a path.',
             'parameters': {
@@ -165,7 +216,7 @@ _IMPLEMENTER_TOOLS = [
         'type': 'function',
         'function': {
             'name': 'run_shell',
-            'description': 'Run a shell command in the repo directory. Use for grep, find, npm, etc.',
+            'description': 'Strict validation boundary. Run linting or test commands (e.g. npm test, pytest, golangci-lint, ruff). Strictly prohibited from file modification or guessing state via bash macros.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -237,15 +288,211 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         
         # Native AST Integration mapping Elasticsearch automatically
         try:
-            subprocess.run(['elastro', 'update', str(p)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
             import elastro_sync
             elastro_sync.sync_ast()
-        except:
-            pass
+        except Exception as e:
+            logger.error(
+                "Failed to trigger elastro AST update",
+                extra={
+                    "file_path": str(p),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
+                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
+                }
+            )
 
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
+        return f'OK: wrote {len(content)} chars to {p}'
+    except Exception as e:
         return f'ERROR writing file: {e}'
+
+
+def _exec_memory_read(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    
+    if not ns or not key:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "error": "namespace and key are required",
+        })
+        return json.dumps({"status": "error", "message": "namespace and key are required"})
+        
+    try:
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        query = json.dumps({'query': {'term': {'_id': key}}}).encode()
+        
+        req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
+        import ssl
+        import urllib.error
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            raw = resp.read().decode()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as je:
+                raise ValueError(f"Invalid JSON returned from ES: {raw[:100]}") from je
+                
+            hits = data.get('hits', {}).get('hits', [])
+            if not hits:
+                logger.info({"event": "memory_read", "status": "not_found", "namespace": ns, "key": key})
+                return json.dumps({"status": "not_found", "message": "No memory stored at this key."})
+            
+            src = hits[0].get('_source', {})
+            expires = src.get('expires_at')
+            if expires:
+                import time
+                if time.time() > expires:
+                    logger.info({"event": "memory_read", "status": "expired", "namespace": ns, "key": key})
+                    return json.dumps({"status": "not_found", "message": "Memory has expired due to TTL decay."})
+            
+            value = src.get('value', '')
+            logger.info({"event": "memory_read", "status": "success", "namespace": ns, "key": key})
+            return json.dumps({"status": "success", "value": value})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
+    except Exception as e:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory read: {e}", "error_type": type(e).__name__})
+
+def _exec_memory_write(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    val = args.get('value')
+    ttl = args.get('ttl')
+    
+    if not ns or not key or not val:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "error": "namespace, key, and value are required"
+        })
+        return json.dumps({"status": "error", "message": "namespace, key, and value are required"})
+        
+    try:
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        
+        import time
+        doc = {'key': key, 'value': val, 'updated_at': time.time()}
+        if ttl:
+            doc['expires_at'] = time.time() + int(ttl)
+            
+        payload = json.dumps(doc).encode()
+        import urllib.parse
+        import urllib.error
+        safe_key = urllib.parse.quote(key, safe='')
+        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
+        
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            logger.info({
+                "event": "memory_write",
+                "status": "success",
+                "namespace": ns,
+                "key": key
+            })
+            return json.dumps({"status": "success", "message": f"Wrote memory key {key} to {ns}"})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
+    except Exception as e:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory write: {e}", "error_type": type(e).__name__})
+
+def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> str:
+    try:
+        p = _resolve_path(args.get('path', ''), repo_path)
+        if not p.exists():
+            return json.dumps({"status": "error", "message": f"File {p} does not exist", "path": str(p)})
+        
+        content = p.read_text(errors='replace')
+        replacements = args.get('replacements', [])
+        
+        if not replacements:
+            return json.dumps({"status": "error", "message": "No replacements provided."})
+            
+        for idx, repl in enumerate(replacements):
+            target = repl.get('target_content', '')
+            new_text = repl.get('replacement_content', '')
+            
+            if target not in content:
+                return json.dumps({"status": "error", "message": "target_content not found in file.", "block_index": idx})
+            if content.count(target) > 1:
+                return json.dumps({"status": "error", "message": "target_content matches multiple locations. Make it more specific.", "block_index": idx})
+                
+            content = content.replace(target, new_text)
+            
+        p.write_text(content)
+        
+        # Native AST Integration mapping Elasticsearch automatically
+        try:
+            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
+            import elastro_sync
+            elastro_sync.sync_ast()
+        except Exception as e:
+            logger.error(
+                "Failed to trigger elastro AST update",
+                extra={
+                    "file_path": str(p),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
+                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
+                }
+            )
+            
+        return json.dumps({"status": "success", "message": f"Applied {len(replacements)} deterministic replacements to {p}"})
+    except Exception as e:
+        logger.exception("Unexpected error in multi_replace_file_content")
+        return json.dumps({"status": "error", "message": str(e), "error_type": type(e).__name__})
 
 
 def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
@@ -259,23 +506,57 @@ def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR listing directory: {e}'
 
 
+class ShellPermissionError(PermissionError):
+    """Raised when an agent attempts to execute an unauthorized shell command."""
+    pass
+
 def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
+    
     try:
         import shlex
         cmd_list = shlex.split(command)
+        if not cmd_list:
+            return json.dumps({"status": "error", "message": "Empty command provided."})
+            
+        executable = cmd_list[0]
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node'}
+        
+        if executable not in allow_list:
+            logger.warning({
+                "event": "security_boundary_violation",
+                "service": "worker-manager",
+                "function": "_exec_run_shell",
+                "attempted_command": command,
+                "executable": executable,
+                "reason": "Executable not in allow-list"
+            })
+            raise ShellPermissionError(f"run_shell is strictly bounded to validation commands ({', '.join(sorted(allow_list))}). System/file manipulation commands are explicitly denied.")
+            
         result = subprocess.run(
             cmd_list, shell=False, capture_output=True, text=True, timeout=30, cwd=cwd,
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:
             output = output[:6000] + '\n... (truncated)'
-        return output or f'(exit code {result.returncode}, no output)'
+        return json.dumps({
+            "status": "success" if result.returncode == 0 else "error",
+            "exit_code": result.returncode,
+            "output": output or "(no output)"
+        })
+    except ShellPermissionError:
+        raise
     except subprocess.TimeoutExpired:
-        return 'ERROR: command timed out after 30s'
+        return json.dumps({"status": "error", "message": "Command timed out after 30s"})
     except Exception as e:
-        return f'ERROR running shell command: {e}'
+        logger.error({
+            "event": "run_shell_error",
+            "command": command,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Execution failed: {e}", "error_type": type(e).__name__})
 
 
 _LLM_CLIENT = None
@@ -539,13 +820,25 @@ def run_implementer(
             elif fn_name == 'write_file':
                 _progress(f'Writing file: {fn_args.get("path", "")}')
                 tool_result = _exec_write_file(fn_args, repo_path)
+            elif fn_name == 'multi_replace_file_content':
+                _progress(f'Replacing content in: {fn_args.get("path", "")}')
+                tool_result = _exec_multi_replace_file_content(fn_args, repo_path)
             elif fn_name == 'list_directory':
                 _progress(f'Listing directory: {fn_args.get("path", "") or "(repo root)"}')
                 tool_result = _exec_list_directory(fn_args, repo_path)
             elif fn_name == 'run_shell':
                 cmd = (fn_args.get('command', ''))[:80]
                 _progress(f'Running: {cmd}')
-                tool_result = _exec_run_shell(fn_args, repo_path)
+                try:
+                    tool_result = _exec_run_shell(fn_args, repo_path)
+                except ShellPermissionError as e:
+                    tool_result = json.dumps({"status": "error", "error_type": "ShellPermissionError", "message": str(e)})
+            elif fn_name == 'memory_read':
+                _progress(f'Reading memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_read(fn_args)
+            elif fn_name == 'memory_write':
+                _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_write(fn_args)
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
