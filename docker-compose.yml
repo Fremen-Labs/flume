@@ -81,7 +81,19 @@ services:
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
-    command: ["uv", "run", "python", "src/dashboard/server.py"]
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        if [ ! -f /app/src/frontend/dist/index.html ]; then
+          echo "Flume UI dist missing; building (npm ci + vite build)..."
+          cd /app/src/frontend/src
+          npm ci
+          npm run build
+        fi
+        cd /app
+        exec uv run python src/dashboard/server.py
 
   worker:
     build:
