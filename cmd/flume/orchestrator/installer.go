@@ -26,6 +26,9 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		missing = append(missing, "Go Compiler")
 	}
 	if !eco.HasElastro {
+		if _, err := exec.LookPath("pipx"); err != nil {
+			missing = append(missing, "pipx Environment")
+		}
 		missing = append(missing, "Elastro CLI")
 	}
 
@@ -37,34 +40,27 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		return fmt.Errorf("user denied dependency injection protocol")
 	}
 
-	_, errBrew := exec.LookPath("brew")
-	hasBrew := errBrew == nil
-
 	for _, dep := range missing {
 		fmt.Println(ui.CyberGradient(fmt.Sprintf("⚡️ Patching mainframe... Injecting %s into the local OS bounds...", dep)))
 		var cmd *exec.Cmd
 
-		requiresBrew := false
-		switch dep {
-		case "Docker Desktop", "Python 3", "Go Compiler":
-			requiresBrew = true
-		}
-
-		if requiresBrew && !hasBrew {
-			return fmt.Errorf("fatal execution constraint: Homebrew binary is missing natively. Please manually install Homebrew to automate %s binding", dep)
-		}
-
 		switch dep {
 		case "Docker Desktop":
-			cmd = exec.Command("brew", "install", "--cask", "docker")
+			cmd = installPackage("docker")
 		case "uv Python Manager":
 			cmd = exec.Command("sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh")
 		case "Python 3":
-			cmd = exec.Command("brew", "install", "python")
+			cmd = installPackage("python")
 		case "Go Compiler":
-			cmd = exec.Command("brew", "install", "go")
+			cmd = installPackage("go")
+		case "pipx Environment":
+			cmd = exec.Command("sh", "-c", "python3 -m pip install --user pipx && python3 -m pipx ensurepath")
 		case "Elastro CLI":
 			cmd = exec.Command("sh", "-c", "curl -sSfL https://raw.githubusercontent.com/Fremen-Labs/elastro/main/install.sh | bash")
+		}
+
+		if cmd == nil {
+			return fmt.Errorf("fatal execution constraint: No supported package manager (apt, yum, pacman, brew) natively found to explicitly construct the %s pipeline", dep)
 		}
 
 		if cmd != nil {
@@ -74,7 +70,51 @@ func EvaluateAndInstall(eco SystemEcology) error {
 				log.Error(fmt.Sprintf("Failed to permanently bind %s into the OS.", dep), "error", err)
 				return err
 			}
+			if dep == "uv Python Manager" || dep == "pipx Environment" {
+				os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
+			}
 			fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
+		}
+	}
+	return nil
+}
+
+func installPackage(dep string) *exec.Cmd {
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		switch dep {
+		case "docker":
+			return exec.Command("sudo", "apt-get", "install", "-y", "docker.io")
+		case "python":
+			return exec.Command("sudo", "apt-get", "install", "-y", "python3")
+		case "go":
+			return exec.Command("sudo", "apt-get", "install", "-y", "golang")
+		}
+	} else if _, err := exec.LookPath("yum"); err == nil {
+		switch dep {
+		case "docker":
+			return exec.Command("sudo", "yum", "install", "-y", "docker")
+		case "python":
+			return exec.Command("sudo", "yum", "install", "-y", "python3")
+		case "go":
+			return exec.Command("sudo", "yum", "install", "-y", "golang")
+		}
+	} else if _, err := exec.LookPath("pacman"); err == nil {
+		switch dep {
+		case "docker":
+			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "docker")
+		case "python":
+			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "python")
+		case "go":
+			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "go")
+		}
+	} else if _, err := exec.LookPath("brew"); err == nil {
+		switch dep {
+		case "docker":
+			return exec.Command("brew", "install", "--cask", "docker")
+		case "python":
+			return exec.Command("brew", "install", "python")
+		case "go":
+			return exec.Command("brew", "install", "go")
 		}
 	}
 	return nil
