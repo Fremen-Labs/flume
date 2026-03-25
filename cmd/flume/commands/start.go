@@ -25,7 +25,7 @@ var StartCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println(ui.CyberGradient("Booting Flume Matrix..."))
 
-		log.Infof("Scanning systemic hardware arrays natively...")
+		log.Infof("💾 Jacking into the local mainframe... Scanning global systemic hardware matrices 🔌")
 		eco := orchestrator.PerformReconnaissance()
 		fmt.Println(ui.NeonGreen(fmt.Sprintf("\n[SYSTEM RECON] Docker: %v | Elastic: %v | OpenBao: %v | Elastro: %v\n", eco.HasDocker, eco.HasElastic, eco.HasOpenBao, eco.HasElastro)))
 
@@ -109,7 +109,7 @@ var StartCmd = &cobra.Command{
 			}
 			wg.Wait()
 		} else {
-			fmt.Println(ui.WarningGold("Deploying Complete Docker Swarm Topology natively via os/exec..."))
+			fmt.Println(ui.WarningGold("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿"))
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
 			c.Stdout = os.Stdout
