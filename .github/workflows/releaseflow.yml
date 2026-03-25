@@ -17,6 +17,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0 # Needed for changelog generation
+        token: ${{ secrets.RFLOW_ADO_PAT }}
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -89,6 +90,13 @@ jobs:
         git push origin main || true
         
         python -m build
+
+    - name: Compile Flume Go CLI
+      run: |
+        mkdir -p dist
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o dist/flume-darwin-arm64 cmd/flume/main.go
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/flume-linux-amd64 cmd/flume/main.go
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/flume-windows-amd64.exe cmd/flume/main.go
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
