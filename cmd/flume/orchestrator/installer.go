@@ -31,6 +31,9 @@ func EvaluateAndInstall(eco SystemEcology) error {
 	if !eco.HasOpenBao {
 		missing = append(missing, "OpenBao Vault")
 	}
+	if !eco.HasElastro {
+		missing = append(missing, "Elastro CLI")
+	}
 
 	if len(missing) == 0 {
 		return nil
@@ -57,6 +60,8 @@ func EvaluateAndInstall(eco SystemEcology) error {
 			cmd = exec.Command("sh", "-c", "brew tap elastic/tap && brew install elastic/tap/elasticsearch-full")
 		case "OpenBao Vault":
 			cmd = exec.Command("sh", "-c", "brew tap hashicorp/tap && brew install hashicorp/tap/vault")
+		case "Elastro CLI":
+			cmd = exec.Command("sh", "-c", "curl -sSfL https://raw.githubusercontent.com/Fremen-Labs/elastro/main/install.sh | bash")
 		}
 
 		if cmd != nil {
