@@ -259,30 +259,57 @@ def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR listing directory: {e}'
 
 
+class ShellPermissionError(PermissionError):
+    """Raised when an agent attempts to execute an unauthorized shell command."""
+    pass
+
 def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
     
-    # Deterministic Boundary Restriction: Reject hallucinated bash execution
-    prohibited_macros = ['sed ', 'awk ', 'rm ', 'cat ', 'vi ', 'nano ', 'mv ', 'mkdir ', 'touch ']
-    for token in prohibited_macros:
-        if token in f" {command} ":
-            return f"PermissionError: run_shell is strictly bounded to deterministic validation (e.g. npm test, pytest, golangci-lint). Use explicit deterministic tools for file manipulation instead of `{token.strip()}`."
-
     try:
         import shlex
         cmd_list = shlex.split(command)
+        if not cmd_list:
+            return json.dumps({"status": "error", "message": "Empty command provided."})
+            
+        executable = cmd_list[0]
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node'}
+        
+        if executable not in allow_list:
+            logger.warning({
+                "event": "security_boundary_violation",
+                "service": "worker-manager",
+                "function": "_exec_run_shell",
+                "attempted_command": command,
+                "executable": executable,
+                "reason": "Executable not in allow-list"
+            })
+            raise ShellPermissionError(f"run_shell is strictly bounded to validation commands ({', '.join(sorted(allow_list))}). System/file manipulation commands are explicitly denied.")
+            
         result = subprocess.run(
             cmd_list, shell=False, capture_output=True, text=True, timeout=30, cwd=cwd,
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:
             output = output[:6000] + '\n... (truncated)'
-        return output or f'(exit code {result.returncode}, no output)'
+        return json.dumps({
+            "status": "success" if result.returncode == 0 else "error",
+            "exit_code": result.returncode,
+            "output": output or "(no output)"
+        })
+    except ShellPermissionError:
+        raise
     except subprocess.TimeoutExpired:
-        return 'ERROR: command timed out after 30s'
+        return json.dumps({"status": "error", "message": "Command timed out after 30s"})
     except Exception as e:
-        return f'ERROR running shell command: {e}'
+        logger.error({
+            "event": "run_shell_error",
+            "command": command,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Execution failed: {e}", "error_type": type(e).__name__})
 
 
 _LLM_CLIENT = None
@@ -552,7 +579,10 @@ def run_implementer(
             elif fn_name == 'run_shell':
                 cmd = (fn_args.get('command', ''))[:80]
                 _progress(f'Running: {cmd}')
-                tool_result = _exec_run_shell(fn_args, repo_path)
+                try:
+                    tool_result = _exec_run_shell(fn_args, repo_path)
+                except ShellPermissionError as e:
+                    tool_result = json.dumps({"status": "error", "error_type": "ShellPermissionError", "message": str(e)})
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
