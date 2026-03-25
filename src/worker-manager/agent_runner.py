@@ -150,6 +150,38 @@ _IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
+            'name': 'memory_read',
+            'description': 'Retrieve cached context natively from the semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                },
+                'required': ['namespace', 'key'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'memory_write',
+            'description': 'Persist operational logic natively into semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                    'value': {'type': 'string'},
+                    'ttl': {'type': 'integer', 'description': 'Time to live in seconds'}
+                },
+                'required': ['namespace', 'key', 'value'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'list_directory',
             'description': 'List files and subdirectories at a path.',
             'parameters': {
@@ -245,7 +277,77 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
+        return f'OK: wrote {len(content)} chars to {p}'
+    except Exception as e:
         return f'ERROR writing file: {e}'
+
+
+def _exec_memory_read(args: dict) -> str:
+    try:
+        ns = args.get('namespace')
+        key = args.get('key')
+        if not ns or not key:
+            return 'ERROR: namespace and key are required'
+            
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        query = json.dumps({'query': {'term': {'_id': key}}}).encode()
+        
+        req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            hits = data.get('hits', {}).get('hits', [])
+            if not hits:
+                return 'NOT_FOUND: No memory stored at this key.'
+            
+            src = hits[0].get('_source', {})
+            expires = src.get('expires_at')
+            if expires:
+                import time
+                if time.time() > expires:
+                    return 'NOT_FOUND: Memory has expired due to TTL decay.'
+            return src.get('value', '')
+    except Exception as e:
+        return f'ERROR reading semantic memory: {e}'
+
+def _exec_memory_write(args: dict) -> str:
+    try:
+        ns = args.get('namespace')
+        key = args.get('key')
+        val = args.get('value')
+        ttl = args.get('ttl')
+        if not ns or not key or not val:
+            return 'ERROR: namespace, key, and value are required'
+            
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        
+        import time
+        doc = {'key': key, 'value': val, 'updated_at': time.time()}
+        if ttl:
+            doc['expires_at'] = time.time() + int(ttl)
+            
+        payload = json.dumps(doc).encode()
+        import urllib.parse
+        safe_key = urllib.parse.quote(key, safe='')
+        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
+        
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            return f'OK: Wrote memory key {key} to {ns}'
+    except Exception as e:
+        return f'ERROR writing semantic memory: {e}'
 
 
 def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
@@ -546,6 +648,12 @@ def run_implementer(
                 cmd = (fn_args.get('command', ''))[:80]
                 _progress(f'Running: {cmd}')
                 tool_result = _exec_run_shell(fn_args, repo_path)
+            elif fn_name == 'memory_read':
+                _progress(f'Reading memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_read(fn_args)
+            elif fn_name == 'memory_write':
+                _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_write(fn_args)
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
