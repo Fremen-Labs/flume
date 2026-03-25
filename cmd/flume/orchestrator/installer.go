@@ -32,6 +32,9 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		missing = append(missing, "OpenBao Vault")
 	}
 	if !eco.HasElastro {
+		if _, err := exec.LookPath("pipx"); err != nil {
+			missing = append(missing, "pipx Environment")
+		}
 		missing = append(missing, "Elastro CLI")
 	}
 
@@ -60,6 +63,8 @@ func EvaluateAndInstall(eco SystemEcology) error {
 			cmd = exec.Command("sh", "-c", "brew tap elastic/tap && brew install elastic/tap/elasticsearch-full")
 		case "OpenBao Vault":
 			cmd = exec.Command("sh", "-c", "brew tap hashicorp/tap && brew install hashicorp/tap/vault")
+		case "pipx Environment":
+			cmd = exec.Command("sh", "-c", "python3 -m pip install --user pipx && python3 -m pipx ensurepath")
 		case "Elastro CLI":
 			cmd = exec.Command("sh", "-c", "curl -sSfL https://raw.githubusercontent.com/Fremen-Labs/elastro/main/install.sh | bash")
 		}
@@ -70,6 +75,9 @@ func EvaluateAndInstall(eco SystemEcology) error {
 			if err := cmd.Run(); err != nil {
 				log.Error(fmt.Sprintf("Failed to permanently bind %s into the OS.", dep), "error", err)
 				return err
+			}
+			if dep == "pipx Environment" {
+				os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
 			}
 			fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
 		}
