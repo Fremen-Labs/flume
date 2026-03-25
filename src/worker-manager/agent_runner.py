@@ -165,7 +165,7 @@ _IMPLEMENTER_TOOLS = [
         'type': 'function',
         'function': {
             'name': 'run_shell',
-            'description': 'Run a shell command in the repo directory. Use for grep, find, npm, etc.',
+            'description': 'Strict validation boundary. Run linting or test commands (e.g. npm test, pytest, golangci-lint, ruff). Strictly prohibited from file modification or guessing state via bash macros.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -262,6 +262,13 @@ def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
 def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
+    
+    # Deterministic Boundary Restriction: Reject hallucinated bash execution
+    prohibited_macros = ['sed ', 'awk ', 'rm ', 'cat ', 'vi ', 'nano ', 'mv ', 'mkdir ', 'touch ']
+    for token in prohibited_macros:
+        if token in f" {command} ":
+            return f"PermissionError: run_shell is strictly bounded to deterministic validation (e.g. npm test, pytest, golangci-lint). Use explicit deterministic tools for file manipulation instead of `{token.strip()}`."
+
     try:
         import shlex
         cmd_list = shlex.split(command)
