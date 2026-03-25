@@ -150,6 +150,31 @@ _IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
+            'name': 'multi_replace_file_content',
+            'description': 'Replace multiple non-contiguous chunks of text in a file. Use this for deterministic surgical code edits instead of raw bash loops.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string', 'description': 'Absolute or repo-relative file path'},
+                    'replacements': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'target_content': {'type': 'string', 'description': 'Exact string to find'},
+                                'replacement_content': {'type': 'string', 'description': 'Exact string to replace it with'}
+                            },
+                            'required': ['target_content', 'replacement_content']
+                        }
+                    }
+                },
+                'required': ['path', 'replacements'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'list_directory',
             'description': 'List files and subdirectories at a path.',
             'parameters': {
@@ -245,7 +270,47 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
+        return f'OK: wrote {len(content)} chars to {p}'
+    except Exception as e:
         return f'ERROR writing file: {e}'
+
+
+def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> str:
+    try:
+        p = _resolve_path(args.get('path', ''), repo_path)
+        if not p.exists():
+            return f'ERROR: File {p} does not exist.'
+        
+        content = p.read_text(errors='replace')
+        replacements = args.get('replacements', [])
+        
+        if not replacements:
+            return 'ERROR: No replacements provided.'
+            
+        for idx, repl in enumerate(replacements):
+            target = repl.get('target_content', '')
+            new_text = repl.get('replacement_content', '')
+            
+            if target not in content:
+                return f'ERROR: replacement block {idx} target_content not found in file.'
+            if content.count(target) > 1:
+                return f'ERROR: replacement block {idx} target_content matches multiple locations. Make it more specific.'
+                
+            content = content.replace(target, new_text)
+            
+        p.write_text(content)
+        
+        # Native AST Integration mapping Elasticsearch automatically
+        try:
+            subprocess.run(['elastro', 'update', str(p)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import elastro_sync
+            elastro_sync.sync_ast()
+        except:
+            pass
+            
+        return f'OK: applied {len(replacements)} deterministic replacements to {p}'
+    except Exception as e:
+        return f'ERROR in multi_replace_file_content: {e}'
 
 
 def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
@@ -539,6 +604,9 @@ def run_implementer(
             elif fn_name == 'write_file':
                 _progress(f'Writing file: {fn_args.get("path", "")}')
                 tool_result = _exec_write_file(fn_args, repo_path)
+            elif fn_name == 'multi_replace_file_content':
+                _progress(f'Replacing content in: {fn_args.get("path", "")}')
+                tool_result = _exec_multi_replace_file_content(fn_args, repo_path)
             elif fn_name == 'list_directory':
                 _progress(f'Listing directory: {fn_args.get("path", "") or "(repo root)"}')
                 tool_result = _exec_list_directory(fn_args, repo_path)
