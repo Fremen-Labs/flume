@@ -25,12 +25,6 @@ func EvaluateAndInstall(eco SystemEcology) error {
 	if !eco.HasGo {
 		missing = append(missing, "Go Compiler")
 	}
-	if !eco.HasElastic {
-		missing = append(missing, "Elasticsearch")
-	}
-	if !eco.HasOpenBao {
-		missing = append(missing, "OpenBao Vault")
-	}
 	if !eco.HasElastro {
 		missing = append(missing, "Elastro CLI")
 	}
@@ -43,9 +37,22 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		return fmt.Errorf("user denied dependency injection protocol")
 	}
 
+	_, errBrew := exec.LookPath("brew")
+	hasBrew := errBrew == nil
+
 	for _, dep := range missing {
 		fmt.Println(ui.CyberGradient(fmt.Sprintf("⚡️ Patching mainframe... Injecting %s into the local OS bounds...", dep)))
 		var cmd *exec.Cmd
+
+		requiresBrew := false
+		switch dep {
+		case "Docker Desktop", "Python 3", "Go Compiler":
+			requiresBrew = true
+		}
+
+		if requiresBrew && !hasBrew {
+			return fmt.Errorf("fatal execution constraint: Homebrew binary is missing natively. Please manually install Homebrew to automate %s binding", dep)
+		}
 
 		switch dep {
 		case "Docker Desktop":
@@ -56,10 +63,6 @@ func EvaluateAndInstall(eco SystemEcology) error {
 			cmd = exec.Command("brew", "install", "python")
 		case "Go Compiler":
 			cmd = exec.Command("brew", "install", "go")
-		case "Elasticsearch":
-			cmd = exec.Command("sh", "-c", "brew tap elastic/tap && brew install elastic/tap/elasticsearch-full")
-		case "OpenBao Vault":
-			cmd = exec.Command("sh", "-c", "brew tap hashicorp/tap && brew install hashicorp/tap/vault")
 		case "Elastro CLI":
 			cmd = exec.Command("sh", "-c", "curl -sSfL https://raw.githubusercontent.com/Fremen-Labs/elastro/main/install.sh | bash")
 		}
