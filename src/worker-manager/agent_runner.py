@@ -283,12 +283,18 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
 
 def _exec_memory_read(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    
+    if not ns or not key:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "error": "namespace and key are required",
+        })
+        return json.dumps({"status": "error", "message": "namespace and key are required"})
+        
     try:
-        ns = args.get('namespace')
-        key = args.get('key')
-        if not ns or not key:
-            return 'ERROR: namespace and key are required'
-            
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
         headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
@@ -296,35 +302,72 @@ def _exec_memory_read(args: dict) -> str:
         
         req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
         import ssl
+        import urllib.error
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
         with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
+            raw = resp.read().decode()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as je:
+                raise ValueError(f"Invalid JSON returned from ES: {raw[:100]}") from je
+                
             hits = data.get('hits', {}).get('hits', [])
             if not hits:
-                return 'NOT_FOUND: No memory stored at this key.'
+                logger.info({"event": "memory_read", "status": "not_found", "namespace": ns, "key": key})
+                return json.dumps({"status": "not_found", "message": "No memory stored at this key."})
             
             src = hits[0].get('_source', {})
             expires = src.get('expires_at')
             if expires:
                 import time
                 if time.time() > expires:
-                    return 'NOT_FOUND: Memory has expired due to TTL decay.'
-            return src.get('value', '')
+                    logger.info({"event": "memory_read", "status": "expired", "namespace": ns, "key": key})
+                    return json.dumps({"status": "not_found", "message": "Memory has expired due to TTL decay."})
+            
+            value = src.get('value', '')
+            logger.info({"event": "memory_read", "status": "success", "namespace": ns, "key": key})
+            return json.dumps({"status": "success", "value": value})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
     except Exception as e:
-        return f'ERROR reading semantic memory: {e}'
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory read: {e}", "error_type": type(e).__name__})
 
 def _exec_memory_write(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    val = args.get('value')
+    ttl = args.get('ttl')
+    
+    if not ns or not key or not val:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "error": "namespace, key, and value are required"
+        })
+        return json.dumps({"status": "error", "message": "namespace, key, and value are required"})
+        
     try:
-        ns = args.get('namespace')
-        key = args.get('key')
-        val = args.get('value')
-        ttl = args.get('ttl')
-        if not ns or not key or not val:
-            return 'ERROR: namespace, key, and value are required'
-            
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
         headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
@@ -336,6 +379,7 @@ def _exec_memory_write(args: dict) -> str:
             
         payload = json.dumps(doc).encode()
         import urllib.parse
+        import urllib.error
         safe_key = urllib.parse.quote(key, safe='')
         req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
         
@@ -345,9 +389,35 @@ def _exec_memory_write(args: dict) -> str:
         ctx.verify_mode = ssl.CERT_NONE
         
         with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-            return f'OK: Wrote memory key {key} to {ns}'
+            logger.info({
+                "event": "memory_write",
+                "status": "success",
+                "namespace": ns,
+                "key": key
+            })
+            return json.dumps({"status": "success", "message": f"Wrote memory key {key} to {ns}"})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
     except Exception as e:
-        return f'ERROR writing semantic memory: {e}'
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory write: {e}", "error_type": type(e).__name__})
 
 
 def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
