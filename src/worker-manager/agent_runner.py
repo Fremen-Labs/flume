@@ -262,14 +262,21 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         
         # Native AST Integration mapping Elasticsearch automatically
         try:
-            subprocess.run(['elastro', 'update', str(p)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
             import elastro_sync
             elastro_sync.sync_ast()
-        except:
-            pass
+        except Exception as e:
+            logger.error(
+                "Failed to trigger elastro AST update",
+                extra={
+                    "file_path": str(p),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
+                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
+                }
+            )
 
-        return f'OK: wrote {len(content)} chars to {p}'
-    except Exception as e:
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
@@ -279,22 +286,22 @@ def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> st
     try:
         p = _resolve_path(args.get('path', ''), repo_path)
         if not p.exists():
-            return f'ERROR: File {p} does not exist.'
+            return json.dumps({"status": "error", "message": f"File {p} does not exist", "path": str(p)})
         
         content = p.read_text(errors='replace')
         replacements = args.get('replacements', [])
         
         if not replacements:
-            return 'ERROR: No replacements provided.'
+            return json.dumps({"status": "error", "message": "No replacements provided."})
             
         for idx, repl in enumerate(replacements):
             target = repl.get('target_content', '')
             new_text = repl.get('replacement_content', '')
             
             if target not in content:
-                return f'ERROR: replacement block {idx} target_content not found in file.'
+                return json.dumps({"status": "error", "message": "target_content not found in file.", "block_index": idx})
             if content.count(target) > 1:
-                return f'ERROR: replacement block {idx} target_content matches multiple locations. Make it more specific.'
+                return json.dumps({"status": "error", "message": "target_content matches multiple locations. Make it more specific.", "block_index": idx})
                 
             content = content.replace(target, new_text)
             
@@ -302,15 +309,25 @@ def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> st
         
         # Native AST Integration mapping Elasticsearch automatically
         try:
-            subprocess.run(['elastro', 'update', str(p)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
             import elastro_sync
             elastro_sync.sync_ast()
-        except:
-            pass
+        except Exception as e:
+            logger.error(
+                "Failed to trigger elastro AST update",
+                extra={
+                    "file_path": str(p),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
+                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
+                }
+            )
             
-        return f'OK: applied {len(replacements)} deterministic replacements to {p}'
+        return json.dumps({"status": "success", "message": f"Applied {len(replacements)} deterministic replacements to {p}"})
     except Exception as e:
-        return f'ERROR in multi_replace_file_content: {e}'
+        logger.exception("Unexpected error in multi_replace_file_content")
+        return json.dumps({"status": "error", "message": str(e), "error_type": type(e).__name__})
 
 
 def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
