@@ -65,6 +65,9 @@ func EvaluateAndInstall(eco SystemEcology) error {
 				log.Error(fmt.Sprintf("Failed to permanently bind %s into the OS.", dep), "error", err)
 				return err
 			}
+			if dep == "uv Python Manager" {
+				os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
+			}
 			fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
 		}
 	}
