@@ -27,7 +27,7 @@ func PromptForPort(port int) int {
 
 // PromptForInstall requests consent to violently inject missing OS components globally.
 func PromptForInstall(missing []string) bool {
-	fmt.Print(WarningGold(fmt.Sprintf("\n⚠️ KERNEL ALERT: Missing native framework dependencies detected:\n %v\n\nExecute autonomous cyber-injection sequence? [Y/n]: ", strings.Join(missing, ", "))))
+	fmt.Print(WarningGold(fmt.Sprintf("\n⚠️ KERNEL ALERT: Missing native framework dependencies detected:\n %v\n\nExecute autonomous sequence? [Y/n]: ", strings.Join(missing, ", "))))
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(strings.ToLower(input))
