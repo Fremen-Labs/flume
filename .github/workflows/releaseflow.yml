@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write # Required for Azure DevOps OIDC ReleaseFlow synchronization
 
     steps:
     - name: Checkout code
@@ -84,7 +85,7 @@ jobs:
         
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add pyproject.toml .version
+        git add pyproject.toml .version manifests/release-manifest.yaml
         git commit -m "chore(release): bump version to ${{ env.VERSION }} [skip ci]" || true
         git push origin HEAD:main || true
         
