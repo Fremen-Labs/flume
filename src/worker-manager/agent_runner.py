@@ -150,6 +150,32 @@ _IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
+            'name': 'memory_read',
+            'description': 'Retrieve cached context natively from the semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                },
+                'required': ['namespace', 'key'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'memory_write',
+            'description': 'Persist operational logic natively into semantic memory bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'namespace': {'type': 'string', 'enum': ['agent_semantic_memory', 'agent_knowledge']},
+                    'key': {'type': 'string'},
+                    'value': {'type': 'string'},
+                    'ttl': {'type': 'integer', 'description': 'Time to live in seconds'}
+                },
+                'required': ['namespace', 'key', 'value'],
             'name': 'multi_replace_file_content',
             'description': 'Replace multiple non-contiguous chunks of text in a file. Use this for deterministic surgical code edits instead of raw bash loops.',
             'parameters': {
@@ -279,8 +305,147 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
+        return f'OK: wrote {len(content)} chars to {p}'
+    except Exception as e:
         return f'ERROR writing file: {e}'
 
+
+def _exec_memory_read(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    
+    if not ns or not key:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "error": "namespace and key are required",
+        })
+        return json.dumps({"status": "error", "message": "namespace and key are required"})
+        
+    try:
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        query = json.dumps({'query': {'term': {'_id': key}}}).encode()
+        
+        req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
+        import ssl
+        import urllib.error
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            raw = resp.read().decode()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as je:
+                raise ValueError(f"Invalid JSON returned from ES: {raw[:100]}") from je
+                
+            hits = data.get('hits', {}).get('hits', [])
+            if not hits:
+                logger.info({"event": "memory_read", "status": "not_found", "namespace": ns, "key": key})
+                return json.dumps({"status": "not_found", "message": "No memory stored at this key."})
+            
+            src = hits[0].get('_source', {})
+            expires = src.get('expires_at')
+            if expires:
+                import time
+                if time.time() > expires:
+                    logger.info({"event": "memory_read", "status": "expired", "namespace": ns, "key": key})
+                    return json.dumps({"status": "not_found", "message": "Memory has expired due to TTL decay."})
+            
+            value = src.get('value', '')
+            logger.info({"event": "memory_read", "status": "success", "namespace": ns, "key": key})
+            return json.dumps({"status": "success", "value": value})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
+    except Exception as e:
+        logger.error({
+            "event": "memory_read",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory read: {e}", "error_type": type(e).__name__})
+
+def _exec_memory_write(args: dict) -> str:
+    ns = args.get('namespace')
+    key = args.get('key')
+    val = args.get('value')
+    ttl = args.get('ttl')
+    
+    if not ns or not key or not val:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "error": "namespace, key, and value are required"
+        })
+        return json.dumps({"status": "error", "message": "namespace, key, and value are required"})
+        
+    try:
+        es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        
+        import time
+        doc = {'key': key, 'value': val, 'updated_at': time.time()}
+        if ttl:
+            doc['expires_at'] = time.time() + int(ttl)
+            
+        payload = json.dumps(doc).encode()
+        import urllib.parse
+        import urllib.error
+        safe_key = urllib.parse.quote(key, safe='')
+        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
+        
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            logger.info({
+                "event": "memory_write",
+                "status": "success",
+                "namespace": ns,
+                "key": key
+            })
+            return json.dumps({"status": "success", "message": f"Wrote memory key {key} to {ns}"})
+            
+    except urllib.error.URLError as e:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": "URLError"
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        
+    except Exception as e:
+        logger.error({
+            "event": "memory_write",
+            "status": "failure",
+            "namespace": ns,
+            "key": key,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        return json.dumps({"status": "error", "message": f"Internal error during memory write: {e}", "error_type": type(e).__name__})
 
 def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> str:
     try:
@@ -668,6 +833,12 @@ def run_implementer(
                     tool_result = _exec_run_shell(fn_args, repo_path)
                 except ShellPermissionError as e:
                     tool_result = json.dumps({"status": "error", "error_type": "ShellPermissionError", "message": str(e)})
+            elif fn_name == 'memory_read':
+                _progress(f'Reading memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_read(fn_args)
+            elif fn_name == 'memory_write':
+                _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
+                tool_result = _exec_memory_write(fn_args)
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
