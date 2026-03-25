@@ -10,6 +10,9 @@ type SystemEcology struct {
 	HasOpenBao     bool
 	HasFlumeLegacy bool
 	HasElastro     bool
+	HasUV          bool
+	HasPython      bool
+	HasGo          bool
 }
 
 // PerformReconnaissance dynamically evaluates the local OS for existing binary dependencies explicitly tracking
@@ -21,6 +24,9 @@ func PerformReconnaissance() SystemEcology {
 		HasOpenBao:     checkBinary("openbao") || checkBinary("vault"),
 		HasFlumeLegacy: checkBinary("flume"),
 		HasElastro:     checkBinary("elastro"),
+		HasUV:          checkBinary("uv"),
+		HasPython:      checkBinary("python3") || checkBinary("python"),
+		HasGo:          checkBinary("go"),
 	}
 }
 

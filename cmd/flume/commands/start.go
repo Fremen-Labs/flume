@@ -29,12 +29,36 @@ var StartCmd = &cobra.Command{
 		eco := orchestrator.PerformReconnaissance()
 		fmt.Println(ui.NeonGreen(fmt.Sprintf("\n[SYSTEM RECON] Docker: %v | Elastic: %v | OpenBao: %v | Elastro: %v\n", eco.HasDocker, eco.HasElastic, eco.HasOpenBao, eco.HasElastro)))
 
+		if err := orchestrator.EvaluateAndInstall(eco); err != nil {
+			log.Fatal("Unmet Dependency Bounds", "error", err)
+		}
+
+		dashboardPort := "8765"
+		vaultPort := "8200"
+		esPort := "9200"
+
 		ports := orchestrator.CheckPortBinds([]int{8765, 8200, 9200})
 		for port, inUse := range ports {
 			if inUse {
-				fmt.Println(ui.WarningGold(fmt.Sprintf("Port %d is actively bound! Gracefully mapping BYOB native override...", port)))
+				newPort := ui.PromptForPort(port)
+				if newPort == 0 {
+					log.Fatal("Port exhaustion detected gracefully natively.")
+				}
+				if port == 8765 {
+					dashboardPort = fmt.Sprintf("%d", newPort)
+				} else if port == 8200 {
+					vaultPort = fmt.Sprintf("%d", newPort)
+				} else if port == 9200 {
+					esPort = fmt.Sprintf("%d", newPort)
+				}
 			}
 		}
+
+		portEnvOverrides := append(os.Environ(), 
+			"DASHBOARD_PORT="+dashboardPort,
+			"VAULT_PORT="+vaultPort,
+			"ES_PORT="+esPort,
+		)
 
 		envCfg := orchestrator.EnvConfig{
 			Provider: ProviderFlag,
@@ -69,7 +93,7 @@ var StartCmd = &cobra.Command{
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
-				dash.Env = append(os.Environ(), "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:9200", "OPENBAO_ADDR=http://localhost:8200")
+				dash.Env = append(portEnvOverrides, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
 				dash.Run()
@@ -87,6 +111,7 @@ var StartCmd = &cobra.Command{
 		} else {
 			fmt.Println(ui.WarningGold("Deploying Complete Docker Swarm Topology natively via os/exec..."))
 			c := exec.Command("docker", "compose", "up", "-d")
+			c.Env = portEnvOverrides
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			if err := c.Run(); err != nil {
