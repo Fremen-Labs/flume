@@ -2116,6 +2116,7 @@ def api_settings_repos():
     return get_repo_settings_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/repos")
+@app.post("/api/settings/repos")
 def api_settings_repos_update(payload: dict):
     from repo_settings import update_repo_settings
     ok, msg = update_repo_settings(WORKSPACE_ROOT, payload)
@@ -2215,70 +2216,7 @@ async def websocket_telemetry(websocket: WebSocket):
     except Exception:
         active_connections.remove(websocket)
 
-# Static Mount for Frontend
-from fastapi.responses import FileResponse
-
-if STATIC_ROOT.exists():
-    asset_dir = STATIC_ROOT / "assets"
-    if asset_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa_catchall(full_path: str):
-        if full_path.startswith("api/"):
-            from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        path = STATIC_ROOT / full_path
-        if path.is_file():
-            return FileResponse(path)
-        return FileResponse(STATIC_ROOT / "index.html")
-else:
-    @app.get("/{full_path:path}")
-    def fallback_root(full_path: str):
-        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
-
 from pydantic import BaseModel
-@app.get("/api/vault/status")
-def vault_status():
-    import urllib.request
-    import urllib.error
-    openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
-    vault_token = os.environ.get('VAULT_TOKEN', 'flume-dev-token')
-    try:
-        req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            health = json.loads(resp.read().decode())
-        
-        req2 = urllib.request.Request(f"{openbao_url}/v1/secret/data/flume/keys")
-        req2.add_header('X-Vault-Token', vault_token)
-        try:
-            with urllib.request.urlopen(req2, timeout=2) as resp2:
-                data = json.loads(resp2.read().decode())
-                keys = list(data.get('data', {}).get('data', {}).keys())
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                keys = []
-            else:
-                raise
-        return {"status": "connected", "health": health, "keys_present": keys}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-class TaskClaimRequest(BaseModel):
-    worker_id: str
-    
-@app.post("/api/tasks/claim")
-async def claim_task(req: TaskClaimRequest):
-    """
-    Distributed Task Lease Coordinator endpoint.
-    Uses Elasticsearch optimistic concurrency control to prevent 409 collisions.
-    """
-    return {"status": "claimed", "task_id": "mock_id", "worker": req.worker_id}
-
-@app.post("/api/tasks/complete")
-async def complete_task(task_id: str):
-    return {"status": "completed", "task": task_id}
-
 class SystemSettingsRequest(BaseModel):
     es_url: str
     es_api_key: str
@@ -2327,6 +2265,71 @@ def update_system_settings(settings: SystemSettingsRequest):
         toml.dump(t, f)
         
     return {"status": "ok"}
+
+
+# Static Mount for Frontend
+from fastapi.responses import FileResponse
+
+if STATIC_ROOT.exists():
+    asset_dir = STATIC_ROOT / "assets"
+    if asset_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa_catchall(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        path = STATIC_ROOT / full_path
+        if path.is_file():
+            return FileResponse(path)
+        return FileResponse(STATIC_ROOT / "index.html")
+else:
+    @app.get("/{full_path:path}")
+    def fallback_root(full_path: str):
+        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
+
+@app.get("/api/vault/status")
+def vault_status():
+    import urllib.request
+    import urllib.error
+    openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+    vault_token = os.environ.get('VAULT_TOKEN', 'flume-dev-token')
+    try:
+        req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            health = json.loads(resp.read().decode())
+        
+        req2 = urllib.request.Request(f"{openbao_url}/v1/secret/data/flume/keys")
+        req2.add_header('X-Vault-Token', vault_token)
+        try:
+            with urllib.request.urlopen(req2, timeout=2) as resp2:
+                data = json.loads(resp2.read().decode())
+                keys = list(data.get('data', {}).get('data', {}).keys())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                keys = []
+            else:
+                raise
+        return {"status": "connected", "health": health, "keys_present": keys}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+class TaskClaimRequest(BaseModel):
+    worker_id: str
+    
+@app.post("/api/tasks/claim")
+async def claim_task(req: TaskClaimRequest):
+    """
+    Distributed Task Lease Coordinator endpoint.
+    Uses Elasticsearch optimistic concurrency control to prevent 409 collisions.
+    """
+    return {"status": "claimed", "task_id": "mock_id", "worker": req.worker_id}
+
+@app.post("/api/tasks/complete")
+async def complete_task(task_id: str):
+    return {"status": "completed", "task": task_id}
+
 
 
 if __name__ == "__main__":
