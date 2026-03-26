@@ -15,6 +15,9 @@ var DestroyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println(ui.CyberGradient("Initiating Terminal Docker Annihilation Protocol..."))
 		
+		// Native API Bootloader Annihilation (Clearing ghost python servers hanging on 8765 bridging FLUME_NATIVE_MODE=1)
+		exec.Command("sh", "-c", "kill -9 $(lsof -t -i:8765) 2>/dev/null || true").Run()
+		
 		c := exec.Command("docker", "compose", "down", "-v")
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
