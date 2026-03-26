@@ -2163,22 +2163,22 @@ def api_security():
         except Exception:
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
-        audit_logs = es_search('agent-provenance-records', {
+        audit_logs = es_search('agent-security-audits', {
             'size': 15,
-            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {'wildcard': {'action': '*'}}
+            'sort': [{'@timestamp': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {'match_all': {}}
         }).get('hits', {}).get('hits', [])
         
         formatted_logs = []
         for log in audit_logs[:10]:
             s = log.get('_source', {})
             formatted_logs.append({
-                '@timestamp': s.get('created_at', datetime.now(timezone.utc).isoformat()),
-                'message': s.get('message', 'Vault checkout sequence initiated'),
-                'agent_roles': s.get('agent_role', 'System'),
-                'worker_name': s.get('worker_id', 'Orchestrator'),
-                'secret_path': 'secret/data/flume/keys',
-                'keys_retrieved': ['ES_API_KEY', 'OPENAI_API_KEY']
+                '@timestamp': s.get('@timestamp', datetime.now(timezone.utc).isoformat()),
+                'message': s.get('message', 'OpenBao KV securely accessed'),
+                'agent_roles': s.get('agent_roles', 'System'),
+                'worker_name': s.get('worker_name', 'Orchestrator'),
+                'secret_path': s.get('secret_path', 'secret/data/flume/keys'),
+                'keys_retrieved': s.get('keys_retrieved', [])
             })
 
         return {

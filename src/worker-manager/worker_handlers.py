@@ -522,7 +522,17 @@ def handle_pm_dispatcher_worker(task):
         # Smaller models / local inferences: 20-line recursive functional scopes
         task['chunking_strategy'] = '20_line_functional_scope'
 
-    result = run_pm_dispatcher(task)
+    try:
+        result = run_pm_dispatcher(task)
+    except Exception as e:
+        log(f"pm-dispatcher: Execution Trap mapping decomposition on {task_id} natively: {e}")
+        if es_id:
+            update_task_doc(es_id, {
+                'status': 'blocked',
+                'active_worker': None,
+                'queue_state': 'queued',
+            })
+        return True
 
     if result.action == 'decompose' and getattr(result, 'subtasks', []):
         count = 0

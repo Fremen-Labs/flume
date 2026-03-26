@@ -114,7 +114,7 @@ def _call_ollama(
     except Exception as e:
         import sys
         sys.stderr.write(f'LLM Execution Trap: {e}\n')
-        return None
+        raise e
 
 
 
@@ -684,7 +684,7 @@ def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd
         return codex_bridge.run_turn_json(prompt, model=model, cwd=cwd, output_schema=schema, timeout=300)
     except Exception as e:
         logger.info(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
-        return None
+        raise e
 
 
 def run_implementer(
