@@ -63,9 +63,10 @@ def _normalize_gemini_model(model_id: str) -> str:
     return _GEMINI_MODEL_ALIASES.get(m, m)
 
 
-def _base_url():
-    if _PROVIDER in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
-        return _PROVIDER_BASE_URLS[_PROVIDER]
+def _base_url(provider=None):
+    p = (provider or _PROVIDER).lower()
+    if p in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
+        return _PROVIDER_BASE_URLS[p]
     return _BASE_URL
 
 
@@ -144,8 +145,8 @@ def _openai_headers():
     return {'Authorization': f'Bearer {key}'}
 
 
-def _openai_chat(messages, model, temperature, max_tokens):
-    url = _base_url() + '/v1/chat/completions'
+def _openai_chat(messages, model, temperature, max_tokens, provider=None):
+    url = _base_url(provider) + '/v1/chat/completions'
     data = _post(
         url,
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
@@ -154,8 +155,8 @@ def _openai_chat(messages, model, temperature, max_tokens):
     return (data['choices'][0]['message'].get('content') or '').strip()
 
 
-def _openai_chat_tools(messages, tools, model, temperature, max_tokens):
-    url = _base_url() + '/v1/chat/completions'
+def _openai_chat_tools(messages, tools, model, temperature, max_tokens, provider=None):
+    url = _base_url(provider) + '/v1/chat/completions'
     data = _post(
         url,
         {
@@ -276,7 +277,7 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
 # Public API
 # ---------------------------------------------------------------------------
 
-def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
+def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None):
     """Call the configured LLM and return the assistant's text response.
 
     Args:
@@ -288,18 +289,19 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192):
     Returns:
         str: The assistant's text response.
     """
+    p = (provider_override or _PROVIDER).lower()
     m = model or _DEFAULT_MODEL
-    if _PROVIDER == 'gemini':
+    if p == 'gemini':
         m = _normalize_gemini_model(m)
-    if _PROVIDER == 'ollama':
+    if p == 'ollama':
         return _ollama_chat(messages, m, temperature, max_tokens)
-    elif _PROVIDER == 'anthropic':
+    elif p == 'anthropic':
         return _anthropic_chat(messages, m, temperature, max_tokens)
     else:
-        return _openai_chat(messages, m, temperature, max_tokens)
+        return _openai_chat(messages, m, temperature, max_tokens, provider=p)
 
 
-def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096):
+def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None):
     """Call the configured LLM with tool definitions.
 
     Args:
@@ -319,12 +321,13 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
                 }
             }
     """
+    p = (provider_override or _PROVIDER).lower()
     m = model or _DEFAULT_MODEL
-    if _PROVIDER == 'gemini':
+    if p == 'gemini':
         m = _normalize_gemini_model(m)
-    if _PROVIDER == 'ollama':
+    if p == 'ollama':
         return _ollama_chat_tools(messages, tools, m, temperature, max_tokens)
-    elif _PROVIDER == 'anthropic':
+    elif p == 'anthropic':
         return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens)
     else:
-        return _openai_chat_tools(messages, tools, m, temperature, max_tokens)
+        return _openai_chat_tools(messages, tools, m, temperature, max_tokens, provider=p)
