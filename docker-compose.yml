@@ -47,6 +47,7 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
+      - "cluster.routing.allocation.disk.threshold_enabled=false"
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "${ES_PORT:-9200}:9200"
