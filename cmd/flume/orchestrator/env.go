@@ -24,7 +24,7 @@ VAULT_TOKEN=flume-dev-token
 OPENBAO_TOKEN=flume-dev-token
 
 # ------------------------------------------
-# LLM Inference
+# LLM Inference (Ephemeral CLI Overrides)
 # ------------------------------------------
 `
 	if config.Provider != "" {
@@ -39,6 +39,6 @@ OPENBAO_TOKEN=flume-dev-token
 		return fmt.Errorf("failed to explicitly write .env natively: %w", err)
 	}
 	
-	log.Infof("Successfully serialized `.env` topology directly into Swarm cache.")
+	log.Infof("Successfully serialized `.env` topology into Swarm cache. (Workspace isolation protects UI configurations).")
 	return nil
 }
