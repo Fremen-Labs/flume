@@ -112,8 +112,8 @@ def _call_ollama(
             content = content.strip('`').replace('json\n', '', 1).strip()
         return json.loads(content)
     except Exception as e:
-        import utils
-        utils.log(f'LLM Execution Trap: {e}')
+        import sys
+        sys.stderr.write(f'LLM Execution Trap: {e}\n')
         return None
 
 
