@@ -2099,6 +2099,21 @@ def api_settings_llm_credentials(payload: dict):
         return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
+@app.post("/api/settings/llm/credentials")
+def api_settings_llm_credentials_post(payload: dict):
+    from llm_credentials_store import apply_credentials_action
+    from llm_settings import _update_env_keys
+    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+    
+    ok, msg, updates = apply_credentials_action(workspace, payload)
+    if not ok:
+        return JSONResponse(status_code=400, content={"error": msg})
+        
+    if updates:
+        _update_env_keys(workspace, updates)
+        
+    return {"ok": True, "message": "Action applied successfully", "restartRequired": bool(updates)}
+
 @app.post("/api/settings/llm/oauth/refresh")
 def api_settings_llm_oauth_refresh():
     from llm_settings import do_oauth_refresh
@@ -2140,20 +2155,23 @@ def api_settings_restart_services():
 @app.get('/api/security')
 def api_security():
     try:
-        from llm_settings import is_openbao_installed
+        from llm_settings import is_openbao_installed, _openbao_enabled, _openbao_secret_ref
         vault_active = is_openbao_installed()
         
         openbao_keys = {}
         try:
-            req = urllib.request.Request(
-                f"{os.environ.get('FLUME_OPENBAO_ADDR', 'http://127.0.0.1:8200')}/v1/secret/data/flume/keys",
-                headers={"X-Vault-Token": os.environ.get('VAULT_TOKEN', 'flume-dev-token')}
-            )
-            with urllib.request.urlopen(req) as res:
-                data = json.loads(res.read().decode())
-                keys = data.get('data', {}).get('data', {})
-                for k in keys:
-                    openbao_keys[k] = "secured"
+            workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+            enabled, pairs = _openbao_enabled(workspace)
+            if enabled:
+                req = urllib.request.Request(
+                    f"{pairs['OPENBAO_ADDR'].rstrip('/')}/v1/{_openbao_secret_ref(pairs)}",
+                    headers={"X-Vault-Token": pairs["OPENBAO_TOKEN"]}
+                )
+                with urllib.request.urlopen(req) as res:
+                    data = json.loads(res.read().decode())
+                    keys = data.get('data', {}).get('data', {})
+                    for k in keys:
+                        openbao_keys[k] = "secured"
         except Exception:
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
