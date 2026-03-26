@@ -20,3 +20,5 @@ dist/
 *.sha256
 
 flume
+.flume/agents/
+.flume/worktrees/
