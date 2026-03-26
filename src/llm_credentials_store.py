@@ -166,6 +166,15 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
         if prov == "openai" and (os.environ.get("OPENAI_OAUTH_STATE_FILE") or "").strip():
             return {"provider": "openai", "api_key": "", "base_url": base}
         return None
+    if key == "***OPENBAO_DELEGATED***":
+        try:
+            from llm_settings import _openbao_get_all
+            bao_vals = _openbao_get_all(workspace_root)
+            delegated_key = str(bao_vals.get(f"FLUME_CRED_{cid}") or "").strip()
+            if delegated_key:
+                key = delegated_key
+        except ImportError:
+            pass
     return {"provider": prov, "api_key": key, "base_url": base}
 
 
@@ -231,6 +240,12 @@ def upsert_credential(
         row["apiKey"] = key
         creds.append(row)
     doc["credentials"] = creds
+    if key and key != "***OPENBAO_DELEGATED***":
+        try:
+            from llm_settings import _openbao_put_many
+            _openbao_put_many(workspace_root, {f"FLUME_CRED_{new_id}": key})
+        except ImportError:
+            pass
     save_document(workspace_root, doc)
     return new_id
 
@@ -276,6 +291,11 @@ def delete_credential(workspace_root: Path, cred_id: str) -> bool:
         doc["activeCredentialId"] = ""
     if str(doc.get("defaultCredentialId") or "") == cred_id:
         doc["defaultCredentialId"] = ""
+    try:
+        from llm_settings import _openbao_put_many
+        _openbao_put_many(workspace_root, {f"FLUME_CRED_{cred_id}": ""})
+    except ImportError:
+        pass
     save_document(workspace_root, doc)
     return True
 
@@ -317,6 +337,15 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
     key = str(c.get("apiKey") or "").strip()
     if not key:
         raise ValueError("Credential has no API key")
+    if key == "***OPENBAO_DELEGATED***":
+        try:
+            from llm_settings import _openbao_get_all
+            bao_vals = _openbao_get_all(workspace_root)
+            delegated_key = str(bao_vals.get(f"FLUME_CRED_{cid}") or "").strip()
+            if delegated_key:
+                key = delegated_key
+        except ImportError:
+            pass
     prov = normalize_provider_id(str(c.get("provider") or "openai").strip().lower())
     base = str(c.get("baseUrl") or "").strip()
     out: dict[str, str] = {
