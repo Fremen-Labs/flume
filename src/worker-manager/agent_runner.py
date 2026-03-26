@@ -93,7 +93,7 @@ def _call_ollama(
     model: Optional[str] = None,
     task: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    import llm_client
+    from utils import llm_client
     messages = [
         {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': json.dumps(user_payload, indent=2)},
@@ -570,9 +570,9 @@ _LLM_CLIENT = None
 
 def _load_llm_client():
     global _LLM_CLIENT
-    if _LLM_CLIENT and getattr(_LLM_CLIENT, '__file__', '') == str(HERE / 'llm_client.py'):
+    if _LLM_CLIENT and getattr(_LLM_CLIENT, '__file__', '') == str(HERE.parent / 'utils' / 'llm_client.py'):
         return _LLM_CLIENT
-    path = HERE / 'llm_client.py'
+    path = HERE.parent / 'utils' / 'llm_client.py'
     spec = importlib.util.spec_from_file_location('worker_manager_llm_client', path)
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
