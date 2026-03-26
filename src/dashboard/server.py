@@ -64,8 +64,22 @@ class WorkspaceInitializationError(Exception):
     """Raised when the FLUME_WORKSPACE path is invalid or cannot be initialized."""
     pass
 
-_ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
-WORKSPACE_ROOT = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
+def _resolve_and_validate_workspace() -> Path:
+    _ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
+    path = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
+    
+    parts = path.parts
+    if parts == ('/',) or parts == ('\\',):
+        raise WorkspaceInitializationError(f"Rejected sensitive system root path: {path}")
+        
+    deny_list = {'etc', 'var', 'usr', 'bin', 'sbin', 'system', 'library', 'private', 'boot', 'dev', 'proc', 'sys', 'opt', 'windows'}
+    if len(parts) > 1 and parts[1].lower() in deny_list:
+        raise WorkspaceInitializationError(f"Rejected sensitive system directory: {path}")
+        
+    return path
+
+# Module-level paths are defined lazily to improve import testability, but evaluated via pure functions.
+WORKSPACE_ROOT = _resolve_and_validate_workspace()
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
@@ -1945,10 +1959,9 @@ app.add_middleware(
 @app.on_event("startup")
 def initialize_workspace_lifecycle():
     try:
-        parts = WORKSPACE_ROOT.parts
-        if parts == ('/',) or (len(parts) > 1 and parts[1] in {'etc', 'var', 'usr', 'bin', 'sbin', 'System', 'Library'}):
-            raise WorkspaceInitializationError(f"Rejected sensitive system path: {WORKSPACE_ROOT}")
-            
+        # Re-run validation natively inside the event loop in case env vars were mutated post-import
+        _resolve_and_validate_workspace()
+        
         WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         logger.info(json.dumps({
@@ -2294,6 +2307,10 @@ if __name__ == "__main__":
     try:
         uvicorn.run(app, host=HOST, port=PORT)
     except WorkspaceInitializationError as e:
-        logger.error(f"Startup aborted: {e}")
+        logger.error(json.dumps({
+            "event": "workspace_initialization_fatal",
+            "error": str(e),
+            "status": "fatal"
+        }))
         import sys
         sys.exit(1)
