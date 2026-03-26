@@ -272,10 +272,10 @@ def claim(
     if preferred_llm_credential_id: doc['preferred_llm_credential_id'] = preferred_llm_credential_id
     if worker_name: doc['active_worker'] = worker_name
     
-    endpoint = f'/{TASK_INDEX}/_update/{item_id}'
+    endpoint = f'/{TASK_INDEX}/_update/{item_id}?refresh=true'
     # Distributed Task Lease Coordinator: Prevent Thundering Herd via OCC Mutex Locks
     if seq_no is not None and primary_term is not None:
-        endpoint += f'?if_seq_no={seq_no}&if_primary_term={primary_term}'
+        endpoint += f'&if_seq_no={seq_no}&if_primary_term={primary_term}'
         
     try:
         es_request(endpoint, {'doc': doc}, method='POST')
