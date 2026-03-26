@@ -1820,26 +1820,44 @@ def agents_start() -> dict:
                 k, _, v = line.partition('=')
                 env[k.strip()] = v.strip()
 
+    try:
+        log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
+        log_dir = Path(log_dir_env).resolve() if log_dir_env else WORKSPACE_ROOT / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        manager_err = open(log_dir / 'manager_stderr.log', 'a')
+        handlers_err = open(log_dir / 'handlers_stderr.log', 'a')
+    except PermissionError as e:
+        logger.error(json.dumps({"event": "log_directory_creation_failure", "error": str(e), "status": "fallback"}))
+        manager_err = subprocess.DEVNULL
+        handlers_err = subprocess.DEVNULL
+    
+    python_bin = sys.executable
+
     if not pids['manager']:
         proc = subprocess.Popen(
-            ['python3', str(WORKER_MANAGER_SCRIPT)],
+            [python_bin, str(WORKER_MANAGER_SCRIPT)],
             env=env,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=manager_err,
             start_new_session=True,
         )
         started.append({'role': 'manager', 'pid': proc.pid})
 
     if not pids['handlers']:
         proc = subprocess.Popen(
-            ['python3', str(WORKER_HANDLERS_SCRIPT)],
+            [python_bin, str(WORKER_HANDLERS_SCRIPT)],
             env=env,
             cwd=str(_SRC_ROOT / 'worker-manager'),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=handlers_err,
             start_new_session=True,
         )
         started.append({'role': 'handlers', 'pid': proc.pid})
+
+    if manager_err is not subprocess.DEVNULL:
+        manager_err.close()
+    if handlers_err is not subprocess.DEVNULL:
+        handlers_err.close()
 
     return {'ok': True, 'started': started, 'already_running': not started}
 
