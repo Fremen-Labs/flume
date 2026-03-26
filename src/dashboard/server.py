@@ -62,8 +62,6 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 
 _ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
 WORKSPACE_ROOT = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
-WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
@@ -81,7 +79,6 @@ if not ES_VERIFY_TLS:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _ensure_gitflow_defaults(entry: dict) -> dict:
@@ -1940,6 +1937,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def initialize_workspace_lifecycle():
+    try:
+        WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(json.dumps({
+            "event": "workspace_initialized",
+            "path": str(WORKSPACE_ROOT),
+            "source": "FLUME_WORKSPACE" if os.environ.get('FLUME_WORKSPACE') else "fallback_home",
+            "status": "success"
+        }))
+    except Exception as e:
+        logger.error(json.dumps({
+            "event": "workspace_initialization_failure",
+            "path": str(WORKSPACE_ROOT),
+            "error": str(e),
+            "status": "fatal"
+        }))
+        import sys
+        sys.exit(1)
 
 @app.get('/api/health')
 def health():
