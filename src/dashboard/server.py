@@ -59,8 +59,12 @@ HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
-WORKER_STATE = WORKSPACE_ROOT / 'worker-manager/state.json'
+
+_ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
+WORKSPACE_ROOT = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
+WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+
+WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
 
@@ -1694,9 +1698,9 @@ def load_snapshot():
 
 # ─── Agent process control ────────────────────────────────────────────────────
 
-WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'manager.py'
-WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'worker_handlers.py'
-WORKER_ENV_FILE = WORKSPACE_ROOT / 'memory' / 'es' / '.env.local'
+WORKER_MANAGER_SCRIPT = _SRC_ROOT / 'worker-manager' / 'manager.py'
+WORKER_HANDLERS_SCRIPT = _SRC_ROOT / 'worker-manager' / 'worker_handlers.py'
+WORKER_ENV_FILE = _SRC_ROOT / 'memory' / 'es' / '.env.local'
 
 
 def _find_worker_pids() -> dict:
@@ -1815,7 +1819,7 @@ def agents_start() -> dict:
         proc = subprocess.Popen(
             ['python3', str(WORKER_HANDLERS_SCRIPT)],
             env=env,
-            cwd=str(WORKSPACE_ROOT / 'worker-manager'),
+            cwd=str(_SRC_ROOT / 'worker-manager'),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
