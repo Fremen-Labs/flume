@@ -388,7 +388,7 @@ def cycle():
     try:
         res = es_request(
             f'/{TASK_INDEX}/_search',
-            {'size': 500, 'query': {'term': {'queue_state.keyword': 'active'}}},
+            {'size': 500, 'query': {'match': {'queue_state': 'active'}}},
             method='POST'
         )
         for h in res.get('hits', {}).get('hits', []):

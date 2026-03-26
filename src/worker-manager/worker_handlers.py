@@ -1172,7 +1172,7 @@ def main():
                 try:
                     res = es_request(
                         f'/{TASK_INDEX}/_search',
-                        {'size': 500, 'query': {'bool': {'must': [{'term': {'queue_state.keyword': 'active'}}]}}},
+                        {'size': 500, 'query': {'bool': {'must': [{'match': {'queue_state': 'active'}}]}}},
                         method='POST',
                     )
                     for h in res.get('hits', {}).get('hits', []):
