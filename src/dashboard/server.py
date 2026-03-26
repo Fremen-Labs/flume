@@ -60,6 +60,10 @@ PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 
+class WorkspaceInitializationError(Exception):
+    """Raised when the FLUME_WORKSPACE path is invalid or cannot be initialized."""
+    pass
+
 _ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
 WORKSPACE_ROOT = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
@@ -1941,6 +1945,10 @@ app.add_middleware(
 @app.on_event("startup")
 def initialize_workspace_lifecycle():
     try:
+        parts = WORKSPACE_ROOT.parts
+        if parts == ('/',) or (len(parts) > 1 and parts[1] in {'etc', 'var', 'usr', 'bin', 'sbin', 'System', 'Library'}):
+            raise WorkspaceInitializationError(f"Rejected sensitive system path: {WORKSPACE_ROOT}")
+            
         WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         logger.info(json.dumps({
@@ -1956,8 +1964,7 @@ def initialize_workspace_lifecycle():
             "error": str(e),
             "status": "fatal"
         }))
-        import sys
-        sys.exit(1)
+        raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
 @app.get('/api/health')
 def health():
@@ -2284,4 +2291,9 @@ def update_system_settings(settings: SystemSettingsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=HOST, port=PORT)
+    try:
+        uvicorn.run(app, host=HOST, port=PORT)
+    except WorkspaceInitializationError as e:
+        logger.error(f"Startup aborted: {e}")
+        import sys
+        sys.exit(1)
