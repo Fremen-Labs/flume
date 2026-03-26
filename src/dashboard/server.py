@@ -2019,12 +2019,68 @@ def api_system_state():
 
 @app.post("/api/projects")
 def api_create_project(payload: dict):
-    # Dummy creation acknowledging React payload
-    return {"success": True, "projectId": "PROJ-1234", "message": "Project created"}
+    name = str((payload or {}).get("name") or "").strip()
+    repo_url = str((payload or {}).get("repoUrl") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Project name is required"})
+
+    project_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-").lower() or f"project-{int(time.time())}"
+    registry = load_projects_registry()
+    if any(str(item.get("id") or "") == project_id for item in registry):
+        return JSONResponse(status_code=409, content={"error": f"Project '{project_id}' already exists"})
+
+    project_path = WORKSPACE_ROOT / project_id
+    try:
+        if repo_url:
+            clone_url = repo_url
+            if "github.com" in repo_url:
+                try:
+                    import github_tokens_store as gts
+                    gh_token = (gts.get_active_token_plain(WORKSPACE_ROOT) or "").strip()
+                    clone_url = _github_https_clone_url(repo_url, gh_token)
+                except Exception:
+                    clone_url = repo_url
+            subprocess.run(["git", "clone", clone_url, str(project_path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        else:
+            project_path.mkdir(parents=True, exist_ok=False)
+
+        entry = {
+            "id": project_id,
+            "name": name,
+            "repoUrl": repo_url,
+            "path": str(project_path),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        registry.append(entry)
+        save_projects_registry(registry)
+        return {"success": True, "projectId": project_id, "project": entry, "message": "Project created"}
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        stdout = (e.stdout or "").strip()
+        msg = stderr or stdout or str(e)
+        return JSONResponse(status_code=400, content={"error": "Failed to clone repository", "detail": msg[:1200]})
+    except FileExistsError:
+        return JSONResponse(status_code=409, content={"error": f"Project path already exists: {project_path}"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "Failed to create project", "detail": str(e)[:1200]})
+
 
 @app.post("/api/projects/{project_id}/delete")
-def api_delete_project(project_id: str):
-    return {"success": True, "message": "Project removed"}
+def api_delete_project(project_id: str, payload: dict | None = None):
+    registry = load_projects_registry()
+    match = next((item for item in registry if str(item.get("id") or "") == project_id), None)
+    if not match:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+
+    project_path = Path(match.get("path") or str(WORKSPACE_ROOT / project_id))
+    try:
+        if project_path.exists():
+            shutil.rmtree(project_path)
+        registry = [item for item in registry if str(item.get("id") or "") != project_id]
+        save_projects_registry(registry)
+        return {"success": True, "message": "Project removed", "projectId": project_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": "Failed to delete project", "detail": str(e)[:1200]})
 
 @app.get("/api/tasks/{task_id}/history")
 def api_task_history(task_id: str):
@@ -2048,11 +2104,86 @@ def api_tasks_bulk_update(payload: dict):
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
-    return []
+    registry = load_projects_registry()
+    match = next((item for item in registry if str(item.get("id") or "") == project_id), None)
+    if not match:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+    repo_path = Path(match.get("path") or str(WORKSPACE_ROOT / project_id))
+    if not (repo_path / '.git').exists():
+        return {"gitAvailable": False, "message": "This project is not a Git repository.", "branches": []}
+    try:
+        head = subprocess.run(["git", "-C", str(repo_path), "symbolic-ref", "--short", "HEAD"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+        branches = subprocess.run(["git", "-C", str(repo_path), "for-each-ref", "--format=%(refname:short)", "refs/heads"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.splitlines()
+        return {"default": head, "branches": [b for b in branches if b]}
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(status_code=400, content={"error": (e.stderr or str(e)).strip()[:1200]})
+
+@app.get("/api/repos/{project_id}/tree")
+def api_repo_tree(project_id: str, branch: str):
+    registry = load_projects_registry()
+    match = next((item for item in registry if str(item.get("id") or "") == project_id), None)
+    if not match:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+    repo_path = Path(match.get("path") or str(WORKSPACE_ROOT / project_id))
+    try:
+        out = subprocess.run(["git", "-C", str(repo_path), "ls-tree", "-r", "--long", branch], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.splitlines()
+        entries = []
+        dirs = set()
+        for line in out:
+            meta, path = line.split('	', 1)
+            parts = meta.split()
+            mode, typ, sha, size = parts[0], parts[1], parts[2], parts[3]
+            parent = ''
+            for part in path.split('/')[:-1]:
+                parent = f"{parent}/{part}" if parent else part
+                if parent not in dirs:
+                    dirs.add(parent)
+                    entries.append({"path": parent, "type": "tree", "size": 0})
+            entries.append({"path": path, "type": typ, "size": int(size) if str(size).isdigit() else 0, "sha": sha, "mode": mode})
+        entries.sort(key=lambda x: (x["path"].count('/'), x["type"] != "tree", x["path"]))
+        return {"branch": branch, "entries": entries}
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(status_code=400, content={"error": (e.stderr or str(e)).strip()[:1200]})
+
+@app.get("/api/repos/{project_id}/file")
+def api_repo_file(project_id: str, path: str, branch: str):
+    registry = load_projects_registry()
+    match = next((item for item in registry if str(item.get("id") or "") == project_id), None)
+    if not match:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+    repo_path = Path(match.get("path") or str(WORKSPACE_ROOT / project_id))
+    try:
+        blob = subprocess.run(["git", "-C", str(repo_path), "show", f"{branch}:{path}"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+        try:
+            text = blob.decode('utf-8')
+            return {"path": path, "branch": branch, "binary": False, "content": text}
+        except UnicodeDecodeError:
+            return {"path": path, "branch": branch, "binary": True}
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(status_code=400, content={"error": (e.stderr or str(e)).decode()[:1200] if isinstance((e.stderr or b''), bytes) else (e.stderr or str(e))[:1200]})
+
+@app.get("/api/repos/{project_id}/diff")
+def api_repo_diff(project_id: str, base: str, head: str):
+    registry = load_projects_registry()
+    match = next((item for item in registry if str(item.get("id") or "") == project_id), None)
+    if not match:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+    repo_path = Path(match.get("path") or str(WORKSPACE_ROOT / project_id))
+    try:
+        name_status = subprocess.run(["git", "-C", str(repo_path), "diff", "--numstat", f"{base}...{head}"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.splitlines()
+        files = []
+        for line in name_status:
+            ins, dels, file_path = line.split('	', 2)
+            files.append({"path": file_path, "status": "modified", "insertions": 0 if ins == '-' else int(ins), "deletions": 0 if dels == '-' else int(dels)})
+        diff = subprocess.run(["git", "-C", str(repo_path), "diff", f"{base}...{head}"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+        return {"base": base, "head": head, "files": files, "diff": diff}
+    except subprocess.CalledProcessError as e:
+        return JSONResponse(status_code=400, content={"error": (e.stderr or str(e)).strip()[:1200]})
 
 @app.post("/api/repos/{project_id}/branches/delete")
 def api_repo_branches_delete(project_id: str, payload: dict):
     return {"success": True}
+
 
 @app.get("/api/codex-app-server/status")
 def api_codex_status():
