@@ -34,6 +34,11 @@ var DestroyCmd = &cobra.Command{
 			return
 		}
 
+		// Wipe LLM Credentials Split-Brain Native Caches
+		homeDir, _ := os.UserHomeDir()
+		os.RemoveAll(homeDir + "/.flume/workspace/worker-manager")
+		os.RemoveAll(homeDir + "/.flume/workspace/worker_state.json")
+
 		fmt.Println(ui.SuccessBlue("Ecosystem Scuttled natively!"))
 	},
 }
