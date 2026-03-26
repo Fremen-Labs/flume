@@ -111,7 +111,9 @@ def _call_ollama(
         if content.startswith('`' * 3):
             content = content.strip('`').replace('json\n', '', 1).strip()
         return json.loads(content)
-    except Exception:
+    except Exception as e:
+        import utils
+        utils.log(f'LLM Execution Trap: {e}')
         return None
 
 
