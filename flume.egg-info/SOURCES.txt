@@ -47,6 +47,7 @@ src/memory/es/scripts/write_review.py
 src/memory/es/scripts/write_task.py
 src/utils/llm_client.py
 src/utils/logger.py
+src/utils/workspace.py
 src/worker-manager/agent_runner.py
 src/worker-manager/elastro_sync.py
 src/worker-manager/manager.py
