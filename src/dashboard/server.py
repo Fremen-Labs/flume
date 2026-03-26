@@ -1820,15 +1820,11 @@ def agents_start() -> dict:
                 k, _, v = line.partition('=')
                 env[k.strip()] = v.strip()
 
-    log_dir = Path.home() / '.flume' / 'logs'
+    log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
+    log_dir = Path(log_dir_env).resolve() if log_dir_env else WORKSPACE_ROOT / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
     
-    python_bin = 'python3'
-    venv_python = Path('.venv/bin/python3')
-    if venv_python.exists():
-        python_bin = str(venv_python.resolve())
-    elif Path(sys.executable).exists() and '.venv' in sys.executable:
-        python_bin = sys.executable
+    python_bin = sys.executable
 
     manager_err = open(log_dir / 'manager_stderr.log', 'a')
     handlers_err = open(log_dir / 'handlers_stderr.log', 'a')
