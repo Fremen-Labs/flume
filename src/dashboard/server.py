@@ -1997,6 +1997,9 @@ def initialize_workspace_lifecycle():
         }))
         raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
+    # Ignite the child process worker swarm dynamically natively post-workspace assembly
+    maybe_auto_start_workers()
+
 @app.get('/api/health')
 def health():
     return {"status": "ok"}

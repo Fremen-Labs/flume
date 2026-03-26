@@ -1150,9 +1150,9 @@ def main():
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
         
-    if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
+    if 'https' in os.environ.get("ES_URL", "") and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
         raise SystemExit(
-            'ES_API_KEY is required. Use OpenBao KV (secret/flume) or .env — see install/flume.config.example.json'
+            'ES_API_KEY is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
         )
     target_worker = sys.argv[1] if len(sys.argv) > 1 else None
     if target_worker:

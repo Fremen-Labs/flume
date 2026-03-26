@@ -562,9 +562,9 @@ def main():
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
-    if not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER':
+    if 'https' in ES_URL and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
         raise SystemExit(
-            'ES_API_KEY is required. Store it in OpenBao (KV secret/flume) or .env — see install/flume.config.example.json'
+            'ES_API_KEY is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
         )
     log('worker manager starting')
     threading.Thread(target=elastro_watchdog, daemon=True).start()
