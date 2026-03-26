@@ -14,7 +14,7 @@ type EnvConfig struct {
 
 // GenerateEnv dynamically overrides the interactive terminal requirements mapping templates securely using os/fs.
 func GenerateEnv(config EnvConfig) error {
-	log.Infof("Constructing `.env` topology dynamically natively via os/fs...")
+	log.Info("Constructing `.env` topology dynamically natively via os/fs...")
 
 	content := `# ------------------------------------------
 # Flume Docker Orchestrator Topology Grid
@@ -39,6 +39,6 @@ OPENBAO_TOKEN=flume-dev-token
 		return fmt.Errorf("failed to explicitly write .env natively: %w", err)
 	}
 	
-	log.Infof("Successfully serialized `.env` topology into Swarm cache. (Workspace isolation protects UI configurations).")
+	log.Info("Successfully serialized `.env` topology into Swarm cache.", "isolation", "Workspace isolation protects UI configurations")
 	return nil
 }

@@ -60,26 +60,10 @@ PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 
-class WorkspaceInitializationError(Exception):
-    """Raised when the FLUME_WORKSPACE path is invalid or cannot be initialized."""
-    pass
+from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 
-def _resolve_and_validate_workspace() -> Path:
-    _ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
-    path = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
-    
-    parts = path.parts
-    if parts == ('/',) or parts == ('\\',):
-        raise WorkspaceInitializationError(f"Rejected sensitive system root path: {path}")
-        
-    deny_list = {'etc', 'var', 'usr', 'bin', 'sbin', 'system', 'library', 'private', 'boot', 'dev', 'proc', 'sys', 'opt', 'windows'}
-    if len(parts) > 1 and parts[1].lower() in deny_list:
-        raise WorkspaceInitializationError(f"Rejected sensitive system directory: {path}")
-        
-    return path
-
-# Module-level paths are defined lazily to improve import testability, but evaluated via pure functions.
-WORKSPACE_ROOT = _resolve_and_validate_workspace()
+# Module-level paths are bounded to block AppSec Path Traversals seamlessly isolating the host
+WORKSPACE_ROOT = resolve_safe_workspace()
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
@@ -1978,7 +1962,7 @@ app.add_middleware(
 def initialize_workspace_lifecycle():
     try:
         # Re-run validation natively inside the event loop in case env vars were mutated post-import
-        _resolve_and_validate_workspace()
+        resolve_safe_workspace()
         
         WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2077,25 +2061,23 @@ def api_codex_proxy_config():
 @app.get("/api/settings/llm")
 def api_settings_llm():
     from llm_settings import get_llm_settings_response
-    return get_llm_settings_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    return get_llm_settings_response(WORKSPACE_ROOT)
 
 @app.post("/api/settings/llm")
 def api_settings_llm_update(payload: dict):
     from llm_settings import validate_llm_settings, _update_env_keys
-    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
-    ok, msg, updates = validate_llm_settings(payload, workspace)
+    ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
-        _update_env_keys(workspace, updates)
+        _update_env_keys(WORKSPACE_ROOT, updates)
         return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.put("/api/settings/llm/credentials")
 def api_settings_llm_credentials(payload: dict):
     from llm_settings import validate_llm_settings, _update_env_keys
-    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
-    ok, msg, updates = validate_llm_settings(payload, workspace)
+    ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
-        _update_env_keys(workspace, updates)
+        _update_env_keys(WORKSPACE_ROOT, updates)
         return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
@@ -2117,7 +2099,7 @@ def api_settings_llm_credentials_post(payload: dict):
 @app.post("/api/settings/llm/oauth/refresh")
 def api_settings_llm_oauth_refresh():
     from llm_settings import do_oauth_refresh
-    ok, msg, token = do_oauth_refresh(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    ok, msg, token = do_oauth_refresh(WORKSPACE_ROOT)
     if ok:
         return {"success": True, "message": msg, "token": token}
     return JSONResponse(status_code=400, content={"error": msg})
@@ -2125,12 +2107,12 @@ def api_settings_llm_oauth_refresh():
 @app.get("/api/settings/repos")
 def api_settings_repos():
     from repo_settings import get_repo_settings_response
-    return get_repo_settings_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    return get_repo_settings_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/repos")
 def api_settings_repos_update(payload: dict):
     from repo_settings import update_repo_settings
-    ok, msg = update_repo_settings(Path(os.environ.get('FLUME_WORKSPACE', './workspace')), payload)
+    ok, msg = update_repo_settings(WORKSPACE_ROOT, payload)
     if ok:
         return {"success": True, "message": msg}
     return JSONResponse(status_code=400, content={"error": msg})
@@ -2138,12 +2120,12 @@ def api_settings_repos_update(payload: dict):
 @app.get("/api/settings/agent-models")
 def api_settings_agent_models():
     from agent_models_settings import get_agent_models_response
-    return get_agent_models_response(Path(os.environ.get('FLUME_WORKSPACE', './workspace')))
+    return get_agent_models_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/agent-models")
 def api_settings_agent_models_update(payload: dict):
     from agent_models_settings import update_agent_models
-    ok, msg = update_agent_models(Path(os.environ.get('FLUME_WORKSPACE', './workspace')), payload)
+    ok, msg = update_agent_models(WORKSPACE_ROOT, payload)
     if ok:
         return {"success": True, "message": msg}
     return JSONResponse(status_code=400, content={"error": msg})
