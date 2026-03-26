@@ -68,13 +68,17 @@ var StartCmd = &cobra.Command{
 		if orchestrator.CheckExoActive() {
 			fmt.Println(ui.SuccessBlue("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences."))
 		} else if envCfg.Provider == "" || envCfg.APIKey == "" {
-			fmt.Println(ui.WarningGold("Exo undetected globally. Escalate to User Auth Layer."))
-			promptCfg, err := ui.RunInteractivePrompt()
-			if err != nil {
-				log.Fatal("Interactive Wizard aborted.", "error", err)
+			if NativeFlag {
+				fmt.Println(ui.WarningGold("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively."))
+			} else {
+				fmt.Println(ui.WarningGold("Exo undetected globally. Escalate to User Auth Layer."))
+				promptCfg, err := ui.RunInteractivePrompt()
+				if err != nil {
+					log.Fatal("Interactive Wizard aborted.", "error", err)
+				}
+				envCfg.Provider = promptCfg.Provider
+				envCfg.APIKey = promptCfg.APIKey
 			}
-			envCfg.Provider = promptCfg.Provider
-			envCfg.APIKey = promptCfg.APIKey
 		}
 
 		if err := orchestrator.GenerateEnv(envCfg); err != nil {
@@ -93,7 +97,16 @@ var StartCmd = &cobra.Command{
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
-				dash.Env = append(portEnvOverrides, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
+				
+				dashEnv := append(portEnvOverrides, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
+				if envCfg.Provider != "" {
+					dashEnv = append(dashEnv, "LLM_PROVIDER="+envCfg.Provider)
+				}
+				if envCfg.APIKey != "" {
+					dashEnv = append(dashEnv, "LLM_API_KEY="+envCfg.APIKey)
+				}
+				dash.Env = dashEnv
+				
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
 				dash.Run()
