@@ -63,7 +63,9 @@ def _normalize_gemini_model(model_id: str) -> str:
     return _GEMINI_MODEL_ALIASES.get(m, m)
 
 
-def _base_url(provider=None):
+def _base_url(provider=None, base_url_override=None):
+    if base_url_override:
+        return base_url_override.rstrip('/')
     p = (provider or _PROVIDER).lower()
     if p in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
         return _PROVIDER_BASE_URLS[p]
@@ -107,9 +109,9 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
 # Ollama
 # ---------------------------------------------------------------------------
 
-def _ollama_chat(messages, model, temperature, max_tokens):
+def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None):
     data = _post(
-        f'{_BASE_URL}/api/chat',
+        f'{_base_url(base_url_override=base_url_override)}/api/chat',
         {
             'model': model,
             'messages': messages,
@@ -120,9 +122,9 @@ def _ollama_chat(messages, model, temperature, max_tokens):
     return data.get('message', {}).get('content', '')
 
 
-def _ollama_chat_tools(messages, tools, model, temperature, max_tokens):
+def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url_override=None):
     return _post(
-        f'{_BASE_URL}/api/chat',
+        f'{_base_url(base_url_override=base_url_override)}/api/chat',
         {
             'model': model,
             'messages': messages,
@@ -145,8 +147,8 @@ def _openai_headers():
     return {'Authorization': f'Bearer {key}'}
 
 
-def _openai_chat(messages, model, temperature, max_tokens, provider=None):
-    url = _base_url(provider) + '/v1/chat/completions'
+def _openai_chat(messages, model, temperature, max_tokens, provider=None, base_url_override=None):
+    url = _base_url(provider, base_url_override) + '/v1/chat/completions'
     data = _post(
         url,
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
@@ -155,8 +157,8 @@ def _openai_chat(messages, model, temperature, max_tokens, provider=None):
     return (data['choices'][0]['message'].get('content') or '').strip()
 
 
-def _openai_chat_tools(messages, tools, model, temperature, max_tokens, provider=None):
-    url = _base_url(provider) + '/v1/chat/completions'
+def _openai_chat_tools(messages, tools, model, temperature, max_tokens, provider=None, base_url_override=None):
+    url = _base_url(provider, base_url_override) + '/v1/chat/completions'
     data = _post(
         url,
         {
@@ -277,7 +279,7 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
 # Public API
 # ---------------------------------------------------------------------------
 
-def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None):
+def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None, base_url_override=None):
     """Call the configured LLM and return the assistant's text response.
 
     Args:
@@ -294,14 +296,14 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_ove
     if p == 'gemini':
         m = _normalize_gemini_model(m)
     if p == 'ollama':
-        return _ollama_chat(messages, m, temperature, max_tokens)
+        return _ollama_chat(messages, m, temperature, max_tokens, base_url_override)
     elif p == 'anthropic':
         return _anthropic_chat(messages, m, temperature, max_tokens)
     else:
-        return _openai_chat(messages, m, temperature, max_tokens, provider=p)
+        return _openai_chat(messages, m, temperature, max_tokens, provider=p, base_url_override=base_url_override)
 
 
-def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None):
+def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None, base_url_override=None):
     """Call the configured LLM with tool definitions.
 
     Args:
@@ -326,8 +328,8 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
     if p == 'gemini':
         m = _normalize_gemini_model(m)
     if p == 'ollama':
-        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens)
+        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, base_url_override)
     elif p == 'anthropic':
         return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens)
     else:
-        return _openai_chat_tools(messages, tools, m, temperature, max_tokens, provider=p)
+        return _openai_chat_tools(messages, tools, m, temperature, max_tokens, provider=p, base_url_override=base_url_override)
