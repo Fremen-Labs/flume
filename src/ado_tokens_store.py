@@ -42,7 +42,11 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
     path = store_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    masked_doc = json.loads(json.dumps(doc))
+    for tok in masked_doc.get("credentials", []):
+        if tok.get("token") and tok["token"] != MASK:
+            tok["token"] = "***OPENBAO_DELEGATED***"
+    path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
 
 
 def _strip_env_quotes(raw: str) -> str:
@@ -99,7 +103,17 @@ def get_active_token_plain(workspace_root: Path) -> str:
             continue
         if str(c.get("id") or "").strip() != aid:
             continue
-        return str(c.get("token") or "").strip()
+        token = str(c.get("token") or "").strip()
+        if token == "***OPENBAO_DELEGATED***":
+            try:
+                from llm_settings import _openbao_get_all
+                bao_vals = _openbao_get_all(workspace_root)
+                delegated_token = str(bao_vals.get(f"FLUME_ADO_{aid}") or "").strip()
+                if delegated_token:
+                    token = delegated_token
+            except ImportError:
+                pass
+        return token
     return ""
 
 
@@ -168,6 +182,11 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
         doc["credentials"] = new_c
         if str(doc.get("activeCredentialId") or "") == cid:
             doc["activeCredentialId"] = str(new_c[0].get("id") or "").strip() if new_c else ""
+        try:
+            from llm_settings import _openbao_put_many
+            _openbao_put_many(workspace_root, {f"FLUME_ADO_{cid}": ""})
+        except ImportError:
+            pass
         save_document(workspace_root, doc)
         _sync_active_to_env(workspace_root)
         return True, ""
@@ -213,6 +232,12 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             doc["credentials"] = creds
             if not str(doc.get("activeCredentialId") or "").strip() and str(row.get("token") or "").strip():
                 doc["activeCredentialId"] = cred_id
+            if has_token_key and token_in and token_in != MASK:
+                try:
+                    from llm_settings import _openbao_put_many
+                    _openbao_put_many(workspace_root, {f"FLUME_ADO_{cred_id}": token_in})
+                except ImportError:
+                    pass
             save_document(workspace_root, doc)
             _sync_active_to_env(workspace_root)
             return True, ""
@@ -231,6 +256,12 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
         doc["credentials"] = creds
         if not str(doc.get("activeCredentialId") or "").strip():
             doc["activeCredentialId"] = new_id
+        if token_in and token_in != MASK:
+            try:
+                from llm_settings import _openbao_put_many
+                _openbao_put_many(workspace_root, {f"FLUME_ADO_{new_id}": token_in})
+            except ImportError:
+                pass
         save_document(workspace_root, doc)
         _sync_active_to_env(workspace_root)
         return True, ""
@@ -265,6 +296,12 @@ def apply_legacy_patch(
             if str(c.get("id")) == aid:
                 apply_to_row(c)
                 doc["credentials"] = creds
+                if update_token and token and token != MASK:
+                    try:
+                        from llm_settings import _openbao_put_many
+                        _openbao_put_many(workspace_root, {f"FLUME_ADO_{aid}": token})
+                    except ImportError:
+                        pass
                 save_document(workspace_root, doc)
                 _sync_active_to_env(workspace_root)
                 return True, ""
@@ -275,6 +312,12 @@ def apply_legacy_patch(
     creds.append(row)
     doc["credentials"] = creds
     doc["activeCredentialId"] = new_id if str(row.get("token") or "").strip() else ""
+    if update_token and token and token != MASK:
+        try:
+            from llm_settings import _openbao_put_many
+            _openbao_put_many(workspace_root, {f"FLUME_ADO_{new_id}": token})
+        except ImportError:
+            pass
     save_document(workspace_root, doc)
     _sync_active_to_env(workspace_root)
     return True, ""
