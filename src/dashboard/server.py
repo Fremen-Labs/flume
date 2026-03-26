@@ -20,9 +20,13 @@ import sys
 import urllib.request
 from urllib.error import URLError, HTTPError
 import urllib.parse
+import glob
+from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
+
+from swarm_engine_config import get_agent_swarm_topology, apply_topology_native, evaluate_topology
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -1948,18 +1952,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import json
 
-app = FastAPI(title="Flume Enterprise API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.on_event("startup")
-def initialize_workspace_lifecycle():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     try:
         # Re-run validation natively inside the event loop in case env vars were mutated post-import
         resolve_safe_workspace()
@@ -1983,6 +1977,20 @@ def initialize_workspace_lifecycle():
 
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
+    
+    yield
+    # No shutdown logic presently mapped
+
+app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# The legacy @app.on_event("startup") was migrated strictly up to the FastAPI lifespan architecture above.
 
 @app.get('/api/health')
 def health():
