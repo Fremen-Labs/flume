@@ -139,7 +139,7 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
                             if audit_res.status not in (200, 201):
                                 logger.warning(f"Security audit log dropped natively: {audit_res.status}")
                         break # Escape the loop natively upon successful index propagation
-                    except urllib.error.URLError as audit_e:
+                    except (urllib.error.URLError, ConnectionError) as audit_e:
                         if attempt < max_retries - 1:
                             logger.info(f"Elasticsearch actively bootstrapping. Retrying audit payload natively in 2s (Attempt {attempt + 1}/{max_retries})...")
                             time.sleep(2)
