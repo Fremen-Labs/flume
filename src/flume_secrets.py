@@ -122,21 +122,32 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
                     "secret_path": f"{mount}/{path}",
                     "keys_retrieved": list(res_data.keys())
                 }
-                try:
-                    audit_req = urllib.request.Request(
-                        f"{es_url.rstrip('/')}/agent-security-audits/_doc",
-                        data=json.dumps(audit_doc).encode("utf-8"),
-                        headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
-                        method="POST"
-                    )
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    with urllib.request.urlopen(audit_req, timeout=5, context=ctx) as audit_res:
-                        if audit_res.status not in (200, 201):
-                            logger.warning(f"Security audit log dropped natively: {audit_res.status}")
-                except Exception as audit_e:
-                    logger.warning(f"Failed to post OpenBao security checkout audit to Elasticsearch: {audit_e}")
+                
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        audit_req = urllib.request.Request(
+                            f"{es_url.rstrip('/')}/agent-security-audits/_doc",
+                            data=json.dumps(audit_doc).encode("utf-8"),
+                            headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
+                            method="POST"
+                        )
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        with urllib.request.urlopen(audit_req, timeout=5, context=ctx) as audit_res:
+                            if audit_res.status not in (200, 201):
+                                logger.warning(f"Security audit log dropped natively: {audit_res.status}")
+                        break # Escape the loop natively upon successful index propagation
+                    except urllib.error.URLError as audit_e:
+                        if attempt < max_retries - 1:
+                            logger.info(f"Elasticsearch actively bootstrapping. Retrying audit payload natively in 2s (Attempt {attempt + 1}/{max_retries})...")
+                            time.sleep(2)
+                        else:
+                            logger.warning(f"Failed to post OpenBao security checkout audit to Elasticsearch after {max_retries} attempts natively: {audit_e}")
+                    except Exception as audit_e:
+                        logger.warning(f"Fatal Elasticsearch error evaluating native boundaries: {audit_e}")
+                        break
             # ----------------------------------------------
             
             return res_data
