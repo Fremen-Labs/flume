@@ -26,8 +26,6 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 
-from swarm_engine_config import get_agent_swarm_topology, apply_topology_native, evaluate_topology
-
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
 from es_bootstrap import ensure_es_indices
