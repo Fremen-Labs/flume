@@ -59,8 +59,28 @@ HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
-WORKER_STATE = WORKSPACE_ROOT / 'worker-manager/state.json'
+
+class WorkspaceInitializationError(Exception):
+    """Raised when the FLUME_WORKSPACE path is invalid or cannot be initialized."""
+    pass
+
+def _resolve_and_validate_workspace() -> Path:
+    _ws_env = os.environ.get('FLUME_WORKSPACE', '').strip()
+    path = Path(_ws_env).resolve() if _ws_env else Path.home() / '.flume' / 'workspace'
+    
+    parts = path.parts
+    if parts == ('/',) or parts == ('\\',):
+        raise WorkspaceInitializationError(f"Rejected sensitive system root path: {path}")
+        
+    deny_list = {'etc', 'var', 'usr', 'bin', 'sbin', 'system', 'library', 'private', 'boot', 'dev', 'proc', 'sys', 'opt', 'windows'}
+    if len(parts) > 1 and parts[1].lower() in deny_list:
+        raise WorkspaceInitializationError(f"Rejected sensitive system directory: {path}")
+        
+    return path
+
+# Module-level paths are defined lazily to improve import testability, but evaluated via pure functions.
+WORKSPACE_ROOT = _resolve_and_validate_workspace()
+WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
 
@@ -77,7 +97,6 @@ if not ES_VERIFY_TLS:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _ensure_gitflow_defaults(entry: dict) -> dict:
@@ -1694,9 +1713,9 @@ def load_snapshot():
 
 # ─── Agent process control ────────────────────────────────────────────────────
 
-WORKER_MANAGER_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'manager.py'
-WORKER_HANDLERS_SCRIPT = WORKSPACE_ROOT / 'worker-manager' / 'worker_handlers.py'
-WORKER_ENV_FILE = WORKSPACE_ROOT / 'memory' / 'es' / '.env.local'
+WORKER_MANAGER_SCRIPT = _SRC_ROOT / 'worker-manager' / 'manager.py'
+WORKER_HANDLERS_SCRIPT = _SRC_ROOT / 'worker-manager' / 'worker_handlers.py'
+WORKER_ENV_FILE = _SRC_ROOT / 'memory' / 'es' / '.env.local'
 
 
 def _find_worker_pids() -> dict:
@@ -1815,7 +1834,7 @@ def agents_start() -> dict:
         proc = subprocess.Popen(
             ['python3', str(WORKER_HANDLERS_SCRIPT)],
             env=env,
-            cwd=str(WORKSPACE_ROOT / 'worker-manager'),
+            cwd=str(_SRC_ROOT / 'worker-manager'),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -1936,6 +1955,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def initialize_workspace_lifecycle():
+    try:
+        # Re-run validation natively inside the event loop in case env vars were mutated post-import
+        _resolve_and_validate_workspace()
+        
+        WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(json.dumps({
+            "event": "workspace_initialized",
+            "path": str(WORKSPACE_ROOT),
+            "source": "FLUME_WORKSPACE" if os.environ.get('FLUME_WORKSPACE') else "fallback_home",
+            "status": "success"
+        }))
+    except Exception as e:
+        logger.error(json.dumps({
+            "event": "workspace_initialization_failure",
+            "path": str(WORKSPACE_ROOT),
+            "error": str(e),
+            "status": "fatal"
+        }))
+        raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
 @app.get('/api/health')
 def health():
@@ -2262,4 +2304,13 @@ def update_system_settings(settings: SystemSettingsRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=HOST, port=PORT)
+    try:
+        uvicorn.run(app, host=HOST, port=PORT)
+    except WorkspaceInitializationError as e:
+        logger.error(json.dumps({
+            "event": "workspace_initialization_fatal",
+            "error": str(e),
+            "status": "fatal"
+        }))
+        import sys
+        sys.exit(1)
