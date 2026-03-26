@@ -937,7 +937,8 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
 
 
 def _get_cluster_topology() -> dict[str, Any]:
-    state_file = BASE / 'worker-manager' / 'state.json'
+    from utils.workspace import resolve_safe_workspace
+    state_file = resolve_safe_workspace() / 'worker_state.json'
     if not state_file.exists():
         return {'available_implementers': 1, 'target_models': ['unknown']}
     try:
