@@ -176,6 +176,12 @@ _IMPLEMENTER_TOOLS = [
                     'ttl': {'type': 'integer', 'description': 'Time to live in seconds'}
                 },
                 'required': ['namespace', 'key', 'value'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'multi_replace_file_content',
             'description': 'Replace multiple non-contiguous chunks of text in a file. Use this for deterministic surgical code edits instead of raw bash loops.',
             'parameters': {
