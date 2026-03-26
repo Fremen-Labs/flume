@@ -24,7 +24,6 @@ from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_t
 
 BASE = _WS / 'worker-manager'
 STATE = BASE / 'state.json'
-LOG = BASE / 'worker_handlers.log'
 
 ES_URL = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -48,10 +47,34 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+import logging
+from logging.handlers import RotatingFileHandler
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "timestamp": now_iso(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "service": "worker-handlers",
+            "pid": os.getpid()
+        })
+
+_handlers_logger = logging.getLogger('worker-handlers')
+_handlers_logger.setLevel(logging.INFO)
+
+try:
+    _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
+    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else Path.home() / '.flume' / 'workspace' / 'logs'
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _fh = RotatingFileHandler(_log_dir / 'worker_handlers.log', maxBytes=10*1024*1024, backupCount=5)
+    _fh.setFormatter(JSONFormatter())
+    _handlers_logger.addHandler(_fh)
+except PermissionError:
+    pass
+
 def log(msg):
-    BASE.mkdir(parents=True, exist_ok=True)
-    with LOG.open('a') as f:
-        f.write(f"[{now_iso()}] {msg}\n")
+    _handlers_logger.info(str(msg))
 
 
 def es_request(path, body=None, method='GET'):
