@@ -109,7 +109,7 @@ async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boole
 
 async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean; restartRequired?: boolean }> {
   const res = await fetch('/api/settings/llm/credentials', {
-    method: 'POST',
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
