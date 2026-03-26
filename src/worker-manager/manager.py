@@ -24,7 +24,8 @@ import llm_credentials_store as lcs  # noqa: E402
 apply_runtime_config(_WS)
 
 BASE = _WS / 'worker-manager'
-STATE = BASE / 'state.json'
+from utils.workspace import resolve_safe_workspace
+STATE = resolve_safe_workspace() / 'worker_state.json'
 AGENT_MODELS_FILE = BASE / 'agent_models.json'
 
 ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')

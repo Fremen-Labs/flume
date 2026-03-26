@@ -21,7 +21,8 @@ apply_runtime_config(_WS)
 from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester
 
 BASE = _WS / 'worker-manager'
-STATE = BASE / 'state.json'
+from utils.workspace import resolve_safe_workspace
+STATE = resolve_safe_workspace() / 'worker_state.json'
 
 ES_URL = os.environ.get('ES_URL', 'http://127.0.0.1:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
