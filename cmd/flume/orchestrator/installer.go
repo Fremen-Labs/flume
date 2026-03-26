@@ -63,18 +63,16 @@ func EvaluateAndInstall(eco SystemEcology) error {
 			return fmt.Errorf("fatal execution constraint: No supported package manager (apt, yum, pacman, brew) natively found to explicitly construct the %s pipeline", dep)
 		}
 
-		if cmd != nil {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				log.Error(fmt.Sprintf("Failed to permanently bind %s into the OS.", dep), "error", err)
-				return err
-			}
-			if dep == "uv Python Manager" || dep == "pipx Environment" {
-				os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
-			}
-			fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Error("Failed to permanently bind telemetry package into the OS.", "package", dep, "error", err)
+			return err
 		}
+		if dep == "uv Python Manager" || dep == "pipx Environment" {
+			os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
+		}
+		fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
 	}
 	return nil
 }

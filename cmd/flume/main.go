@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/Fremen-Labs/flume/cmd/flume/commands"
@@ -18,6 +19,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	log.SetFormatter(log.JSONFormatter)
 	rootCmd.AddCommand(commands.StartCmd)
 	rootCmd.AddCommand(commands.DestroyCmd)
 	rootCmd.AddCommand(commands.DoctorCmd)
