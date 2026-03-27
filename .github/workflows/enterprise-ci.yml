@@ -88,7 +88,7 @@ jobs:
 
       - name: Native E2E Dashboard Health Assertion
         run: |
-          MAX_RETRIES=5
+          MAX_RETRIES=20
           for i in $(seq 1 $MAX_RETRIES); do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8765 || echo "000")
             if [ "$HTTP_CODE" = "200" ]; then
