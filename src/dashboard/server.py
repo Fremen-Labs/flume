@@ -2113,31 +2113,45 @@ def api_task_transition(task_id: str, payload: dict):
 
 @app.post("/api/tasks/bulk-update")
 from fastapi import Depends, HTTPException, Request
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import ValidationError
 import secrets
+import httpx
 
 class KillSwitchDatabaseError(Exception): pass
 class KillSwitchProcessError(Exception): pass
 
-class AppConfig:
-    ES_URL: str = os.environ.get('ES_URL', 'http://localhost:9200')
-    ES_API_KEY: str = os.environ.get('ES_API_KEY', '')
-    ES_CA_CERTS: str = os.environ.get('ES_CA_CERTS', '').strip()
+class AuthConfigurationError(Exception): pass
+class InvalidCredentialsError(Exception): pass
+
+class AppConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    ES_URL: str = "http://localhost:9200"
+    ES_API_KEY: str = ""
+    ES_CA_CERTS: str = ""
+    FLUME_ADMIN_TOKEN: str = ""
 
 class ElasticsearchClient:
     def __init__(self, es_url: str, api_key: str, ca_certs: str):
         self.es_url = es_url.rstrip('/')
         self.headers = {'Content-Type': 'application/json'}
         if api_key: self.headers['Authorization'] = f'ApiKey {api_key}'
-        self.ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
+        verify_ssl = ca_certs if ca_certs else False
+        self.client = httpx.Client(headers=self.headers, verify=verify_ssl, timeout=10.0)
 
     def update_tasks_to_halted(self):
         query = {
             "query": {"terms": {"status.keyword": ["ready", "running"]}},
             "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
         }
-        req = urllib.request.Request(f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=self.headers, method='POST')
-        with urllib.request.urlopen(req, timeout=10, context=self.ctx) as res:
-            res.read()
+        url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
+        try:
+            response = self.client.post(url, json=query)
+            response.raise_for_status()
+        except httpx.RequestError as e:
+            raise KillSwitchDatabaseError(f"Network error updating Elasticsearch: {e}")
+        except httpx.HTTPStatusError as e:
+            raise KillSwitchDatabaseError(f"HTTP error updating Elasticsearch: {e.response.status_code}")
 
 class AgentSupervisor:
     def terminate_all(self) -> dict:
@@ -2149,22 +2163,30 @@ class KillSwitchService:
         self.supervisor = supervisor
 
     def halt_all_tasks(self, correlation_id: str):
-        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
+        logger.info(json.dumps({"event": "kill_switch.invoke.start", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
         try:
             self.es_client.update_tasks_to_halted()
-            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "correlation_id": correlation_id}))
+            logger.info(json.dumps({"event": "kill_switch.db_update.success", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "correlation_id": correlation_id}))
         except Exception as e:
-            logger.error(json.dumps({"event": "kill_switch_database_error", "error": str(e), "correlation_id": correlation_id}))
+            logger.error(json.dumps({"event": "kill_switch.db_update.failure", "error": str(e), "correlation_id": correlation_id}))
             raise KillSwitchDatabaseError(str(e))
 
         try:
             supervisor_res = self.supervisor.terminate_all()
-            killed_pids = supervisor_res.get('killed_pids', [])
-            logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "message": "Supervisor gracefully executed subprocess halts", "correlation_id": correlation_id}))
+            killed_pids = []
+            if isinstance(supervisor_res, dict):
+                killed_pids = supervisor_res.get('killed_pids', [])
+            else:
+                logger.warning(json.dumps({
+                    "event": "kill_switch.supervisor.invalid_response",
+                    "response_type": str(type(supervisor_res)),
+                    "correlation_id": correlation_id
+                }))
+            logger.info(json.dumps({"event": "kill_switch.process_kill.success", "killed_pids": killed_pids, "killed_pid_count": len(killed_pids), "message": "Supervisor gracefully executed subprocess halts", "correlation_id": correlation_id}))
             return {"success": True, "killed_pids": killed_pids, "correlation_id": correlation_id}
         except Exception as e:
             logger.critical(json.dumps({
-                "event": "kill_switch_partial_failure",
+                "event": "kill_switch.invoke.partial_failure",
                 "error": str(e),
                 "correlation_id": correlation_id,
                 "message": "CRITICAL: Database tasks were halted, but failed to kill OS processes. Manual intervention may be required."
@@ -2187,23 +2209,32 @@ def get_agent_supervisor():
 def get_kill_switch_service(es_client: ElasticsearchClient = Depends(get_es_client), supervisor: AgentSupervisor = Depends(get_agent_supervisor)):
     return KillSwitchService(es_client, supervisor)
 
-def verify_admin_access(request: Request):
-    admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
-    if not admin_token:
-        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
-        raise HTTPException(status_code=403, detail="Endpoint disabled: Server configuration incomplete.")
+class AdminAuthorizer:
+    def __init__(self, required_token: str):
+        self.required_token = required_token
+    
+    def authorize(self, auth_header: str):
+        if not self.required_token:
+            raise AuthConfigurationError("Admin token not configured on server.")
         
-    auth_header = request.headers.get("Authorization")
-    expected_auth = f"Bearer {admin_token}"
+        expected_auth = f"Bearer {self.required_token}"
+        if not auth_header or not secrets.compare_digest(auth_header, expected_auth):
+            raise InvalidCredentialsError("Admin access required.")
 
-    if not auth_header or not secrets.compare_digest(auth_header, expected_auth):
+def verify_admin_access(request: Request, app_config: AppConfig = Depends(get_app_config)):
+    authorizer = AdminAuthorizer(app_config.FLUME_ADMIN_TOKEN)
+    try:
+        authorizer.authorize(request.headers.get("Authorization"))
+    except InvalidCredentialsError:
         logger.warning(json.dumps({
             "event": "admin_auth_failure",
             "endpoint": "/api/tasks/stop-all",
             "client_ip": request.client.host if request.client else "unknown"
         }))
         raise HTTPException(status_code=403, detail="Admin access required")
-    
+    except AuthConfigurationError:
+        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
+        raise HTTPException(status_code=403, detail="Endpoint disabled: Server configuration incomplete.")
     return True
 
 @app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
