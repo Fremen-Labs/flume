@@ -9,6 +9,7 @@ toml>=0.10.2
 fastapi>=0.135.1
 uvicorn>=0.42.0
 pyyaml>=6.0.3
+httpx>=0.28.1
 
 [dev]
 pytest

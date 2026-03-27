@@ -2137,16 +2137,16 @@ class ElasticsearchClient:
         self.headers = {'Content-Type': 'application/json'}
         if api_key: self.headers['Authorization'] = f'ApiKey {api_key}'
         verify_ssl = ca_certs if ca_certs else False
-        self.client = httpx.Client(headers=self.headers, verify=verify_ssl, timeout=10.0)
+        self.client = httpx.AsyncClient(headers=self.headers, verify=verify_ssl, timeout=10.0)
 
-    def update_tasks_to_halted(self):
+    async def update_tasks_to_halted(self):
         query = {
             "query": {"terms": {"status.keyword": ["ready", "running"]}},
             "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
         }
         url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
         try:
-            response = self.client.post(url, json=query)
+            response = await self.client.post(url, json=query)
             response.raise_for_status()
         except httpx.RequestError as e:
             raise KillSwitchDatabaseError(f"Network error updating Elasticsearch: {e}")
@@ -2162,10 +2162,10 @@ class KillSwitchService:
         self.es_client = es_client
         self.supervisor = supervisor
 
-    def halt_all_tasks(self, correlation_id: str):
+    async def halt_all_tasks(self, correlation_id: str):
         logger.info(json.dumps({"event": "kill_switch.invoke.start", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
         try:
-            self.es_client.update_tasks_to_halted()
+            await self.es_client.update_tasks_to_halted()
             logger.info(json.dumps({"event": "kill_switch.db_update.success", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "correlation_id": correlation_id}))
         except Exception as e:
             logger.error(json.dumps({"event": "kill_switch.db_update.failure", "error": str(e), "correlation_id": correlation_id}))
@@ -2238,14 +2238,16 @@ def verify_admin_access(request: Request, app_config: AppConfig = Depends(get_ap
     return True
 
 @app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
-def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill_switch_service)):
+async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill_switch_service)):
     correlation_id = str(uuid.uuid4())
     try:
-        result = kill_switch_service.halt_all_tasks(correlation_id)
+        result = await kill_switch_service.halt_all_tasks(correlation_id)
         return {**result, "message": "All active Swarm networks successfully halted natively via supervisor."}
     except (KillSwitchDatabaseError, KillSwitchProcessError) as e:
-        raise HTTPException(status_code=500, detail={'error': str(e), 'correlation_id': correlation_id})
-
+        error_message = "An internal error occurred while halting tasks. Please check server logs."
+        if isinstance(e, KillSwitchProcessError):
+            error_message = "CRITICAL: Tasks were marked as halted, but failed to terminate running processes. Manual intervention may be required."
+        raise HTTPException(status_code=500, detail={'error': error_message, 'correlation_id': correlation_id})
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
     return []
