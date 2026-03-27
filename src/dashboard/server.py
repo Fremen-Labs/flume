@@ -480,6 +480,8 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         model=model,
         temperature=0.3,
         max_tokens=8192,
+        provider_override=cfg.get('provider'),
+        base_url_override=cfg.get('baseUrl'),
         timeout_seconds=timeout_seconds,
     )
 
