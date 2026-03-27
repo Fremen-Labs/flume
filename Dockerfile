@@ -29,6 +29,7 @@ COPY . /app
 # layer on the host unless dist exists there; docker-compose runs a build-if-missing entrypoint too.
 WORKDIR /app/src/frontend/src
 RUN npm ci && npm run build && rm -rf /app/src/frontend/src/node_modules
+RUN cp -R /app/src/frontend/dist /dist-cache
 WORKDIR /app
 
 # Command is explicitly overridden per service via docker-compose.yml
