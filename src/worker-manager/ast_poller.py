@@ -1,10 +1,17 @@
+import sys
 import time
 import os
 import subprocess
 import logging
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from opensearchpy import OpenSearch
+
+_WS = Path(__file__).resolve().parent.parent
+if str(_WS) not in sys.path:
+    sys.path.insert(0, str(_WS))
+from utils.workspace import resolve_safe_workspace
 
 def json_log(level: str, msg: str, **kwargs):
     doc = {
@@ -44,10 +51,14 @@ def poll_and_sync():
     that are 'completed' but have not yet been 'ast_synced'.
     """
     json_log("INFO", "Initializing Deterministic AST Poller Daemon...")
+    client = init_es_client()
+    
+    POLL_INTERVAL_SECONDS = int(os.environ.get('AST_POLLER_INTERVAL_SECONDS', '15'))
+    BATCH_SIZE = int(os.environ.get('AST_POLLER_BATCH_SIZE', '10'))
+    SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get('AST_POLLER_SUBPROCESS_TIMEOUT', '120'))
     
     while True:
         try:
-            client = init_es_client()
             # Query ES for completed tasks without ast_synced
             query = {
                 "query": {
@@ -60,7 +71,7 @@ def poll_and_sync():
                         ]
                     }
                 },
-                "size": 10
+                "size": BATCH_SIZE
             }
             
             res = client.search(index="agent-task-records", body=query)
@@ -72,24 +83,47 @@ def poll_and_sync():
                 repo_path = source.get('repo_path')
                 
                 if not repo_path:
-                    client.update(index="agent-task-records", id=task_id, body={"doc": {"ast_synced": True}})
+                    client.update(index="agent-task-records", id=task_id, body={"doc": {"ast_synced": True, "ast_sync_status": "ignored"}})
                     continue
                     
-                json_log("INFO", f"Found newly completed task. Initiating native AST batch index.", task_id=task_id, repo=repo_path)
+                update_body = {"doc": {"ast_synced": True}}
+                
                 try:
-                    subprocess.run(["elastro", "rag", "update", repo_path], check=True, capture_output=True, timeout=120)
-                    json_log("INFO", "Flawlessly updated AST boundary natively.", repo=repo_path)
-                except subprocess.CalledProcessError as e:
-                    json_log("ERROR", "subprocess trace failed.", repo=repo_path, stdout=e.stdout.decode('utf-8', errors='replace'), stderr=e.stderr.decode('utf-8', errors='replace'))
+                    safe_path = Path(repo_path).resolve()
+                    ws = resolve_safe_workspace()
+                    if not safe_path.is_relative_to(ws):
+                        json_log("ERROR", "Path Injection Trap activated: Repo path outside bounds.", task_id=task_id, raw_path=repo_path)
+                        update_body["doc"]["ast_sync_status"] = "failed"
+                        update_body["doc"]["ast_sync_error"] = "path_injection_locked"
+                        client.update(index="agent-task-records", id=task_id, body=update_body)
+                        continue
                 except Exception as e:
-                    json_log("ERROR", f"elastro rag update failed on repo.", repo=repo_path, error=str(e))
+                    json_log("ERROR", "Malformed Path encountered.", task_id=task_id, raw_path=repo_path)
+                    update_body["doc"]["ast_sync_status"] = "failed"
+                    update_body["doc"]["ast_sync_error"] = str(e)
+                    client.update(index="agent-task-records", id=task_id, body=update_body)
+                    continue
                     
-                client.update(index="agent-task-records", id=task_id, body={"doc": {"ast_synced": True}})
+                json_log("INFO", f"Found newly completed task. Initiating native AST batch index.", task_id=task_id, repo=str(safe_path))
+                try:
+                    subprocess.run(["elastro", "rag", "update", str(safe_path)], check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)
+                    json_log("INFO", "Flawlessly updated AST boundary natively.", repo=str(safe_path))
+                    update_body["doc"]["ast_sync_status"] = "success"
+                except subprocess.CalledProcessError as e:
+                    json_log("ERROR", "subprocess trace failed.", repo=str(safe_path), stdout=e.stdout.decode('utf-8', errors='replace'), stderr=e.stderr.decode('utf-8', errors='replace'))
+                    update_body["doc"]["ast_sync_status"] = "failed"
+                    update_body["doc"]["ast_sync_error"] = str(e)
+                except Exception as e:
+                    json_log("ERROR", f"elastro rag update failed on repo.", repo=str(safe_path), error=str(e))
+                    update_body["doc"]["ast_sync_status"] = "failed"
+                    update_body["doc"]["ast_sync_error"] = str(e)
+                    
+                client.update(index="agent-task-records", id=task_id, body=update_body)
                 
         except Exception as e:
             json_log("ERROR", "Elasticsearch trace failure.", error=str(e))
             
-        time.sleep(15)
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 def start_poller_thread():
     import threading
