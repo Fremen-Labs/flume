@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/log"
@@ -15,7 +16,6 @@ import (
 
 var (
 	ProviderFlag string
-	KeyFlag      string
 	NativeFlag   bool
 )
 
@@ -35,7 +35,7 @@ var StartCmd = &cobra.Command{
 
 		log.Infof("💾 Jacking into the local mainframe... Scanning global systemic hardware matrices 🔌")
 		eco := orchestrator.PerformReconnaissance()
-		log.Info(fmt.Sprintf("[SYSTEM RECON] Docker: %v | Elastic: %v | OpenBao: %v | Elastro: %v", eco.HasDocker, eco.HasElastic, eco.HasOpenBao, eco.HasElastro))
+		log.Info("[SYSTEM RECON]", "Docker", eco.HasDocker, "Elastic", eco.HasElastic, "OpenBao", eco.HasOpenBao, "Elastro", eco.HasElastro)
 
 		if err := orchestrator.EvaluateAndInstall(eco); err != nil {
 			log.Error("Unmet Dependency Bounds", "error", err)
@@ -72,7 +72,7 @@ var StartCmd = &cobra.Command{
 
 		envCfg := orchestrator.EnvConfig{
 			Provider: ProviderFlag,
-			APIKey:   KeyFlag,
+			APIKey:   os.Getenv("FLUME_API_KEY"),
 		}
 
 		if orchestrator.CheckExoActive() {
@@ -104,10 +104,11 @@ var StartCmd = &cobra.Command{
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
 			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			if err := c.Run(); err != nil {
-				log.Error("Data grid boot failed", "error", err)
+			output, err := c.CombinedOutput()
+			if err != nil {
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+			} else {
+				log.Info("Data grid bootstrapped successfully", "output", strings.TrimSpace(string(output)))
 			}
 
 			go func() {
@@ -141,12 +142,12 @@ var StartCmd = &cobra.Command{
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			if err := c.Run(); err != nil {
-				log.Error("Container topology boot failed", "error", err)
+			output, err := c.CombinedOutput()
+			if err != nil {
+				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(string(output)))
 				return err
 			}
+			log.Info("Container Swarm bootstrapped successfully", "output", strings.TrimSpace(string(output)))
 		}
 
 		orchestrator.AwaitOrchestration()
@@ -156,6 +157,5 @@ var StartCmd = &cobra.Command{
 
 func init() {
 	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", "Explicitly declare LLM Provider (openai, ollama, exo)")
-	StartCmd.Flags().StringVarP(&KeyFlag, "key", "k", "", "Explicitly declare LLM API Secret Key (Masked)")
 	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native High-Performance Git Worktrees")
 }
