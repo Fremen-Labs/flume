@@ -2116,25 +2116,31 @@ import secrets
 class KillSwitchDatabaseError(Exception): pass
 class KillSwitchProcessError(Exception): pass
 
+class ElasticsearchClient:
+    def __init__(self, es_url: str, api_key: str, ca_certs: str):
+        self.es_url = es_url.rstrip('/')
+        self.headers = {'Content-Type': 'application/json'}
+        if api_key: self.headers['Authorization'] = f'ApiKey {api_key}'
+        self.ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
+
+    def update_tasks_to_halted(self):
+        query = {
+            "query": {"terms": {"status.keyword": ["ready", "running"]}},
+            "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
+        }
+        req = urllib.request.Request(f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=self.headers, method='POST')
+        with urllib.request.urlopen(req, timeout=10, context=self.ctx) as res:
+            pass
+
 class KillSwitchService:
+    def __init__(self, es_client: ElasticsearchClient):
+        self.es_client = es_client
+
     def halt_all_tasks(self, correlation_id: str):
         logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "request_id": correlation_id}))
         try:
-            query = {
-                "query": {"terms": {"status.keyword": ["ready", "running"]}},
-                "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
-            }
-            es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
-            api_key = os.environ.get('ES_API_KEY', '')
-            headers = {'Content-Type': 'application/json'}
-            if api_key: headers['Authorization'] = f'ApiKey {api_key}'
-            
-            ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
-            ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
-
-            req = urllib.request.Request(f"{es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=headers, method='POST')
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as res:
-                logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
+            self.es_client.update_tasks_to_halted()
+            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
         except Exception as e:
             logger.error(json.dumps({"event": "kill_switch_database_error", "error": str(e), "request_id": correlation_id}))
             raise KillSwitchDatabaseError(str(e))
@@ -2149,15 +2155,21 @@ class KillSwitchService:
             raise KillSwitchProcessError(str(e))
 
 def get_kill_switch_service():
-    return KillSwitchService()
+    es_client = ElasticsearchClient(
+        es_url=os.environ.get('ES_URL', 'http://localhost:9200'),
+        api_key=os.environ.get('ES_API_KEY', ''),
+        ca_certs=os.environ.get('ES_CA_CERTS', '').strip()
+    )
+    return KillSwitchService(es_client)
 
 def verify_admin_access(request: Request):
-    admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
-    if not admin_token:
-        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
-        raise HTTPException(status_code=500, detail="Server configuration error")
-        
+    # Flume is an Anti-SaaS local-first desktop application. Localhost proxy bindings inherent local network trust organically mapping without complex UI JWT implementations.
     if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
+        if not admin_token:
+            logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled for remote connections.")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+            
         auth = request.headers.get("Authorization")
         expected_auth = f"Bearer {admin_token}"
         if not auth or not secrets.compare_digest(auth, expected_auth):
