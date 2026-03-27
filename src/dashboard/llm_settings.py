@@ -209,8 +209,55 @@ def _dedupe_models(models: list[dict[str, str]]) -> list[dict[str, str]]:
     return out
 
 
+def _normalize_ollama_base_url(base_url: str) -> str:
+    raw = (base_url or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        path = (parsed.path or "").rstrip("/")
+        if path in ("/v1", "/api"):
+            parsed = parsed._replace(path="")
+            return urllib.parse.urlunparse(parsed).rstrip("/")
+    except Exception:
+        pass
+    if raw.endswith("/v1"):
+        return raw[:-3].rstrip("/")
+    if raw.endswith("/api"):
+        return raw[:-4].rstrip("/")
+    return raw
+
+
+def _host_is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in {"", "127.0.0.1", "localhost", "::1"}
+
+
+def resolve_effective_ollama_base_url(pairs: dict[str, str]) -> str:
+    """
+    Prefer explicit saved LLM_BASE_URL, but on clean installs fall back to LOCAL_OLLAMA_BASE_URL
+    (which is usually populated by flume start / docker-compose as .../v1).
+    If LLM_BASE_URL is still a loopback default while LOCAL_OLLAMA_BASE_URL points remote,
+    prefer the remote LOCAL_OLLAMA_BASE_URL so Settings reflects the real reachable Ollama.
+    """
+    llm_base = _normalize_ollama_base_url(pairs.get("LLM_BASE_URL", ""))
+    local_base = _normalize_ollama_base_url(pairs.get("LOCAL_OLLAMA_BASE_URL", ""))
+    if not llm_base:
+        return local_base
+    if not local_base:
+        return llm_base
+    try:
+        llm_host = urllib.parse.urlparse(llm_base).hostname or ""
+        local_host = urllib.parse.urlparse(local_base).hostname or ""
+        if _host_is_loopback(llm_host) and not _host_is_loopback(local_host):
+            return local_base
+    except Exception:
+        pass
+    return llm_base
+
+
 def _fetch_ollama_models(base_url: str, timeout: float = 5.0) -> list[dict[str, str]]:
-    base = (base_url or "").strip().rstrip("/")
+    base = _normalize_ollama_base_url(base_url)
     if not base:
         return []
 
@@ -244,7 +291,7 @@ def provider_catalog_for_workspace(workspace_root: Path) -> list[dict[str, Any]]
     pairs = load_effective_pairs(workspace_root)
     provider = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
     model = pairs.get("LLM_MODEL", "llama3.2").strip() or "llama3.2"
-    base_url = pairs.get("LLM_BASE_URL", "").strip()
+    base_url = resolve_effective_ollama_base_url(pairs) if provider == "ollama" else pairs.get("LLM_BASE_URL", "").strip()
 
     catalog: list[dict[str, Any]] = []
     for entry in PROVIDER_CATALOG:
@@ -442,6 +489,7 @@ _SKIP_PROCESS_OVERLAY_FOR_LLM = frozenset(
 # Repo tokens from .env / OpenBao must not be overridden by a stale GH_TOKEN in the shell
 # or systemd environment left over from an old session.
 _REPO_CREDS_FROM_FILE_FIRST = frozenset({"GH_TOKEN", "ADO_TOKEN", "ADO_ORG_URL"})
+_LOCAL_PROVIDER_ROUTE_KEYS = frozenset({"LOCAL_OLLAMA_BASE_URL", "LOCAL_EXO_BASE_URL"})
 
 
 def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
@@ -468,6 +516,15 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
             pairs[key] = v
     except ImportError:
         pass
+
+    # Containerized clean installs often export provider-local routes (e.g. LOCAL_OLLAMA_BASE_URL)
+    # while WORKSPACE_ROOT points at /workspace and the editable repo/.env lives elsewhere (/app/.env).
+    # Overlay these explicit process env vars so Settings can discover remote local-model endpoints.
+    for key in _LOCAL_PROVIDER_ROUTE_KEYS:
+        v = os.environ.get(key, "").strip()
+        if v:
+            pairs[key] = v
+
     bao_vals = _openbao_get_all(workspace_root)
     for key, val in bao_vals.items():
         if val is not None and str(val).strip():
@@ -807,7 +864,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
     pairs = load_effective_pairs(workspace_root)
     provider = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
     model = pairs.get("LLM_MODEL", "llama3.2").strip()
-    base_url = pairs.get("LLM_BASE_URL", "").strip()
+    base_url = resolve_effective_ollama_base_url(pairs) if provider == "ollama" else pairs.get("LLM_BASE_URL", "").strip()
     raw_api_key = (pairs.get("LLM_API_KEY") or "").strip()
     api_key_set = bool(raw_api_key)
     platform_api_key = _looks_like_openai_platform_api_key(raw_api_key)

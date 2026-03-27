@@ -227,7 +227,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "configured": True,
                 "models": list(ollama_entry.get("models") or []),
                 "allowCustomModelId": True,
-                "hint": "Uses LLM_BASE_URL / default :11434",
+                "hint": "Uses the effective Ollama endpoint from Settings or LOCAL_OLLAMA_BASE_URL.",
             }
         )
 
@@ -311,7 +311,7 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
                 "isPrimary": False,
                 "models": list(ollama_entry.get("models") or []),
                 "allowCustomModelId": True,
-                "hint": "Uses your local Ollama instance (LLM_BASE_URL / default :11434).",
+                "hint": "Uses the effective Ollama endpoint from Settings or LOCAL_OLLAMA_BASE_URL.",
             }
         )
 

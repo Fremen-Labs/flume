@@ -324,7 +324,8 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
     pairs = load_effective_pairs(workspace_root)
     cid = (cred_id or "").strip()
     if cid == OLLAMA_CREDENTIAL_ID:
-        base = (pairs.get("LLM_BASE_URL") or "").strip()
+        from llm_settings import resolve_effective_ollama_base_url
+        base = resolve_effective_ollama_base_url(pairs)
         return {
             "LLM_PROVIDER": "ollama",
             "LLM_API_KEY": "",
