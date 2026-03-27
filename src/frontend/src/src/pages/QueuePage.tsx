@@ -38,7 +38,7 @@ export default function QueuePage() {
   const workers = snapshot?.workers ?? [];
 
   const handleHaltSwarms = async () => {
-    if (!window.confirm('Are you absolutely sure you want to hard-kill all active Swarm threads natively? This will immediately terminate OS subprocesses and block LLM executions organically to save Gemini Tokens.')) return;
+    if (!window.confirm('Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.')) return;
     try {
       setIsHalting(true);
       const res = await fetch('/api/tasks/stop-all', { method: 'POST' });

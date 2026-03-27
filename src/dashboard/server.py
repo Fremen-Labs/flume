@@ -2141,19 +2141,26 @@ def api_tasks_stop_all():
             
         pids = _find_worker_pids()
         killed = []
+        failed_pids = []
         for group in ('manager', 'handlers'):
             for pid in (pids.get(group) or []):
                 try:
                     os.kill(pid, signal.SIGTERM)
                     killed.append(pid)
-                except Exception:
-                    pass
-        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed, "message": "Subprocess LLM executions cleanly terminated natively"}))
+                except ProcessLookupError:
+                    logger.warning(json.dumps({"event": "kill_switch_process_lookup_error", "pid": pid, "message": "Process already terminated naturally"}))
+                except Exception as e:
+                    failed_pids.append(pid)
+                    logger.error(json.dumps({"event": "kill_switch_os_kill_exception", "pid": pid, "error": str(e)}))
+                    
+        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed, "failed_pids": failed_pids, "message": "Subprocess LLM executions cleanly evaluated"}))
         
+        if failed_pids:
+            return {"success": True, "message": f"Tasks successfully blocked in DB, but failed to terminate {len(failed_pids)} worker processes.", "killed_pids": killed, "failed_pids": failed_pids}
         return {"success": True, "message": "All active Swarm networks successfully halted natively.", "killed_pids": killed}
     except Exception as e:
         logger.error(json.dumps({"event": "kill_switch_fatal", "error": str(e), "traceback": traceback.format_exc()}))
-        return JSONResponse(status_code=502, content={'error': str(e)[:300]})
+        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
