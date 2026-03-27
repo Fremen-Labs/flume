@@ -2113,11 +2113,21 @@ def api_task_transition(task_id: str, payload: dict):
 def api_tasks_bulk_update(payload: dict):
     return {"success": True}
 
-@app.post("/api/tasks/stop-all")
-def api_tasks_stop_all():
-    import signal
+from fastapi import Depends, HTTPException
+
+def verify_admin_access(request: Request):
+    if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        auth = request.headers.get("Authorization")
+        if not auth or auth != f"Bearer {os.environ.get('FLUME_ADMIN_TOKEN', 'dev') }":
+            raise HTTPException(status_code=403, detail="Admin access required for Kill Switch proxy")
+    return True
+
+@app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
+def api_tasks_stop_all(request: Request):
+    import uuid
+    correlation_id = str(uuid.uuid4())
     try:
-        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks"}))
+        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "request_id": correlation_id}))
         query = {
             "query": {
                 "terms": {"status.keyword": ["ready", "running"]}
@@ -2131,36 +2141,22 @@ def api_tasks_stop_all():
         headers = {'Content-Type': 'application/json'}
         if api_key: headers['Authorization'] = f'ApiKey {api_key}'
         
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
+        ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
 
         req = urllib.request.Request(f"{es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=10, context=ctx) as res:
-            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively"}))
+            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
             
-        pids = _find_worker_pids()
-        killed = []
+        supervisor_res = agents_stop()
         failed_pids = []
-        for group in ('manager', 'handlers'):
-            for pid in (pids.get(group) or []):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    killed.append(pid)
-                except ProcessLookupError:
-                    logger.warning(json.dumps({"event": "kill_switch_process_lookup_error", "pid": pid, "message": "Process already terminated naturally"}))
-                except Exception as e:
-                    failed_pids.append(pid)
-                    logger.error(json.dumps({"event": "kill_switch_os_kill_exception", "pid": pid, "error": str(e)}))
-                    
-        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed, "failed_pids": failed_pids, "message": "Subprocess LLM executions cleanly evaluated"}))
+        killed_pids = supervisor_res.get('killed_pids', [])
+        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "failed_pids": failed_pids, "message": "Supervisor gracefully executed subprocess halts", "request_id": correlation_id}))
         
-        if failed_pids:
-            return {"success": True, "message": f"Tasks successfully blocked in DB, but failed to terminate {len(failed_pids)} worker processes.", "killed_pids": killed, "failed_pids": failed_pids}
-        return {"success": True, "message": "All active Swarm networks successfully halted natively.", "killed_pids": killed}
+        return {"success": True, "message": "All active Swarm networks successfully halted natively via supervisor.", "killed_pids": killed_pids, "request_id": correlation_id}
     except Exception as e:
-        logger.error(json.dumps({"event": "kill_switch_fatal", "error": str(e), "traceback": traceback.format_exc()}))
-        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
+        logger.error(json.dumps({"event": "kill_switch_fatal", "error": str(e), "request_id": correlation_id, "traceback": traceback.format_exc()}))
+        return JSONResponse(status_code=500, content={'error': str(e)[:300], 'request_id":': correlation_id})
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
