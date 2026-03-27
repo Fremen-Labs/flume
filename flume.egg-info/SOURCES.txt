@@ -22,7 +22,6 @@ src/dashboard/es_bootstrap.py
 src/dashboard/llm_settings.py
 src/dashboard/repo_settings.py
 src/dashboard/server.py
-src/frontend/src/node_modules/flatted/python/flatted.py
 src/memory/es/scripts/assign_model.py
 src/memory/es/scripts/attach_artifact.py
 src/memory/es/scripts/byrds_event_ingest.py
@@ -49,6 +48,7 @@ src/utils/llm_client.py
 src/utils/logger.py
 src/utils/workspace.py
 src/worker-manager/agent_runner.py
+src/worker-manager/ast_poller.py
 src/worker-manager/elastro_sync.py
 src/worker-manager/manager.py
 src/worker-manager/meta_critic.py

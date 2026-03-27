@@ -1,7 +1,18 @@
 import { motion } from 'framer-motion';
-import { Loader2, AlertCircle, GitBranch } from 'lucide-react';
+import { useState } from 'react';
+import { Loader2, AlertCircle, GitBranch, ShieldAlert } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
+import { useToast } from '@/hooks/use-toast';
+import { Input } from '@/components/ui/input';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 const stages: { id: string; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
@@ -31,18 +42,95 @@ function timeAgo(ts?: string) {
 }
 
 export default function QueuePage() {
-  const { data: snapshot, isLoading, error } = useSnapshot();
+  const { data: snapshot, isLoading, error, mutate } = useSnapshot();
+  const { toast } = useToast();
+  const [isHalting, setIsHalting] = useState(false);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [adminToken, setAdminToken] = useState('');
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
+
+  const handleConfirmHalt = async () => {
+    try {
+      setIsHalting(true);
+      const res = await fetch('/api/tasks/stop-all', { 
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${adminToken}`
+        }
+      });
+      if (res.ok) {
+        mutate();
+        setAdminToken('');
+        toast({ title: "Swarms Halted", description: "All active tasks successfully halted." });
+      } else {
+        const errorBody = await res.json().catch(() => ({}));
+        const description = errorBody.error 
+          ? `Error: ${errorBody.error} (Request ID: ${errorBody.correlation_id || 'Unknown'})`
+          : "An unknown error occurred resolving the native API.";
+        toast({ title: "Halt Failed", description, variant: "destructive" });
+      }
+    } catch (e) {
+      console.error(e);
+      toast({ title: "System Exception", description: "Exception occurred triggering Kill Switch bounds.", variant: "destructive" });
+    } finally {
+      setIsHalting(false);
+      setShowConfirmDialog(false);
+    }
+  };
 
   return (
     <div className="p-6 lg:p-8 max-w-[1800px] mx-auto space-y-6 relative">
 
-      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">Work Queue</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
-        </p>
+      <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Stop All Swarms</DialogTitle>
+            <DialogDescription className="space-y-3 pt-2">
+              <p>Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.</p>
+              <Input 
+                type="password" 
+                placeholder="Flume Admin Token" 
+                value={adminToken} 
+                onChange={(e) => setAdminToken(e.target.value)} 
+                className="w-full"
+              />
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0 mt-4">
+            <button
+              onClick={() => setShowConfirmDialog(false)}
+              className="px-4 py-2 border rounded-md text-sm hover:bg-muted"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirmHalt}
+              disabled={isHalting}
+              className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md text-sm flex items-center justify-center gap-2"
+            >
+              {isHalting && <Loader2 className="w-4 h-4 animate-spin" />}
+              {isHalting ? 'Terminating...' : 'Force Kill Processes'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Work Queue</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
+          </p>
+        </div>
+        <button 
+          onClick={() => setShowConfirmDialog(true)}
+          disabled={isHalting}
+          className="flex items-center gap-2 px-4 py-2 bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/20 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+        >
+          {isHalting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
+          {isHalting ? 'Halting LLM Generation...' : 'Halt All Swarms'}
+        </button>
       </motion.div>
 
       {isLoading && (
