@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Optional
 import json
 import os
-import re
-import shlex
-import shutil
+import signal
+import sys
+import threading
+import time
+import uuid
 import ssl
 
 class NetflixFaultTolerance:
@@ -2116,6 +2118,13 @@ import secrets
 class KillSwitchDatabaseError(Exception): pass
 class KillSwitchProcessError(Exception): pass
 
+class AppConfig:
+    ES_URL: str = os.environ.get('ES_URL', 'http://localhost:9200')
+    ES_API_KEY: str = os.environ.get('ES_API_KEY', '')
+    ES_CA_CERTS: str = os.environ.get('ES_CA_CERTS', '').strip()
+
+config = AppConfig()
+
 class ElasticsearchClient:
     def __init__(self, es_url: str, api_key: str, ca_certs: str):
         self.es_url = es_url.rstrip('/')
@@ -2130,61 +2139,72 @@ class ElasticsearchClient:
         }
         req = urllib.request.Request(f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=self.headers, method='POST')
         with urllib.request.urlopen(req, timeout=10, context=self.ctx) as res:
-            pass
+            res.read()
 
 class KillSwitchService:
     def __init__(self, es_client: ElasticsearchClient):
         self.es_client = es_client
 
     def halt_all_tasks(self, correlation_id: str):
-        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "request_id": correlation_id}))
+        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
         try:
             self.es_client.update_tasks_to_halted()
-            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
+            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "correlation_id": correlation_id}))
         except Exception as e:
-            logger.error(json.dumps({"event": "kill_switch_database_error", "error": str(e), "request_id": correlation_id}))
+            logger.error(json.dumps({"event": "kill_switch_database_error", "error": str(e), "correlation_id": correlation_id}))
             raise KillSwitchDatabaseError(str(e))
 
         try:
             supervisor_res = agents_stop()
             killed_pids = supervisor_res.get('killed_pids', [])
-            logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "message": "Supervisor gracefully executed subprocess halts", "request_id": correlation_id}))
-            return {"success": True, "killed_pids": killed_pids, "request_id": correlation_id}
+            logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "message": "Supervisor gracefully executed subprocess halts", "correlation_id": correlation_id}))
+            return {"success": True, "killed_pids": killed_pids, "correlation_id": correlation_id}
         except Exception as e:
-            logger.critical(json.dumps({"event": "kill_switch_process_error", "error": str(e), "request_id": correlation_id}))
-            raise KillSwitchProcessError(str(e))
+            logger.critical(json.dumps({
+                "event": "kill_switch_partial_failure",
+                "error": str(e),
+                "correlation_id": correlation_id,
+                "message": "CRITICAL: Database tasks were halted, but failed to kill OS processes. Manual intervention may be required."
+            }))
+            raise KillSwitchProcessError(f"DB updated but process kill failed: {e}")
 
-def get_kill_switch_service():
-    es_client = ElasticsearchClient(
-        es_url=os.environ.get('ES_URL', 'http://localhost:9200'),
-        api_key=os.environ.get('ES_API_KEY', ''),
-        ca_certs=os.environ.get('ES_CA_CERTS', '').strip()
+def get_es_client(app_config: AppConfig = Depends(lambda: config)):
+    return ElasticsearchClient(
+        es_url=app_config.ES_URL,
+        api_key=app_config.ES_API_KEY,
+        ca_certs=app_config.ES_CA_CERTS
     )
+
+def get_kill_switch_service(es_client: ElasticsearchClient = Depends(get_es_client)):
     return KillSwitchService(es_client)
 
 def verify_admin_access(request: Request):
-    # Flume is an Anti-SaaS local-first desktop application. Localhost proxy bindings inherent local network trust organically mapping without complex UI JWT implementations.
-    if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
-        admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
-        if not admin_token:
-            logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled for remote connections.")
-            raise HTTPException(status_code=500, detail="Server configuration error")
-            
-        auth = request.headers.get("Authorization")
-        expected_auth = f"Bearer {admin_token}"
-        if not auth or not secrets.compare_digest(auth, expected_auth):
-            raise HTTPException(status_code=403, detail="Admin access required for Kill Switch proxy")
+    admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
+    if not admin_token:
+        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
+        raise HTTPException(status_code=403, detail="Endpoint disabled: Server configuration incomplete.")
+        
+    auth_header = request.headers.get("Authorization")
+    expected_auth = f"Bearer {admin_token}"
+
+    if not auth_header or not secrets.compare_digest(auth_header, expected_auth):
+        logger.warning(json.dumps({
+            "event": "admin_auth_failure",
+            "endpoint": "/api/tasks/stop-all",
+            "client_ip": request.client.host if request.client else "unknown"
+        }))
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
     return True
 
 @app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
 def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill_switch_service)):
-    import uuid
     correlation_id = str(uuid.uuid4())
     try:
         result = kill_switch_service.halt_all_tasks(correlation_id)
         return {**result, "message": "All active Swarm networks successfully halted natively via supervisor."}
     except (KillSwitchDatabaseError, KillSwitchProcessError) as e:
-        return JSONResponse(status_code=500, content={'error': str(e), 'request_id': correlation_id})
+        return JSONResponse(status_code=500, content={'error': str(e), 'correlation_id': correlation_id})
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):

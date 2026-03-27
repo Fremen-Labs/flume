@@ -56,7 +56,11 @@ export default function QueuePage() {
         mutate();
         toast({ title: "Swarms Halted", description: "All active tasks successfully halted." });
       } else {
-        toast({ title: "Halt Failed", description: "Backend drop occurred.", variant: "destructive" });
+        const errorBody = await res.json().catch(() => ({}));
+        const description = errorBody.error 
+          ? `Error: ${errorBody.error} (Request ID: ${errorBody.correlation_id || 'Unknown'})`
+          : "An unknown error occurred resolving the native API.";
+        toast({ title: "Halt Failed", description, variant: "destructive" });
       }
     } catch (e) {
       console.error(e);
