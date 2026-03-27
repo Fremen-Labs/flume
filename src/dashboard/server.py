@@ -2403,6 +2403,47 @@ def api_workflow_agents_status():
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
 
+@app.post("/api/intake/session")
+async def api_create_session(request: Request):
+    data = await request.json()
+    repo = data.get('repo')
+    prompt = data.get('prompt')
+    if not repo or not prompt:
+        return JSONResponse(status_code=400, content={"error": "Missing repo or prompt"})
+    session = create_planning_session(repo, prompt)
+    return {
+        "sessionId": session.get("id"),
+        "messages": session.get("messages", []),
+        "plan": session.get("draftPlan"),
+        "planSource": session.get("draftPlanSource")
+    }
+
+@app.post("/api/intake/session/{session_id}/message")
+async def api_refine_session(session_id: str, request: Request):
+    data = await request.json()
+    text = data.get('text')
+    plan = data.get('plan')
+    session = refine_session(session_id, text, plan)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    return {
+        "messages": session.get("messages", []),
+        "plan": session.get("draftPlan"),
+        "planSource": session.get("draftPlanSource")
+    }
+
+@app.post("/api/intake/session/{session_id}/commit")
+async def api_commit_session(session_id: str, request: Request):
+    data = await request.json()
+    plan = data.get('plan')
+    if not plan:
+        return JSONResponse(status_code=400, content={"error": "Missing plan payload"})
+    session = load_session(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    docs, _ = commit_plan(session['repo'], plan)
+    return {"count": len(docs)}
+
 
 active_connections = []
 @app.websocket("/ws/telemetry")
