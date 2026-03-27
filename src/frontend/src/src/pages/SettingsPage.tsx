@@ -443,7 +443,7 @@ export default function SettingsPage() {
     setRepoSaveError(null);
     try {
       const res = await fetch('/api/settings/repos', {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ githubTokenAction: body } satisfies RepoSettingsPayload),
       });
@@ -466,7 +466,7 @@ export default function SettingsPage() {
     setRepoSaveError(null);
     try {
       const res = await fetch('/api/settings/repos', {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ adoTokenAction: body } satisfies RepoSettingsPayload),
       });
