@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
+from pydantic import BaseModel
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -2306,7 +2307,6 @@ else:
     def fallback_root(full_path: str):
         return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
-from pydantic import BaseModel
 @app.get("/api/vault/status")
 def vault_status():
     import urllib.request
