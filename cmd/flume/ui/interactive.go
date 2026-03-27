@@ -166,8 +166,8 @@ func (m promptModel) View() string {
 			"(Press enter to continue)\n"
 	}
 	if m.step == 1 {
-		return NeonGreen("Select LLM Provider by number:\n\n") +
-			"1. openai\n" +
+		return NeonGreen("Select LLM Provider by number:\n") +
+			"\n1. openai\n" +
 			"2. anthropic\n" +
 			"3. ollama\n" +
 			"4. exo\n\n" +
@@ -175,8 +175,8 @@ func (m promptModel) View() string {
 			"(Press enter to continue)\n"
 	}
 	if m.step == 2 {
-		return NeonGreen("Ollama detected. Is this model local or remote?\n\n") +
-			"1. Local\n" +
+		return NeonGreen("Ollama detected. Is this model local or remote?\n") +
+			"\n1. Local\n" +
 			"2. Remote\n\n" +
 			m.choiceInput.View() + "\n\n" +
 			"(Press enter to continue)\n"
