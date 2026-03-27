@@ -105,7 +105,16 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
             if e.code in [429, 500, 502, 503, 504]:
                 time.sleep(2 ** attempt)
                 continue
-            raise e
+            model = None
+            try:
+                if isinstance(payload, dict):
+                    model = payload.get('model')
+            except Exception:
+                model = None
+            detail = f'HTTP {e.code} for {url}'
+            if model:
+                detail += f' (model={model})'
+            raise RuntimeError(detail) from e
         except urllib.error.URLError as e:
             last_err = e
             time.sleep(2 ** attempt)

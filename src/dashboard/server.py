@@ -55,7 +55,7 @@ hydrate_secrets_from_openbao()
 # Execute Elasticsearch Index Bootstrapping natively now that auth is fully populated
 ensure_es_indices()
 
-from llm_settings import load_effective_pairs  # noqa: E402
+from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # noqa: E402
 
 _DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
@@ -286,20 +286,49 @@ def _sync_llm_runtime_env():
         pass
 
 
+def _planner_debug_log(event: str, **fields):
+    try:
+        path = WORKSPACE_ROOT / 'planner-debug.log'
+        row = {'ts': _utcnow_iso(), 'event': event, **fields}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+
+
 def _planner_runtime_config() -> dict:
     _sync_llm_runtime_env()
-    provider = (os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
-    model = (os.environ.get('LLM_MODEL') or LLM_MODEL).strip()
-    base_url = (os.environ.get('LLM_BASE_URL') or LLM_BASE_URL).strip()
+    pairs = load_effective_pairs(WORKSPACE_ROOT)
+    provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
+    model = (pairs.get('LLM_MODEL') or os.environ.get('LLM_MODEL') or LLM_MODEL).strip()
+    if provider == 'ollama':
+        base_url = resolve_effective_ollama_base_url(pairs).strip()
+    else:
+        base_url = (pairs.get('LLM_BASE_URL') or os.environ.get('LLM_BASE_URL') or LLM_BASE_URL).strip()
     parsed = urlparse(base_url) if base_url else None
     host = parsed.netloc or parsed.path if parsed else ''
-    return {
+    cfg = {
         'provider': provider,
         'model': model,
         'baseUrl': base_url,
         'host': host,
         'usingCodexAppServer': _planner_should_use_codex_app_server(),
     }
+    _planner_debug_log(
+        'runtime_config',
+        provider=provider,
+        model=model,
+        baseUrl=base_url,
+        envProvider=(os.environ.get('LLM_PROVIDER') or '').strip(),
+        envModel=(os.environ.get('LLM_MODEL') or '').strip(),
+        envBaseUrl=(os.environ.get('LLM_BASE_URL') or '').strip(),
+        pairProvider=(pairs.get('LLM_PROVIDER') or '').strip(),
+        pairModel=(pairs.get('LLM_MODEL') or '').strip(),
+        pairBaseUrl=(pairs.get('LLM_BASE_URL') or '').strip(),
+        pairLocalOllamaBaseUrl=(pairs.get('LOCAL_OLLAMA_BASE_URL') or '').strip(),
+    )
+    return cfg
 
 
 def _planner_request_timeout_seconds(config: Optional[dict] = None) -> int:
@@ -464,6 +493,15 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     cfg = _planner_runtime_config()
     model = cfg.get('model') or LLM_MODEL
     timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
+    _planner_debug_log(
+        'planner_request',
+        provider=cfg.get('provider'),
+        model=model,
+        baseUrl=cfg.get('baseUrl'),
+        timeoutSeconds=timeout_seconds,
+        usingCodexAppServer=bool(cfg.get('usingCodexAppServer')),
+        messageCount=len(messages or []),
+    )
     if cfg.get('usingCodexAppServer'):
         import codex_app_server_client
 
