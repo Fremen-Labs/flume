@@ -41,7 +41,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao  # noqa: E402
+from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # noqa: E402
 
 # Merge .env config
 apply_runtime_config(_SRC_ROOT)
@@ -1943,6 +1943,28 @@ def maybe_auto_start_workers():
         logger.info(f'Flume: warning — could not auto-start workers: {e}')
 
 
+def _session_messages_for_client(session: dict) -> list:
+    out = []
+    for m in session.get('messages', []):
+        if m.get('from') not in ('user', 'agent'):
+            continue
+        item = {
+            'from': m.get('from'),
+            'text': m.get('text', ''),
+        }
+        if m.get('plan') is not None:
+            item['plan'] = m.get('plan')
+        out.append(item)
+    return out
+
+
+def _count_plan_tasks(plan: Optional[dict]) -> int:
+    total = 0
+    for epic in (plan or {}).get('epics') or []:
+        for feature in epic.get('features') or []:
+            for story in feature.get('stories') or []:
+                total += len(story.get('tasks') or [])
+    return total
 
 
 from fastapi import FastAPI, BackgroundTasks, WebSocket, Request
@@ -1994,6 +2016,81 @@ app.add_middleware(
 @app.get('/api/health')
 def health():
     return {"status": "ok"}
+
+
+@app.post('/api/intake/session')
+def api_intake_start_session(payload: dict):
+    repo = (payload.get('repo') or '').strip()
+    prompt = (payload.get('prompt') or '').strip()
+    if not repo:
+        return JSONResponse(status_code=400, content={'error': 'repo is required'})
+    if not prompt:
+        return JSONResponse(status_code=400, content={'error': 'prompt is required'})
+    try:
+        session = create_planning_session(repo, prompt)
+        return {
+            'sessionId': session['id'],
+            'messages': _session_messages_for_client(session),
+            'plan': session.get('draftPlan') or {'epics': []},
+            'planSource': session.get('draftPlanSource'),
+        }
+    except Exception as e:
+        logger.exception('Failed to create intake session')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+
+
+@app.post('/api/intake/session/{session_id}/message')
+def api_intake_message(session_id: str, payload: dict):
+    text = (payload.get('text') or '').strip()
+    if not text:
+        return JSONResponse(status_code=400, content={'error': 'text is required'})
+    plan = payload.get('plan') if isinstance(payload.get('plan'), dict) else None
+    try:
+        session = refine_session(session_id, text, plan)
+        if not session:
+            return JSONResponse(status_code=404, content={'error': 'session not found'})
+        return {
+            'sessionId': session['id'],
+            'messages': _session_messages_for_client(session),
+            'plan': session.get('draftPlan') or {'epics': []},
+            'planSource': session.get('draftPlanSource'),
+        }
+    except Exception as e:
+        logger.exception('Failed to refine intake session')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+
+
+@app.post('/api/intake/session/{session_id}/commit')
+def api_intake_commit(session_id: str, payload: dict):
+    session = load_session(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={'error': 'session not found'})
+
+    plan = payload.get('plan') if isinstance(payload.get('plan'), dict) else session.get('draftPlan')
+    if not plan or not (plan.get('epics') or []):
+        return JSONResponse(status_code=400, content={'error': 'plan is empty'})
+
+    repo = session.get('repo') or (payload.get('repo') or '').strip()
+    if not repo:
+        return JSONResponse(status_code=400, content={'error': 'repo is required'})
+
+    try:
+        docs, _results = commit_plan(repo, plan)
+        session['status'] = 'committed'
+        session['draftPlan'] = plan
+        session['committed_at'] = datetime.utcnow().isoformat() + 'Z'
+        session['committedDocs'] = [d.get('id') for d in docs]
+        save_session(session)
+        return {
+            'ok': True,
+            'count': _count_plan_tasks(plan),
+            'created': len(docs),
+            'taskIds': [d.get('id') for d in docs if d.get('item_type') == 'task'],
+        }
+    except Exception as e:
+        logger.exception('Failed to commit intake plan')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+
 
 @app.get('/api/snapshot')
 def api_snapshot():
