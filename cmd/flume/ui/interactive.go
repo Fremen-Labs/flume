@@ -182,12 +182,14 @@ func (m promptModel) View() string {
 			"(Press enter to continue)\n"
 	}
 	if m.step == 3 {
-		return NeonGreen("Enter the remote Ollama hostname or IP address:\n\n") +
+		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") +
+			"\n" +
 			m.hostInput.View() + "\n\n" +
 			"(Press enter to continue)\n"
 	}
 	if m.step == 4 {
-		return NeonGreen("Enter API Secret (Masked natively): \n\n") +
+		return NeonGreen("Enter API Secret (Masked natively):\n") +
+			"\n" +
 			m.keyInput.View() + "\n\n(Press enter to submit)\n"
 	}
 	return SuccessBlue("Credentials received securely.")
