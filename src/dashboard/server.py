@@ -2005,7 +2005,7 @@ def api_snapshot():
 def api_system_state():
     try:
         workers = load_workers()
-        active = sum(1 for w in workers if w.get('status') == 'busy')
+        active = sum(1 for w in workers if w.get('status') in ('busy', 'claimed'))
         total = len(workers)
         return {
             "status": "online",
@@ -2019,12 +2019,32 @@ def api_system_state():
 
 @app.post("/api/projects")
 def api_create_project(payload: dict):
-    # Dummy creation acknowledging React payload
-    return {"success": True, "projectId": "PROJ-1234", "message": "Project created"}
+    import uuid, datetime
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Project name is absolutely required natively."})
+    
+    new_id = f"proj-{uuid.uuid4().hex[:8]}"
+    entry = {
+        "id": new_id,
+        "name": name,
+        "repoUrl": (payload.get("repoUrl") or "").strip(),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "gitflow": {"autoPrOnApprove": True, "defaultBranch": None}
+    }
+    
+    registry = load_projects_registry()
+    registry.append(entry)
+    save_projects_registry(registry)
+    
+    return {"success": True, "projectId": new_id, "message": "Project dynamically constructed seamlessly natively."}
 
 @app.post("/api/projects/{project_id}/delete")
 def api_delete_project(project_id: str):
-    return {"success": True, "message": "Project removed"}
+    registry = load_projects_registry()
+    filtered = [p for p in registry if p.get("id") != project_id]
+    save_projects_registry(filtered)
+    return {"success": True, "message": "Project removed natively"}
 
 @app.get("/api/tasks/{task_id}/history")
 def api_task_history(task_id: str):
@@ -2163,22 +2183,22 @@ def api_security():
         except Exception:
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
-        audit_logs = es_search('agent-provenance-records', {
+        audit_logs = es_search('agent-security-audits', {
             'size': 15,
-            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {'wildcard': {'action': '*'}}
+            'sort': [{'@timestamp': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {'match_all': {}}
         }).get('hits', {}).get('hits', [])
         
         formatted_logs = []
         for log in audit_logs[:10]:
             s = log.get('_source', {})
             formatted_logs.append({
-                '@timestamp': s.get('created_at', datetime.now(timezone.utc).isoformat()),
-                'message': s.get('message', 'Vault checkout sequence initiated'),
-                'agent_roles': s.get('agent_role', 'System'),
-                'worker_name': s.get('worker_id', 'Orchestrator'),
-                'secret_path': 'secret/data/flume/keys',
-                'keys_retrieved': ['ES_API_KEY', 'OPENAI_API_KEY']
+                '@timestamp': s.get('@timestamp', datetime.now(timezone.utc).isoformat()),
+                'message': s.get('message', 'OpenBao KV securely accessed'),
+                'agent_roles': s.get('agent_roles', 'System'),
+                'worker_name': s.get('worker_name', 'Orchestrator'),
+                'secret_path': s.get('secret_path', 'secret/data/flume/keys'),
+                'keys_retrieved': s.get('keys_retrieved', [])
             })
 
         return {
