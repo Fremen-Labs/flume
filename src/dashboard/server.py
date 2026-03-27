@@ -2143,6 +2143,55 @@ def api_settings_repos_update(payload: dict):
         return {"success": True, "message": msg}
     return JSONResponse(status_code=400, content={"error": msg})
 
+class SystemSettingsRequest(BaseModel):
+    es_url: str
+    es_api_key: str
+    openbao_url: str
+    vault_token: str
+
+@app.get("/api/settings/system")
+def get_system_settings():
+    import toml
+    try:
+        with open(os.environ.get('FLUME_CONFIG', 'config.toml'), 'r') as f:
+            t = toml.load(f)
+        sys_conf = t.get('system', {})
+    except Exception:
+        sys_conf = {}
+        
+    return {
+        "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
+        "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
+        "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
+        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else ""
+    }
+
+@app.put("/api/settings/system")
+def update_system_settings(settings: SystemSettingsRequest):
+    import toml
+    config_path = os.environ.get('FLUME_CONFIG', 'config.toml')
+    try:
+        with open(config_path, 'r') as f:
+            t = toml.load(f)
+    except Exception:
+        t = {}
+        
+    if 'system' not in t:
+        t['system'] = {}
+        
+    t['system']['es_url'] = settings.es_url
+    if settings.es_api_key and settings.es_api_key != "***":
+        t['system']['es_api_key'] = settings.es_api_key
+        
+    t['system']['openbao_url'] = settings.openbao_url
+    if settings.vault_token and settings.vault_token != "••••":
+        t['system']['vault_token'] = settings.vault_token
+    
+    with open(config_path, 'w') as f:
+        toml.dump(t, f)
+        
+    return {"status": "ok"}
+
 @app.get("/api/settings/agent-models")
 def api_settings_agent_models():
     from agent_models_settings import get_agent_models_response
