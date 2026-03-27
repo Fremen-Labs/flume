@@ -2110,53 +2110,69 @@ def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
 @app.post("/api/tasks/bulk-update")
-def api_tasks_bulk_update(payload: dict):
-    return {"success": True}
-
 from fastapi import Depends, HTTPException
+import secrets
+
+class KillSwitchDatabaseError(Exception): pass
+class KillSwitchProcessError(Exception): pass
+
+class KillSwitchService:
+    def halt_all_tasks(self, correlation_id: str):
+        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "request_id": correlation_id}))
+        try:
+            query = {
+                "query": {"terms": {"status.keyword": ["ready", "running"]}},
+                "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
+            }
+            es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+            api_key = os.environ.get('ES_API_KEY', '')
+            headers = {'Content-Type': 'application/json'}
+            if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+            
+            ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
+            ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
+
+            req = urllib.request.Request(f"{es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as res:
+                logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
+        except Exception as e:
+            logger.error(json.dumps({"event": "kill_switch_database_error", "error": str(e), "request_id": correlation_id}))
+            raise KillSwitchDatabaseError(str(e))
+
+        try:
+            supervisor_res = agents_stop()
+            killed_pids = supervisor_res.get('killed_pids', [])
+            logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "message": "Supervisor gracefully executed subprocess halts", "request_id": correlation_id}))
+            return {"success": True, "killed_pids": killed_pids, "request_id": correlation_id}
+        except Exception as e:
+            logger.critical(json.dumps({"event": "kill_switch_process_error", "error": str(e), "request_id": correlation_id}))
+            raise KillSwitchProcessError(str(e))
+
+def get_kill_switch_service():
+    return KillSwitchService()
 
 def verify_admin_access(request: Request):
+    admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
+    if not admin_token:
+        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
+        raise HTTPException(status_code=500, detail="Server configuration error")
+        
     if request.client and request.client.host not in ("127.0.0.1", "::1", "localhost"):
         auth = request.headers.get("Authorization")
-        if not auth or auth != f"Bearer {os.environ.get('FLUME_ADMIN_TOKEN', 'dev') }":
+        expected_auth = f"Bearer {admin_token}"
+        if not auth or not secrets.compare_digest(auth, expected_auth):
             raise HTTPException(status_code=403, detail="Admin access required for Kill Switch proxy")
     return True
 
 @app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
-def api_tasks_stop_all(request: Request):
+def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill_switch_service)):
     import uuid
     correlation_id = str(uuid.uuid4())
     try:
-        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "request_id": correlation_id}))
-        query = {
-            "query": {
-                "terms": {"status.keyword": ["ready", "running"]}
-            },
-            "script": {
-                "source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"
-            }
-        }
-        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
-        api_key = os.environ.get('ES_API_KEY', '')
-        headers = {'Content-Type': 'application/json'}
-        if api_key: headers['Authorization'] = f'ApiKey {api_key}'
-        
-        ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
-        ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
-
-        req = urllib.request.Request(f"{es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as res:
-            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "request_id": correlation_id}))
-            
-        supervisor_res = agents_stop()
-        failed_pids = []
-        killed_pids = supervisor_res.get('killed_pids', [])
-        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "failed_pids": failed_pids, "message": "Supervisor gracefully executed subprocess halts", "request_id": correlation_id}))
-        
-        return {"success": True, "message": "All active Swarm networks successfully halted natively via supervisor.", "killed_pids": killed_pids, "request_id": correlation_id}
-    except Exception as e:
-        logger.error(json.dumps({"event": "kill_switch_fatal", "error": str(e), "request_id": correlation_id, "traceback": traceback.format_exc()}))
-        return JSONResponse(status_code=500, content={'error': str(e)[:300], 'request_id":': correlation_id})
+        result = kill_switch_service.halt_all_tasks(correlation_id)
+        return {**result, "message": "All active Swarm networks successfully halted natively via supervisor."}
+    except (KillSwitchDatabaseError, KillSwitchProcessError) as e:
+        return JSONResponse(status_code=500, content={'error': str(e), 'request_id': correlation_id})
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
