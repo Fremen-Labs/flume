@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
-import { Loader2, AlertCircle, GitBranch } from 'lucide-react';
+import { useState } from 'react';
+import { Loader2, AlertCircle, GitBranch, ShieldAlert } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 
@@ -31,18 +32,47 @@ function timeAgo(ts?: string) {
 }
 
 export default function QueuePage() {
-  const { data: snapshot, isLoading, error } = useSnapshot();
+  const { data: snapshot, isLoading, error, mutate } = useSnapshot();
+  const [isHalting, setIsHalting] = useState(false);
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
+
+  const handleHaltSwarms = async () => {
+    if (!window.confirm('Are you absolutely sure you want to hard-kill all active Swarm threads natively? This will immediately terminate OS subprocesses and block LLM executions organically to save Gemini Tokens.')) return;
+    try {
+      setIsHalting(true);
+      const res = await fetch('/api/tasks/stop-all', { method: 'POST' });
+      if (res.ok) {
+        mutate();
+      } else {
+        alert('Failed to halt swarms natively. Backend drop occurred.');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Exception occurred triggering Kill Switch bounds.');
+    } finally {
+      setIsHalting(false);
+    }
+  };
 
   return (
     <div className="p-6 lg:p-8 max-w-[1800px] mx-auto space-y-6 relative">
 
-      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">Work Queue</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
-        </p>
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Work Queue</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
+          </p>
+        </div>
+        <button 
+          onClick={handleHaltSwarms}
+          disabled={isHalting}
+          className="flex items-center gap-2 px-4 py-2 bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/20 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+        >
+          {isHalting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
+          {isHalting ? 'Halting LLM Generation...' : 'Halt All Swarms'}
+        </button>
       </motion.div>
 
       {isLoading && (

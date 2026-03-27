@@ -2113,6 +2113,48 @@ def api_task_transition(task_id: str, payload: dict):
 def api_tasks_bulk_update(payload: dict):
     return {"success": True}
 
+@app.post("/api/tasks/stop-all")
+def api_tasks_stop_all():
+    import signal
+    try:
+        logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks"}))
+        query = {
+            "query": {
+                "terms": {"status.keyword": ["ready", "running"]}
+            },
+            "script": {
+                "source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"
+            }
+        }
+        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Content-Type': 'application/json'}
+        if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+        
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(f"{es_url}/agent-task-records/_update_by_query?conflicts=proceed", data=json.dumps(query).encode(), headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as res:
+            logger.info(json.dumps({"event": "kill_switch_es_halt", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively"}))
+            
+        pids = _find_worker_pids()
+        killed = []
+        for group in ('manager', 'handlers'):
+            for pid in (pids.get(group) or []):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed.append(pid)
+                except Exception:
+                    pass
+        logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed, "message": "Subprocess LLM executions cleanly terminated natively"}))
+        
+        return {"success": True, "message": "All active Swarm networks successfully halted natively.", "killed_pids": killed}
+    except Exception as e:
+        logger.error(json.dumps({"event": "kill_switch_fatal", "error": str(e), "traceback": traceback.format_exc()}))
+        return JSONResponse(status_code=502, content={'error': str(e)[:300]})
+
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
     return []
