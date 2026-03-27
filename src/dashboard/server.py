@@ -2112,7 +2112,7 @@ def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
 @app.post("/api/tasks/bulk-update")
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 import secrets
 
 class KillSwitchDatabaseError(Exception): pass
@@ -2122,8 +2122,6 @@ class AppConfig:
     ES_URL: str = os.environ.get('ES_URL', 'http://localhost:9200')
     ES_API_KEY: str = os.environ.get('ES_API_KEY', '')
     ES_CA_CERTS: str = os.environ.get('ES_CA_CERTS', '').strip()
-
-config = AppConfig()
 
 class ElasticsearchClient:
     def __init__(self, es_url: str, api_key: str, ca_certs: str):
@@ -2141,9 +2139,14 @@ class ElasticsearchClient:
         with urllib.request.urlopen(req, timeout=10, context=self.ctx) as res:
             res.read()
 
+class AgentSupervisor:
+    def terminate_all(self) -> dict:
+        return agents_stop()
+
 class KillSwitchService:
-    def __init__(self, es_client: ElasticsearchClient):
+    def __init__(self, es_client: ElasticsearchClient, supervisor: AgentSupervisor):
         self.es_client = es_client
+        self.supervisor = supervisor
 
     def halt_all_tasks(self, correlation_id: str):
         logger.info(json.dumps({"event": "kill_switch_invoked", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
@@ -2155,7 +2158,7 @@ class KillSwitchService:
             raise KillSwitchDatabaseError(str(e))
 
         try:
-            supervisor_res = agents_stop()
+            supervisor_res = self.supervisor.terminate_all()
             killed_pids = supervisor_res.get('killed_pids', [])
             logger.info(json.dumps({"event": "kill_switch_os_pkill", "killed_pids": killed_pids, "message": "Supervisor gracefully executed subprocess halts", "correlation_id": correlation_id}))
             return {"success": True, "killed_pids": killed_pids, "correlation_id": correlation_id}
@@ -2168,15 +2171,21 @@ class KillSwitchService:
             }))
             raise KillSwitchProcessError(f"DB updated but process kill failed: {e}")
 
-def get_es_client(app_config: AppConfig = Depends(lambda: config)):
+def get_app_config():
+    return AppConfig()
+
+def get_es_client(app_config: AppConfig = Depends(get_app_config)):
     return ElasticsearchClient(
         es_url=app_config.ES_URL,
         api_key=app_config.ES_API_KEY,
         ca_certs=app_config.ES_CA_CERTS
     )
 
-def get_kill_switch_service(es_client: ElasticsearchClient = Depends(get_es_client)):
-    return KillSwitchService(es_client)
+def get_agent_supervisor():
+    return AgentSupervisor()
+
+def get_kill_switch_service(es_client: ElasticsearchClient = Depends(get_es_client), supervisor: AgentSupervisor = Depends(get_agent_supervisor)):
+    return KillSwitchService(es_client, supervisor)
 
 def verify_admin_access(request: Request):
     admin_token = os.environ.get('FLUME_ADMIN_TOKEN')
@@ -2204,7 +2213,7 @@ def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill
         result = kill_switch_service.halt_all_tasks(correlation_id)
         return {**result, "message": "All active Swarm networks successfully halted natively via supervisor."}
     except (KillSwitchDatabaseError, KillSwitchProcessError) as e:
-        return JSONResponse(status_code=500, content={'error': str(e), 'correlation_id': correlation_id})
+        raise HTTPException(status_code=500, detail={'error': str(e), 'correlation_id': correlation_id})
 
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):

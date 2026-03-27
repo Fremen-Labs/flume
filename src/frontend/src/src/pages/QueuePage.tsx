@@ -51,7 +51,13 @@ export default function QueuePage() {
   const handleConfirmHalt = async () => {
     try {
       setIsHalting(true);
-      const res = await fetch('/api/tasks/stop-all', { method: 'POST' });
+      const token = (import.meta as any).env.VITE_FLUME_ADMIN_TOKEN || localStorage.getItem('FLUME_ADMIN_TOKEN') || '';
+      const res = await fetch('/api/tasks/stop-all', { 
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       if (res.ok) {
         mutate();
         toast({ title: "Swarms Halted", description: "All active tasks successfully halted." });
