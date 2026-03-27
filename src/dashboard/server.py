@@ -25,6 +25,8 @@ from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
+import traceback
+from fastapi import BackgroundTasks
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -2017,11 +2019,7 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
-from fastapi import BackgroundTasks
-
-def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
-    import urllib.request, json, os, subprocess, logging, ssl
-    logger = logging.getLogger(__name__)
+def _check_ast_exists_natively(repo_path: str) -> bool:
     try:
         es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
@@ -2033,25 +2031,36 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
         ctx.verify_mode = ssl.CERT_NONE
 
         query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
-        
         req = urllib.request.Request(f"{es_url}/flume-elastro-graph/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
-        exists = False
-        try:
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
-                data = json.loads(res.read().decode())
-                exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
-        except Exception:
-            pass
+        
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
+            data = json.loads(res.read().decode())
+            return data.get('hits', {}).get('total', {}).get('value', 0) > 0
+    except Exception as e:
+        logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
+        return False
+
+def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
+    try:
+        exists = _check_ast_exists_natively(repo_path)
             
         if not exists:
-            logger.info(f"[{project_name}] Deterministic AST Ingestion Booting natively (Zero-Interaction)...")
-            subprocess.run(f'elastro rag ingest "{repo_path}"', shell=True, check=True, capture_output=True, timeout=120)
-            logger.info(f"[{project_name}] Native AST bounds secured flawlessly.")
+            logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
+            subprocess.run(["elastro", "rag", "ingest", repo_path], shell=False, check=True, capture_output=True, timeout=120)
+            logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
         else:
-            logger.info(f"[{project_name}] Deterministic AST Verification Passed. Repository natively indexed already.")
+            logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
 
+    except subprocess.CalledProcessError as e:
+        logger.error({
+            "event": "ast_ingest_failure", 
+            "repo": repo_path, 
+            "error": "subprocess_error",
+            "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
+            "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
+        })
     except Exception as e:
-        logger.error(f"Background deterministic ingest failed: {e}")
+        logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
 
 @app.post("/api/projects")
 def api_create_project(payload: dict, background_tasks: BackgroundTasks):
