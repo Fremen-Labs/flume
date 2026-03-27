@@ -30,7 +30,7 @@ services:
     entrypoint: >
       /bin/sh -c "
         echo 'Bootstrapping new Flume secrets & Topologies...';
-        vault secrets enable -path=secret kv-v2 || true;
+        if ! vault secrets list | grep -q 'secret/'; then vault secrets enable -path=secret kv-v2; fi;
         ES_KEY=$$(hexdump -vn 32 -e '1/1 \"%02x\"' /dev/urandom);
         echo 'Generated Dynamic Elastic Token.';
         vault kv put secret/flume/keys ES_API_KEY=$$ES_KEY OPENAI_API_KEY=$$OPENAI_API_KEY;
