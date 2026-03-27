@@ -4,6 +4,7 @@ import { Loader2, AlertCircle, GitBranch, ShieldAlert } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 import { useToast } from '@/hooks/use-toast';
+import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
@@ -45,21 +46,22 @@ export default function QueuePage() {
   const { toast } = useToast();
   const [isHalting, setIsHalting] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [adminToken, setAdminToken] = useState('');
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
 
   const handleConfirmHalt = async () => {
     try {
       setIsHalting(true);
-      const token = (import.meta as any).env.VITE_FLUME_ADMIN_TOKEN || localStorage.getItem('FLUME_ADMIN_TOKEN') || '';
       const res = await fetch('/api/tasks/stop-all', { 
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${adminToken}`
         }
       });
       if (res.ok) {
         mutate();
+        setAdminToken('');
         toast({ title: "Swarms Halted", description: "All active tasks successfully halted." });
       } else {
         const errorBody = await res.json().catch(() => ({}));
@@ -84,8 +86,15 @@ export default function QueuePage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Stop All Swarms</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.
+            <DialogDescription className="space-y-3 pt-2">
+              <p>Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.</p>
+              <Input 
+                type="password" 
+                placeholder="Flume Admin Token" 
+                value={adminToken} 
+                onChange={(e) => setAdminToken(e.target.value)} 
+                className="w-full"
+              />
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-0 mt-4">
