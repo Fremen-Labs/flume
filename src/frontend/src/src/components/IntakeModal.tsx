@@ -473,6 +473,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
           )}
         >
           <DialogPrimitive.Title className="sr-only">Plan New Work — {projectName}</DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">Create or refine a work plan for the selected project, then commit the resulting tasks to the queue.</DialogPrimitive.Description>
 
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-white/8 bg-white/[0.02] shrink-0">
