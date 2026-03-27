@@ -161,24 +161,24 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m promptModel) View() string {
 	if m.step == 0 && strings.TrimSpace(m.cfg.Provider) != "" {
 		return NeonGreen("Existing .env LLM provider detected: "+m.cfg.Provider+"\n\n") +
-			m.changeInput.View() + "\n" +
 			"Change the LLM provider? (y/N)\n\n" +
+			m.changeInput.View() + "\n\n" +
 			"(Press enter to continue)\n"
 	}
 	if m.step == 1 {
 		return NeonGreen("Select LLM Provider by number:\n\n") +
-			m.providerInput.View() + "\n\n" +
 			"1. openai\n" +
 			"2. anthropic\n" +
 			"3. ollama\n" +
 			"4. exo\n\n" +
+			m.providerInput.View() + "\n\n" +
 			"(Press enter to continue)\n"
 	}
 	if m.step == 2 {
 		return NeonGreen("Ollama detected. Is this model local or remote?\n\n") +
-			m.choiceInput.View() + "\n\n" +
 			"1. Local\n" +
 			"2. Remote\n\n" +
+			m.choiceInput.View() + "\n\n" +
 			"(Press enter to continue)\n"
 	}
 	if m.step == 3 {
