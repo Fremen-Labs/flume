@@ -3,13 +3,17 @@ package orchestrator
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/log"
 )
 
 type EnvConfig struct {
-	Provider string
-	APIKey   string
+	Provider           string
+	APIKey             string
+	BaseURL            string
+	LocalOllamaBaseURL string
+	Host               string
 }
 
 // GenerateEnv dynamically overrides the interactive terminal requirements mapping templates securely using os/fs.
@@ -30,7 +34,16 @@ OPENBAO_TOKEN=flume-dev-token
 	if config.Provider != "" {
 		content += fmt.Sprintf("LLM_PROVIDER=%s\n", config.Provider)
 	}
-	if config.APIKey != "" {
+	if config.BaseURL != "" {
+		content += fmt.Sprintf("LLM_BASE_URL=%s\n", config.BaseURL)
+	}
+	if config.LocalOllamaBaseURL != "" {
+		content += fmt.Sprintf("LOCAL_OLLAMA_BASE_URL=%s\n", config.LocalOllamaBaseURL)
+	}
+	if config.Host != "" {
+		content += fmt.Sprintf("LLM_HOST=%s\n", config.Host)
+	}
+	if strings.TrimSpace(config.APIKey) != "" {
 		content += fmt.Sprintf("LLM_API_KEY=%s\n", config.APIKey)
 	}
 
@@ -38,7 +51,7 @@ OPENBAO_TOKEN=flume-dev-token
 	if err != nil {
 		return fmt.Errorf("failed to explicitly write .env natively: %w", err)
 	}
-	
+
 	log.Info("Successfully serialized `.env` topology into Swarm cache.", "isolation", "Workspace isolation protects UI configurations")
 	return nil
 }
