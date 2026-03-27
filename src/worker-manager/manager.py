@@ -508,4 +508,9 @@ def main():
 
 
 if __name__ == '__main__':
+    try:
+        from ast_poller import start_poller_thread
+        start_poller_thread()
+    except Exception as e:
+        log(f"Failed to boot AST Deterministic Poller natively: {e}")
     main()

@@ -563,23 +563,6 @@ def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> st
             
         p.write_text(content)
         
-        # Native AST Integration mapping Elasticsearch automatically
-        try:
-            subprocess.run(['elastro', 'rag', 'update', str(p)], check=True, capture_output=True, timeout=10)
-            import elastro_sync
-            elastro_sync.sync_ast()
-        except Exception as e:
-            logger.error(
-                "Failed to trigger elastro AST update",
-                extra={
-                    "file_path": str(p),
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
-                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
-                }
-            )
-            
         return json.dumps({"status": "success", "message": f"Applied {len(replacements)} deterministic replacements to {p}"})
     except Exception as e:
         logger.exception("Unexpected error in multi_replace_file_content")
