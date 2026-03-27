@@ -44,4 +44,5 @@ Tasks that require modifying or writing files.
 ## Explicit Rules
 - Do NOT use abstract reasoning or speculative file modifications outside of the explicit `instructions` payload.
 - Always execute `implementation_complete` to signal the state machine successfully parsing your JSON task array cleanly.
+- **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` to retrieve mapped nodes corresponding to your workitem before editing code. If the repository is completely missing from the index natively, call `elastro_rag_ingest` once to initialize the bounds.
 - Target the explicit semantic AST bounds (`fremen_codebase_rag`) via `elastro` when `analysis` lacks direct file paths gracefully.

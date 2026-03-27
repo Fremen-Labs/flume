@@ -25,8 +25,16 @@ apply_runtime_config(_WS)
 
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace
+try:
+    from dashboard.llm_settings import load_effective_pairs
+    for _k, _v in load_effective_pairs(resolve_safe_workspace()).items():
+        if _v is not None and str(_v).strip():
+            os.environ[_k] = str(_v).strip()
+except ImportError:
+    pass
+
 STATE = resolve_safe_workspace() / 'worker_state.json'
-AGENT_MODELS_FILE = BASE / 'agent_models.json'
+AGENT_MODELS_FILE = resolve_safe_workspace() / 'worker-manager' / 'agent_models.json'
 
 ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -74,7 +82,8 @@ _manager_logger.setLevel(logging.INFO)
 
 try:
     _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
-    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else Path.home() / '.flume' / 'workspace' / 'logs'
+    from utils.workspace import resolve_safe_workspace
+    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
     _log_dir.mkdir(parents=True, exist_ok=True)
     _fh = RotatingFileHandler(_log_dir / 'manager.log', maxBytes=10*1024*1024, backupCount=5)
     _fh.setFormatter(JSONFormatter())
@@ -481,84 +490,6 @@ def sync_worker_processes(state):
                 stderr=subprocess.DEVNULL
             )
             log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
-
-
-def elastro_watchdog():
-    log('elastro watchdog starting')
-    file_mtimes = {}
-    registry_path = _WS / 'projects.json'
-    while True:
-        try:
-            if registry_path.exists():
-                registry = json.loads(registry_path.read_text())
-                projects = registry.get('projects') if isinstance(registry, dict) else registry
-                if isinstance(projects, list):
-                    for p in projects:
-                        if not isinstance(p, dict):
-                            continue
-                        workspace_dir = Path(p.get('path') or str(_WS / p.get('id', '')))
-                        if not workspace_dir.exists() or not workspace_dir.is_dir():
-                            continue
-                        
-                        for root, dirs, files in os.walk(workspace_dir):
-                            if any(ignored in root for ignored in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']):
-                                continue
-                            for f in files:
-                                filepath = Path(root) / f
-                                try:
-                                    mtime = filepath.stat().st_mtime
-                                except Exception:
-                                    continue
-                                
-                                last_mtime = file_mtimes.get(str(filepath))
-                                if last_mtime is not None and mtime > last_mtime:
-                                    try:
-                                        subprocess.Popen(
-                                            ['elastro', 'rag', 'update', str(filepath)],
-                                            stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL
-                                        )
-                                        log(f'watchdog: triggered elastro rag update for {filepath.name}')
-                                        
-                                        try:
-                                            total_bytes = 0
-                                            for r, ds, fs in os.walk(workspace_dir):
-                                                if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']): continue
-                                                for fw in fs:
-                                                    total_bytes += (Path(r) / fw).stat().st_size
-                                            mod_bytes = filepath.stat().st_size
-                                            if total_bytes > mod_bytes:
-                                                savings = (total_bytes - mod_bytes) // 4
-                                                es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
-                                                es_key = os.environ.get('ES_API_KEY', '')
-                                                if es_key and es_url:
-                                                    doc = {
-                                                        'worker_name': 'elastro-watchdog',
-                                                        'worker_role': 'system',
-                                                        'provider': 'elastro-cache',
-                                                        'model': 'ast-sync',
-                                                        'input_tokens': 0,
-                                                        'output_tokens': 0,
-                                                        'savings': savings,
-                                                        'created_at': datetime.now(timezone.utc).isoformat()
-                                                    }
-                                                    req = urllib.request.Request(
-                                                        f"{es_url}/agent-token-telemetry/_doc",
-                                                        data=json.dumps(doc).encode(),
-                                                        headers={'Content-Type': 'application/json', 'Authorization': f'ApiKey {es_key}'},
-                                                        method='POST'
-                                                    )
-                                                    with urllib.request.urlopen(req, timeout=3, context=ctx): pass
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        pass
-                                file_mtimes[str(filepath)] = mtime
-        except Exception as e:
-            log(f'watchdog loop error: {e}')
-        time.sleep(5)
-
-
 def main():
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
@@ -568,7 +499,6 @@ def main():
             'ES_API_KEY is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
         )
     log('worker manager starting')
-    threading.Thread(target=elastro_watchdog, daemon=True).start()
     while True:
         try:
             cycle()

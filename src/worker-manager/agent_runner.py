@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import urllib.request
+import urllib.parse
+import urllib.error
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +43,37 @@ class AgentResult:
     subtasks: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
+def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
+    if not task or not usage:
+        return
+    try:
+        import urllib.request
+        import json
+        import ssl
+        from datetime import datetime, timezone
+        import os
+        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        es_key = os.environ.get('ES_API_KEY', '')
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        doc = {
+            'worker_name': task.get('active_worker') or task.get('assigned_agent') or 'unknown-worker',
+            'worker_role': task.get('assigned_agent_role') or task.get('owner') or 'generic',
+            'provider': task.get('preferred_llm_provider') or task.get('llm_provider') or 'ollama',
+            'model': task.get('preferred_model') or task.get('llm_model') or 'unknown',
+            'input_tokens': usage.get('prompt_tokens', 0),
+            'output_tokens': usage.get('completion_tokens', 0),
+            'savings': 0,
+            'created_at': datetime.now(timezone.utc).isoformat()
+        }
+        hdrs = {'Content-Type': 'application/json'}
+        if es_key: hdrs['Authorization'] = f'ApiKey {es_key}'
+        req = urllib.request.Request(f"{es_url}/agent-token-telemetry/_doc", data=json.dumps(doc).encode(), headers=hdrs, method='POST')
+        with urllib.request.urlopen(req, timeout=2, context=ctx): pass
+    except Exception as e:
+        logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
 
 def _load_system_prompt(role: str) -> str:
     prompt_path = AGENTS_ROOT / role / 'SYSTEM_PROMPT.md'
@@ -100,17 +133,25 @@ def _call_ollama(
     ]
     try:
         kw = _task_llm_kw(task)
-        content = llm_client.chat(
+        content, usage = llm_client.chat(
             messages,
             model=model or _current_llm_model(),
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=8192,
+            return_usage=True,
             **kw,
         )
+        _emit_usage(task, usage)
         content = content.strip()
-        if content.startswith('`' * 3):
-            content = content.strip('`').replace('json\n', '', 1).strip()
-        return json.loads(content)
+        try:
+            val = content
+            if val.startswith('`' * 3):
+                val = val.strip('`').replace('json\n', '', 1).strip()
+            return json.loads(val)
+        except json.JSONDecodeError as de:
+            from pathlib import Path
+            Path('workspace/logs/gemini_payload.txt').write_text(content + "\n\n", encoding='utf-8')
+            raise de
     except Exception as e:
         import sys
         sys.stderr.write(f'LLM Execution Trap: {e}\n')
@@ -120,6 +161,35 @@ def _call_ollama(
 
 
 _IMPLEMENTER_TOOLS = [
+    {
+        'type': 'function',
+        'function': {
+            'name': 'elastro_rag_ingest',
+            'description': 'Ingest a new repository into the Elastro AST indexing system. Use this only for brand new projects that have not been indexed before to mathematically map all token bounds.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'repo_path': {'type': 'string', 'description': 'The absolute path to the repository root.'},
+                },
+                'required': ['repo_path'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'elastro_query_ast',
+            'description': 'Query the Elastro AST index for precise code mappings and snippets matching your work item. MUST be used before modifying code to dynamically save tokens contextually.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'query': {'type': 'string', 'description': 'The search query, e.g., a function name or class.'},
+                    'target_path': {'type': 'string', 'description': 'The absolute path to the target repository.'},
+                },
+                'required': ['query', 'target_path'],
+            },
+        },
+    },
     {
         'type': 'function',
         'function': {
@@ -294,28 +364,65 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
                 return f'ERROR writing file: Meta-Critic Python Syntax Check Failed at line {e.lineno}: {e.msg}'
         p.write_text(content)
         
-        # Native AST Integration mapping Elasticsearch automatically
-        try:
-            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
-            import elastro_sync
-            elastro_sync.sync_ast()
-        except Exception as e:
-            logger.error(
-                "Failed to trigger elastro AST update",
-                extra={
-                    "file_path": str(p),
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
-                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
-                }
-            )
-
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
+
+
+def _exec_elastro_rag_ingest(args: dict, repo_path: Optional[str]) -> str:
+    try:
+        p = _resolve_path(args.get('repo_path', repo_path or '.'), repo_path)
+        subprocess.run(f'elastro rag ingest "{p}"', shell=True, check=True, capture_output=True, timeout=120)
+        return "OK: AST Ingested Successfully."
+    except Exception as e:
+        return f'ERROR ingesting AST natively: {e}'
+
+
+def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
+    query = args.get('query', '')
+    target_path = _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
+    try:
+        cmd = f'elastro rag query "{query}"'
+        result = subprocess.run(cmd, shell=True, cwd=str(target_path), capture_output=True, timeout=60, text=True)
+        output = result.stdout + result.stderr
+        
+        total_bytes = 0
+        for r, ds, fs in os.walk(target_path):
+            if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']): continue
+            for fw in fs:
+                total_bytes += (Path(r) / fw).stat().st_size
+        
+        mod_bytes = len(output.encode('utf-8'))
+        savings = max(0, (total_bytes - mod_bytes) // 4)
+        
+        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        if es_url:
+            doc = {
+                'worker_name': 'implementer',
+                'worker_role': 'system',
+                'provider': 'elastro-cache',
+                'model': 'ast-sync',
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'savings': savings,
+                'created_at': datetime.now(timezone.utc).isoformat()
+            }
+            req = urllib.request.Request(
+                f"{es_url}/agent-token-telemetry/_doc",
+                data=json.dumps(doc).encode(),
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=3): pass
+            except Exception:
+                pass
+                
+        return output
+    except Exception as e:
+        return f'ERROR querying AST natively: {e}'
 
 
 def _exec_memory_read(args: dict) -> str:
@@ -338,7 +445,7 @@ def _exec_memory_read(args: dict) -> str:
         
         req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
         import ssl
-        import urllib.error
+        # ensure no local shadow
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -414,8 +521,7 @@ def _exec_memory_write(args: dict) -> str:
             doc['expires_at'] = time.time() + int(ttl)
             
         payload = json.dumps(doc).encode()
-        import urllib.parse
-        import urllib.error
+        # ensure no local shadow
         safe_key = urllib.parse.quote(key, safe='')
         req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
         
@@ -482,7 +588,7 @@ def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> st
         
         # Native AST Integration mapping Elasticsearch automatically
         try:
-            subprocess.run(['elastro', 'update', str(p)], check=True, capture_output=True, timeout=10)
+            subprocess.run(['elastro', 'rag', 'update', str(p)], check=True, capture_output=True, timeout=10)
             import elastro_sync
             elastro_sync.sync_ast()
         except Exception as e:
@@ -592,16 +698,19 @@ def _call_ollama_tools(
     try:
         llm_client = _load_llm_client()
         kw = _task_llm_kw(task)
-        return llm_client.chat_with_tools(
+        res, usage = llm_client.chat_with_tools(
             messages,
             tools,
             model=model,
             temperature=0.2,
             max_tokens=4096,
+            return_usage=True,
             **kw,
         )
+        _emit_usage(task, usage)
+        return res
     except Exception as e:
-        logger.info(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        logger.info(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}')
         return None
 
 def _codex_json_schema_implementer() -> dict[str, Any]:
@@ -683,7 +792,7 @@ def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd
     try:
         return codex_bridge.run_turn_json(prompt, model=model, cwd=cwd, output_schema=schema, timeout=300)
     except Exception as e:
-        logger.info(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        logger.info(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}')
         raise e
 
 
@@ -847,6 +956,12 @@ def run_implementer(
             elif fn_name == 'memory_write':
                 _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
                 tool_result = _exec_memory_write(fn_args)
+            elif fn_name == 'elastro_rag_ingest':
+                _progress(f'Ingesting AST: {fn_args.get("repo_path", "")}')
+                tool_result = _exec_elastro_rag_ingest(fn_args, repo_path)
+            elif fn_name == 'elastro_query_ast':
+                _progress(f'Querying AST: {fn_args.get("query", "")}')
+                tool_result = _exec_elastro_query_ast(fn_args, repo_path)
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')

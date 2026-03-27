@@ -64,7 +64,8 @@ _handlers_logger.setLevel(logging.INFO)
 
 try:
     _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
-    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else Path.home() / '.flume' / 'workspace' / 'logs'
+    from utils.workspace import resolve_safe_workspace
+    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
     _log_dir.mkdir(parents=True, exist_ok=True)
     _fh = RotatingFileHandler(_log_dir / 'worker_handlers.log', maxBytes=10*1024*1024, backupCount=5)
     _fh.setFormatter(JSONFormatter())
@@ -1174,7 +1175,7 @@ def main():
     while True:
         try:
             apply_runtime_config(_WS)
-            sync_llm_env_from_workspace(_WS)
+            sync_llm_env_from_workspace(resolve_safe_workspace())
             state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
             claimed_workers = {w.get('name') for w in state.get('workers', []) if w.get('status') == 'claimed'}
 
@@ -1211,17 +1212,12 @@ def main():
                         if task_id and role in ('implementer', 'tester', 'reviewer'):
                             es_id, task = fetch_task_doc(task_id)
                             if es_id and task and not task.get('agent_log'):
-                                patch = {
-                                    'status': 'ready',
-                                    'owner': role,
-                                    'assigned_agent_role': role,
-                                    'needs_human': False,
-                                    'queue_state': 'queued',
-                                    'active_worker': None,
-                                }
-                                update_task_doc(es_id, patch)
-                                log(f"{role}: released task={task_id} (no agent_log)")
-                                continue
+                                # Safety trap disabled: Tasks are just claimed, agent_log is natively empty!
+                                # patch = { ... }
+                                # update_task_doc(es_id, patch)
+                                # log(f"{role}: released task={task_id} (no agent_log)")
+                                # continue
+                                pass
                     except Exception:
                         pass
                     run_worker(worker)
