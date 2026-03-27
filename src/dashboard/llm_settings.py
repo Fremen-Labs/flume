@@ -196,6 +196,75 @@ VALID_PROVIDERS = {p["id"] for p in PROVIDER_CATALOG}
 OAUTH_PROVIDERS = {"openai"}  # Only OpenAI supports OAuth Codex flow
 SENSITIVE_KEYS = {"LLM_API_KEY", "GH_TOKEN", "ADO_TOKEN", "ES_API_KEY", "OPENAI_OAUTH_STATE_JSON"}
 
+
+def _dedupe_models(models: list[dict[str, str]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in models:
+        mid = str((raw or {}).get("id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append({"id": mid, "name": str((raw or {}).get("name") or mid).strip() or mid})
+    return out
+
+
+def _fetch_ollama_models(base_url: str, timeout: float = 5.0) -> list[dict[str, str]]:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return []
+
+    def _load(url: str) -> dict[str, Any]:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        return json.loads(body)
+
+    model_rows: list[dict[str, str]] = []
+    errs: list[str] = []
+    for suffix, key in (("/api/tags", "models"), ("/v1/models", "data")):
+        try:
+            payload = _load(base + suffix)
+            for item in payload.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                mid = str(item.get("name") or item.get("id") or "").strip()
+                if mid:
+                    model_rows.append({"id": mid, "name": mid})
+            if model_rows:
+                break
+        except Exception as exc:
+            errs.append(str(exc))
+    if model_rows:
+        return _dedupe_models(model_rows)
+    return []
+
+
+def provider_catalog_for_workspace(workspace_root: Path) -> list[dict[str, Any]]:
+    pairs = load_effective_pairs(workspace_root)
+    provider = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
+    model = pairs.get("LLM_MODEL", "llama3.2").strip() or "llama3.2"
+    base_url = pairs.get("LLM_BASE_URL", "").strip()
+
+    catalog: list[dict[str, Any]] = []
+    for entry in PROVIDER_CATALOG:
+        copied = dict(entry)
+        copied["models"] = [dict(m) for m in entry.get("models") or []]
+        catalog.append(copied)
+
+    if provider == "ollama":
+        for entry in catalog:
+            if entry.get("id") != "ollama":
+                continue
+            live_models = _fetch_ollama_models(base_url or str(entry.get("baseUrlDefault") or ""))
+            merged = list(live_models) + [dict(m) for m in entry.get("models") or []]
+            if model:
+                merged.append({"id": model, "name": model})
+            entry["models"] = _dedupe_models(merged)
+            break
+
+    return catalog
+
 # ─── .env load/save ────────────────────────────────────────────────────────────
 
 
@@ -794,7 +863,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
         key_suffix_out = ""
 
     return {
-        "catalog": PROVIDER_CATALOG,
+        "catalog": provider_catalog_for_workspace(workspace_root),
         "settings": {
             "provider": provider,
             "model": model,

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import llm_credentials_store as lcs
-from llm_settings import PROVIDER_CATALOG, load_effective_pairs, get_oauth_status
+from llm_settings import load_effective_pairs, get_oauth_status, provider_catalog_for_workspace
 from workspace_llm_env import normalize_gemini_model_id, resolve_cloud_agent_model
 
 AGENT_ROLE_IDS = (
@@ -26,8 +26,8 @@ def agent_models_path(workspace_root: Path) -> Path:
     return workspace_root / "worker-manager" / "agent_models.json"
 
 
-def _catalog_entry(provider_id: str) -> Optional[dict[str, Any]]:
-    for p in PROVIDER_CATALOG:
+def _catalog_entry(workspace_root: Path, provider_id: str) -> Optional[dict[str, Any]]:
+    for p in provider_catalog_for_workspace(workspace_root):
         if p["id"] == provider_id:
             return p
     return None
@@ -115,7 +115,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
     out: list[dict[str, Any]] = []
 
     current = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
-    entry = _catalog_entry(current)
+    entry = _catalog_entry(workspace_root, current)
     if entry:
         models = list(entry.get("models") or [])
         if current == "openai_compatible":
@@ -159,7 +159,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
         if not cid:
             continue
         pid = lcs.normalize_provider_id(str(c.get("provider") or "").strip().lower())
-        cat = _catalog_entry(pid)
+        cat = _catalog_entry(workspace_root, pid)
         if not cat and pid != "openai_compatible":
             continue
         key = str(c.get("apiKey") or "").strip()
@@ -201,7 +201,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
         )
 
     # Explicit OpenAI OAuth option when Codex/ChatGPT login is set up (even if Settings uses API key).
-    openai_entry = _catalog_entry("openai")
+    openai_entry = _catalog_entry(workspace_root, "openai")
     if openai_entry and oauth_ok:
         out.append(
             {
@@ -216,7 +216,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
             }
         )
 
-    ollama_entry = _catalog_entry("ollama")
+    ollama_entry = _catalog_entry(workspace_root, "ollama")
     if ollama_entry and current != "ollama":
         out.append(
             {
@@ -272,7 +272,7 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     # Primary configured provider first
-    entry = _catalog_entry(current)
+    entry = _catalog_entry(workspace_root, current)
     if entry and provider_is_configured(workspace_root, current, pairs):
         models = list(entry.get("models") or [])
         if current == "openai_compatible":
@@ -301,7 +301,7 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
         )
 
     # Ollama — optional local routing per role
-    ollama_entry = _catalog_entry("ollama")
+    ollama_entry = _catalog_entry(workspace_root, "ollama")
     if ollama_entry:
         out.append(
             {
