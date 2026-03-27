@@ -343,7 +343,7 @@ def call_planner_model(messages):
             timeout=180,
         )
 
-    import llm_client
+    from utils import llm_client
     return llm_client.chat(
         messages,
         model=model,
