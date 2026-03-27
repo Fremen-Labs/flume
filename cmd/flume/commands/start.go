@@ -199,8 +199,24 @@ var StartCmd = &cobra.Command{
 		}
 
 		log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
+		dockerEnv := append([]string{}, portEnvOverrides...)
+		if envCfg.Provider != "" {
+			dockerEnv = append(dockerEnv, "LLM_PROVIDER="+envCfg.Provider)
+		}
+		if envCfg.BaseURL != "" {
+			dockerEnv = append(dockerEnv, "LLM_BASE_URL="+envCfg.BaseURL)
+		}
+		if envCfg.LocalOllamaBaseURL != "" {
+			dockerEnv = append(dockerEnv, "LOCAL_OLLAMA_BASE_URL="+envCfg.LocalOllamaBaseURL)
+		}
+		if envCfg.Host != "" {
+			dockerEnv = append(dockerEnv, "LLM_HOST="+envCfg.Host)
+		}
+		if envCfg.APIKey != "" {
+			dockerEnv = append(dockerEnv, "LLM_API_KEY="+envCfg.APIKey)
+		}
 		c := exec.Command("docker", "compose", "up", "-d")
-		c.Env = portEnvOverrides
+		c.Env = dockerEnv
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		if err := c.Run(); err != nil {
