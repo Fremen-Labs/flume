@@ -71,6 +71,10 @@ var StartCmd = &cobra.Command{
 			if NativeFlag {
 				fmt.Println(ui.WarningGold("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively."))
 			} else {
+				stat, _ := os.Stdin.Stat()
+				if (stat.Mode() & os.ModeCharDevice) == 0 {
+					log.Fatal("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+				}
 				fmt.Println(ui.WarningGold("Exo undetected globally. Escalate to User Auth Layer."))
 				promptCfg, err := ui.RunInteractivePrompt()
 				if err != nil {
