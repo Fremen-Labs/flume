@@ -25,6 +25,8 @@ from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
+import traceback
+from fastapi import BackgroundTasks
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -2017,8 +2019,51 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
+def _check_ast_exists_natively(repo_path: str) -> bool:
+    try:
+        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Content-Type': 'application/json'}
+        if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
+        req = urllib.request.Request(f"{es_url}/flume-elastro-graph/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
+        
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
+            data = json.loads(res.read().decode())
+            return data.get('hits', {}).get('total', {}).get('value', 0) > 0
+    except Exception as e:
+        logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
+        return False
+
+def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
+    try:
+        exists = _check_ast_exists_natively(repo_path)
+            
+        if not exists:
+            logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
+            subprocess.run(["elastro", "rag", "ingest", repo_path], shell=False, check=True, capture_output=True, timeout=120)
+            logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
+        else:
+            logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
+
+    except subprocess.CalledProcessError as e:
+        logger.error({
+            "event": "ast_ingest_failure", 
+            "repo": repo_path, 
+            "error": "subprocess_error",
+            "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
+            "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
+        })
+    except Exception as e:
+        logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
+
 @app.post("/api/projects")
-def api_create_project(payload: dict):
+def api_create_project(payload: dict, background_tasks: BackgroundTasks):
     import uuid, datetime
     name = (payload.get("name") or "").strip()
     if not name:
@@ -2036,6 +2081,8 @@ def api_create_project(payload: dict):
     registry = load_projects_registry()
     registry.append(entry)
     save_projects_registry(registry)
+    
+    background_tasks.add_task(_deterministic_ast_ingest, entry["repoUrl"], new_id, name)
     
     return {"success": True, "projectId": new_id, "message": "Project dynamically constructed seamlessly natively."}
 
