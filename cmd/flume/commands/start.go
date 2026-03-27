@@ -201,12 +201,12 @@ var StartCmd = &cobra.Command{
 		log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 		c := exec.Command("docker", "compose", "up", "-d")
 		c.Env = portEnvOverrides
-		output, err := c.CombinedOutput()
-		if err != nil {
-			log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		if err := c.Run(); err != nil {
+			log.Error("Container topology boot failed", "error", err)
 			return err
 		}
-		log.Info("Container Swarm bootstrapped successfully", "output", strings.TrimSpace(string(output)))
 		log.Info("Flume services started in detached mode.", "dashboard", fmt.Sprintf("http://localhost:%s", dashboardPort))
 		return nil
 	},
