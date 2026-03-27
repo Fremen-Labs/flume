@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/log"
@@ -15,22 +16,30 @@ import (
 
 var (
 	ProviderFlag string
-	KeyFlag      string
 	NativeFlag   bool
 )
+
+func isHeadlessEnv(getenv func(string) string, getstat func() (os.FileInfo, error)) bool {
+	stat, err := getstat()
+	if err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		return true
+	}
+	return getenv("CI") != "" || getenv("NON_INTERACTIVE") == "1" || getenv("FLUME_HEADLESS") == "1"
+}
 
 var StartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Initiate Flume V3 Edge Orchestrator",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println(ui.CyberGradient("Booting Flume Matrix..."))
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Info("Booting Flume Matrix...")
 
 		log.Infof("💾 Jacking into the local mainframe... Scanning global systemic hardware matrices 🔌")
 		eco := orchestrator.PerformReconnaissance()
-		fmt.Println(ui.NeonGreen(fmt.Sprintf("\n[SYSTEM RECON] Docker: %v | Elastic: %v | OpenBao: %v | Elastro: %v\n", eco.HasDocker, eco.HasElastic, eco.HasOpenBao, eco.HasElastro)))
+		log.Info("[SYSTEM RECON]", "Docker", eco.HasDocker, "Elastic", eco.HasElastic, "OpenBao", eco.HasOpenBao, "Elastro", eco.HasElastro)
 
 		if err := orchestrator.EvaluateAndInstall(eco); err != nil {
-			log.Fatal("Unmet Dependency Bounds", "error", err)
+			log.Error("Unmet Dependency Bounds", "error", err)
+			return err
 		}
 
 		dashboardPort := "8765"
@@ -42,7 +51,8 @@ var StartCmd = &cobra.Command{
 			if inUse {
 				newPort := ui.PromptForPort(port)
 				if newPort == 0 {
-					log.Fatal("Port exhaustion detected gracefully natively.")
+					log.Error("Port exhaustion detected gracefully natively.")
+					return fmt.Errorf("port exhaustion on %d", port)
 				}
 				if port == 8765 {
 					dashboardPort = fmt.Sprintf("%d", newPort)
@@ -62,23 +72,24 @@ var StartCmd = &cobra.Command{
 
 		envCfg := orchestrator.EnvConfig{
 			Provider: ProviderFlag,
-			APIKey:   KeyFlag,
+			APIKey:   os.Getenv("FLUME_API_KEY"),
 		}
 
 		if orchestrator.CheckExoActive() {
-			fmt.Println(ui.SuccessBlue("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences."))
+			log.Info("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences.")
 		} else if envCfg.Provider == "" || envCfg.APIKey == "" {
 			if NativeFlag {
-				fmt.Println(ui.WarningGold("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively."))
+				log.Warn("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively.")
 			} else {
-				stat, _ := os.Stdin.Stat()
-				if (stat.Mode() & os.ModeCharDevice) == 0 {
-					log.Fatal("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+				if isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
+					log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+					return fmt.Errorf("headless tty pseudo-hang prevented")
 				}
-				fmt.Println(ui.WarningGold("Exo undetected globally. Escalate to User Auth Layer."))
+				log.Warn("Exo undetected globally. Escalate to User Auth Layer.")
 				promptCfg, err := ui.RunInteractivePrompt()
 				if err != nil {
-					log.Fatal("Interactive Wizard aborted.", "error", err)
+					log.Error("Interactive Wizard aborted.", "error", err)
+					return err
 				}
 				envCfg.Provider = promptCfg.Provider
 				envCfg.APIKey = promptCfg.APIKey
@@ -86,16 +97,18 @@ var StartCmd = &cobra.Command{
 		}
 
 		if err := orchestrator.GenerateEnv(envCfg); err != nil {
-			log.Fatal("Failed to construct ecosystem environment", "error", err)
+			log.Error("Failed to construct ecosystem environment", "error", err)
+			return err
 		}
 
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
 			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			if err := c.Run(); err != nil {
-				log.Error("Data grid boot failed", "error", err)
+			output, err := c.CombinedOutput()
+			if err != nil {
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+			} else {
+				log.Info("Data grid bootstrapped successfully", "output", strings.TrimSpace(string(output)))
 			}
 
 			go func() {
@@ -126,23 +139,23 @@ var StartCmd = &cobra.Command{
 			}
 			wg.Wait()
 		} else {
-			fmt.Println(ui.WarningGold("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿"))
+			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			if err := c.Run(); err != nil {
-				fmt.Println(ui.ErrorRed("Container topology boot failed: " + err.Error()))
-				return
+			output, err := c.CombinedOutput()
+			if err != nil {
+				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+				return err
 			}
+			log.Info("Container Swarm bootstrapped successfully", "output", strings.TrimSpace(string(output)))
 		}
 
 		orchestrator.AwaitOrchestration()
+		return nil
 	},
 }
 
 func init() {
-	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", ui.SuccessBlue("Explicitly declare LLM Provider (openai, ollama, exo)"))
-	StartCmd.Flags().StringVarP(&KeyFlag, "key", "k", "", ui.WarningGold("Explicitly declare LLM API Secret Key (Masked)"))
-	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, ui.CyberGradient("Launch Flume utilizing OS-native High-Performance Git Worktrees"))
+	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", "Explicitly declare LLM Provider (openai, ollama, exo)")
+	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native High-Performance Git Worktrees")
 }
