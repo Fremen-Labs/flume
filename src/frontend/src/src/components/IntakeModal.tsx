@@ -506,7 +506,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
 
             {/* ── Initial prompt ── */}
             {(phase === 'prompt' || phase === 'planning') && (
-              <div className="flex flex-col items-center justify-center h-full gap-6 px-6">
+              <div className="flex flex-col items-center justify-center h-full gap-6 px-6" data-phase={phase}>
                 <div className="text-center max-w-lg">
                   <div className="w-14 h-14 rounded-2xl bg-primary/15 flex items-center justify-center mx-auto mb-4">
                     <Bot className="w-7 h-7 text-primary" />
@@ -527,6 +527,15 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     disabled={phase === 'planning'}
                     autoFocus
                   />
+                  {phase === 'planning' && !planningStatus && (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-foreground/90 space-y-2">
+                      <div className="flex items-center gap-2 text-primary">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span className="font-medium">Starting planning session…</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">Waiting for planner status from the server.</div>
+                    </div>
+                  )}
                   {phase === 'planning' && planningStatus && (
                     <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-foreground/90 space-y-2">
                       <div className="flex items-center gap-2 text-primary">
