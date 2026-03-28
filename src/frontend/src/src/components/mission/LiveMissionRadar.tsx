@@ -1,66 +1,11 @@
-import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Radar, Activity, CheckCircle2, Clock, Server, Monitor, TerminalSquare } from 'lucide-react';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Line, LineChart, ResponsiveContainer } from 'recharts';
-
-interface WorkerState {
-  name: string;
-  role: string;
-  model: string;
-  execution_host: string;
-  llm_provider: string;
-  status: string;
-  current_task_title?: string;
-  heartbeat_at: string;
-}
-
-interface SystemState {
-  updated_at: string;
-  workers: WorkerState[];
-}
+import { useSystemState } from '../../hooks/useSystemState';
 
 export function LiveMissionRadar() {
-  const [data, setData] = useState<SystemState | null>(null);
-  const [history, setHistory] = useState<{ name: string, active: number, idle: number }[]>([]);
-  const [logs, setLogs] = useState<{ id: string, msg: string, time: string, level: string }[]>([]);
-
-  useEffect(() => {
-    const fetchState = async () => {
-      try {
-        const res = await fetch('/api/system-state');
-        if (res.ok) {
-          const json = await res.json();
-          setData(json);
-          
-          const activeCount = json.workers.filter((w: any) => w.status === 'claimed' || w.status === 'active').length;
-          const idleCount = json.workers.filter((w: any) => w.status === 'idle').length;
-          
-          setHistory(prev => {
-             const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
-             const arr = [...prev, { name: now, active: activeCount, idle: idleCount }];
-             return arr.length > 25 ? arr.slice(arr.length - 25) : arr;
-          });
-
-          try {
-            const logsRes = await fetch('/api/logs');
-            if (logsRes.ok) {
-              const logsJson = await logsRes.json();
-              setLogs(logsJson);
-            }
-          } catch(e) {
-            console.error('Failed to fetch telemetry streams');
-          }
-        }
-      } catch (e) {
-        console.error('Failed to fetch system state', e);
-      }
-    };
-    
-    fetchState();
-    const interval = setInterval(fetchState, 2000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data, history, logs, isLoading } = useSystemState();
 
   if (!data) {
     return (
