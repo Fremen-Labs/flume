@@ -42,17 +42,15 @@ export function LiveMissionRadar() {
              return arr.length > 25 ? arr.slice(arr.length - 25) : arr;
           });
 
-          setLogs(prev => {
-             const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
-             const newLogs = json.workers.filter((w:any) => w.status === 'claimed' || w.status === 'active').map((w:any) => ({
-                 id: Math.random().toString(36),
-                 msg: `[${w.name}] executing: ${w.current_task_title?.slice(0, 50) || 'AST Synthesis'}`,
-                 time,
-                 level: 'INFO'
-             }));
-             if (newLogs.length === 0) return prev;
-             return [...newLogs, ...prev].slice(0, 60);
-          });
+          try {
+            const logsRes = await fetch('/api/logs');
+            if (logsRes.ok) {
+              const logsJson = await logsRes.json();
+              setLogs(logsJson);
+            }
+          } catch(e) {
+            console.error('Failed to fetch telemetry streams');
+          }
         }
       } catch (e) {
         console.error('Failed to fetch system state', e);

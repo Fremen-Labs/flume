@@ -2110,8 +2110,7 @@ def api_task_commits(task_id: str):
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
-
-@app.post("/api/tasks/bulk-update")
+ 
 from fastapi import Depends, HTTPException, Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError
@@ -2439,13 +2438,51 @@ else:
     def fallback_root(full_path: str):
         return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
-from pydantic import BaseModel
+def get_vault_token():
+    t = os.environ.get('VAULT_TOKEN')
+    if t: return t
+    try:
+        with open("/vault/file/keys.json", "r") as f:
+            return json.load(f).get("root_token", "flume-dev-token")
+    except Exception:
+        return "flume-dev-token"
+
+@app.get("/api/logs")
+def get_telemetry_logs():
+    try:
+        body = {
+            "size": 60,
+            "sort": [{"timestamp": {"order": "desc"}}],
+            "query": {"match_all": {}}
+        }
+        res = es_search('flume-telemetry', body)
+        hits = res.get('hits', {}).get('hits', [])
+        logs = []
+        for h in hits:
+            src = h['_source']
+            t_iso = src.get('timestamp', '')
+            try:
+                time_str = datetime.fromisoformat(t_iso.replace('Z', '+00:00')).strftime('%H:%M:%S')
+            except Exception:
+                time_str = t_iso
+                
+            logs.append({
+                "id": h['_id'],
+                "msg": f"[{src.get('worker_name', 'System')}] {src.get('message', '')}",
+                "time": time_str,
+                "level": src.get('level', 'INFO')
+            })
+        logs.reverse()
+        return logs
+    except Exception as e:
+        return []
+
 @app.get("/api/vault/status")
 def vault_status():
     import urllib.request
     import urllib.error
     openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
-    vault_token = os.environ.get('VAULT_TOKEN', 'flume-dev-token')
+    vault_token = get_vault_token()
     try:
         req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -2466,6 +2503,7 @@ def vault_status():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+from pydantic import BaseModel
 class TaskClaimRequest(BaseModel):
     worker_id: str
     
@@ -2501,7 +2539,7 @@ def get_system_settings():
         "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
         "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
         "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
-        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else ""
+        "vault_token": "••••" if get_vault_token() or sys_conf.get('vault_token') else ""
     }
 
 @app.put("/api/settings/system")

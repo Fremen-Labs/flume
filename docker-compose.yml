@@ -22,7 +22,9 @@ services:
       retries: 5
 
   bootstrap:
-    image: hashicorp/vault:1.15
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: flume-bootstrap
     depends_on:
       openbao:
@@ -32,7 +34,7 @@ services:
     volumes:
       - .:/app
       - openbao_data:/vault/file
-    entrypoint: ["/bin/sh", "/app/bootstrap.sh"]
+    command: ["uv", "run", "python", "/app/bootstrap.py"]
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
@@ -66,6 +68,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - .:/app
+      - openbao_data:/vault/file:ro
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
     environment:
@@ -108,6 +111,7 @@ services:
     volumes:
       - .:/app
       - ..:/workspace
+      - openbao_data:/vault/file:ro
     environment:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
@@ -120,7 +124,7 @@ services:
       mode: replicated
       replicas: 2
     healthcheck:
-      test: ["CMD-SHELL", "ps -ef | grep manager.py || exit 1"]
+      test: ["CMD-SHELL", "curl -s http://localhost:8080/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

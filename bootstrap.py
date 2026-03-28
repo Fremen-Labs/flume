@@ -1,11 +1,16 @@
-import os, subprocess, json, datetime, secrets, sys
+import os, json, datetime, secrets, sys
+import hvac
+from hvac.exceptions import VaultError
 
-def log(level, msg):
-    print(json.dumps({
-        "time": datetime.datetime.utcnow().isoformat() + "Z", 
-        "level": level, 
-        "message": msg
-    }))
+def log(level, message, **kwargs):
+    log_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "level": level.upper(),
+        "message": message,
+        "service": "flume-bootstrap",
+        **kwargs
+    }
+    print(json.dumps(log_entry), file=sys.stdout)
     sys.stdout.flush()
 
 def main():
@@ -27,19 +32,35 @@ def main():
     
     openai_key = env_vars.get("OPENAI_API_KEY", "")
     
+    client = hvac.Client(url='http://openbao:8200')
+    
+    # Wait for OpenBao to come online natively
+    log("info", "Awaiting OpenBao Native Initialization...", component="vault_boot")
+    import time
+    import requests
+    for i in range(30):
+        try:
+            res = requests.get('http://openbao:8200/v1/sys/health')
+            if res.status_code in [200, 429, 472, 473, 501, 503]:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+        
     keys_path = "/vault/file/keys.json"
     if not os.path.exists(keys_path):
         log("info", "First true boot detected: Initializing OpenBao cluster securely.")
         try:
-            init_out = subprocess.check_output(
-                ["vault", "operator", "init", "-key-shares=1", "-key-threshold=1", "-format=json"],
-                text=True
-            )
+            init_result = client.sys.initialize(secret_shares=1, secret_threshold=1)
+            keys_data = {
+                "unseal_keys_b64": init_result["keys_base64"],
+                "root_token": init_result["root_token"]
+            }
             with open(keys_path, "w") as f:
-                f.write(init_out)
-            log("info", "Successfully generated root topology and unseal arrays.")
-        except Exception as e:
-            log("error", f"Failed to initialize vault: {e}")
+                json.dump(keys_data, f)
+            log("info", "Successfully generated root topology and unseal arrays.", component="vault_init", status="success")
+        except VaultError as e:
+            log("error", "Failed to initialize vault", component="vault_init", error_details=str(e))
             sys.exit(1)
     else:
         log("info", "Persistent OpenBao cluster detected. Deserializing keys...")
@@ -50,56 +71,45 @@ def main():
         unseal_key = keys_data["unseal_keys_b64"][0]
         root_token = keys_data["root_token"]
 
-    env_path = "/app/.env"
-    lines = []
-    has_target = False
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            lines = f.readlines()
-            
-    with open(env_path, "w") as f:
-        for line in lines:
-            if line.startswith("VAULT_TOKEN="):
-                f.write(f"VAULT_TOKEN={root_token}\n")
-                has_target = True
-            else:
-                f.write(line)
-        if not has_target:
-            f.write(f"\nVAULT_TOKEN={root_token}\n")
-    log("info", "Injected dynamic VAULT_TOKEN into local .env successfully.")
-
     # 2. Unseal OpenBao
     try:
-        subprocess.check_call(["vault", "operator", "unseal", unseal_key], stdout=subprocess.DEVNULL)
-        log("info", "OpenBao KMS Unsealed Successfully.")
-    except Exception as e:
-        log("warn", "OpenBao KMS may already be unsealed. Continuing...")
+        if client.sys.is_sealed():
+            client.sys.submit_unseal_key(unseal_key)
+            log("info", "OpenBao KMS Unsealed Successfully.", component="vault_unseal")
+        else:
+            log("info", "OpenBao KMS already unsealed. Continuing...", component="vault_unseal")
+    except VaultError as e:
+        log("error", "Failed to unseal vault", component="vault_unseal", error_details=str(e))
+        sys.exit(1)
 
     # 3. Login to Vault
-    subprocess.check_call(["vault", "login", root_token], stdout=subprocess.DEVNULL)
+    client.token = root_token
     
     try:
-        out = subprocess.check_output(["vault", "secrets", "list"], text=True)
-        if "secret/" not in out:
-            subprocess.check_call(["vault", "secrets", "enable", "-path=secret", "kv-v2"], stdout=subprocess.DEVNULL)
-            log("info", "Successfully enabled Vault secret engine at secret/.")
+        secrets_engines = client.sys.list_mounted_secrets_engines()
+        if 'secret/' not in secrets_engines.get('data', {}):
+            client.sys.enable_secrets_engine(backend_type='kv', path='secret', options={'version': '2'})
+            log("info", "Successfully enabled Vault secret engine at secret/.", component="vault_secrets_enable")
         else:
-            log("info", "Secret engine 'secret/' already exists. Skipping creation.")
-    except Exception as e:
-        log("error", f"Failed to interface with Vault: {e}")
+            log("info", "Secret engine 'secret/' already exists. Skipping creation.", component="vault_secrets_enable")
+    except VaultError as e:
+        log("error", "Failed to interface with Vault", component="vault_secrets", error_details=str(e))
         sys.exit(1)
         
     es_key = secrets.token_hex(32)
     log("info", "Generated Dynamic Elastic Token.")
     
     try:
-        subprocess.check_call(
-            ["vault", "kv", "put", "secret/flume/keys", f"ES_API_KEY={es_key}", f"OPENAI_API_KEY={openai_key}"],
-            stdout=subprocess.DEVNULL
+        client.secrets.kv.v2.create_or_update_secret(
+            path='flume/keys',
+            secret={
+                'ES_API_KEY': es_key,
+                'OPENAI_API_KEY': openai_key
+            }
         )
-        log("info", "Injected Matrix API keys into Vault KV-v2 secret/flume/keys block natively.")
-    except Exception as e:
-        log("error", f"Failed to push keys to Vault: {e}")
+        log("info", "Injected Matrix API keys into Vault KV-v2 secret/flume/keys block natively.", component="vault_kv_write", status="success")
+    except VaultError as e:
+        log("error", "Failed to push keys to Vault", component="vault_kv_write", error_details=str(e))
         sys.exit(1)
 
 if __name__ == "__main__":
