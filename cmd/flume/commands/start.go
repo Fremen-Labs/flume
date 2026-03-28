@@ -151,6 +151,19 @@ var StartCmd = &cobra.Command{
 		}
 
 		orchestrator.AwaitOrchestration()
+
+		if eco.HasElastro {
+			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
+			ingest := exec.Command("uv", "run", "elastro", "rag", "ingest", ".")
+			ingest.Stdout = os.Stdout
+			ingest.Stderr = os.Stderr
+			if err := ingest.Run(); err != nil {
+				log.Warn("Non-critical failure synchronizing local AST Mapping", "error", err)
+			} else {
+				log.Info("Local AST Mapping Synchronized via Elastro Graph RAG.")
+			}
+		}
+
 		return nil
 	},
 }
