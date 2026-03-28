@@ -27,6 +27,39 @@ def main():
     
     openai_key = env_vars.get("OPENAI_API_KEY", "")
     
+    keys_path = "/vault/file/keys.json"
+    if not os.path.exists(keys_path):
+        log("info", "First true boot detected: Initializing OpenBao cluster securely.")
+        try:
+            init_out = subprocess.check_output(
+                ["vault", "operator", "init", "-key-shares=1", "-key-threshold=1", "-format=json"],
+                text=True
+            )
+            with open(keys_path, "w") as f:
+                f.write(init_out)
+            log("info", "Successfully generated root topology and unseal arrays.")
+        except Exception as e:
+            log("error", f"Failed to initialize vault: {e}")
+            sys.exit(1)
+    else:
+        log("info", "Persistent OpenBao cluster detected. Deserializing keys...")
+
+    # Load keys
+    with open(keys_path, "r") as f:
+        keys_data = json.load(f)
+        unseal_key = keys_data["unseal_keys_b64"][0]
+        root_token = keys_data["root_token"]
+
+    # 2. Unseal OpenBao
+    try:
+        subprocess.check_call(["vault", "operator", "unseal", unseal_key], stdout=subprocess.DEVNULL)
+        log("info", "OpenBao KMS Unsealed Successfully.")
+    except Exception as e:
+        log("warn", "OpenBao KMS may already be unsealed. Continuing...")
+
+    # 3. Login to Vault
+    subprocess.check_call(["vault", "login", root_token], stdout=subprocess.DEVNULL)
+    
     try:
         out = subprocess.check_output(["vault", "secrets", "list"], text=True)
         if "secret/" not in out:
