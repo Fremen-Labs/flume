@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
+
 	
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/log"
@@ -103,11 +107,15 @@ var StartCmd = &cobra.Command{
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
 			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
+			
+			var outBuf, errBuf bytes.Buffer
+			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+			
 			err := c.Run()
 			if err != nil {
-				log.Error("Data grid boot failed", "error", err)
+				combinedOutput := outBuf.String() + "\n" + errBuf.String()
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 			} else {
 				log.Info("Data grid bootstrapped successfully")
 			}
@@ -143,11 +151,15 @@ var StartCmd = &cobra.Command{
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
+			
+			var outBuf, errBuf bytes.Buffer
+			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+			
 			err := c.Run()
 			if err != nil {
-				log.Error("Container topology boot failed", "error", err)
+				combinedOutput := outBuf.String() + "\n" + errBuf.String()
+				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 				return err
 			}
 			log.Info("Container Swarm bootstrapped successfully")
