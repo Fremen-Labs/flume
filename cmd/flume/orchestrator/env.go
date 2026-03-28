@@ -20,8 +20,6 @@ func GenerateEnv(config EnvConfig) error {
 # Flume Docker Orchestrator Topology Grid
 # ------------------------------------------
 DASHBOARD_PORT=8765
-VAULT_TOKEN=flume-dev-token
-OPENBAO_TOKEN=flume-dev-token
 
 # ------------------------------------------
 # LLM Inference (Ephemeral CLI Overrides)
