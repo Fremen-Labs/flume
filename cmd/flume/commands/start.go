@@ -5,8 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"strings"
-
+	
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/log"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
@@ -104,11 +103,13 @@ var StartCmd = &cobra.Command{
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
 			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			output, err := c.CombinedOutput()
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			err := c.Run()
 			if err != nil {
-				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+				log.Error("Data grid boot failed", "error", err)
 			} else {
-				log.Info("Data grid bootstrapped successfully", "output", strings.TrimSpace(string(output)))
+				log.Info("Data grid bootstrapped successfully")
 			}
 
 			go func() {
@@ -142,16 +143,17 @@ var StartCmd = &cobra.Command{
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
-			output, err := c.CombinedOutput()
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			err := c.Run()
 			if err != nil {
-				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+				log.Error("Container topology boot failed", "error", err)
 				return err
 			}
-			log.Info("Container Swarm bootstrapped successfully", "output", strings.TrimSpace(string(output)))
+			log.Info("Container Swarm bootstrapped successfully")
 		}
 
-		orchestrator.AwaitOrchestration()
-		return nil
+		return orchestrator.AwaitOrchestration()
 	},
 }
 
