@@ -50,6 +50,24 @@ def main():
         unseal_key = keys_data["unseal_keys_b64"][0]
         root_token = keys_data["root_token"]
 
+    env_path = "/app/.env"
+    lines = []
+    has_target = False
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+            
+    with open(env_path, "w") as f:
+        for line in lines:
+            if line.startswith("VAULT_TOKEN="):
+                f.write(f"VAULT_TOKEN={root_token}\n")
+                has_target = True
+            else:
+                f.write(line)
+        if not has_target:
+            f.write(f"\nVAULT_TOKEN={root_token}\n")
+    log("info", "Injected dynamic VAULT_TOKEN into local .env successfully.")
+
     # 2. Unseal OpenBao
     try:
         subprocess.check_call(["vault", "operator", "unseal", unseal_key], stdout=subprocess.DEVNULL)
