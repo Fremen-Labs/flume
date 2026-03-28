@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import ssl
+import hvac
 
 class NetflixFaultTolerance:
     '''Netflix Microservice Resilience Wrapper'''
@@ -2441,18 +2442,21 @@ else:
 def get_vault_token():
     t = os.environ.get('VAULT_TOKEN')
     if t: return t
-    try:
-        role_id = os.environ.get('VAULT_ROLE_ID')
-        secret_id = os.environ.get('VAULT_SECRET_ID')
-        if role_id and secret_id:
-            import hvac
+    
+    role_id = os.environ.get('VAULT_ROLE_ID')
+    secret_id = os.environ.get('VAULT_SECRET_ID')
+    
+    if role_id and secret_id:
+        try:
             openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
             client = hvac.Client(url=openbao_url)
             res = client.auth.approle.login(role_id=role_id, secret_id=secret_id)
             return res['auth']['client_token']
-    except Exception as e:
-        logger.error(f"AppRole login failed natively: {e}")
-    return "flume-dev-token"
+        except Exception as e:
+            logger.error(f"AppRole login failed natively: {e}")
+            raise RuntimeError("Critical: Failed to authenticate via Vault AppRole.")
+            
+    raise RuntimeError("Critical: Vault authentication configuration missing. Neither VAULT_TOKEN nor VAULT_ROLE_ID/VAULT_SECRET_ID provided.")
 
 @app.get("/api/logs")
 def get_telemetry_logs():
