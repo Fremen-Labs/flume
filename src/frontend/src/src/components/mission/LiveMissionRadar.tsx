@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Radar, Activity, CheckCircle2, Clock, Server, Monitor } from 'lucide-react';
+import { Radar, Activity, CheckCircle2, Clock, Server, Monitor, TerminalSquare } from 'lucide-react';
 import { StatusBadge } from '@/components/StatusBadge';
+import { Line, LineChart, ResponsiveContainer } from 'recharts';
 
 interface WorkerState {
   name: string;
@@ -21,6 +22,8 @@ interface SystemState {
 
 export function LiveMissionRadar() {
   const [data, setData] = useState<SystemState | null>(null);
+  const [history, setHistory] = useState<{ name: string, active: number, idle: number }[]>([]);
+  const [logs, setLogs] = useState<{ id: string, msg: string, time: string, level: string }[]>([]);
 
   useEffect(() => {
     const fetchState = async () => {
@@ -29,6 +32,27 @@ export function LiveMissionRadar() {
         if (res.ok) {
           const json = await res.json();
           setData(json);
+          
+          const activeCount = json.workers.filter((w: any) => w.status === 'claimed' || w.status === 'active').length;
+          const idleCount = json.workers.filter((w: any) => w.status === 'idle').length;
+          
+          setHistory(prev => {
+             const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
+             const arr = [...prev, { name: now, active: activeCount, idle: idleCount }];
+             return arr.length > 25 ? arr.slice(arr.length - 25) : arr;
+          });
+
+          setLogs(prev => {
+             const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' });
+             const newLogs = json.workers.filter((w:any) => w.status === 'claimed' || w.status === 'active').map((w:any) => ({
+                 id: Math.random().toString(36),
+                 msg: `[${w.name}] executing: ${w.current_task_title?.slice(0, 50) || 'AST Synthesis'}`,
+                 time,
+                 level: 'INFO'
+             }));
+             if (newLogs.length === 0) return prev;
+             return [...newLogs, ...prev].slice(0, 60);
+          });
         }
       } catch (e) {
         console.error('Failed to fetch system state', e);
@@ -55,30 +79,55 @@ export function LiveMissionRadar() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="glass-surface p-4 rounded-xl text-center hover:bg-white/[0.02] transition-colors border border-white/[0.02]">
-          <div className="text-2xl font-bold text-foreground">{data.workers.length}</div>
-          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Total Nodes</div>
-        </div>
-        <div className="glass-surface p-4 rounded-xl text-center border border-primary/30 relative overflow-hidden group">
-          <div className="absolute inset-0 bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="text-2xl font-bold text-primary relative z-10">{activeWorkers.length}</div>
-          <div className="text-[10px] text-primary/70 uppercase tracking-wider mt-1 relative z-10">Active Streams</div>
-        </div>
-        <div className="glass-surface p-4 rounded-xl text-center hover:bg-white/[0.02] transition-colors border border-white/[0.02]">
-          <div className="text-2xl font-bold text-foreground">{idleWorkers.length}</div>
-          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Standby</div>
-        </div>
-        <div className="glass-surface p-4 rounded-xl text-center hover:bg-white/[0.02] transition-colors border border-white/[0.02]">
-          <div className="text-2xl font-bold text-success flex items-center justify-center gap-1.5">
-            <CheckCircle2 className="w-4 h-4" /> ON
+        <div className="glass-surface p-4 rounded-xl relative overflow-hidden border border-white/[0.02]">
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="text-2xl font-bold text-foreground">{data.workers.length}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Total Nodes</div>
           </div>
-          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Grid Status</div>
+        </div>
+        <div className="glass-surface p-4 rounded-xl border border-primary/30 relative overflow-hidden group">
+          <div className="absolute inset-x-0 bottom-0 h-16 opacity-20 group-hover:opacity-40 transition-opacity">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history}>
+                <Line type="monotone" dataKey="active" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="text-2xl font-bold text-primary">{activeWorkers.length}</div>
+            <div className="text-[10px] text-primary/70 uppercase tracking-wider mt-1">Active Streams</div>
+          </div>
+        </div>
+        <div className="glass-surface p-4 rounded-xl border border-white/[0.05] relative overflow-hidden group">
+          <div className="absolute inset-x-0 bottom-0 h-16 opacity-10 group-hover:opacity-20 transition-opacity">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history}>
+                <Line type="monotone" dataKey="idle" stroke="hsl(var(--muted-foreground))" strokeWidth={2} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="text-2xl font-bold text-foreground">{idleWorkers.length}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Standby</div>
+          </div>
+        </div>
+        <div className="glass-surface p-4 rounded-xl relative overflow-hidden border border-success/20 bg-success/5 flex flex-col items-center justify-center">
+          <div className="text-2xl font-bold text-success flex items-center justify-center gap-2">
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-success"></span>
+            </span>
+            ON
+          </div>
+          <div className="text-[10px] text-success/70 uppercase tracking-wider mt-1 font-semibold">Grid Status</div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        <AnimatePresence>
-          {data.workers.map((worker, i) => {
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
+        <div className="lg:col-span-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <AnimatePresence>
+              {data.workers.map((worker, i) => {
             const isActive = worker.status === 'claimed' || worker.status === 'active';
             return (
               <motion.div
@@ -127,8 +176,31 @@ export function LiveMissionRadar() {
                 </div>
               </motion.div>
             );
-          })}
-        </AnimatePresence>
+                    })}
+            </AnimatePresence>
+          </div>
+        </div>
+
+        {/* Live Telemetry Feed (Sidebar) */}
+        <div className="lg:col-span-1 border border-white/[0.05] rounded-xl flex flex-col overflow-hidden bg-black/60 shadow-inner">
+          <div className="p-3 border-b border-white/[0.05] bg-white/[0.01] flex items-center gap-2">
+            <TerminalSquare className="w-3.5 h-3.5 text-muted-foreground" />
+            <h3 className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Live Telemetry Feed</h3>
+            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 space-y-2 h-[400px] lg:h-auto custom-scrollbar">
+            {logs.length === 0 ? (
+              <div className="text-[10px] text-muted-foreground/30 text-center py-4 font-mono">Awaiting stream...</div>
+            ) : (
+              logs.map((log) => (
+                <div key={log.id} className="text-[10px] font-mono leading-relaxed">
+                  <span className="text-muted-foreground/50">[{log.time}]</span> 
+                  <span className={log.level === 'INFO' ? 'text-primary/90' : 'text-success/90'}> {log.msg}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
