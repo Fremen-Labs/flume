@@ -1999,6 +1999,17 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+@app.get('/api/exo-status')
+def api_exo_status():
+    try:
+        req = urllib.request.Request("http://host.docker.internal:52415/models", method='GET')
+        with urllib.request.urlopen(req, timeout=0.25) as resp:
+            if resp.status == 200:
+                return {"active": True}
+    except Exception:
+        pass
+    return {"active": False}
+
 @app.get('/api/snapshot')
 def api_snapshot():
     try:
