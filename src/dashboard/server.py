@@ -2442,10 +2442,17 @@ def get_vault_token():
     t = os.environ.get('VAULT_TOKEN')
     if t: return t
     try:
-        with open("/vault/file/keys.json", "r") as f:
-            return json.load(f).get("root_token", "flume-dev-token")
-    except Exception:
-        return "flume-dev-token"
+        role_id = os.environ.get('VAULT_ROLE_ID')
+        secret_id = os.environ.get('VAULT_SECRET_ID')
+        if role_id and secret_id:
+            import hvac
+            openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+            client = hvac.Client(url=openbao_url)
+            res = client.auth.approle.login(role_id=role_id, secret_id=secret_id)
+            return res['auth']['client_token']
+    except Exception as e:
+        logger.error(f"AppRole login failed natively: {e}")
+    return "flume-dev-token"
 
 @app.get("/api/logs")
 def get_telemetry_logs():
@@ -2475,7 +2482,9 @@ def get_telemetry_logs():
         logs.reverse()
         return logs
     except Exception as e:
-        return []
+        logger.error("Failed to query telemetry logs natively", exc_info=True)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Could not load logs")
 
 @app.get("/api/vault/status")
 def vault_status():
