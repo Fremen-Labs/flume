@@ -10,6 +10,9 @@ fastapi>=0.135.1
 uvicorn>=0.42.0
 pyyaml>=6.0.3
 httpx>=0.28.1
+hvac>=2.1.0
+opensearch-py>=2.3.0
+tenacity>=8.3.0
 
 [dev]
 pytest

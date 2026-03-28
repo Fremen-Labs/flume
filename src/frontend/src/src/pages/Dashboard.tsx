@@ -6,6 +6,7 @@ import {
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { StatusBadge } from '@/components/StatusBadge';
 import { useNavigate } from 'react-router-dom';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import projBg1 from '@/assets/projects/proj-bg-1.jpg';
 import projBg2 from '@/assets/projects/proj-bg-2.jpg';
 import projBg3 from '@/assets/projects/proj-bg-3.jpg';
@@ -60,10 +61,10 @@ export default function Dashboard() {
     .slice(0, 6);
 
   const pipelineStages = [
-    { label: 'Planned', count: plannedTasks.length, color: 'bg-muted-foreground' },
-    { label: 'Running', count: runningTasks.length, color: 'bg-primary' },
-    { label: 'Done', count: doneTasks.length, color: 'bg-success' },
-    { label: 'Blocked', count: blockedTasks.length, color: 'bg-destructive' },
+    { label: 'Planned', count: plannedTasks.length, color: 'bg-muted-foreground', desc: 'Queued for agentic blueprint extraction natively.' },
+    { label: 'Running', count: runningTasks.length, color: 'bg-primary', desc: 'Synchronous execution across parallel orchestrator nodes.' },
+    { label: 'Done', count: doneTasks.length, color: 'bg-success', desc: 'Verified and merged safely bypassing evaluation structures.' },
+    { label: 'Blocked', count: blockedTasks.length, color: 'bg-destructive', desc: 'Execution exceptions requiring structural AST interventions.' },
   ];
 
   return (
@@ -116,24 +117,35 @@ export default function Dashboard() {
       {/* Metric Cards */}
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
         {[
-          { title: 'Tasks Running', value: runningTasks.length, icon: Zap, color: 'text-primary' },
-          { title: 'Tasks in Queue', value: plannedTasks.length, icon: ListTodo, color: 'text-muted-foreground' },
-          { title: 'Tasks Completed', value: doneTasks.length, icon: CheckCircle2, color: 'text-success' },
-          { title: 'Blocked Issues', value: blockedTasks.length, icon: AlertTriangle, color: 'text-destructive' },
+          { title: 'Tasks Running', value: runningTasks.length, icon: Zap, color: 'text-primary', description: "Real-time AI compute clusters generating code currently synced to parallel Git worktrees." },
+          { title: 'Tasks in Queue', value: plannedTasks.length, icon: ListTodo, color: 'text-muted-foreground', description: "Tickets staged by the orchestrator awaiting native daemon resource allocation bounds." },
+          { title: 'Tasks Completed', value: doneTasks.length, icon: CheckCircle2, color: 'text-success', description: "System verified pipelines pushed natively successfully bypassing the PR Critic thresholds." },
+          { title: 'Blocked Issues', value: blockedTasks.length, icon: AlertTriangle, color: 'text-destructive', description: "Tasks flagged for explicit human intervention resolving Structural AST exceptions or loops." },
         ].map(card => (
-          <motion.div
-            key={card.title}
-            whileHover={{ y: -3, transition: { duration: 0.2 } }}
-            className="glass-card hover-lift p-4 flex items-center gap-3"
-          >
-            <div className="p-2 rounded-lg bg-primary/10 flex-shrink-0">
-              <card.icon className="w-4 h-4 text-primary" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-[10px] text-muted-foreground">{card.title}</p>
-              <span className={`text-2xl font-bold ${card.color}`}>{card.value}</span>
-            </div>
-          </motion.div>
+          <Tooltip key={card.title} delayDuration={150}>
+            <TooltipTrigger asChild>
+              <motion.div
+                whileHover={{ y: -3, transition: { duration: 0.25 } }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => navigate('/queue')}
+                className="glass-card hover-lift p-4 flex items-center gap-3 cursor-pointer group"
+              >
+                <div className="p-2 rounded-lg bg-primary/10 flex-shrink-0 group-hover:bg-primary/20 transition-colors">
+                  <card.icon className="w-4 h-4 text-primary group-hover:scale-110 transition-transform duration-300" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] text-muted-foreground">{card.title}</p>
+                  <span className={`text-2xl font-bold ${card.color}`}>{card.value}</span>
+                </div>
+              </motion.div>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-[240px] text-xs leading-relaxed glass-panel border-white/[0.1] shadow-2xl p-3">
+              <p className="text-foreground/90">{card.description}</p>
+              <div className="mt-2 text-[10px] text-primary flex items-center gap-1 font-medium">
+                Click to view details <ArrowRight className="w-3 h-3" />
+              </div>
+            </TooltipContent>
+          </Tooltip>
         ))}
       </motion.div>
 
@@ -188,23 +200,30 @@ export default function Dashboard() {
             <div className="glass-panel p-5">
               <div className="flex items-center justify-between relative z-10">
                 {pipelineStages.map((stage, i) => (
-                  <div key={stage.label} className="flex items-center flex-1">
-                    <div className="flex-1 text-center">
-                      <div className="flex items-center justify-center gap-1.5 mb-2">
-                        <span className={`w-2 h-2 rounded-full ${stage.color}`} />
-                        <span className="text-xs font-medium text-foreground">{stage.label}</span>
-                      </div>
-                      <div className="text-2xl font-bold text-foreground">{stage.count}</div>
-                    </div>
-                    {i < pipelineStages.length - 1 && (
-                      <div className="flex items-center gap-1 px-2 text-muted-foreground/30">
-                        <div className="w-1 h-1 rounded-full bg-white/10" />
-                        <div className="w-1 h-1 rounded-full bg-white/10" />
-                        <div className="w-1 h-1 rounded-full bg-white/10" />
-                        <ArrowRight className="w-3 h-3 text-muted-foreground/30" />
-                      </div>
-                    )}
-                  </div>
+                  <Tooltip key={stage.label} delayDuration={150}>
+                    <TooltipTrigger asChild>
+                      <motion.div whileHover={{ y: -2, scale: 1.02 }} className="flex items-center flex-1 cursor-help group">
+                        <div className="flex-1 text-center">
+                          <div className="flex items-center justify-center gap-1.5 mb-2">
+                            <span className={`w-2 h-2 rounded-full ${stage.color} group-hover:shadow-[0_0_8px_currentColor] transition-shadow duration-300`} />
+                            <span className="text-xs font-medium text-foreground">{stage.label}</span>
+                          </div>
+                          <div className="text-2xl font-bold text-foreground group-hover:text-primary transition-colors">{stage.count}</div>
+                        </div>
+                        {i < pipelineStages.length - 1 && (
+                          <div className="flex items-center gap-1 px-2 text-muted-foreground/30">
+                            <div className="w-1 h-1 rounded-full bg-white/10" />
+                            <div className="w-1 h-1 rounded-full bg-white/10" />
+                            <div className="w-1 h-1 rounded-full bg-white/10" />
+                            <ArrowRight className="w-3 h-3 text-muted-foreground/30" />
+                          </div>
+                        )}
+                      </motion.div>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-[200px] text-xs leading-relaxed glass-panel border-white/[0.1] shadow-2xl p-2.5">
+                      <p className="text-foreground/90">{stage.desc}</p>
+                    </TooltipContent>
+                  </Tooltip>
                 ))}
               </div>
             </div>
