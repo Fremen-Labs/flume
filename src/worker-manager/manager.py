@@ -70,13 +70,16 @@ from logging.handlers import RotatingFileHandler
 
 class JSONFormatter(logging.Formatter):
     def format(self, record):
-        return json.dumps({
+        data = {
             "timestamp": now_iso(),
             "level": record.levelname,
             "message": record.getMessage(),
             "service": "worker-manager",
             "pid": os.getpid()
-        })
+        }
+        if hasattr(record, 'structured_data'):
+            data.update(record.structured_data)
+        return json.dumps(data)
 
 _manager_logger = logging.getLogger('worker-manager')
 _manager_logger.setLevel(logging.INFO)
@@ -92,8 +95,11 @@ try:
 except PermissionError:
     pass
 
-def log(msg):
-    _manager_logger.info(str(msg))
+def log(msg, **kwargs):
+    if kwargs:
+        _manager_logger.info(str(msg), extra={'structured_data': kwargs})
+    else:
+        _manager_logger.info(str(msg))
 
 def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
     doc = {
@@ -534,13 +540,13 @@ def main():
     def ping_local_llm():
         url = os.environ.get("LLM_BASE_URL") or os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
         if "docker" in url and sys.platform.startswith("linux"):
-            log("WARNING: host.docker.internal natively detected on Linux! If workers hang, define LOCAL_LLM_HOST=172.17.0.1 in .env")
+            log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="define LOCAL_LLM_HOST=172.17.0.1 in .env")
         try:
             req = urllib.request.Request(f"{url}/models", method="GET")
             with urllib.request.urlopen(req, timeout=3):
                 pass
         except Exception as e:
-            log(f"WARNING: Local LLM boot ping failed at {url}: {e} (Workers may stall if unreachable)")
+            log("Local LLM boot ping failed", event="llm_ping_failure", url=url, error=str(e), advice="Workers may stall if unreachable")
 
     ping_local_llm()
     log('worker manager starting')
