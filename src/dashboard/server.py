@@ -2001,7 +2001,7 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-import httpx
+
 
 @app.get('/api/exo-status')
 async def api_exo_status(request: Request):
@@ -2032,7 +2032,8 @@ async def api_exo_status(request: Request):
         if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1', '::1'):
             logger.info("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
             return {"active": False}
-    except Exception:
+    except (ValueError, TypeError) as e:
+        logger.error("Unexpected error during Exo URL validation", extra={"target_url": exo_url, "error": str(e)})
         return {"active": False}
 
     try:
@@ -2040,8 +2041,8 @@ async def api_exo_status(request: Request):
         resp.raise_for_status()
         return {"active": True, "baseUrl": base_url}
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        logger.info(
-            "Failed to connect to Exo service natively",
+        logger.warning(
+            "Exo service connection failed",
             extra={
                 "component": "exo_detector",
                 "target_url": exo_url,
