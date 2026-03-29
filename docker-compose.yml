@@ -114,6 +114,8 @@ services:
     volumes:
       - .:/app
       - ..:/workspace
+    # Allows the container to communicate with services running on the host machine.
+    # Required for the /api/exo-status endpoint to detect local cluster daemons natively.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

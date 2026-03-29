@@ -1999,16 +1999,28 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+import httpx
+http_client = httpx.AsyncClient()
+
 @app.get('/api/exo-status')
-def api_exo_status():
+async def api_exo_status():
+    exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
+    exo_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", "0.5"))
+    base_url = exo_url.replace('/models', '/v1')
+
     try:
-        req = urllib.request.Request("http://host.docker.internal:52415/models", method='GET')
-        with urllib.request.urlopen(req, timeout=0.25) as resp:
-            if resp.status == 200:
-                return {"active": True}
-    except Exception:
-        pass
-    return {"active": False}
+        resp = await http_client.get(exo_url, timeout=exo_timeout)
+        resp.raise_for_status()
+        return {"active": True, "baseUrl": base_url}
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        log_data = {
+            "message": "Failed to connect to Exo service natively",
+            "target_url": exo_url,
+            "error_type": type(e).__name__,
+            "error_details": str(e)
+        }
+        logger.warning(json.dumps(log_data))
+        return {"active": False}
 
 @app.get('/api/snapshot')
 def api_snapshot():

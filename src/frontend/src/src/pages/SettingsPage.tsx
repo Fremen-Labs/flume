@@ -680,15 +680,17 @@ export default function SettingsPage() {
                     <Button
                       type="button"
                       className="shrink-0 font-semibold bg-emerald-600 hover:bg-emerald-700 text-white"
-                      title="Set endpoint to host.docker.internal:52415"
+                      title={exoData?.baseUrl ? `Set endpoint to ${exoData.baseUrl}` : "Configure Exo"}
                       onClick={() => {
-                        updateForm({
-                          provider: 'openai_compatible',
-                          baseUrl: 'http://host.docker.internal:52415/v1',
-                          authMode: 'api_key',
-                          apiKey: '',
-                          model: ''
-                        });
+                        if (exoData?.active && exoData.baseUrl) {
+                          updateForm({
+                            provider: 'openai_compatible',
+                            baseUrl: exoData.baseUrl,
+                            authMode: 'api_key',
+                            apiKey: '',
+                            model: ''
+                          });
+                        }
                       }}
                     >
                       <Plus className="h-4 w-4 mr-1" />
