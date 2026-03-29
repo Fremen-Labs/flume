@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -190,8 +191,21 @@ var StartCmd = &cobra.Command{
 			var res *http.Response
 			var reqErr error
 
-			backoff := 500 * time.Millisecond
-			for retries := 1; retries <= 5; retries++ {
+			retriesLimit := 5
+			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
+				retriesLimit = r
+			}
+			initialBackoff := 500
+			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
+				initialBackoff = b
+			}
+
+			astSyncClient := &http.Client{
+				Timeout: 15 * time.Second,
+			}
+
+			backoff := time.Duration(initialBackoff) * time.Millisecond
+			for retries := 1; retries <= retriesLimit; retries++ {
 				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
 				if err != nil {
 					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
@@ -199,7 +213,7 @@ var StartCmd = &cobra.Command{
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("X-Flume-System-Token", envCfg.AdminToken)
 
-				res, reqErr = http.DefaultClient.Do(req)
+				res, reqErr = astSyncClient.Do(req)
 				if reqErr == nil && res.StatusCode == 200 {
 					defer res.Body.Close()
 					break
@@ -208,8 +222,11 @@ var StartCmd = &cobra.Command{
 				if res != nil {
 					res.Body.Close()
 				}
-				if retries < 5 {
-					log.Warn(fmt.Sprintf("AST synchronization handshaking unavailable or refused (Attempt %d/5). Retrying in %v...", retries, backoff))
+				if retries < retriesLimit {
+					log.Warn("AST synchronization handshake failed, retrying...",
+						"attempt", fmt.Sprintf("%d/%d", retries, retriesLimit),
+						"retry_in", backoff.String(),
+					)
 					time.Sleep(backoff)
 					backoff *= 2
 				}
