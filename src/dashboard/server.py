@@ -2005,15 +2005,31 @@ import httpx
 
 @app.get('/api/exo-status')
 async def api_exo_status(request: Request):
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse, urlunparse
     http_client = request.app.state.http_client
     exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
-    exo_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", "0.5"))
-    base_url = exo_url.replace('/models', '/v1')
+    
+    DEFAULT_EXO_TIMEOUT = 0.5
+    try:
+        exo_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", str(DEFAULT_EXO_TIMEOUT)))
+    except ValueError:
+        logger.warning(
+            "Invalid EXO_STATUS_TIMEOUT_SECONDS value. Falling back to default.",
+            extra={
+                "component": "exo_detector",
+                "invalid_value": os.environ.get("EXO_STATUS_TIMEOUT_SECONDS"),
+                "default_value": DEFAULT_EXO_TIMEOUT,
+            }
+        )
+        exo_timeout = DEFAULT_EXO_TIMEOUT
+
+    parsed_url = urlparse(exo_url)
+    base_url_parts = parsed_url._replace(path='/v1')
+    base_url = urlunparse(base_url_parts)
 
     try:
-        hostname = urlparse(exo_url).hostname
-        if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1'):
+        hostname = parsed_url.hostname
+        if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1', '::1'):
             logger.info("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
             return {"active": False}
     except Exception:
