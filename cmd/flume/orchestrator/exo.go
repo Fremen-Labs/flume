@@ -13,7 +13,7 @@ func CheckExoActive() bool {
 	if err == nil {
 		return true
 	}
-	
+
 	// Probe Exo native inference API metrics globally
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://localhost:52415/api/v1/models")

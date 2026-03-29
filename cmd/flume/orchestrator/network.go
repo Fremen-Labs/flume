@@ -16,7 +16,7 @@ func CheckPortBinds(ports []int) map[int]bool {
 			results[port] = false // Port is absolutely free
 		} else {
 			conn.Close()
-			results[port] = true  // Collision Detected natively
+			results[port] = true // Collision Detected natively
 		}
 	}
 	return results

@@ -7,10 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Fremen-Labs/flume/cmd/flume/commands"
+	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
-	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/Fremen-Labs/flume/cmd/flume/commands"
 )
 
 var rootCmd = &cobra.Command{

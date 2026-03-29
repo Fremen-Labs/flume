@@ -43,7 +43,7 @@ func AwaitOrchestration() error {
 	}
 
 	fmt.Print(ui.WarningGold("Awaiting Flume Ecosystem Convergence "))
-	
+
 	statusCh := PollHealth(healthUrl)
 	for status := range statusCh {
 		if status.Active {

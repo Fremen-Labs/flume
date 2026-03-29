@@ -2197,6 +2197,7 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient()
     yield
     await app.state.http_client.aclose()
+    agents_stop()
 
 app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)
 
@@ -2410,35 +2411,43 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
-def _check_ast_exists_natively(repo_path: str) -> tuple[bool, str]:
+import asyncio
+async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: str) -> tuple[bool, str]:
     try:
         es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
         headers = {'Content-Type': 'application/json'}
         if api_key: headers['Authorization'] = f'ApiKey {api_key}'
 
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
+        elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
         query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
-        req = urllib.request.Request(f"{es_url}/flume-elastro-graph/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
         
-        with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
-            data = json.loads(res.read().decode())
-            exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
-            return exists, ("Found mapping records" if exists else "No logical paths matched")
+        response = await http_client.post(f"{es_url}/{elastro_index}/_search", json=query, headers=headers, timeout=5.0, verify=False)
+        response.raise_for_status()
+        
+        data = response.json()
+        exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
+        return exists, ("Found mapping records" if exists else "No logical paths matched")
     except Exception as e:
         logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
         return False, str(e)
 
-def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
+
+async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: str, project_id: str, project_name: str):
     try:
-        exists, details = _check_ast_exists_natively(repo_path)
+        exists, details = await _check_ast_exists_natively(http_client, repo_path)
             
         if not exists:
             logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
-            subprocess.run(["elastro", "rag", "ingest", repo_path], shell=False, check=True, capture_output=True, timeout=120)
+            elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+            proc = await asyncio.create_subprocess_exec(
+                "elastro", "rag", "ingest", repo_path, "-i", elastro_index,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, "elastro", stdout, stderr)
             logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
         else:
             logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
@@ -2455,7 +2464,7 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
         logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
 
 @app.post("/api/system/sync-ast")
-def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
+async def api_system_sync_ast(request: Request, x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
     import secrets
     if not (
         settings.FLUME_ADMIN_TOKEN and
@@ -2465,14 +2474,15 @@ def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppC
         logger.warning({"event": "auth_failure", "endpoint": "/api/system/sync-ast", "reason": "invalid_system_token"})
         raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
         
-    workspace = settings.FLUME_WORKSPACE
+    flume_root = str(_SRC_ROOT.parent)
     try:
-        _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
-        exists, details = _check_ast_exists_natively(workspace)
+        http_client = request.app.state.http_client
+        await _deterministic_ast_ingest(http_client, flume_root, "flume-core", "Flume Core Architecture")
+        exists, details = await _check_ast_exists_natively(http_client, flume_root)
         if not exists:
             logger.error({
                 "event": "ast_verification_failure",
-                "workspace": workspace,
+                "workspace": flume_root,
                 "details": details,
             })
             return JSONResponse(status_code=500, content={
@@ -2498,7 +2508,7 @@ def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppC
         return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
 @app.post("/api/projects")
-def api_create_project(payload: dict, background_tasks: BackgroundTasks):
+async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
     import uuid, datetime
     name = (payload.get("name") or "").strip()
     if not name:
@@ -2517,7 +2527,8 @@ def api_create_project(payload: dict, background_tasks: BackgroundTasks):
     registry.append(entry)
     save_projects_registry(registry)
     
-    background_tasks.add_task(_deterministic_ast_ingest, entry["repoUrl"], new_id, name)
+    http_client = request.app.state.http_client
+    background_tasks.add_task(_deterministic_ast_ingest, http_client, entry["repoUrl"], new_id, name)
     
     return {"success": True, "projectId": new_id, "message": "Project dynamically constructed seamlessly natively."}
 

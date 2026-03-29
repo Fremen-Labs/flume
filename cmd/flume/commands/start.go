@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,12 +163,12 @@ var StartCmd = &cobra.Command{
 
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
-			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			
+			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao", "bootstrap")
+
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
-			
+
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
@@ -201,7 +202,18 @@ var StartCmd = &cobra.Command{
 
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
-				dash.Run()
+
+				if err := dash.Start(); err != nil {
+					log.Error("Failed to spawn Flume Dashboard natively", "err", err)
+					return
+				}
+
+				homeDir, _ := os.UserHomeDir()
+				pidFile := filepath.Join(homeDir, ".flume", "flume-daemon.pid")
+				os.MkdirAll(filepath.Dir(pidFile), 0755)
+				os.WriteFile(pidFile, []byte(strconv.Itoa(dash.Process.Pid)), 0644)
+
+				dash.Wait()
 			}()
 
 			var wg sync.WaitGroup
@@ -233,11 +245,11 @@ var StartCmd = &cobra.Command{
 			}
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = dockerEnv
-			
+
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
-			
+
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
@@ -254,30 +266,38 @@ var StartCmd = &cobra.Command{
 		if eco.HasElastro {
 			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
 
-			dashboardAPI := os.Getenv("FLUME_DASHBOARD_API_URL")
-			if dashboardAPI == "" {
-				dashboardAPI = fmt.Sprintf("http://localhost:%s", dashboardPort)
+			type ASTConfig struct {
+				DashboardAPIURL string
+				RetriesLimit    int
+				InitialBackoff  int
 			}
-			endpoint := fmt.Sprintf("%s/api/system/sync-ast", dashboardAPI)
+
+			cfg := ASTConfig{
+				DashboardAPIURL: os.Getenv("FLUME_DASHBOARD_API_URL"),
+				RetriesLimit:    5,
+				InitialBackoff:  500,
+			}
+			if cfg.DashboardAPIURL == "" {
+				cfg.DashboardAPIURL = fmt.Sprintf("http://localhost:%s", dashboardPort)
+			}
+			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
+				cfg.RetriesLimit = r
+			}
+			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
+				cfg.InitialBackoff = b
+			}
+
+			endpoint := fmt.Sprintf("%s/api/system/sync-ast", cfg.DashboardAPIURL)
 
 			var res *http.Response
 			var reqErr error
-
-			retriesLimit := 5
-			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
-				retriesLimit = r
-			}
-			initialBackoff := 500
-			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
-				initialBackoff = b
-			}
 
 			astSyncClient := &http.Client{
 				Timeout: 15 * time.Second,
 			}
 
-			backoff := time.Duration(initialBackoff) * time.Millisecond
-			for retries := 1; retries <= retriesLimit; retries++ {
+			backoff := time.Duration(cfg.InitialBackoff) * time.Millisecond
+			for retries := 1; retries <= cfg.RetriesLimit; retries++ {
 				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
 				if err != nil {
 					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
@@ -294,9 +314,9 @@ var StartCmd = &cobra.Command{
 				if res != nil {
 					res.Body.Close()
 				}
-				if retries < retriesLimit {
+				if retries < cfg.RetriesLimit {
 					log.Warn("AST synchronization handshake failed, retrying...",
-						"attempt", fmt.Sprintf("%d/%d", retries, retriesLimit),
+						"attempt", fmt.Sprintf("%d/%d", retries, cfg.RetriesLimit),
 						"retry_in", backoff.String(),
 					)
 					time.Sleep(backoff)
