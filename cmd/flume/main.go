@@ -23,6 +23,7 @@ func init() {
 	rootCmd.AddCommand(commands.StartCmd)
 	rootCmd.AddCommand(commands.DestroyCmd)
 	rootCmd.AddCommand(commands.DoctorCmd)
+	rootCmd.AddCommand(commands.DispatchCmd)
 }
 
 func main() {

@@ -19,6 +19,6 @@ dist/
 *.tar.gz
 *.sha256
 
-flume
+/flume
 .flume/agents/
 .flume/worktrees/
