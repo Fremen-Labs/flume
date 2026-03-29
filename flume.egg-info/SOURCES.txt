@@ -18,6 +18,7 @@ src/dashboard/agent_models_settings.py
 src/dashboard/codex_app_server.py
 src/dashboard/codex_app_server_client.py
 src/dashboard/codex_ws_proxy.py
+src/dashboard/config.py
 src/dashboard/es_bootstrap.py
 src/dashboard/llm_settings.py
 src/dashboard/repo_settings.py
@@ -49,6 +50,7 @@ src/utils/llm_client.py
 src/utils/logger.py
 src/utils/workspace.py
 src/worker-manager/agent_runner.py
+src/worker-manager/ast_poller.py
 src/worker-manager/elastro_sync.py
 src/worker-manager/manager.py
 src/worker-manager/meta_critic.py

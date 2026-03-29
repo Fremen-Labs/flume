@@ -2,15 +2,19 @@ services:
   openbao:
     image: hashicorp/vault:1.15
     container_name: flume-openbao
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    command: server
     environment:
-      - VAULT_DEV_ROOT_TOKEN_ID=flume-dev-token
-      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - VAULT_API_ADDR=http://127.0.0.1:8200
     ports:
       - "${VAULT_PORT:-8200}:8200"
     cap_add:
       - IPC_LOCK
     volumes:
       - openbao_data:/vault/file
+      - ./config:/vault/config:ro
     healthcheck:
       test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
       interval: 10s
@@ -18,24 +22,23 @@ services:
       retries: 5
 
   bootstrap:
-    image: hashicorp/vault:1.15
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: flume-bootstrap
     depends_on:
       openbao:
-        condition: service_healthy
+        condition: service_started
     environment:
       - VAULT_ADDR=http://openbao:8200
-      - VAULT_TOKEN=flume-dev-token
     volumes:
       - .:/app
-    entrypoint: ["/bin/sh", "/app/bootstrap.sh"]
+      - openbao_data:/vault/file
+    command: ["uv", "run", "python", "/app/bootstrap.py"]
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: flume-elasticsearch
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -46,7 +49,7 @@ services:
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200 || exit 1"]
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -v '\"status\":\"red\"' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -67,6 +70,8 @@ services:
       - .:/app
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
@@ -75,6 +80,8 @@ services:
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
+      - VAULT_ROLE_ID=flume-client-role
+      - VAULT_SECRET_ID=flume-client-secret
     command:
       - /bin/bash
       - -c
@@ -87,6 +94,11 @@ services:
         fi
         cd /app
         exec uv run python src/dashboard/server.py
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8765/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   worker:
     build:
@@ -109,10 +121,17 @@ services:
       - FLUME_WORKSPACE=/workspace
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      - VAULT_ROLE_ID=flume-client-role
+      - VAULT_SECRET_ID=flume-client-secret
     command: ["uv", "run", "python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated
       replicas: 2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   es_data:

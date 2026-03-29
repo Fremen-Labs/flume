@@ -1,15 +1,16 @@
-from utils.logger import get_logger
-logger = get_logger(__name__)
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 import json
 import os
-import re
-import shlex
-import shutil
+import signal
+import sys
+import threading
+import time
+import uuid
 import ssl
+import hvac
 
 class NetflixFaultTolerance:
     '''Netflix Microservice Resilience Wrapper'''
@@ -29,6 +30,8 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from pydantic import BaseModel
+import traceback
+from fastapi import BackgroundTasks
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -43,6 +46,8 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # noqa: E402
 
@@ -70,6 +75,8 @@ from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 
 # Module-level paths are bounded to block AppSec Path Traversals seamlessly isolating the host
 WORKSPACE_ROOT = resolve_safe_workspace()
+from config import AppConfig, get_settings
+
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
@@ -2155,7 +2162,7 @@ def _count_plan_tasks(plan: Optional[dict]) -> int:
     return total
 
 
-from fastapi import FastAPI, BackgroundTasks, WebSocket, Request
+from fastapi import FastAPI, BackgroundTasks, WebSocket, Request, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -2187,8 +2194,9 @@ async def lifespan(app: FastAPI):
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
     
+    app.state.http_client = httpx.AsyncClient()
     yield
-    # No shutdown logic presently mapped
+    await app.state.http_client.aclose()
 
 app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)
 
@@ -2294,6 +2302,91 @@ def api_intake_commit(session_id: str, payload: dict):
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 
+from urllib.parse import urlparse, urlunparse
+
+def _parse_float_env(key: str, default: float) -> float:
+    val_str = os.environ.get(key)
+    if val_str is None:
+        return default
+    try:
+        val_flt = float(val_str)
+        if val_flt > 0:
+            return val_flt
+        logger.warning(
+            f"Invalid {key} value (must be > 0). Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_flt,
+                "default_value": default,
+            }
+        )
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid {key} format. Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_str,
+                "default_value": default,
+            }
+        )
+    return default
+
+class AppSettings:
+    def __init__(self):
+        self.exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
+        self.exo_timeout = _parse_float_env("EXO_STATUS_TIMEOUT_SECONDS", 0.5)
+
+settings = AppSettings()
+
+import fastapi
+def get_app_settings() -> AppSettings:
+    return settings
+
+@app.get('/api/exo-status')
+async def api_exo_status(request: fastapi.Request, app_settings: AppSettings = fastapi.Depends(get_app_settings)):
+    http_client = request.app.state.http_client
+    
+    exo_url = app_settings.exo_url
+    exo_timeout = app_settings.exo_timeout
+
+    parsed_url = urlparse(exo_url)
+    base_url_parts = parsed_url._replace(path='/v1')
+    base_url = urlunparse(base_url_parts)
+
+    try:
+        hostname = parsed_url.hostname
+        if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1', '::1'):
+            logger.warning("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
+            return {"active": False}
+    except (ValueError, TypeError) as e:
+        logger.error("Unexpected error during Exo URL validation", extra={"target_url": exo_url, "error": str(e)})
+        return {"active": False}
+
+    try:
+        resp = await http_client.get(exo_url, timeout=exo_timeout)
+        resp.raise_for_status()
+        
+        logger.info(
+            "Successfully connected to Exo service",
+            extra={
+                "component": "exo_detector",
+                "target_url": exo_url,
+            }
+        )
+        return {"active": True, "baseUrl": base_url}
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning(
+            "Exo service connection failed",
+            extra={
+                "component": "exo_detector",
+                "target_url": exo_url,
+                "timeout_seconds": exo_timeout,
+                "error_type": type(e).__name__,
+                "error_details": str(e)
+            }
+        )
+        return {"active": False}
+
 @app.get('/api/snapshot')
 def api_snapshot():
     try:
@@ -2317,8 +2410,95 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
+def _check_ast_exists_natively(repo_path: str) -> tuple[bool, str]:
+    try:
+        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Content-Type': 'application/json'}
+        if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
+        req = urllib.request.Request(f"{es_url}/flume-elastro-graph/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
+        
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
+            data = json.loads(res.read().decode())
+            exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
+            return exists, ("Found mapping records" if exists else "No logical paths matched")
+    except Exception as e:
+        logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
+        return False, str(e)
+
+def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
+    try:
+        exists, details = _check_ast_exists_natively(repo_path)
+            
+        if not exists:
+            logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
+            subprocess.run(["elastro", "rag", "ingest", repo_path], shell=False, check=True, capture_output=True, timeout=120)
+            logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
+        else:
+            logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
+
+    except subprocess.CalledProcessError as e:
+        logger.error({
+            "event": "ast_ingest_failure", 
+            "repo": repo_path, 
+            "error": "subprocess_error",
+            "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
+            "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
+        })
+    except Exception as e:
+        logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
+
+@app.post("/api/system/sync-ast")
+def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
+    import secrets
+    if not (
+        settings.FLUME_ADMIN_TOKEN and
+        x_flume_system_token and
+        secrets.compare_digest(settings.FLUME_ADMIN_TOKEN, x_flume_system_token)
+    ):
+        logger.warning({"event": "auth_failure", "endpoint": "/api/system/sync-ast", "reason": "invalid_system_token"})
+        raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
+        
+    workspace = settings.FLUME_WORKSPACE
+    try:
+        _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
+        exists, details = _check_ast_exists_natively(workspace)
+        if not exists:
+            logger.error({
+                "event": "ast_verification_failure",
+                "workspace": workspace,
+                "details": details,
+            })
+            return JSONResponse(status_code=500, content={
+                "error": "AST ingestion completed, but post-flight verification failed.",
+                "details": details
+            })
+        return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
+    except (IOError, subprocess.CalledProcessError) as e:
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "subprocess_error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "A predictable subprocess execution failure occurred natively."})
+    except Exception as e:
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "unhandled_exception",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
+
 @app.post("/api/projects")
-def api_create_project(payload: dict):
+def api_create_project(payload: dict, background_tasks: BackgroundTasks):
     import uuid, datetime
     name = (payload.get("name") or "").strip()
     if not name:
@@ -2336,6 +2516,8 @@ def api_create_project(payload: dict):
     registry = load_projects_registry()
     registry.append(entry)
     save_projects_registry(registry)
+    
+    background_tasks.add_task(_deterministic_ast_ingest, entry["repoUrl"], new_id, name)
     
     return {"success": True, "projectId": new_id, "message": "Project dynamically constructed seamlessly natively."}
 
@@ -2362,10 +2544,137 @@ def api_task_commits(task_id: str):
 def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
-@app.post("/api/tasks/bulk-update")
-def api_tasks_bulk_update(payload: dict):
-    return {"success": True}
 
+from fastapi import Depends, HTTPException, Request, Header
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import ValidationError
+import secrets
+import httpx
+
+class KillSwitchDatabaseError(Exception): pass
+class KillSwitchProcessError(Exception): pass
+
+class AuthConfigurationError(Exception): pass
+class InvalidCredentialsError(Exception): pass
+
+class IndexError(Exception): pass
+class ElasticsearchClient:
+    def __init__(self, es_url: str, api_key: str, ca_certs: str):
+        self.es_url = es_url.rstrip('/')
+        self.headers = {'Content-Type': 'application/json'}
+        if api_key: self.headers['Authorization'] = f'ApiKey {api_key}'
+        verify_ssl = ca_certs if ca_certs else False
+        self.client = httpx.AsyncClient(headers=self.headers, verify=verify_ssl, timeout=10.0)
+
+    async def update_tasks_to_halted(self):
+        query = {
+            "query": {"terms": {"status.keyword": ["ready", "running"]}},
+            "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
+        }
+        url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
+        try:
+            response = await self.client.post(url, json=query)
+            response.raise_for_status()
+        except httpx.RequestError as e:
+            raise KillSwitchDatabaseError(f"Network error updating Elasticsearch: {e}")
+        except httpx.HTTPStatusError as e:
+            raise KillSwitchDatabaseError(f"HTTP error updating Elasticsearch: {e.response.status_code}")
+
+class AgentSupervisor:
+    def terminate_all(self) -> dict:
+        return agents_stop()
+
+class KillSwitchService:
+    def __init__(self, es_client: ElasticsearchClient, supervisor: AgentSupervisor):
+        self.es_client = es_client
+        self.supervisor = supervisor
+
+    async def halt_all_tasks(self, correlation_id: str):
+        logger.info(json.dumps({"event": "kill_switch.invoke.start", "action": "initiating_swarm_halt", "target": "all_active_tasks", "correlation_id": correlation_id}))
+        try:
+            await self.es_client.update_tasks_to_halted()
+            logger.info(json.dumps({"event": "kill_switch.db_update.success", "elasticsearch_status": "blocked", "message": "All execution bounds overridden natively", "correlation_id": correlation_id}))
+        except Exception as e:
+            logger.error(json.dumps({"event": "kill_switch.db_update.failure", "error": str(e), "correlation_id": correlation_id}))
+            raise KillSwitchDatabaseError(str(e))
+
+        try:
+            supervisor_res = self.supervisor.terminate_all()
+            killed_pids = []
+            if isinstance(supervisor_res, dict):
+                killed_pids = supervisor_res.get('killed_pids', [])
+            else:
+                logger.warning(json.dumps({
+                    "event": "kill_switch.supervisor.invalid_response",
+                    "response_type": str(type(supervisor_res)),
+                    "correlation_id": correlation_id
+                }))
+            logger.info(json.dumps({"event": "kill_switch.process_kill.success", "killed_pids": killed_pids, "killed_pid_count": len(killed_pids), "message": "Supervisor gracefully executed subprocess halts", "correlation_id": correlation_id}))
+            return {"success": True, "killed_pids": killed_pids, "correlation_id": correlation_id}
+        except Exception as e:
+            logger.critical(json.dumps({
+                "event": "kill_switch.invoke.partial_failure",
+                "error": str(e),
+                "correlation_id": correlation_id,
+                "message": "CRITICAL: Database tasks were halted, but failed to kill OS processes. Manual intervention may be required."
+            }))
+            raise KillSwitchProcessError(f"DB updated but process kill failed: {e}")
+
+def get_app_config():
+    return AppConfig()
+
+def get_es_client(app_config: AppConfig = Depends(get_app_config)):
+    return ElasticsearchClient(
+        es_url=app_config.ES_URL,
+        api_key=app_config.ES_API_KEY,
+        ca_certs=app_config.ES_CA_CERTS
+    )
+
+def get_agent_supervisor():
+    return AgentSupervisor()
+
+def get_kill_switch_service(es_client: ElasticsearchClient = Depends(get_es_client), supervisor: AgentSupervisor = Depends(get_agent_supervisor)):
+    return KillSwitchService(es_client, supervisor)
+
+class AdminAuthorizer:
+    def __init__(self, required_token: str):
+        self.required_token = required_token
+    
+    def authorize(self, auth_header: str):
+        if not self.required_token:
+            raise AuthConfigurationError("Admin token not configured on server.")
+        
+        expected_auth = f"Bearer {self.required_token}"
+        if not auth_header or not secrets.compare_digest(auth_header, expected_auth):
+            raise InvalidCredentialsError("Admin access required.")
+
+def verify_admin_access(request: Request, app_config: AppConfig = Depends(get_app_config)):
+    authorizer = AdminAuthorizer(app_config.FLUME_ADMIN_TOKEN)
+    try:
+        authorizer.authorize(request.headers.get("Authorization"))
+    except InvalidCredentialsError:
+        logger.warning(json.dumps({
+            "event": "admin_auth_failure",
+            "endpoint": "/api/tasks/stop-all",
+            "client_ip": request.client.host if request.client else "unknown"
+        }))
+        raise HTTPException(status_code=403, detail="Admin access required")
+    except AuthConfigurationError:
+        logger.critical("CRITICAL: FLUME_ADMIN_TOKEN is not set. Admin endpoint is disabled.")
+        raise HTTPException(status_code=403, detail="Endpoint disabled: Server configuration incomplete.")
+    return True
+
+@app.post("/api/tasks/stop-all", dependencies=[Depends(verify_admin_access)])
+async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(get_kill_switch_service)):
+    correlation_id = str(uuid.uuid4())
+    try:
+        result = await kill_switch_service.halt_all_tasks(correlation_id)
+        return {**result, "message": "All active Swarm networks successfully halted natively via supervisor."}
+    except (KillSwitchDatabaseError, KillSwitchProcessError) as e:
+        error_message = "An internal error occurred while halting tasks. Please check server logs."
+        if isinstance(e, KillSwitchProcessError):
+            error_message = "CRITICAL: Tasks were marked as halted, but failed to terminate running processes. Manual intervention may be required."
+        raise HTTPException(status_code=500, detail={'error': error_message, 'correlation_id': correlation_id})
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
     return []
@@ -2571,6 +2880,9 @@ def api_workflow_agents_status():
 
 
 
+import uuid
+import datetime
+
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
@@ -2579,39 +2891,94 @@ async def websocket_telemetry(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            for conn in active_connections:
-                await conn.send_text(json.dumps({"event": "update", "data": data}))
-    except Exception:
-        active_connections.remove(websocket)
+            try:
+                parsed = json.loads(data)
+                if not isinstance(parsed, dict):
+                    parsed = {"msg": str(parsed)}
+            except json.JSONDecodeError:
+                parsed = {"msg": data}
+            
+            payload = {
+                "id": parsed.get("id", uuid.uuid4().hex),
+                "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
+                "time": parsed.get("time", datetime.datetime.now().strftime("%H:%M:%S")),
+                "level": parsed.get("level", "INFO").upper()
+            }
+            
+            for conn in active_connections[:]:
+                try:
+                    await conn.send_text(json.dumps({"event": "telemetry", "data": payload}))
+                except Exception as e:
+                    logger.warning({"event": "websocket_send_failed", "client": str(conn.client), "error": str(e)})
+                    try:
+                        active_connections.remove(conn)
+                    except ValueError:
+                        pass
+    except Exception as e:
+        logger.error({"event": "websocket_handler_crashed", "client": str(websocket.client), "error": str(e), "traceback": traceback.format_exc()})
+    finally:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
-# Static Mount for Frontend
-from fastapi.responses import FileResponse
 
-if STATIC_ROOT.exists():
-    asset_dir = STATIC_ROOT / "assets"
-    if asset_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
 
-    @app.get("/{full_path:path}")
-    async def serve_spa_catchall(full_path: str):
-        if full_path.startswith("api/"):
-            from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        path = STATIC_ROOT / full_path
-        if path.is_file():
-            return FileResponse(path)
-        return FileResponse(STATIC_ROOT / "index.html")
-else:
-    @app.get("/{full_path:path}")
-    def fallback_root(full_path: str):
-        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
+def get_vault_token():
+    t = os.environ.get('VAULT_TOKEN')
+    if t: return t
+    
+    role_id = os.environ.get('VAULT_ROLE_ID')
+    secret_id = os.environ.get('VAULT_SECRET_ID')
+    
+    if role_id and secret_id:
+        try:
+            openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+            client = hvac.Client(url=openbao_url)
+            res = client.auth.approle.login(role_id=role_id, secret_id=secret_id)
+            return res['auth']['client_token']
+        except Exception as e:
+            logger.error(f"AppRole login failed natively: {e}")
+            raise RuntimeError("Critical: Failed to authenticate via Vault AppRole.")
+            
+    raise RuntimeError("Critical: Vault authentication configuration missing. Neither VAULT_TOKEN nor VAULT_ROLE_ID/VAULT_SECRET_ID provided.")
+
+@app.get("/api/logs")
+def get_telemetry_logs():
+    try:
+        body = {
+            "size": 60,
+            "sort": [{"timestamp": {"order": "desc"}}],
+            "query": {"match_all": {}}
+        }
+        res = es_search('flume-telemetry', body)
+        hits = res.get('hits', {}).get('hits', [])
+        logs = []
+        for h in hits:
+            src = h['_source']
+            t_iso = src.get('timestamp', '')
+            try:
+                time_str = datetime.fromisoformat(t_iso.replace('Z', '+00:00')).strftime('%H:%M:%S')
+            except Exception:
+                time_str = t_iso
+                
+            logs.append({
+                "id": h['_id'],
+                "msg": f"[{src.get('worker_name', 'System')}] {src.get('message', '')}",
+                "time": time_str,
+                "level": src.get('level', 'INFO')
+            })
+        logs.reverse()
+        return logs
+    except Exception as e:
+        logger.error("Failed to query telemetry logs natively", exc_info=True)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Could not load logs")
 
 @app.get("/api/vault/status")
 def vault_status():
     import urllib.request
     import urllib.error
     openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
-    vault_token = os.environ.get('VAULT_TOKEN', 'flume-dev-token')
+    vault_token = get_vault_token()
     try:
         req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -2632,6 +2999,7 @@ def vault_status():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+from pydantic import BaseModel
 class TaskClaimRequest(BaseModel):
     worker_id: str
     
@@ -2667,7 +3035,7 @@ def get_system_settings():
         "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
         "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
         "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
-        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else ""
+        "vault_token": "••••" if get_vault_token() or sys_conf.get('vault_token') else ""
     }
 
 @app.put("/api/settings/system")
@@ -2695,6 +3063,29 @@ def update_system_settings(settings: SystemSettingsRequest):
         toml.dump(t, f)
         
     return {"status": "ok"}
+
+
+# Static Mount for Frontend
+from fastapi.responses import FileResponse
+
+if STATIC_ROOT.exists():
+    asset_dir = STATIC_ROOT / "assets"
+    if asset_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa_catchall(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        path = STATIC_ROOT / full_path
+        if path.is_file():
+            return FileResponse(path)
+        return FileResponse(STATIC_ROOT / "index.html")
+else:
+    @app.get("/{full_path:path}")
+    def fallback_root(full_path: str):
+        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
 
 if __name__ == "__main__":

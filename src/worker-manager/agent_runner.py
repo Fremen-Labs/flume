@@ -164,20 +164,6 @@ _IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
-            'name': 'elastro_rag_ingest',
-            'description': 'Ingest a new repository into the Elastro AST indexing system. Use this only for brand new projects that have not been indexed before to mathematically map all token bounds.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'repo_path': {'type': 'string', 'description': 'The absolute path to the repository root.'},
-                },
-                'required': ['repo_path'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
             'name': 'elastro_query_ast',
             'description': 'Query the Elastro AST index for precise code mappings and snippets matching your work item. MUST be used before modifying code to dynamically save tokens contextually.',
             'parameters': {
@@ -369,15 +355,6 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
-
-
-def _exec_elastro_rag_ingest(args: dict, repo_path: Optional[str]) -> str:
-    try:
-        p = _resolve_path(args.get('repo_path', repo_path or '.'), repo_path)
-        subprocess.run(f'elastro rag ingest "{p}"', shell=True, check=True, capture_output=True, timeout=120)
-        return "OK: AST Ingested Successfully."
-    except Exception as e:
-        return f'ERROR ingesting AST natively: {e}'
 
 
 def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
@@ -586,23 +563,6 @@ def _exec_multi_replace_file_content(args: dict, repo_path: Optional[str]) -> st
             
         p.write_text(content)
         
-        # Native AST Integration mapping Elasticsearch automatically
-        try:
-            subprocess.run(['elastro', 'rag', 'update', str(p)], check=True, capture_output=True, timeout=10)
-            import elastro_sync
-            elastro_sync.sync_ast()
-        except Exception as e:
-            logger.error(
-                "Failed to trigger elastro AST update",
-                extra={
-                    "file_path": str(p),
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "stdout": e.stdout.decode('utf-8', errors='replace') if hasattr(e, 'stdout') and e.stdout else None,
-                    "stderr": e.stderr.decode('utf-8', errors='replace') if hasattr(e, 'stderr') and e.stderr else None,
-                }
-            )
-            
         return json.dumps({"status": "success", "message": f"Applied {len(replacements)} deterministic replacements to {p}"})
     except Exception as e:
         logger.exception("Unexpected error in multi_replace_file_content")
@@ -956,11 +916,8 @@ def run_implementer(
             elif fn_name == 'memory_write':
                 _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
                 tool_result = _exec_memory_write(fn_args)
-            elif fn_name == 'elastro_rag_ingest':
-                _progress(f'Ingesting AST: {fn_args.get("repo_path", "")}')
-                tool_result = _exec_elastro_rag_ingest(fn_args, repo_path)
             elif fn_name == 'elastro_query_ast':
-                _progress(f'Querying AST: {fn_args.get("query", "")}')
+                _progress(f'Querying AST for nodes mapping: {fn_args.get("query", "")}')
                 tool_result = _exec_elastro_query_ast(fn_args, repo_path)
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')

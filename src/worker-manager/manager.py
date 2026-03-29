@@ -13,6 +13,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
@@ -93,6 +94,36 @@ except PermissionError:
 
 def log(msg):
     _manager_logger.info(str(msg))
+
+def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
+    doc = {
+        "timestamp": now_iso(),
+        "worker_name": worker_name,
+        "event_type": event_type,
+        "message": details,
+        "level": level
+    }
+    try:
+        es_request("/flume-telemetry/_doc", body=doc, method="POST")
+    except Exception as e:
+        log(f"telemetry logging failed: {e}")
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","service":"flume-worker"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 def load_agent_role_defs():
@@ -460,6 +491,7 @@ def cycle():
                 snapshot['preferred_llm_credential_id'] = pref_cred
                 snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
                 log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+                log_telemetry_event(worker['name'], "TASK_CLAIM", f"Claimed task: {snapshot['current_task_title'][:50]}")
             else:
                 # OCC Mutex Lock denied (task snagged by a faster node in the cluster)
                 snapshot['status'] = 'idle'
@@ -508,4 +540,7 @@ def main():
 
 
 if __name__ == '__main__':
+    from ast_poller import start_poller_thread
+    start_health_server()
+    start_poller_thread()
     main()
