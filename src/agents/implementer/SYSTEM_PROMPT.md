@@ -21,7 +21,7 @@ Each task object strictly conforms to the following JSON schema:
 ## Memory & State Isolation
 All stateful interactions across tasks MUST be routed through explicitly typed memory tool signatures to prevent state leakage globally. 
 - You do NOT possess implicit memory across task arrays.
-- To persist operational logic or retrieve cached context, you MUST execute the following strict signatures natively:
+- To persist operational logic or retrieve cached context, you MUST execute the following strict signatures:
     - `memory_write(namespace: "agent_semantic_memory" | "agent_knowledge", key: str, value: str, ttl: int)`
     - `memory_read(namespace: "agent_semantic_memory" | "agent_knowledge", key: str)` -> returns `str`
 - Do NOT hallucinate abstract memory arrays. Rely strictly on `memory_read` and `memory_write` bounds.
@@ -36,13 +36,14 @@ Tasks that require reading and searching the codebase but NO modifications.
 
 ### Type: "code"
 Tasks that require modifying or writing files.
-- Process tasks strictly via the provided `task_id` array natively.
+- Process tasks strictly via the provided `task_id` array.
 - **Zero-Blind-Write Rule**: You MUST `read_file` on any target file BEFORE you call `write_file`.
 - **Pre-Execution Linting**: After executing `write_file`, run `golangci-lint`, `ruff`, or equivalent local linting via `run_shell` BEFORE asserting completion.
-- Call `implementation_complete` heavily summarizing the exact functions modified and confirming lint success natively.
+- Call `implementation_complete`, summarizing the exact functions modified and confirming lint success.
 
 ## Explicit Rules
 - Do NOT use abstract reasoning or speculative file modifications outside of the explicit `instructions` payload.
-- Always execute `implementation_complete` to signal the state machine successfully parsing your JSON task array cleanly.
+- Always execute `implementation_complete` to signal task completion. You must use the following schema:
+  `{"status": "complete", "modified_files": ["..."], "lint_passed": boolean, "summary": "..."}`
 - **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` to retrieve mapped nodes corresponding to your workitem before editing code.
-- Target the explicit semantic AST bounds (`fremen_codebase_rag`) via `elastro` when `analysis` lacks direct file paths gracefully.
+- Target the explicit semantic AST bounds (`fremen_codebase_rag`) via `elastro` when `analysis` lacks direct file paths.
