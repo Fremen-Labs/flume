@@ -3,26 +3,58 @@ package orchestrator
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 )
 
+type HealthStatus struct {
+	Active  bool
+	Timeout bool
+}
+
+// PollHealth iteratively checks the health endpoint and pushes state to a channel.
+func PollHealth(url string) <-chan HealthStatus {
+	ch := make(chan HealthStatus)
+	go func() {
+		defer close(ch)
+		client := http.Client{Timeout: 2 * time.Second}
+		for i := 0; i < 60; i++ {
+			resp, err := client.Get(url)
+			if err == nil && resp.StatusCode == 200 {
+				resp.Body.Close()
+				ch <- HealthStatus{Active: true, Timeout: false}
+				return
+			}
+			ch <- HealthStatus{Active: false, Timeout: false}
+			time.Sleep(1 * time.Second)
+		}
+		ch <- HealthStatus{Active: false, Timeout: true}
+	}()
+	return ch
+}
+
 // AwaitOrchestration enforces strict Netflix engineering loops actively asserting system stabilization iteratively.
-func AwaitOrchestration() {
-	client := http.Client{Timeout: 2 * time.Second}
+func AwaitOrchestration() error {
+	healthUrl := os.Getenv("FLUME_HEALTH_URL")
+	if healthUrl == "" {
+		healthUrl = "http://localhost:8765/api/health"
+	}
+
 	fmt.Print(ui.WarningGold("Awaiting Flume Ecosystem Convergence "))
 	
-	for i := 0; i < 3; i++ { // Bounded loop for immediate testing constraints
-		resp, err := client.Get("http://localhost:8765/api/health")
-		if err == nil && resp.StatusCode == 200 {
-			resp.Body.Close()
+	statusCh := PollHealth(healthUrl)
+	for status := range statusCh {
+		if status.Active {
 			fmt.Println(ui.SuccessBlue("\n[FLUME ACTIVE] Dashboard & Workers globally synchronized."))
-			return
+			return nil
 		}
-		
+		if status.Timeout {
+			fmt.Println(ui.CyberGradient("\n[ERROR] Boot sequence timeout out after 60 seconds!"))
+			return fmt.Errorf("timeout awaiting flume ecosystem convergence")
+		}
 		fmt.Print(ui.CyberGradient("."))
-		time.Sleep(1 * time.Second)
 	}
-	fmt.Println(ui.SuccessBlue("\n[FLUME CAPTIVE] Boot sequence offloaded natively!"))
+	return nil
 }
