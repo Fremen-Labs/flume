@@ -1981,8 +1981,9 @@ async def lifespan(app: FastAPI):
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
     
+    app.state.http_client = httpx.AsyncClient()
     yield
-    # No shutdown logic presently mapped
+    await app.state.http_client.aclose()
 
 app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)
 
@@ -1998,6 +1999,93 @@ app.add_middleware(
 @app.get('/api/health')
 def health():
     return {"status": "ok"}
+
+
+
+from urllib.parse import urlparse, urlunparse
+
+def _parse_float_env(key: str, default: float) -> float:
+    val_str = os.environ.get(key)
+    if val_str is None:
+        return default
+    try:
+        val_flt = float(val_str)
+        if val_flt > 0:
+            return val_flt
+        logger.warning(
+            f"Invalid {key} value (must be > 0). Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_flt,
+                "default_value": default,
+            }
+        )
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid {key} format. Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_str,
+                "default_value": default,
+            }
+        )
+    return default
+
+class AppSettings:
+    def __init__(self):
+        self.exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
+        self.exo_timeout = _parse_float_env("EXO_STATUS_TIMEOUT_SECONDS", 0.5)
+
+settings = AppSettings()
+
+import fastapi
+def get_app_settings() -> AppSettings:
+    return settings
+
+@app.get('/api/exo-status')
+async def api_exo_status(request: fastapi.Request, app_settings: AppSettings = fastapi.Depends(get_app_settings)):
+    http_client = request.app.state.http_client
+    
+    exo_url = app_settings.exo_url
+    exo_timeout = app_settings.exo_timeout
+
+    parsed_url = urlparse(exo_url)
+    base_url_parts = parsed_url._replace(path='/v1')
+    base_url = urlunparse(base_url_parts)
+
+    try:
+        hostname = parsed_url.hostname
+        if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1', '::1'):
+            logger.warning("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
+            return {"active": False}
+    except (ValueError, TypeError) as e:
+        logger.error("Unexpected error during Exo URL validation", extra={"target_url": exo_url, "error": str(e)})
+        return {"active": False}
+
+    try:
+        resp = await http_client.get(exo_url, timeout=exo_timeout)
+        resp.raise_for_status()
+        
+        logger.info(
+            "Successfully connected to Exo service",
+            extra={
+                "component": "exo_detector",
+                "target_url": exo_url,
+            }
+        )
+        return {"active": True, "baseUrl": base_url}
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.warning(
+            "Exo service connection failed",
+            extra={
+                "component": "exo_detector",
+                "target_url": exo_url,
+                "timeout_seconds": exo_timeout,
+                "error_type": type(e).__name__,
+                "error_details": str(e)
+            }
+        )
+        return {"active": False}
 
 @app.get('/api/snapshot')
 def api_snapshot():

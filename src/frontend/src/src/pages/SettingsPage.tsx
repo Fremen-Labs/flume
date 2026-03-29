@@ -283,6 +283,18 @@ export default function SettingsPage() {
     staleTime: 30_000,
   });
 
+  const { data: exoData } = useQuery<{ active: boolean; baseUrl?: string }>({
+    queryKey: ['settings', 'exo-status'],
+    queryFn: async () => {
+      const res = await fetch('/api/exo-status');
+      if (!res.ok) {
+        throw new Error(`Failed to fetch exo-status: ${res.statusText}`);
+      }
+      return await res.json();
+    },
+    staleTime: 30_000,
+  });
+
   const [sysForm, setSysForm] = useState<Partial<SystemSettingsPayload>>({});
   const [sysSaveError, setSysSaveError] = useState<string | null>(null);
   const [sysSaveSuccess, setSysSaveSuccess] = useState(false);
@@ -504,10 +516,44 @@ export default function SettingsPage() {
     );
   }
 
+  const [userPerspective, setUserPerspective] = useState<string>(() => {
+    try {
+      return localStorage.getItem('fremen-user-perspective') ?? 'standard';
+    } catch {
+      return 'standard';
+    }
+  });
+
+  const onPerspectiveChange = (v: string) => {
+    setUserPerspective(v);
+    try {
+      localStorage.setItem('fremen-user-perspective', v);
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
     <div className="p-6 lg:p-8 max-w-[800px] mx-auto space-y-8">
-      <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
-      <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
+          <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
+        </div>
+        
+        <div className="w-48">
+          <Select value={userPerspective} onValueChange={onPerspectiveChange}>
+            <SelectTrigger className="h-8">
+              <SelectValue placeholder="Perspective" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="standard">Standard User</SelectItem>
+              <SelectItem value="exo_administrator">Exo Administrator</SelectItem>
+              <SelectItem value="developer">Developer</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
       {false && (
         <div
@@ -626,6 +672,35 @@ export default function SettingsPage() {
             </AccordionTrigger>
             <AccordionContent>
               <div className="space-y-6 pt-4">
+                {exoData?.active && (userPerspective === 'exo_administrator' || userPerspective === 'developer') && (
+                  <div className="rounded-xl border-2 border-emerald-500/50 bg-emerald-500/15 dark:bg-emerald-950/40 px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between shadow-sm">
+                    <div className="space-y-1 min-w-0">
+                      <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Exo Cluster Detected Locally!</p>
+                      <p className="text-xs text-emerald-700 dark:text-emerald-400/80 leading-relaxed">
+                        A fast Apple Silicon cluster daemon is running on your host machine.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      className="shrink-0 font-semibold bg-emerald-600 hover:bg-emerald-700 text-white"
+                      title={exoData?.baseUrl ? `Set endpoint to ${exoData.baseUrl}` : "Configure Exo"}
+                      onClick={() => {
+                        if (exoData?.active && exoData.baseUrl) {
+                          updateForm({
+                            provider: 'openai_compatible',
+                            baseUrl: exoData.baseUrl,
+                            authMode: 'api_key',
+                            apiKey: '',
+                            model: ''
+                          });
+                        }
+                      }}
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Configure Exo
+                    </Button>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label>Provider</Label>
                   <Select
