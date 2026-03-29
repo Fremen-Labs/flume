@@ -2039,12 +2039,16 @@ class AppSettings:
 
 settings = AppSettings()
 
+import fastapi
+def get_app_settings() -> AppSettings:
+    return settings
+
 @app.get('/api/exo-status')
-async def api_exo_status(request: Request):
+async def api_exo_status(request: fastapi.Request, app_settings: AppSettings = fastapi.Depends(get_app_settings)):
     http_client = request.app.state.http_client
     
-    exo_url = settings.exo_url
-    exo_timeout = settings.exo_timeout
+    exo_url = app_settings.exo_url
+    exo_timeout = app_settings.exo_timeout
 
     parsed_url = urlparse(exo_url)
     base_url_parts = parsed_url._replace(path='/v1')
