@@ -163,7 +163,7 @@ var StartCmd = &cobra.Command{
 
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
-			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao", "bootstrap")
+			c := exec.Command("docker", "compose", "up", "-d", "--wait", "elasticsearch", "openbao", "bootstrap")
 
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
@@ -243,7 +243,7 @@ var StartCmd = &cobra.Command{
 			if envCfg.APIKey != "" {
 				dockerEnv = append(dockerEnv, "LLM_API_KEY="+envCfg.APIKey)
 			}
-			c := exec.Command("docker", "compose", "up", "-d")
+			c := exec.Command("docker", "compose", "up", "-d", "--wait")
 			c.Env = dockerEnv
 
 			var outBuf, errBuf bytes.Buffer

@@ -530,6 +530,19 @@ def main():
         raise SystemExit(
             'ES_API_KEY is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
         )
+        
+    def ping_local_llm():
+        url = os.environ.get("LLM_BASE_URL") or os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+        if "docker" in url and sys.platform.startswith("linux"):
+            log("WARNING: host.docker.internal natively detected on Linux! If workers hang, define LOCAL_LLM_HOST=172.17.0.1 in .env")
+        try:
+            req = urllib.request.Request(f"{url}/models", method="GET")
+            with urllib.request.urlopen(req, timeout=3):
+                pass
+        except Exception as e:
+            log(f"WARNING: Local LLM boot ping failed at {url}: {e} (Workers may stall if unreachable)")
+
+    ping_local_llm()
     log('worker manager starting')
     while True:
         try:

@@ -59,6 +59,9 @@ type DiagnosticsReport struct {
 	AgentsReady   int
 	AgentsBusy    int
 
+	LlmOnline bool
+	LlmTarget string
+
 	mu sync.Mutex
 }
 
@@ -149,6 +152,21 @@ func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsRepor
 	}
 }
 
+func fetchLlmGateway(client *http.Client, baseURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
+	defer wg.Done()
+	report.mu.Lock()
+	report.LlmTarget = baseURL
+	report.mu.Unlock()
+
+	resp, err := client.Get(baseURL + "/models")
+	if err == nil {
+		defer resp.Body.Close()
+		report.mu.Lock()
+		report.LlmOnline = true
+		report.mu.Unlock()
+	}
+}
+
 // Presentation Layer Mapping
 func renderDiagnosticReport(report *DiagnosticsReport) {
 	// Status resolutions
@@ -176,6 +194,11 @@ func renderDiagnosticReport(report *DiagnosticsReport) {
 		apiStat = valueStyle.Render("ONLINE")
 	}
 
+	llmStat := errStyle.Render(fmt.Sprintf("OFFLINE (%s unreachable, verify LOCAL_LLM_HOST if on Linux!)", report.LlmTarget))
+	if report.LlmOnline {
+		llmStat = valueStyle.Render(fmt.Sprintf("ONLINE (%s)", report.LlmTarget))
+	}
+
 	// UI Layout
 	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
 
@@ -188,6 +211,7 @@ func renderDiagnosticReport(report *DiagnosticsReport) {
 	fmt.Println(renderRow("OpenBao KMS:", vaultStat))
 	fmt.Println(renderRow("Elasticsearch Engine:", esStat))
 	fmt.Println(renderRow("Flume API Orchestrator:", apiStat))
+	fmt.Println(renderRow("Local LLM Base URI:", llmStat))
 	fmt.Println(borderStyle.Render("├─────────────────────────────────────────────────────────────────┤"))
 	fmt.Println(renderRow("Active Projects:", valueStyle.Render(fmt.Sprintf("%d", report.Projects))))
 	fmt.Println(renderRow("Work In Queue:", valueStyle.Render(fmt.Sprintf("%d tasks", report.QueuedWork))))
@@ -208,6 +232,7 @@ var DoctorCmd = &cobra.Command{
 		esURL, _ := cmd.Flags().GetString("es-url")
 		vaultURL, _ := cmd.Flags().GetString("vault-url")
 		dashboardURL, _ := cmd.Flags().GetString("dashboard-url")
+		llmURL, _ := cmd.Flags().GetString("llm-url")
 
 		client := &http.Client{Timeout: 3 * time.Second}
 		report := &DiagnosticsReport{}
@@ -216,11 +241,12 @@ var DoctorCmd = &cobra.Command{
 		fmt.Println("\n" + ui.CyberGradient(":: FLUME ECOSYSTEM TELEMETRY DIAGNOSTICS ::") + "\n")
 
 		// Parallel Telemetry Execution Maps (Goroutines)
-		wg.Add(4)
+		wg.Add(5)
 		go fetchDocker(report, &wg)
 		go fetchVault(client, vaultURL, report, &wg)
 		go fetchElasticsearch(client, esURL, report, &wg)
 		go fetchDashboard(client, dashboardURL, report, &wg)
+		go fetchLlmGateway(client, llmURL, report, &wg)
 
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
@@ -233,4 +259,5 @@ func init() {
 	DoctorCmd.Flags().StringP("es-url", "e", "http://localhost:9200", "Elasticsearch Diagnostic Endpoint")
 	DoctorCmd.Flags().StringP("vault-url", "v", "http://localhost:8200", "OpenBao Telemetry Endpoint")
 	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://localhost:8765", "Flume API Dashboard Endpoint")
+	DoctorCmd.Flags().StringP("llm-url", "l", "http://host.docker.internal:52415/v1", "Local LLM Inference Engine Endpoint")
 }
