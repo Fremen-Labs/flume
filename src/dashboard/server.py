@@ -2005,36 +2005,46 @@ def health():
 
 from urllib.parse import urlparse, urlunparse
 
+def _parse_float_env(key: str, default: float) -> float:
+    val_str = os.environ.get(key)
+    if val_str is None:
+        return default
+    try:
+        val_flt = float(val_str)
+        if val_flt > 0:
+            return val_flt
+        logger.warning(
+            f"Invalid {key} value (must be > 0). Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_flt,
+                "default_value": default,
+            }
+        )
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid {key} format. Falling back to default.",
+            extra={
+                "component": "config_parser",
+                "invalid_value": val_str,
+                "default_value": default,
+            }
+        )
+    return default
+
+class AppSettings:
+    def __init__(self):
+        self.exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
+        self.exo_timeout = _parse_float_env("EXO_STATUS_TIMEOUT_SECONDS", 0.5)
+
+settings = AppSettings()
+
 @app.get('/api/exo-status')
 async def api_exo_status(request: Request):
     http_client = request.app.state.http_client
-    exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
     
-    DEFAULT_EXO_TIMEOUT = 0.5
-    try:
-        configured_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", str(DEFAULT_EXO_TIMEOUT)))
-        if configured_timeout > 0:
-            exo_timeout = configured_timeout
-        else:
-            logger.warning(
-                "Invalid EXO_STATUS_TIMEOUT_SECONDS value (must be > 0). Falling back to default.",
-                extra={
-                    "component": "exo_detector",
-                    "invalid_value": configured_timeout,
-                    "default_value": DEFAULT_EXO_TIMEOUT,
-                }
-            )
-            exo_timeout = DEFAULT_EXO_TIMEOUT
-    except ValueError:
-        logger.warning(
-            "Invalid EXO_STATUS_TIMEOUT_SECONDS value. Falling back to default.",
-            extra={
-                "component": "exo_detector",
-                "invalid_value": os.environ.get("EXO_STATUS_TIMEOUT_SECONDS"),
-                "default_value": DEFAULT_EXO_TIMEOUT,
-            }
-        )
-        exo_timeout = DEFAULT_EXO_TIMEOUT
+    exo_url = settings.exo_url
+    exo_timeout = settings.exo_timeout
 
     parsed_url = urlparse(exo_url)
     base_url_parts = parsed_url._replace(path='/v1')
@@ -2043,7 +2053,7 @@ async def api_exo_status(request: Request):
     try:
         hostname = parsed_url.hostname
         if hostname not in ('host.docker.internal', 'localhost', '127.0.0.1', '::1'):
-            logger.info("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
+            logger.warning("Rejected Exo base URL targeting out-of-bounds mapping", extra={"target_url": exo_url})
             return {"active": False}
     except (ValueError, TypeError) as e:
         logger.error("Unexpected error during Exo URL validation", extra={"target_url": exo_url, "error": str(e)})
@@ -2067,6 +2077,7 @@ async def api_exo_status(request: Request):
             extra={
                 "component": "exo_detector",
                 "target_url": exo_url,
+                "timeout_seconds": exo_timeout,
                 "error_type": type(e).__name__,
                 "error_details": str(e)
             }
