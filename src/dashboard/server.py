@@ -2066,17 +2066,34 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
         logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
 
 @app.post("/api/system/sync-ast")
-def api_system_sync_ast():
-    workspace = os.environ.get('FLUME_WORKSPACE') or str(WORKSPACE_ROOT)
+def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
+    if not settings.FLUME_ADMIN_TOKEN or x_flume_system_token != settings.FLUME_ADMIN_TOKEN:
+        logger.warning({"event": "ast_system_sync_forbidden", "reason": "Invalid or missing structural token bounds natively"})
+        raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
+        
+    workspace = settings.FLUME_WORKSPACE
     try:
         _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
         exists = _check_ast_exists_natively(workspace)
         if not exists:
             return JSONResponse(status_code=500, content={"error": "AST mapping verification inherently failed post-ingestion"})
         return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
+    except (IOError, subprocess.CalledProcessError) as e:
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "predictable_subprocess_rejection",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "A predictable subprocess execution failure occurred natively."})
     except Exception as e:
-        logger.error({"event": "ast_system_sync_failure", "error": str(e)})
-        return JSONResponse(status_code=500, content={"error": f"AST Sync aborted inherently: {e}"})
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "unhandled_exception",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
 @app.post("/api/projects")
 def api_create_project(payload: dict, background_tasks: BackgroundTasks):
@@ -2126,7 +2143,7 @@ def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Header
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError
 import secrets
@@ -2144,6 +2161,12 @@ class AppConfig(BaseSettings):
     ES_API_KEY: str = ""
     ES_CA_CERTS: str = ""
     FLUME_ADMIN_TOKEN: str = ""
+    FLUME_WORKSPACE: str = str(WORKSPACE_ROOT)
+
+import functools
+@functools.lru_cache()
+def get_settings():
+    return AppConfig()
 
 class ElasticsearchClient:
     def __init__(self, es_url: str, api_key: str, ca_certs: str):

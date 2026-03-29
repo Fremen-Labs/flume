@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/spf13/cobra"
@@ -78,6 +79,13 @@ var StartCmd = &cobra.Command{
 			APIKey:   os.Getenv("FLUME_API_KEY"),
 		}
 
+		adminToken, tErr := orchestrator.GenerateAdminToken()
+		if tErr != nil {
+			log.Error("Failed to seed explicit cryptographic bounds natively", "error", tErr)
+			return tErr
+		}
+		envCfg.AdminToken = adminToken
+
 		if orchestrator.CheckExoActive() {
 			log.Info("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences.")
 		} else if envCfg.Provider == "" || envCfg.APIKey == "" {
@@ -131,6 +139,7 @@ var StartCmd = &cobra.Command{
 				if envCfg.APIKey != "" {
 					dashEnv = append(dashEnv, "LLM_API_KEY="+envCfg.APIKey)
 				}
+				dashEnv = append(dashEnv, "FLUME_ADMIN_TOKEN="+envCfg.AdminToken)
 				dash.Env = dashEnv
 				
 				dash.Stdout = os.Stdout
@@ -171,21 +180,50 @@ var StartCmd = &cobra.Command{
 
 		if eco.HasElastro {
 			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
-			req, err := http.NewRequestWithContext(cmd.Context(), "POST", fmt.Sprintf("http://localhost:%s/api/system/sync-ast", dashboardPort), nil)
-			if err != nil {
-				return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
+
+			dashboardAPI := os.Getenv("FLUME_DASHBOARD_API_URL")
+			if dashboardAPI == "" {
+				dashboardAPI = fmt.Sprintf("http://localhost:%s", dashboardPort)
 			}
-			req.Header.Set("Content-Type", "application/json")
-			res, err := http.DefaultClient.Do(req)
-			if err != nil {
-				log.Error("Critical architectural failure synchronizing AST metrics: backend interface unreachable natively", "error", err)
-				return fmt.Errorf("ast synchronization explicitly failed: %w", err)
+			endpoint := fmt.Sprintf("%s/api/system/sync-ast", dashboardAPI)
+
+			var res *http.Response
+			var reqErr error
+
+			backoff := 500 * time.Millisecond
+			for retries := 1; retries <= 5; retries++ {
+				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
+				if err != nil {
+					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Flume-System-Token", envCfg.AdminToken)
+
+				res, reqErr = http.DefaultClient.Do(req)
+				if reqErr == nil && res.StatusCode == 200 {
+					defer res.Body.Close()
+					break
+				}
+
+				if res != nil {
+					res.Body.Close()
+				}
+				if retries < 5 {
+					log.Warn(fmt.Sprintf("AST synchronization handshaking unavailable or refused (Attempt %d/5). Retrying in %v...", retries, backoff))
+					time.Sleep(backoff)
+					backoff *= 2
+				}
 			}
-			defer res.Body.Close()
-			if res.StatusCode != 200 {
-				log.Error("Critical architectural failure synchronizing AST metrics: HTTP 500 rejection by python backend", "code", res.StatusCode)
-				return fmt.Errorf("backend rejected ast update block natively")
+
+			if reqErr != nil || (res != nil && res.StatusCode != 200) {
+				statusCode := 0
+				if res != nil {
+					statusCode = res.StatusCode
+				}
+				log.Error("Critical architectural failure synchronizing AST metrics: backend rejected AST update inherently natively", "error", reqErr, "code", statusCode)
+				return fmt.Errorf("ast synchronization inherently failed securely")
 			}
+
 			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
 		}
 
