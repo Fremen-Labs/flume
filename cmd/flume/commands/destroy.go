@@ -23,9 +23,19 @@ var DestroyCmd = &cobra.Command{
 		if pidBytes, err := os.ReadFile(pidFile); err == nil {
 			if pid, parseErr := strconv.Atoi(string(pidBytes)); parseErr == nil {
 				if process, pErr := os.FindProcess(pid); pErr == nil {
-					fmt.Println(ui.CyberGradient(fmt.Sprintf("Transmitting SIGTERM mapping to sub-orchestrator PID [%d] natively...", pid)))
-					process.Signal(syscall.SIGTERM)
-					time.Sleep(3 * time.Second)
+					if err := process.Signal(syscall.Signal(0)); err == nil {
+						fmt.Println(ui.CyberGradient(fmt.Sprintf("Transmitting SIGTERM mapping to sub-orchestrator PID [%d] natively...", pid)))
+						process.Signal(syscall.SIGTERM)
+						time.Sleep(1 * time.Second)
+
+						if checkErr := process.Signal(syscall.Signal(0)); checkErr == nil {
+							fmt.Println(ui.WarningGold(fmt.Sprintf("PID [%d] did not respond to SIGTERM, escalating to SIGKILL...", pid)))
+							process.Signal(syscall.SIGKILL)
+							time.Sleep(1 * time.Second)
+						}
+					} else {
+						fmt.Println(ui.WarningGold(fmt.Sprintf("Stale PID file detected. Sub-orchestrator PID [%d] is not running natively.", pid)))
+					}
 				}
 			}
 			os.Remove(pidFile)
