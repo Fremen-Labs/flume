@@ -14,6 +14,7 @@ export interface WorkerState {
 export interface SystemState {
   updated_at: string;
   workers: WorkerState[];
+  telemetry?: Record<string, any>;
 }
 
 export function useSystemState(pollInterval: number = 2000) {

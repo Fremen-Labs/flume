@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Radar, PowerOff, ShieldAlert, Loader2 } from 'lucide-react';
+import { Radar, PowerOff, ShieldAlert, Loader2, Activity, Database, Zap, HardDrive } from 'lucide-react';
 import { LiveMissionRadar } from '@/components/mission/LiveMissionRadar';
 import { toast } from 'sonner';
+import { useSystemState } from '@/hooks/useSystemState';
 
 export default function MissionControlPage() {
   const [haltingState, setHaltingState] = useState<'idle' | 'confirm' | 'halting'>('idle');
+  const systemState = useSystemState(2000);
+  const telemetry = systemState?.telemetry || {};
 
   const triggerKillSwitch = async () => {
     setHaltingState('halting');
@@ -108,6 +111,51 @@ export default function MissionControlPage() {
           </div>
         </div>
       </motion.div>
+
+      {Object.keys(telemetry).length > 0 && (
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10"
+        >
+          <div className="glass-card p-4 flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-muted-foreground text-xs font-semibold uppercase tracking-wider">
+              <Activity className="w-3.5 h-3.5 text-blue-400" />
+              Agent Throughput
+            </div>
+            <div className="text-2xl font-bold font-mono text-white flex items-baseline gap-1">
+              {telemetry.completedWork || 0} <span className="text-xs font-sans text-muted-foreground font-normal">tasks solved</span>
+            </div>
+          </div>
+          <div className="glass-card p-4 flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-muted-foreground text-xs font-semibold uppercase tracking-wider">
+              <Zap className="w-3.5 h-3.5 text-yellow-400" />
+              LLM Latency
+            </div>
+            <div className="text-2xl font-bold font-mono text-white">
+              {telemetry.llmLatency || "---"}
+            </div>
+          </div>
+          <div className="glass-card p-4 flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-muted-foreground text-xs font-semibold uppercase tracking-wider">
+              <Database className="w-3.5 h-3.5 text-green-400" />
+              Worktree Status (ES)
+            </div>
+            <div className="text-2xl font-bold font-mono text-white flex items-baseline gap-1">
+              {telemetry.elasticAstCount || 0} <span className="text-xs font-sans text-muted-foreground font-normal">nodes</span>
+            </div>
+          </div>
+          <div className="glass-card p-4 flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-muted-foreground text-xs font-semibold uppercase tracking-wider">
+              <HardDrive className="w-3.5 h-3.5 text-purple-400" />
+              OpenBao KMS
+            </div>
+            <div className="text-lg font-bold font-mono text-white flex items-center h-full">
+              {telemetry.vaultSealed ? <span className="text-destructive drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]">LOCKED</span> : <span className="text-success drop-shadow-[0_0_8px_rgba(34,197,94,0.8)]">ACTIVE</span>}
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       <div className="relative z-10">
         <LiveMissionRadar />

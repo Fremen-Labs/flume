@@ -35,7 +35,7 @@ services:
     volumes:
       - .:/app
       - openbao_data:/vault/file
-    command: ["uv", "run", "python", "/app/bootstrap.py"]
+    command: ["uv", "run", "python", "/app/dev/bootstrap.py"]
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
