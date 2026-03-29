@@ -2573,27 +2573,7 @@ async def websocket_telemetry(websocket: WebSocket):
         if websocket in active_connections:
             active_connections.remove(websocket)
 
-# Static Mount for Frontend
-from fastapi.responses import FileResponse
 
-if STATIC_ROOT.exists():
-    asset_dir = STATIC_ROOT / "assets"
-    if asset_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa_catchall(full_path: str):
-        if full_path.startswith("api/"):
-            from fastapi.responses import JSONResponse
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        path = STATIC_ROOT / full_path
-        if path.is_file():
-            return FileResponse(path)
-        return FileResponse(STATIC_ROOT / "index.html")
-else:
-    @app.get("/{full_path:path}")
-    def fallback_root(full_path: str):
-        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
 def get_vault_token():
     t = os.environ.get('VAULT_TOKEN')
@@ -2736,6 +2716,29 @@ def update_system_settings(settings: SystemSettingsRequest):
         toml.dump(t, f)
         
     return {"status": "ok"}
+
+
+# Static Mount for Frontend
+from fastapi.responses import FileResponse
+
+if STATIC_ROOT.exists():
+    asset_dir = STATIC_ROOT / "assets"
+    if asset_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(asset_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa_catchall(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        path = STATIC_ROOT / full_path
+        if path.is_file():
+            return FileResponse(path)
+        return FileResponse(STATIC_ROOT / "index.html")
+else:
+    @app.get("/{full_path:path}")
+    def fallback_root(full_path: str):
+        return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
 
 
 if __name__ == "__main__":
