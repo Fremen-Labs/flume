@@ -17,6 +17,21 @@ interface PlanEpic { id: string; title: string; description: string; features: P
 interface Plan { epics: PlanEpic[]; }
 
 interface ChatMsg { from: 'user' | 'agent'; text: string; plan?: Plan; }
+interface PlanningStatus {
+  stage?: string;
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
+  host?: string;
+  usingCodexAppServer?: boolean;
+  connectionTestDurationMs?: number | null;
+  connectionTestOk?: boolean | null;
+  connectionTestResult?: string | null;
+  requestStartedAt?: string | null;
+  requestElapsedSeconds?: number | null;
+  timeoutSeconds?: number | null;
+  failureText?: string | null;
+}
 
 type Phase = 'prompt' | 'planning' | 'chat' | 'committing' | 'committed';
 
@@ -279,6 +294,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   /** 'placeholder' = skeleton from server when LLM failed or returned no plan; 'llm' = model-produced tree */
   const [planSource, setPlanSource] = useState<'llm' | 'placeholder' | null>(null);
   const [chatInput, setChatInput] = useState('');
+  const [planningStatus, setPlanningStatus] = useState<PlanningStatus | null>(null);
   const [error, setError] = useState('');
   const [commitCount, setCommitCount] = useState(0);
   const [committed, setCommitted] = useState(false);
@@ -294,6 +310,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setPlan({ epics: [] });
       setPlanSource(null);
       setChatInput('');
+      setPlanningStatus(null);
       setError('');
       setCommitCount(0);
       setCommitted(false);
@@ -304,6 +321,40 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!open || !sessionId || phase !== 'planning') return undefined;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/intake/session/${sessionId}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? 'Failed to load planning status');
+        if (cancelled) return;
+        setPlanningStatus(data.planningStatus ?? null);
+        setMessages(data.messages ?? []);
+        setPlan(data.plan ?? { epics: [] });
+        setPlanSource(data.planSource === 'placeholder' || data.planSource === 'llm' ? data.planSource : null);
+        if (data.status === 'ready' || data.status === 'failed') {
+          setPhase('chat');
+        }
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Failed to load planning status');
+          setPhase('prompt');
+        }
+      }
+    };
+
+    poll();
+    const id = window.setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [open, sessionId, phase]);
+
 
   async function startSession() {
     if (!prompt.trim()) return;
@@ -320,10 +371,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setSessionId(data.sessionId);
       setMessages(data.messages ?? []);
       setPlan(data.plan ?? { epics: [] });
+      setPlanningStatus(data.planningStatus ?? null);
       setPlanSource(
         data.planSource === 'placeholder' || data.planSource === 'llm' ? data.planSource : null,
       );
-      setPhase('chat');
+      setPhase(data.status === 'ready' || data.status === 'failed' ? 'chat' : 'planning');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to connect to planner');
       setPhase('prompt');
@@ -355,6 +407,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       if (data.planSource === 'placeholder' || data.planSource === 'llm') {
         setPlanSource(data.planSource);
       }
+      setPlanningStatus(data.planningStatus ?? null);
     } catch (e: unknown) {
       // Remove thinking msg and show error
       setMessages(prev => prev.filter(m => m !== thinkingMsg));
@@ -384,6 +437,21 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     }
   }
 
+
+  const requestElapsed = planningStatus?.requestElapsedSeconds != null
+    ? `${planningStatus.requestElapsedSeconds.toFixed(1)}s`
+    : null;
+  const connectionElapsed = planningStatus?.connectionTestDurationMs != null
+    ? `${planningStatus.connectionTestDurationMs.toFixed(0)} ms`
+    : null;
+  const plannerStageLabel = planningStatus?.stage === 'testing_connection'
+    ? 'Testing remote LLM connection…'
+    : planningStatus?.stage === 'requesting_plan'
+      ? 'Waiting for planner response…'
+      : planningStatus?.stage === 'failed'
+        ? 'Planner request failed'
+        : 'Preparing planner…';
+
   const epicCount = plan.epics?.length ?? 0;
   const taskCount = plan.epics?.reduce((a, ep) =>
     a + (ep.features?.reduce((b, f) =>
@@ -405,6 +473,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
           )}
         >
           <DialogPrimitive.Title className="sr-only">Plan New Work — {projectName}</DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">Create or refine a work plan for the selected project, then commit the resulting tasks to the queue.</DialogPrimitive.Description>
 
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-white/8 bg-white/[0.02] shrink-0">
@@ -437,7 +506,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
 
             {/* ── Initial prompt ── */}
             {(phase === 'prompt' || phase === 'planning') && (
-              <div className="flex flex-col items-center justify-center h-full gap-6 px-6">
+              <div className="flex flex-col items-center justify-center h-full gap-6 px-6" data-phase={phase}>
                 <div className="text-center max-w-lg">
                   <div className="w-14 h-14 rounded-2xl bg-primary/15 flex items-center justify-center mx-auto mb-4">
                     <Bot className="w-7 h-7 text-primary" />
@@ -458,6 +527,35 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     disabled={phase === 'planning'}
                     autoFocus
                   />
+                  {phase === 'planning' && !planningStatus && (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-foreground/90 space-y-2">
+                      <div className="flex items-center gap-2 text-primary">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span className="font-medium">Starting planning session…</span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">Waiting for planner status from the server.</div>
+                    </div>
+                  )}
+                  {phase === 'planning' && planningStatus && (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-foreground/90 space-y-2">
+                      <div className="flex items-center gap-2 text-primary">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span className="font-medium">{plannerStageLabel}</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                        <div><span className="text-foreground/80">Provider:</span> {planningStatus.provider ?? '—'} {planningStatus.model ? `· ${planningStatus.model}` : ''}</div>
+                        <div><span className="text-foreground/80">Host:</span> {planningStatus.host ?? planningStatus.baseUrl ?? '—'}</div>
+                        <div><span className="text-foreground/80">Connection test:</span> {planningStatus.connectionTestOk == null ? 'pending' : planningStatus.connectionTestOk ? 'ok' : 'failed'}{connectionElapsed ? ` · ${connectionElapsed}` : ''}</div>
+                        <div><span className="text-foreground/80">Planner request:</span> {requestElapsed ? `${requestElapsed} elapsed` : 'queued'}{planningStatus.timeoutSeconds ? ` · timeout ${planningStatus.timeoutSeconds}s` : ''}</div>
+                      </div>
+                      {planningStatus.connectionTestResult && (
+                        <div className="text-[11px] text-muted-foreground break-all">{planningStatus.connectionTestResult}</div>
+                      )}
+                      {planningStatus.failureText && (
+                        <div className="text-[11px] text-destructive break-all">{planningStatus.failureText}</div>
+                      )}
+                    </div>
+                  )}
                   {error && (
                     <div className="flex items-center gap-2 text-destructive text-xs">
                       <AlertCircle className="w-3.5 h-3.5 shrink-0" />

@@ -35,10 +35,20 @@ import os
 import urllib.request
 import urllib.error
 
-_PROVIDER = os.environ.get('LLM_PROVIDER', 'ollama').lower()
-_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434').rstrip('/')
-_API_KEY = os.environ.get('LLM_API_KEY', '')
-_DEFAULT_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
+def _provider() -> str:
+    return os.environ.get('LLM_PROVIDER', 'ollama').lower()
+
+
+def _base_url_env() -> str:
+    return os.environ.get('LLM_BASE_URL', 'http://localhost:11434').rstrip('/')
+
+
+def _api_key() -> str:
+    return os.environ.get('LLM_API_KEY', '')
+
+
+def _default_model() -> str:
+    return os.environ.get('LLM_MODEL', 'llama3.2')
 
 _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
@@ -66,10 +76,10 @@ def _normalize_gemini_model(model_id: str) -> str:
 def _base_url(provider=None, base_url_override=None):
     if base_url_override:
         return base_url_override.rstrip('/')
-    p = (provider or _PROVIDER).lower()
+    p = (provider or _provider()).lower()
     if p in _PROVIDER_BASE_URLS and not os.environ.get('LLM_BASE_URL'):
         return _PROVIDER_BASE_URLS[p]
-    return _BASE_URL
+    return _base_url_env()
 
 
 import time
@@ -95,7 +105,16 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
             if e.code in [429, 500, 502, 503, 504]:
                 time.sleep(2 ** attempt)
                 continue
-            raise e
+            model = None
+            try:
+                if isinstance(payload, dict):
+                    model = payload.get('model')
+            except Exception:
+                model = None
+            detail = f'HTTP {e.code} for {url}'
+            if model:
+                detail += f' (model={model})'
+            raise RuntimeError(detail) from e
         except urllib.error.URLError as e:
             last_err = e
             time.sleep(2 ** attempt)
@@ -109,7 +128,7 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
 # Ollama
 # ---------------------------------------------------------------------------
 
-def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None):
+def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None, timeout=120):
     data = _post(
         f'{_base_url(base_url_override=base_url_override)}/api/chat',
         {
@@ -118,6 +137,7 @@ def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=Non
             'stream': False,
             'options': {'temperature': temperature, 'num_predict': max_tokens},
         },
+        timeout=timeout,
     )
     return data.get('message', {}).get('content', '')
 
@@ -141,18 +161,19 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url
 # ---------------------------------------------------------------------------
 
 def _openai_headers():
-    key = (_API_KEY or '').strip()
+    key = (_api_key() or '').strip()
     if not key:
         raise RuntimeError('LLM_API_KEY is empty.')
     return {'Authorization': f'Bearer {key}'}
 
 
-def _openai_chat(messages, model, temperature, max_tokens, provider=None, base_url_override=None):
+def _openai_chat(messages, model, temperature, max_tokens, provider=None, base_url_override=None, timeout=120):
     url = _base_url(provider, base_url_override) + '/v1/chat/completions'
     data = _post(
         url,
         {'model': model, 'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens},
         _openai_headers(),
+        timeout=timeout,
     )
     return (data['choices'][0]['message'].get('content') or '').strip()
 
@@ -196,7 +217,7 @@ def _openai_chat_tools(messages, tools, model, temperature, max_tokens, provider
 
 def _anthropic_headers():
     return {
-        'x-api-key': _API_KEY,
+        'x-api-key': _api_key(),
         'anthropic-version': '2023-06-01',
     }
 
@@ -279,7 +300,7 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
 # Public API
 # ---------------------------------------------------------------------------
 
-def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None, base_url_override=None):
+def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None, base_url_override=None, timeout_seconds=120):
     """Call the configured LLM and return the assistant's text response.
 
     Args:
@@ -291,16 +312,16 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_ove
     Returns:
         str: The assistant's text response.
     """
-    p = (provider_override or _PROVIDER).lower()
-    m = model or _DEFAULT_MODEL
+    p = (provider_override or _provider()).lower()
+    m = model or _default_model()
     if p == 'gemini':
         m = _normalize_gemini_model(m)
     if p == 'ollama':
-        return _ollama_chat(messages, m, temperature, max_tokens, base_url_override)
+        return _ollama_chat(messages, m, temperature, max_tokens, base_url_override, timeout=timeout_seconds)
     elif p == 'anthropic':
         return _anthropic_chat(messages, m, temperature, max_tokens)
     else:
-        return _openai_chat(messages, m, temperature, max_tokens, provider=p, base_url_override=base_url_override)
+        return _openai_chat(messages, m, temperature, max_tokens, provider=p, base_url_override=base_url_override, timeout=timeout_seconds)
 
 
 def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None, base_url_override=None):
@@ -323,8 +344,8 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
                 }
             }
     """
-    p = (provider_override or _PROVIDER).lower()
-    m = model or _DEFAULT_MODEL
+    p = (provider_override or _provider()).lower()
+    m = model or _default_model()
     if p == 'gemini':
         m = _normalize_gemini_model(m)
     if p == 'ollama':

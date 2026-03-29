@@ -18,14 +18,18 @@ class NetflixFaultTolerance:
 
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from urllib.error import URLError, HTTPError
 import urllib.parse
+from urllib.parse import urlparse
 import glob
 from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
+from pydantic import BaseModel
 import traceback
 from fastapi import BackgroundTasks
 
@@ -45,7 +49,7 @@ if str(BASE) not in sys.path:
 from utils.logger import get_logger
 logger = get_logger(__name__)
 
-from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao  # noqa: E402
+from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # noqa: E402
 
 # Merge .env config
 apply_runtime_config(_SRC_ROOT)
@@ -56,7 +60,7 @@ hydrate_secrets_from_openbao()
 # Execute Elasticsearch Index Bootstrapping natively now that auth is fully populated
 ensure_es_indices()
 
-from llm_settings import load_effective_pairs  # noqa: E402
+from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # noqa: E402
 
 _DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
@@ -265,6 +269,169 @@ def save_session(session):
     session['updated_at'] = datetime.utcnow().isoformat() + 'Z'
     path.write_text(json.dumps(session, indent=2))
 
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat() + 'Z'
+
+
+def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
+    if not started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+        return round((datetime.now(timezone.utc) - started).total_seconds(), 3)
+    except Exception:
+        return None
+
+
+def _sync_llm_runtime_env():
+    load_legacy_dotenv_into_environ(_SRC_ROOT)
+    try:
+        from workspace_llm_env import sync_llm_env_from_workspace
+
+        sync_llm_env_from_workspace(WORKSPACE_ROOT)
+    except Exception:
+        pass
+
+
+def _planner_debug_log(event: str, **fields):
+    try:
+        path = WORKSPACE_ROOT / 'planner-debug.log'
+        row = {'ts': _utcnow_iso(), 'event': event, **fields}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+
+
+def _planner_runtime_config() -> dict:
+    _sync_llm_runtime_env()
+    pairs = load_effective_pairs(WORKSPACE_ROOT)
+    provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
+    model = (pairs.get('LLM_MODEL') or os.environ.get('LLM_MODEL') or LLM_MODEL).strip()
+    if provider == 'ollama':
+        base_url = resolve_effective_ollama_base_url(pairs).strip()
+    else:
+        base_url = (pairs.get('LLM_BASE_URL') or os.environ.get('LLM_BASE_URL') or LLM_BASE_URL).strip()
+    parsed = urlparse(base_url) if base_url else None
+    host = parsed.netloc or parsed.path if parsed else ''
+    cfg = {
+        'provider': provider,
+        'model': model,
+        'baseUrl': base_url,
+        'host': host,
+        'usingCodexAppServer': _planner_should_use_codex_app_server(),
+    }
+    _planner_debug_log(
+        'runtime_config',
+        provider=provider,
+        model=model,
+        baseUrl=base_url,
+        envProvider=(os.environ.get('LLM_PROVIDER') or '').strip(),
+        envModel=(os.environ.get('LLM_MODEL') or '').strip(),
+        envBaseUrl=(os.environ.get('LLM_BASE_URL') or '').strip(),
+        pairProvider=(pairs.get('LLM_PROVIDER') or '').strip(),
+        pairModel=(pairs.get('LLM_MODEL') or '').strip(),
+        pairBaseUrl=(pairs.get('LLM_BASE_URL') or '').strip(),
+        pairLocalOllamaBaseUrl=(pairs.get('LOCAL_OLLAMA_BASE_URL') or '').strip(),
+    )
+    return cfg
+
+
+def _planner_request_timeout_seconds(config: Optional[dict] = None) -> int:
+    cfg = config or _planner_runtime_config()
+    provider = (cfg.get('provider') or '').lower()
+    base_url = (cfg.get('baseUrl') or '').lower()
+    default_timeout = int(os.environ.get('FLUME_PLANNER_TIMEOUT_SECONDS', '300'))
+    if provider == 'ollama' or ('11434' in base_url) or ('ollama' in base_url):
+        return max(default_timeout, 300)
+    return default_timeout
+
+
+def _build_planning_status(stage: str = 'queued') -> dict:
+    cfg = _planner_runtime_config()
+    return {
+        'stage': stage,
+        'provider': cfg.get('provider'),
+        'model': cfg.get('model'),
+        'baseUrl': cfg.get('baseUrl'),
+        'host': cfg.get('host'),
+        'usingCodexAppServer': cfg.get('usingCodexAppServer'),
+        'connectionTestStartedAt': None,
+        'connectionTestDurationMs': None,
+        'connectionTestOk': None,
+        'connectionTestResult': None,
+        'requestStartedAt': None,
+        'requestElapsedSeconds': None,
+        'timeoutSeconds': _planner_request_timeout_seconds(cfg),
+        'failureText': None,
+        'lastUpdatedAt': _utcnow_iso(),
+    }
+
+
+def _update_planning_status(session: dict, **updates) -> dict:
+    status = session.get('planningStatus') or _build_planning_status()
+    status.update({k: v for k, v in updates.items() if v is not None or k in updates})
+    started_at = status.get('requestStartedAt')
+    elapsed = _iso_elapsed_seconds(started_at)
+    if elapsed is not None:
+        status['requestElapsedSeconds'] = elapsed
+    status['lastUpdatedAt'] = _utcnow_iso()
+    session['planningStatus'] = status
+    return status
+
+
+def _test_planner_connection(status: dict) -> dict:
+    provider = (status.get('provider') or '').lower()
+    base_url = (status.get('baseUrl') or '').rstrip('/')
+    if not base_url:
+        status['connectionTestOk'] = False
+        status['connectionTestResult'] = 'No LLM_BASE_URL configured.'
+        return status
+    url = base_url
+    if provider == 'ollama':
+        url = base_url + '/api/version'
+    elif provider in ('openai', 'openai_compatible', 'gemini'):
+        url = base_url + '/v1/models'
+    started = time.time()
+    status['connectionTestStartedAt'] = _utcnow_iso()
+    try:
+        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode(errors='ignore')
+            status['connectionTestOk'] = True
+            status['connectionTestResult'] = f'{url} responded HTTP {getattr(resp, "status", 200)}'
+            if provider == 'ollama':
+                try:
+                    version = json.loads(body).get('version')
+                    if version:
+                        status['connectionTestResult'] += f' (Ollama {version})'
+                except Exception:
+                    pass
+    except Exception as e:
+        status['connectionTestOk'] = False
+        status['connectionTestResult'] = f'{url} failed: {e}'[:300]
+    status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
+    return status
+
+
+def _complete_planner_turn(session: dict, message: str, plan: Optional[dict], plan_source: str, failure_text: Optional[str] = None):
+    session['draftPlan'] = plan
+    session['draftPlanSource'] = plan_source
+    session['messages'].append({
+        'from': 'agent',
+        'text': message,
+        'plan': plan,
+        'agent_role': session.get('agent_role', 'intake'),
+    })
+    _update_planning_status(
+        session,
+        stage='ready' if not failure_text else 'failed',
+        failureText=failure_text,
+    )
+    save_session(session)
+
+
 
 PLANNER_SYSTEM_PROMPT = """\
 You are a senior technical planner. The user describes what they want built and you \
@@ -328,33 +495,39 @@ def _planner_should_use_codex_app_server() -> bool:
         return False
 
 
-def call_planner_model(messages):
+def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     """Call the configured planner backend and return the assistant response text."""
-    load_legacy_dotenv_into_environ(_SRC_ROOT)
-    try:
-        from workspace_llm_env import sync_llm_env_from_workspace
-
-        sync_llm_env_from_workspace(WORKSPACE_ROOT)
-    except Exception:
-        pass
-
-    model = os.environ.get('LLM_MODEL', LLM_MODEL)
-    if _planner_should_use_codex_app_server():
+    cfg = _planner_runtime_config()
+    model = cfg.get('model') or LLM_MODEL
+    timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
+    _planner_debug_log(
+        'planner_request',
+        provider=cfg.get('provider'),
+        model=model,
+        baseUrl=cfg.get('baseUrl'),
+        timeoutSeconds=timeout_seconds,
+        usingCodexAppServer=bool(cfg.get('usingCodexAppServer')),
+        messageCount=len(messages or []),
+    )
+    if cfg.get('usingCodexAppServer'):
         import codex_app_server_client
 
         return codex_app_server_client.planner_chat(
             messages,
             model=model,
             cwd=str(WORKSPACE_ROOT),
-            timeout=180,
+            timeout=timeout_seconds,
         )
 
-    import llm_client
+    from utils import llm_client
     return llm_client.chat(
         messages,
         model=model,
         temperature=0.3,
         max_tokens=8192,
+        provider_override=cfg.get('provider'),
+        base_url_override=cfg.get('baseUrl'),
+        timeout_seconds=timeout_seconds,
     )
 
 def _strip_json_blocks(text: str) -> str:
@@ -457,19 +630,36 @@ def create_planning_session(repo, prompt):
             {'from': 'user', 'text': prompt, 'plan': None}
         ],
         'draftPlan': None,
-        'created_at': datetime.utcnow().isoformat() + 'Z',
-        'updated_at': datetime.utcnow().isoformat() + 'Z',
+        'draftPlanSource': None,
+        'planningStatus': _build_planning_status(stage='queued'),
+        'created_at': _utcnow_iso(),
+        'updated_at': _utcnow_iso(),
     }
+    save_session(session)
+    threading.Thread(target=_run_initial_planning, args=(session_id,), daemon=True).start()
+    return session
+
+
+def _run_initial_planning(session_id: str):
+    session = load_session(session_id)
+    if not session:
+        return
+    status = _update_planning_status(session, stage='testing_connection')
+    _test_planner_connection(status)
+    save_session(session)
 
     llm_messages = build_llm_messages(session)
+    timeout_seconds = _planner_request_timeout_seconds(status)
+    _update_planning_status(session, stage='requesting_plan', requestStartedAt=_utcnow_iso(), timeoutSeconds=timeout_seconds, failureText=None)
+    save_session(session)
     message = None
     plan = None
     llm_error = None
     try:
-        raw = call_planner_model(llm_messages)
+        raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
     except Exception as e:
-        llm_error = str(e)[:200]
+        llm_error = str(e)[:300]
 
     if llm_error:
         hint = _planner_llm_error_hint(llm_error)
@@ -478,11 +668,11 @@ def create_planning_session(repo, prompt):
             "Below is an editable PLACEHOLDER outline derived only from your prompt — "
             "not an AI-generated breakdown. Edit the tree manually or fix LLM auth and start a new plan."
         )
-        plan = placeholder_plan(repo, prompt)
-        plan_source = 'placeholder'
-    elif not plan or not plan.get('epics'):
-        plan = placeholder_plan(repo, prompt)
-        plan_source = 'placeholder'
+        plan = placeholder_plan(session.get('repo') or '', session['messages'][0].get('text') or '')
+        _complete_planner_turn(session, message, plan, 'placeholder', llm_error)
+        return
+    if not plan or not plan.get('epics'):
+        plan = placeholder_plan(session.get('repo') or '', session['messages'][0].get('text') or '')
         prior = (message or '').strip()
         if prior:
             message = (
@@ -495,20 +685,9 @@ def create_planning_session(repo, prompt):
                 "The model did not return a usable plan structure. "
                 "Below is an editable placeholder template; try again or adjust your LLM settings."
             )
-    else:
-        plan_source = 'llm'
-
-    session['draftPlan'] = plan
-    session['draftPlanSource'] = plan_source
-    session['messages'].append({
-        'from': 'agent',
-        'text': message,
-        'plan': plan,
-        'agent_role': 'intake',
-    })
-
-    save_session(session)
-    return session
+        _complete_planner_turn(session, message, plan, 'placeholder')
+        return
+    _complete_planner_turn(session, message, plan, 'llm')
 
 
 def refine_session(session_id, user_text, current_plan):
@@ -525,15 +704,23 @@ def refine_session(session_id, user_text, current_plan):
     if current_plan:
         session['draftPlan'] = current_plan
 
+    _update_planning_status(session, stage='testing_connection')
+    _test_planner_connection(session['planningStatus'])
+    save_session(session)
+
     llm_messages = build_llm_messages(session)
+    timeout_seconds = _planner_request_timeout_seconds(session.get('planningStatus'))
+    _update_planning_status(session, stage='requesting_plan', requestStartedAt=_utcnow_iso(), timeoutSeconds=timeout_seconds, failureText=None)
+    save_session(session)
     try:
-        raw = call_planner_model(llm_messages)
+        raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
     except Exception as e:
-        err = str(e)[:200]
+        err = str(e)[:300]
         hint = _planner_llm_error_hint(err)
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
         plan = None
+        _update_planning_status(session, stage='failed', failureText=err)
 
     if plan and plan.get('epics'):
         session['draftPlan'] = plan
@@ -548,6 +735,8 @@ def refine_session(session_id, user_text, current_plan):
         'agent_role': session.get('agent_role', 'intake'),
     })
 
+    if session.get('planningStatus', {}).get('stage') != 'failed':
+        _update_planning_status(session, stage='ready', failureText=None)
     save_session(session)
     return session
 
@@ -1949,6 +2138,28 @@ def maybe_auto_start_workers():
         logger.info(f'Flume: warning — could not auto-start workers: {e}')
 
 
+def _session_messages_for_client(session: dict) -> list:
+    out = []
+    for m in session.get('messages', []):
+        if m.get('from') not in ('user', 'agent'):
+            continue
+        item = {
+            'from': m.get('from'),
+            'text': m.get('text', ''),
+        }
+        if m.get('plan') is not None:
+            item['plan'] = m.get('plan')
+        out.append(item)
+    return out
+
+
+def _count_plan_tasks(plan: Optional[dict]) -> int:
+    total = 0
+    for epic in (plan or {}).get('epics') or []:
+        for feature in epic.get('features') or []:
+            for story in feature.get('stories') or []:
+                total += len(story.get('tasks') or [])
+    return total
 
 
 from fastapi import FastAPI, BackgroundTasks, WebSocket, Request, Depends, HTTPException, Header
@@ -2002,6 +2213,93 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+
+def _session_payload_for_client(session: dict) -> dict:
+    status = dict(session.get('planningStatus') or {})
+    started_at = status.get('requestStartedAt')
+    elapsed = _iso_elapsed_seconds(started_at)
+    if elapsed is not None:
+        status['requestElapsedSeconds'] = elapsed
+    return {
+        'sessionId': session['id'],
+        'status': status.get('stage') or session.get('status') or 'active',
+        'messages': _session_messages_for_client(session),
+        'plan': session.get('draftPlan') or {'epics': []},
+        'planSource': session.get('draftPlanSource'),
+        'planningStatus': status,
+    }
+
+
+@app.post('/api/intake/session')
+def api_intake_start_session(payload: dict):
+    repo = (payload.get('repo') or '').strip()
+    prompt = (payload.get('prompt') or '').strip()
+    if not repo:
+        return JSONResponse(status_code=400, content={'error': 'repo is required'})
+    if not prompt:
+        return JSONResponse(status_code=400, content={'error': 'prompt is required'})
+    try:
+        session = create_planning_session(repo, prompt)
+        return _session_payload_for_client(session)
+    except Exception as e:
+        logger.exception('Failed to create intake session')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+
+
+@app.get('/api/intake/session/{session_id}')
+def api_intake_get_session(session_id: str):
+    session = load_session(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={'error': 'session not found'})
+    return _session_payload_for_client(session)
+
+
+@app.post('/api/intake/session/{session_id}/message')
+def api_intake_message(session_id: str, payload: dict):
+    text = (payload.get('text') or '').strip()
+    if not text:
+        return JSONResponse(status_code=400, content={'error': 'text is required'})
+    plan = payload.get('plan') if isinstance(payload.get('plan'), dict) else None
+    try:
+        session = refine_session(session_id, text, plan)
+        if not session:
+            return JSONResponse(status_code=404, content={'error': 'session not found'})
+        return _session_payload_for_client(session)
+    except Exception as e:
+        logger.exception('Failed to refine intake session')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+
+
+@app.post('/api/intake/session/{session_id}/commit')
+def api_intake_commit(session_id: str, payload: dict):
+    session = load_session(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={'error': 'session not found'})
+
+    plan = payload.get('plan') if isinstance(payload.get('plan'), dict) else session.get('draftPlan')
+    if not plan or not (plan.get('epics') or []):
+        return JSONResponse(status_code=400, content={'error': 'plan is empty'})
+
+    repo = session.get('repo') or (payload.get('repo') or '').strip()
+    if not repo:
+        return JSONResponse(status_code=400, content={'error': 'repo is required'})
+
+    try:
+        docs, _results = commit_plan(repo, plan)
+        session['status'] = 'committed'
+        session['draftPlan'] = plan
+        session['committed_at'] = datetime.utcnow().isoformat() + 'Z'
+        session['committedDocs'] = [d.get('id') for d in docs]
+        save_session(session)
+        return {
+            'ok': True,
+            'count': _count_plan_tasks(plan),
+            'created': len(docs),
+            'taskIds': [d.get('id') for d in docs if d.get('item_type') == 'task'],
+        }
+    except Exception as e:
+        logger.exception('Failed to commit intake plan')
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 
 from urllib.parse import urlparse, urlunparse
@@ -2453,6 +2751,55 @@ def api_settings_repos_update(payload: dict):
     if ok:
         return {"success": True, "message": msg}
     return JSONResponse(status_code=400, content={"error": msg})
+
+class SystemSettingsRequest(BaseModel):
+    es_url: str
+    es_api_key: str
+    openbao_url: str
+    vault_token: str
+
+@app.get("/api/settings/system")
+def get_system_settings():
+    import toml
+    try:
+        with open(os.environ.get('FLUME_CONFIG', 'config.toml'), 'r') as f:
+            t = toml.load(f)
+        sys_conf = t.get('system', {})
+    except Exception:
+        sys_conf = {}
+        
+    return {
+        "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
+        "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
+        "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
+        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else ""
+    }
+
+@app.put("/api/settings/system")
+def update_system_settings(settings: SystemSettingsRequest):
+    import toml
+    config_path = os.environ.get('FLUME_CONFIG', 'config.toml')
+    try:
+        with open(config_path, 'r') as f:
+            t = toml.load(f)
+    except Exception:
+        t = {}
+        
+    if 'system' not in t:
+        t['system'] = {}
+        
+    t['system']['es_url'] = settings.es_url
+    if settings.es_api_key and settings.es_api_key != "***":
+        t['system']['es_api_key'] = settings.es_api_key
+        
+    t['system']['openbao_url'] = settings.openbao_url
+    if settings.vault_token and settings.vault_token != "••••":
+        t['system']['vault_token'] = settings.vault_token
+    
+    with open(config_path, 'w') as f:
+        toml.dump(t, f)
+        
+    return {"status": "ok"}
 
 @app.get("/api/settings/agent-models")
 def api_settings_agent_models():

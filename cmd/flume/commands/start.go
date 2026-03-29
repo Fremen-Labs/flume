@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/agents"
-	"github.com/spf13/cobra"
-	"github.com/charmbracelet/log"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
+	"github.com/charmbracelet/log"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -69,15 +69,34 @@ var StartCmd = &cobra.Command{
 			}
 		}
 
-		portEnvOverrides := append(os.Environ(), 
+		portEnvOverrides := append(os.Environ(),
 			"DASHBOARD_PORT="+dashboardPort,
 			"VAULT_PORT="+vaultPort,
 			"ES_PORT="+esPort,
 		)
 
 		envCfg := orchestrator.EnvConfig{
-			Provider: ProviderFlag,
-			APIKey:   os.Getenv("FLUME_API_KEY"),
+			Provider:           ProviderFlag,
+			APIKey:             os.Getenv("FLUME_API_KEY"),
+			BaseURL:            strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
+			LocalOllamaBaseURL: strings.TrimSpace(os.Getenv("LOCAL_OLLAMA_BASE_URL")),
+			Host:               strings.TrimSpace(os.Getenv("LLM_HOST")),
+		}
+
+		existingPromptCfg := ui.PromptConfig{
+			Provider: strings.TrimSpace(os.Getenv("LLM_PROVIDER")),
+			APIKey:   strings.TrimSpace(os.Getenv("LLM_API_KEY")),
+			Host:     strings.TrimSpace(os.Getenv("LLM_HOST")),
+		}
+		if existingPromptCfg.Provider == "" && envCfg.LocalOllamaBaseURL != "" {
+			existingPromptCfg.Provider = "ollama"
+		}
+
+		if envCfg.Provider == "" {
+			envCfg.Provider = existingPromptCfg.Provider
+		}
+		if envCfg.APIKey == "" {
+			envCfg.APIKey = existingPromptCfg.APIKey
 		}
 
 		adminToken, tErr := orchestrator.GenerateAdminToken()
@@ -89,14 +108,33 @@ var StartCmd = &cobra.Command{
 
 		if orchestrator.CheckExoActive() {
 			log.Info("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences.")
-		} else if envCfg.Provider == "" || envCfg.APIKey == "" {
-			if NativeFlag {
-				log.Warn("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively.")
-			} else {
-				if isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
-					log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
-					return fmt.Errorf("headless tty pseudo-hang prevented")
+		} else if NativeFlag {
+			log.Warn("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively.")
+		} else {
+			if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" {
+				log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+				return fmt.Errorf("headless tty pseudo-hang prevented")
+			}
+
+			if existingPromptCfg.Provider != "" {
+				log.Warn("Exo undetected globally. Existing .env LLM configuration detected.")
+				promptCfg, err := ui.RunInteractivePrompt(existingPromptCfg)
+				if err != nil {
+					log.Error("Interactive Wizard aborted.", "error", err)
+					return err
 				}
+				envCfg.Provider = promptCfg.Provider
+				envCfg.APIKey = promptCfg.APIKey
+				if promptCfg.Provider == "ollama" {
+					if promptCfg.Host == "" {
+						promptCfg.Host = "127.0.0.1"
+					}
+					envCfg.Host = promptCfg.Host
+					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
+					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
+					envCfg.APIKey = ""
+				}
+			} else if envCfg.Provider == "" || (envCfg.APIKey == "" && envCfg.Provider != "ollama") {
 				log.Warn("Exo undetected globally. Escalate to User Auth Layer.")
 				promptCfg, err := ui.RunInteractivePrompt()
 				if err != nil {
@@ -105,6 +143,15 @@ var StartCmd = &cobra.Command{
 				}
 				envCfg.Provider = promptCfg.Provider
 				envCfg.APIKey = promptCfg.APIKey
+				if promptCfg.Provider == "ollama" {
+					if promptCfg.Host == "" {
+						promptCfg.Host = "127.0.0.1"
+					}
+					envCfg.Host = promptCfg.Host
+					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
+					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
+					envCfg.APIKey = ""
+				}
 			}
 		}
 
@@ -132,17 +179,26 @@ var StartCmd = &cobra.Command{
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
-				
+
 				dashEnv := append(portEnvOverrides, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
 				if envCfg.Provider != "" {
 					dashEnv = append(dashEnv, "LLM_PROVIDER="+envCfg.Provider)
+				}
+				if envCfg.BaseURL != "" {
+					dashEnv = append(dashEnv, "LLM_BASE_URL="+envCfg.BaseURL)
+				}
+				if envCfg.LocalOllamaBaseURL != "" {
+					dashEnv = append(dashEnv, "LOCAL_OLLAMA_BASE_URL="+envCfg.LocalOllamaBaseURL)
+				}
+				if envCfg.Host != "" {
+					dashEnv = append(dashEnv, "LLM_HOST="+envCfg.Host)
 				}
 				if envCfg.APIKey != "" {
 					dashEnv = append(dashEnv, "LLM_API_KEY="+envCfg.APIKey)
 				}
 				dashEnv = append(dashEnv, "FLUME_ADMIN_TOKEN="+envCfg.AdminToken)
 				dash.Env = dashEnv
-				
+
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
 				dash.Run()
@@ -159,8 +215,24 @@ var StartCmd = &cobra.Command{
 			wg.Wait()
 		} else {
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
+			dockerEnv := append([]string{}, portEnvOverrides...)
+			if envCfg.Provider != "" {
+				dockerEnv = append(dockerEnv, "LLM_PROVIDER="+envCfg.Provider)
+			}
+			if envCfg.BaseURL != "" {
+				dockerEnv = append(dockerEnv, "LLM_BASE_URL="+envCfg.BaseURL)
+			}
+			if envCfg.LocalOllamaBaseURL != "" {
+				dockerEnv = append(dockerEnv, "LOCAL_OLLAMA_BASE_URL="+envCfg.LocalOllamaBaseURL)
+			}
+			if envCfg.Host != "" {
+				dockerEnv = append(dockerEnv, "LLM_HOST="+envCfg.Host)
+			}
+			if envCfg.APIKey != "" {
+				dockerEnv = append(dockerEnv, "LLM_API_KEY="+envCfg.APIKey)
+			}
 			c := exec.Command("docker", "compose", "up", "-d")
-			c.Env = portEnvOverrides
+			c.Env = dockerEnv
 			
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
@@ -172,7 +244,7 @@ var StartCmd = &cobra.Command{
 				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 				return err
 			}
-			log.Info("Container Swarm bootstrapped successfully")
+			log.Info("Container Swarm bootstrapped successfully in detached mode.")
 		}
 
 		if err := orchestrator.AwaitOrchestration(); err != nil {

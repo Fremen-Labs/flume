@@ -349,6 +349,13 @@ export default function SettingsPage() {
   const catalog = data?.catalog ?? [];
   const providerCatalog = catalog.find((p: LlmSettingsCatalogItem) => p.id === providerId);
   const models = providerCatalog?.models ?? [];
+  const supportsManualModelEntry = providerId === 'ollama' || providerId === 'openai_compatible';
+  const modelSuggestions = useMemo(() => {
+    const out = [...models];
+    const current = (effectiveSettings.model ?? '').trim();
+    if (current && !out.some((m) => m.id === current)) out.unshift({ id: current, name: current });
+    return out;
+  }, [models, effectiveSettings.model]);
   const supportsOAuth = providerId === 'openai' && providerCatalog?.authMode === 'api_key_or_oauth';
   const showRouteSection =
     providerId === 'ollama' || providerId === 'openai_compatible' || (providerId === 'openai' && effectiveSettings.routeType === 'network');
@@ -734,7 +741,30 @@ export default function SettingsPage() {
 
                 <div className="space-y-2">
                   <Label>Model</Label>
-                  {models.length > 0 ? (
+                  {supportsManualModelEntry ? (
+                    <>
+                      <Input
+                        list={providerId === 'ollama' ? 'ollama-model-suggestions' : undefined}
+                        placeholder={providerId === 'ollama' ? 'Enter Ollama model ID (e.g. qwen3-coder:30b)' : 'Enter model ID (e.g. gpt-4o)'}
+                        value={form.model ?? effectiveSettings.model ?? ''}
+                        onChange={(e) => updateForm({ model: e.target.value })}
+                      />
+                      {providerId === 'ollama' && modelSuggestions.length > 0 && (
+                        <>
+                          <datalist id="ollama-model-suggestions">
+                            {modelSuggestions.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.name}
+                              </option>
+                            ))}
+                          </datalist>
+                          <p className="text-[11px] text-muted-foreground leading-snug">
+                            Suggestions come from the configured Ollama endpoint when reachable. You can still type any model tag manually.
+                          </p>
+                        </>
+                      )}
+                    </>
+                  ) : models.length > 0 ? (
                     <Select
                       value={effectiveSettings.model ?? ''}
                       onValueChange={(v) => updateForm({ model: v })}
