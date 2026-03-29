@@ -1,5 +1,3 @@
-from utils.logger import get_logger
-logger = get_logger(__name__)
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -44,6 +42,8 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao  # noqa: E402
 
@@ -1951,7 +1951,7 @@ def maybe_auto_start_workers():
 
 
 
-from fastapi import FastAPI, BackgroundTasks, WebSocket, Request
+from fastapi import FastAPI, BackgroundTasks, WebSocket, Request, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
