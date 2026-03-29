@@ -2064,6 +2064,19 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
     except Exception as e:
         logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
 
+@app.post("/api/system/sync-ast")
+def api_system_sync_ast():
+    workspace = os.environ.get('FLUME_WORKSPACE') or str(WORKSPACE_ROOT)
+    try:
+        _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
+        exists = _check_ast_exists_natively(workspace)
+        if not exists:
+            return JSONResponse(status_code=500, content={"error": "AST mapping verification inherently failed post-ingestion"})
+        return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
+    except Exception as e:
+        logger.error({"event": "ast_system_sync_failure", "error": str(e)})
+        return JSONResponse(status_code=500, content={"error": f"AST Sync aborted inherently: {e}"})
+
 @app.post("/api/projects")
 def api_create_project(payload: dict, background_tasks: BackgroundTasks):
     import uuid, datetime
@@ -2111,7 +2124,6 @@ def api_task_commits(task_id: str):
 def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
-@app.post("/api/tasks/bulk-update")
 from fastapi import Depends, HTTPException, Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError

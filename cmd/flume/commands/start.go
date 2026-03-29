@@ -2,16 +2,17 @@ package commands
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
-	"sync"
 	"strings"
+	"sync"
 
-	"github.com/spf13/cobra"
-	"github.com/charmbracelet/log"
+	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/Fremen-Labs/flume/cmd/flume/agents"
+	"github.com/charmbracelet/log"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -154,14 +155,22 @@ var StartCmd = &cobra.Command{
 
 		if eco.HasElastro {
 			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
-			ingest := exec.Command("uv", "run", "elastro", "rag", "ingest", ".")
-			ingest.Stdout = os.Stdout
-			ingest.Stderr = os.Stderr
-			if err := ingest.Run(); err != nil {
-				log.Warn("Non-critical failure synchronizing local AST Mapping", "error", err)
-			} else {
-				log.Info("Local AST Mapping Synchronized via Elastro Graph RAG.")
+			req, err := http.NewRequestWithContext(cmd.Context(), "POST", fmt.Sprintf("http://localhost:%s/api/system/sync-ast", dashboardPort), nil)
+			if err != nil {
+				return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
 			}
+			req.Header.Set("Content-Type", "application/json")
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				log.Error("Critical architectural failure synchronizing AST metrics: backend interface unreachable natively", "error", err)
+				return fmt.Errorf("ast synchronization explicitly failed: %w", err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != 200 {
+				log.Error("Critical architectural failure synchronizing AST metrics: HTTP 500 rejection by python backend", "code", res.StatusCode)
+				return fmt.Errorf("backend rejected ast update block natively")
+			}
+			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
 		}
 
 		return nil
