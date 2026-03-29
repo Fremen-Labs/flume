@@ -71,6 +71,8 @@ from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 
 # Module-level paths are bounded to block AppSec Path Traversals seamlessly isolating the host
 WORKSPACE_ROOT = resolve_safe_workspace()
+from config import AppConfig, get_settings
+
 WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
 SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
 PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
@@ -2110,7 +2112,7 @@ def api_system_state():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
-def _check_ast_exists_natively(repo_path: str) -> bool:
+def _check_ast_exists_natively(repo_path: str) -> tuple[bool, str]:
     try:
         es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
@@ -2126,14 +2128,15 @@ def _check_ast_exists_natively(repo_path: str) -> bool:
         
         with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
             data = json.loads(res.read().decode())
-            return data.get('hits', {}).get('total', {}).get('value', 0) > 0
+            exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
+            return exists, ("Found mapping records" if exists else "No logical paths matched")
     except Exception as e:
         logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
-        return False
+        return False, str(e)
 
 def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str):
     try:
-        exists = _check_ast_exists_natively(repo_path)
+        exists, details = _check_ast_exists_natively(repo_path)
             
         if not exists:
             logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
@@ -2152,6 +2155,49 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
         })
     except Exception as e:
         logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
+
+@app.post("/api/system/sync-ast")
+def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
+    import secrets
+    if not (
+        settings.FLUME_ADMIN_TOKEN and
+        x_flume_system_token and
+        secrets.compare_digest(settings.FLUME_ADMIN_TOKEN, x_flume_system_token)
+    ):
+        logger.warning({"event": "auth_failure", "endpoint": "/api/system/sync-ast", "reason": "invalid_system_token"})
+        raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
+        
+    workspace = settings.FLUME_WORKSPACE
+    try:
+        _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
+        exists, details = _check_ast_exists_natively(workspace)
+        if not exists:
+            logger.error({
+                "event": "ast_verification_failure",
+                "workspace": workspace,
+                "details": details,
+            })
+            return JSONResponse(status_code=500, content={
+                "error": "AST ingestion completed, but post-flight verification failed.",
+                "details": details
+            })
+        return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
+    except (IOError, subprocess.CalledProcessError) as e:
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "subprocess_error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "A predictable subprocess execution failure occurred natively."})
+    except Exception as e:
+        logger.error({
+            "event": "ast_system_sync_failure", 
+            "reason": "unhandled_exception",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
 @app.post("/api/projects")
 def api_create_project(payload: dict, background_tasks: BackgroundTasks):
@@ -2199,8 +2245,9 @@ def api_task_commits(task_id: str):
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
- 
-from fastapi import Depends, HTTPException, Request
+
+
+from fastapi import Depends, HTTPException, Request, Header
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError
 import secrets
@@ -2212,13 +2259,7 @@ class KillSwitchProcessError(Exception): pass
 class AuthConfigurationError(Exception): pass
 class InvalidCredentialsError(Exception): pass
 
-class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-    ES_URL: str = "http://localhost:9200"
-    ES_API_KEY: str = ""
-    ES_CA_CERTS: str = ""
-    FLUME_ADMIN_TOKEN: str = ""
-
+class IndexError(Exception): pass
 class ElasticsearchClient:
     def __init__(self, es_url: str, api_key: str, ca_certs: str):
         self.es_url = es_url.rstrip('/')
@@ -2492,6 +2533,9 @@ def api_workflow_agents_status():
 
 
 
+import uuid
+import datetime
+
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
@@ -2500,10 +2544,34 @@ async def websocket_telemetry(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            for conn in active_connections:
-                await conn.send_text(json.dumps({"event": "update", "data": data}))
-    except Exception:
-        active_connections.remove(websocket)
+            try:
+                parsed = json.loads(data)
+                if not isinstance(parsed, dict):
+                    parsed = {"msg": str(parsed)}
+            except json.JSONDecodeError:
+                parsed = {"msg": data}
+            
+            payload = {
+                "id": parsed.get("id", uuid.uuid4().hex),
+                "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
+                "time": parsed.get("time", datetime.datetime.now().strftime("%H:%M:%S")),
+                "level": parsed.get("level", "INFO").upper()
+            }
+            
+            for conn in active_connections[:]:
+                try:
+                    await conn.send_text(json.dumps({"event": "telemetry", "data": payload}))
+                except Exception as e:
+                    logger.warning({"event": "websocket_send_failed", "client": str(conn.client), "error": str(e)})
+                    try:
+                        active_connections.remove(conn)
+                    except ValueError:
+                        pass
+    except Exception as e:
+        logger.error({"event": "websocket_handler_crashed", "client": str(websocket.client), "error": str(e), "traceback": traceback.format_exc()})
+    finally:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
 # Static Mount for Frontend
 from fastapi.responses import FileResponse

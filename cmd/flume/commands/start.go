@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	
+	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/spf13/cobra"
 	"github.com/charmbracelet/log"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 )
 
 var (
@@ -78,6 +80,13 @@ var StartCmd = &cobra.Command{
 			APIKey:   os.Getenv("FLUME_API_KEY"),
 		}
 
+		adminToken, tErr := orchestrator.GenerateAdminToken()
+		if tErr != nil {
+			log.Error("Failed to seed explicit cryptographic bounds natively", "error", tErr)
+			return tErr
+		}
+		envCfg.AdminToken = adminToken
+
 		if orchestrator.CheckExoActive() {
 			log.Info("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences.")
 		} else if envCfg.Provider == "" || envCfg.APIKey == "" {
@@ -131,6 +140,7 @@ var StartCmd = &cobra.Command{
 				if envCfg.APIKey != "" {
 					dashEnv = append(dashEnv, "LLM_API_KEY="+envCfg.APIKey)
 				}
+				dashEnv = append(dashEnv, "FLUME_ADMIN_TOKEN="+envCfg.AdminToken)
 				dash.Env = dashEnv
 				
 				dash.Stdout = os.Stdout
@@ -165,7 +175,76 @@ var StartCmd = &cobra.Command{
 			log.Info("Container Swarm bootstrapped successfully")
 		}
 
-		return orchestrator.AwaitOrchestration()
+		if err := orchestrator.AwaitOrchestration(); err != nil {
+			return err
+		}
+
+		if eco.HasElastro {
+			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
+
+			dashboardAPI := os.Getenv("FLUME_DASHBOARD_API_URL")
+			if dashboardAPI == "" {
+				dashboardAPI = fmt.Sprintf("http://localhost:%s", dashboardPort)
+			}
+			endpoint := fmt.Sprintf("%s/api/system/sync-ast", dashboardAPI)
+
+			var res *http.Response
+			var reqErr error
+
+			retriesLimit := 5
+			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
+				retriesLimit = r
+			}
+			initialBackoff := 500
+			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
+				initialBackoff = b
+			}
+
+			astSyncClient := &http.Client{
+				Timeout: 15 * time.Second,
+			}
+
+			backoff := time.Duration(initialBackoff) * time.Millisecond
+			for retries := 1; retries <= retriesLimit; retries++ {
+				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
+				if err != nil {
+					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Flume-System-Token", envCfg.AdminToken)
+
+				res, reqErr = astSyncClient.Do(req)
+				if reqErr == nil && res.StatusCode == 200 {
+					defer res.Body.Close()
+					break
+				}
+
+				if res != nil {
+					res.Body.Close()
+				}
+				if retries < retriesLimit {
+					log.Warn("AST synchronization handshake failed, retrying...",
+						"attempt", fmt.Sprintf("%d/%d", retries, retriesLimit),
+						"retry_in", backoff.String(),
+					)
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+			}
+
+			if reqErr != nil || (res != nil && res.StatusCode != 200) {
+				statusCode := 0
+				if res != nil {
+					statusCode = res.StatusCode
+				}
+				log.Error("Failed to synchronize AST with the Flume dashboard", "error", reqErr, "http_status", statusCode)
+				return fmt.Errorf("could not connect to the Flume dashboard to sync AST after 5 attempts. Please check the dashboard container logs for errors")
+			}
+
+			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
+		}
+
+		return nil
 	},
 }
 

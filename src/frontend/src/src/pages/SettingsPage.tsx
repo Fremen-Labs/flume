@@ -406,7 +406,7 @@ export default function SettingsPage() {
       credentialLabel: form.credentialLabel ?? effectiveSettings.credentialLabel ?? undefined,
       credentialId,
     };
-    if (payload.apiKey === '***') delete (payload as Record<string, unknown>).apiKey;
+    if (payload.apiKey === '***') delete (payload as { apiKey?: string }).apiKey;
     saveMutation.mutate(payload);
   };
 
@@ -555,7 +555,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {false && (
+      {showRestartCta && (
         <div
           className="rounded-xl border-2 border-amber-500/50 bg-amber-500/15 dark:bg-amber-950/40 px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between shadow-sm"
           data-testid="settings-restart-services-cta"

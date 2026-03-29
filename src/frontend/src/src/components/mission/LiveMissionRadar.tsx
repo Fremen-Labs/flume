@@ -2,10 +2,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Radar, Activity, CheckCircle2, Clock, Server, Monitor, TerminalSquare } from 'lucide-react';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Line, LineChart, ResponsiveContainer } from 'recharts';
-import { useSystemState } from '../../hooks/useSystemState';
+import { useSystemState, WorkerState } from '@/hooks/useSystemState';
+import { useWorkerHistory } from '@/hooks/useWorkerHistory';
+import { useTelemetryStream } from '@/hooks/useTelemetryStream';
 
 export function LiveMissionRadar() {
-  const { data, history, logs, isLoading } = useSystemState();
+  const data = useSystemState(2000);
+  const history = useWorkerHistory(data);
+  const logs = useTelemetryStream();
 
   if (!data) {
     return (
@@ -70,7 +74,7 @@ export function LiveMissionRadar() {
         <div className="lg:col-span-3">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             <AnimatePresence>
-              {data.workers.map((worker, i) => {
+              {data.workers.map((worker: WorkerState, i: number) => {
             const isActive = worker.status === 'claimed' || worker.status === 'active';
             return (
               <motion.div
