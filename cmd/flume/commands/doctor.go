@@ -85,10 +85,10 @@ func renderRow(label, value string) string {
 
 func fetchDocker(report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	err := exec.Command("docker", "info").Run()
-
 	report.mu.Lock()
 	defer report.mu.Unlock()
+
+	err := exec.Command("docker", "info").Run()
 	report.DockerOnline = (err == nil)
 	if !report.DockerOnline {
 		report.Suggestions = append(report.Suggestions, "Docker Daemon is unreachable. Start Docker Desktop or OrbStack.")
@@ -97,10 +97,10 @@ func fetchDocker(report *DiagnosticsReport, wg *sync.WaitGroup) {
 
 func fetchVault(client *http.Client, vaultURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	resp, err := client.Get(vaultURL + "/v1/sys/seal-status")
-
 	report.mu.Lock()
 	defer report.mu.Unlock()
+
+	resp, err := client.Get(vaultURL + "/v1/sys/seal-status")
 	if err == nil && resp.StatusCode == 200 {
 		defer resp.Body.Close()
 		report.VaultOnline = true
@@ -128,29 +128,28 @@ func fetchVault(client *http.Client, vaultURL string, report *DiagnosticsReport,
 
 func fetchElasticsearch(client *http.Client, esURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	respES, err := client.Get(esURL + "/_stats/docs")
+	report.mu.Lock()
+	defer report.mu.Unlock()
 
+	respES, err := client.Get(esURL + "/_stats/docs")
 	if err == nil {
 		defer respES.Body.Close()
-		report.mu.Lock()
 		report.ElasticOnline = true
 		var e ESStatsData
 		if json.NewDecoder(respES.Body).Decode(&e) == nil {
 			report.ElasticASTCount = e.All.Primaries.Docs.Count
 		}
-		report.mu.Unlock()
 	}
 }
 
 func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
+	report.mu.Lock()
+	defer report.mu.Unlock()
 
 	// Query both system-state and snapshot efficiently.
 	statResp, errStat := client.Get(apiURL + "/api/system-state")
 	snapResp, errSnap := client.Get(apiURL + "/api/snapshot")
-
-	report.mu.Lock()
-	defer report.mu.Unlock()
 
 	if errStat == nil {
 		defer statResp.Body.Close()
@@ -184,15 +183,13 @@ func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsRepor
 func fetchLlmGateway(client *http.Client, baseURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
 	report.mu.Lock()
-	report.LlmTarget = baseURL
-	report.mu.Unlock()
+	defer report.mu.Unlock()
 
+	report.LlmTarget = baseURL
 	start := time.Now()
 	resp, err := client.Get(baseURL + "/models")
 	latency := time.Since(start)
 
-	report.mu.Lock()
-	defer report.mu.Unlock()
 	if err == nil {
 		defer resp.Body.Close()
 		report.LlmOnline = true

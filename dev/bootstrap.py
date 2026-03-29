@@ -39,6 +39,7 @@ def initialize_and_unseal(client, keys_path):
             }
             with open(keys_path, "w") as f:
                 json.dump(keys_data, f)
+            os.chmod(keys_path, 0o600)
             log("info", "Successfully generated root topology and unseal arrays.", component="vault_init", status="success")
         except VaultError as e:
             log("error", "Failed to initialize vault", component="vault_init", error_details=str(e))
@@ -96,18 +97,61 @@ def configure_secrets_engine(client, openai_key):
 def provision_approle(client):
     try:
         auth_methods = client.sys.list_auth_methods()
-        if 'approle/' not in auth_methods:
+        auth_data = auth_methods.get('data', auth_methods) if isinstance(auth_methods, dict) else auth_methods
+        if 'approle/' not in auth_data:
             client.sys.enable_auth_method(method_type='approle')
             log("info", "Enabled AppRole authentication engine.")
+        else:
+            log("info", "AppRole authentication engine already enabled.")
         
         policy = 'path "secret/data/flume/*" { capabilities = ["read"] }'
-        client.sys.create_or_update_policy(name='flume-read-policy', policy=policy)
-        log("info", "Created flume-read-policy for Vault KV access.")
+        
+        # Idempotent policy creation
+        policies_resp = client.sys.list_policies()
+        existing_policies = []
+        if isinstance(policies_resp, dict):
+            if 'data' in policies_resp and isinstance(policies_resp['data'], dict) and 'policies' in policies_resp['data']:
+                existing_policies = policies_resp['data']['policies']
+            elif 'policies' in policies_resp:
+                existing_policies = policies_resp['policies']
+            else:
+                existing_policies = list(policies_resp.keys())
+        else:
+            existing_policies = policies_resp
+            
+        if 'flume-read-policy' not in existing_policies:
+            client.sys.create_or_update_policy(name='flume-read-policy', policy=policy)
+            log("info", "Created flume-read-policy for Vault KV access.")
+        else:
+            log("info", "Policy flume-read-policy already exists.")
         
         client.write('auth/approle/role/flume-worker', token_policies=['flume-read-policy'])
         client.write('auth/approle/role/flume-worker/role-id', role_id='flume-client-role')
-        client.write('auth/approle/role/flume-worker/custom-secret-id', secret_id='flume-client-secret')
-        log("info", "Successfully provisioned deterministic AppRole flume-worker.")
+        
+        # Determine if secret_id already provided natively, otherwise generate
+        secret_resp = client.write('auth/approle/role/flume-worker/secret-id')
+        secret_id = secret_resp['data']['secret_id']
+        
+        env_path = "/app/.env"
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+            
+            replaced = False
+            with open(env_path, "w") as f:
+                for line in lines:
+                    if line.startswith("BAO_SECRET_ID="):
+                        f.write(f'BAO_SECRET_ID="{secret_id}"\n')
+                        replaced = True
+                    else:
+                        f.write(line)
+                if not replaced:
+                    if lines and not lines[-1].endswith("\n"):
+                        f.write("\n")
+                    f.write(f'BAO_SECRET_ID="{secret_id}"\n')
+            log("info", "Injected dynamically generated BAO_SECRET_ID into /app/.env")
+            
+        log("info", "Successfully provisioned dynamic AppRole flume-worker.")
     except VaultError as e:
         log("error", "Failed to provision AppRole engine", component="vault_approle", error_details=str(e))
         sys.exit(1)
