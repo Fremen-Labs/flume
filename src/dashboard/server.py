@@ -2067,8 +2067,13 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
 
 @app.post("/api/system/sync-ast")
 def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
-    if not settings.FLUME_ADMIN_TOKEN or x_flume_system_token != settings.FLUME_ADMIN_TOKEN:
-        logger.warning({"event": "ast_system_sync_forbidden", "reason": "Invalid or missing structural token bounds natively"})
+    import secrets
+    if not (
+        settings.FLUME_ADMIN_TOKEN and
+        x_flume_system_token and
+        secrets.compare_digest(settings.FLUME_ADMIN_TOKEN, x_flume_system_token)
+    ):
+        logger.warning({"event": "auth_failure", "endpoint": "/api/system/sync-ast", "reason": "invalid_system_token"})
         raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
         
     workspace = settings.FLUME_WORKSPACE
@@ -2081,7 +2086,7 @@ def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppC
     except (IOError, subprocess.CalledProcessError) as e:
         logger.error({
             "event": "ast_system_sync_failure", 
-            "reason": "predictable_subprocess_rejection",
+            "reason": "subprocess_error",
             "error": str(e),
             "traceback": traceback.format_exc()
         })
@@ -2164,7 +2169,6 @@ class AppConfig(BaseSettings):
     FLUME_WORKSPACE: str = str(WORKSPACE_ROOT)
 
 import functools
-@functools.lru_cache()
 def get_settings():
     return AppConfig()
 
@@ -2472,6 +2476,8 @@ async def websocket_telemetry(websocket: WebSocket):
                 except Exception:
                     pass
     except Exception:
+        pass
+    finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
 

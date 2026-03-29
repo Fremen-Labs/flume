@@ -220,8 +220,8 @@ var StartCmd = &cobra.Command{
 				if res != nil {
 					statusCode = res.StatusCode
 				}
-				log.Error("Critical architectural failure synchronizing AST metrics: backend rejected AST update inherently natively", "error", reqErr, "code", statusCode)
-				return fmt.Errorf("ast synchronization inherently failed securely")
+				log.Error("Failed to synchronize AST with the Flume dashboard", "error", reqErr, "http_status", statusCode)
+				return fmt.Errorf("could not connect to the Flume dashboard to sync AST after 5 attempts. Please check the dashboard container logs for errors")
 			}
 
 			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
