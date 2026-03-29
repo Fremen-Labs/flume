@@ -163,6 +163,19 @@ def hydrate_secrets_from_openbao() -> None:
     addr = os.environ.get("OPENBAO_ADDR", "http://openbao:8200")
     token = os.environ.get("OPENBAO_TOKEN", "")
     
+    if not token:
+        role_id = os.environ.get("VAULT_ROLE_ID")
+        secret_id = os.environ.get("VAULT_SECRET_ID")
+        if role_id and secret_id:
+            try:
+                import hvac
+                client = hvac.Client(url=addr)
+                res = client.auth.approle.login(role_id=role_id, secret_id=secret_id)
+                token = res['auth']['client_token']
+                os.environ["OPENBAO_TOKEN"] = token
+            except Exception as e:
+                logger.warning(f"AppRole native fetch failed: {e}")
+
     if not token or not addr:
         logger.warning(json.dumps({
             "event": "openbao_config_missing",

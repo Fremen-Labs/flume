@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -9,10 +11,10 @@ import (
 	"sync"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/agents"
+	"github.com/spf13/cobra"
+	"github.com/charmbracelet/log"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/charmbracelet/log"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -105,11 +107,17 @@ var StartCmd = &cobra.Command{
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
 			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
-			output, err := c.CombinedOutput()
+			
+			var outBuf, errBuf bytes.Buffer
+			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+			
+			err := c.Run()
 			if err != nil {
-				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+				combinedOutput := outBuf.String() + "\n" + errBuf.String()
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 			} else {
-				log.Info("Data grid bootstrapped successfully", "output", strings.TrimSpace(string(output)))
+				log.Info("Data grid bootstrapped successfully")
 			}
 
 			go func() {
@@ -143,15 +151,23 @@ var StartCmd = &cobra.Command{
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 			c := exec.Command("docker", "compose", "up", "-d")
 			c.Env = portEnvOverrides
-			output, err := c.CombinedOutput()
+			
+			var outBuf, errBuf bytes.Buffer
+			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			c.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+			
+			err := c.Run()
 			if err != nil {
-				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(string(output)))
+				combinedOutput := outBuf.String() + "\n" + errBuf.String()
+				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 				return err
 			}
-			log.Info("Container Swarm bootstrapped successfully", "output", strings.TrimSpace(string(output)))
+			log.Info("Container Swarm bootstrapped successfully")
 		}
 
-		orchestrator.AwaitOrchestration()
+		if err := orchestrator.AwaitOrchestration(); err != nil {
+			return err
+		}
 
 		if eco.HasElastro {
 			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
