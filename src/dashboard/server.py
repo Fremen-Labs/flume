@@ -11,6 +11,7 @@ import time
 import uuid
 import ssl
 import hvac
+import httpx
 
 class NetflixFaultTolerance:
     '''Netflix Microservice Resilience Wrapper'''
@@ -2422,7 +2423,7 @@ async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: 
         elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
         query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
         
-        response = await http_client.post(f"{es_url}/{elastro_index}/_search", json=query, headers=headers, timeout=5.0, verify=False)
+        response = await http_client.post(f"{es_url}/{elastro_index}/_search", json=query, headers=headers, timeout=5.0)
         response.raise_for_status()
         
         data = response.json()

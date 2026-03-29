@@ -16,7 +16,7 @@ services:
       - openbao_data:/vault/file
       - ./config:/vault/config:ro
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 >/dev/null 2>&1; rc=$$?; if [ $$rc -eq 0 ] || [ $$rc -eq 2 ]; then exit 0; else exit 1; fi"]
       interval: 10s
       timeout: 5s
       retries: 5

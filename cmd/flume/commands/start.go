@@ -173,7 +173,11 @@ var StartCmd = &cobra.Command{
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
 				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				return err
 			} else {
+				log.Info("Waiting exclusively for OpenBao KMS cluster generation locks...")
+				bs := exec.Command("docker", "compose", "wait", "bootstrap")
+				bs.Run()
 				log.Info("Data grid bootstrapped successfully")
 			}
 
