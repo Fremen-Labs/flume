@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -201,7 +202,18 @@ var StartCmd = &cobra.Command{
 
 				dash.Stdout = os.Stdout
 				dash.Stderr = os.Stderr
-				dash.Run()
+
+				if err := dash.Start(); err != nil {
+					log.Error("Failed to spawn Flume Dashboard natively", "err", err)
+					return
+				}
+
+				homeDir, _ := os.UserHomeDir()
+				pidFile := filepath.Join(homeDir, ".flume", "flume-daemon.pid")
+				os.MkdirAll(filepath.Dir(pidFile), 0755)
+				os.WriteFile(pidFile, []byte(strconv.Itoa(dash.Process.Pid)), 0644)
+
+				dash.Wait()
 			}()
 
 			var wg sync.WaitGroup

@@ -2197,6 +2197,7 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient()
     yield
     await app.state.http_client.aclose()
+    agents_stop()
 
 app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)
 
@@ -2421,8 +2422,9 @@ def _check_ast_exists_natively(repo_path: str) -> tuple[bool, str]:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+        elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
         query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
-        req = urllib.request.Request(f"{es_url}/flume-elastro-graph/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
+        req = urllib.request.Request(f"{es_url}/{elastro_index}/_search", data=json.dumps(query).encode(), headers=headers, method='POST')
         
         with urllib.request.urlopen(req, timeout=5, context=ctx) as res:
             data = json.loads(res.read().decode())
@@ -2438,7 +2440,8 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
             
         if not exists:
             logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
-            subprocess.run(["elastro", "rag", "ingest", repo_path, "-i", "flume-elastro-graph"], shell=False, check=True, capture_output=True, timeout=120)
+            elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+            subprocess.run(["elastro", "rag", "ingest", repo_path, "-i", elastro_index], shell=False, check=True, capture_output=True, timeout=120)
             logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
         else:
             logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
@@ -2476,7 +2479,8 @@ def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppC
                 "details": details,
             })
             return JSONResponse(status_code=500, content={
-                "error": "AST ingestion completed, but post-flight verification failed."
+                "error": "AST ingestion completed, but post-flight verification failed.",
+                "details": details
             })
         return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
     except (IOError, subprocess.CalledProcessError) as e:
