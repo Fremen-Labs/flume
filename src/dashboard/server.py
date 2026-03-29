@@ -1981,7 +1981,6 @@ async def lifespan(app: FastAPI):
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
     
-    import httpx
     app.state.http_client = httpx.AsyncClient()
     yield
     await app.state.http_client.aclose()
