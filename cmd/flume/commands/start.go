@@ -162,7 +162,7 @@ var StartCmd = &cobra.Command{
 
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
-			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao")
+			c := exec.Command("docker", "compose", "up", "-d", "elasticsearch", "openbao", "bootstrap")
 			
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)

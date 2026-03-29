@@ -2438,7 +2438,7 @@ def _deterministic_ast_ingest(repo_path: str, project_id: str, project_name: str
             
         if not exists:
             logger.info({"event": "ast_ingest_start", "repo": repo_path, "project": project_name})
-            subprocess.run(["elastro", "rag", "ingest", repo_path], shell=False, check=True, capture_output=True, timeout=120)
+            subprocess.run(["elastro", "rag", "ingest", repo_path, "-i", "flume-elastro-graph"], shell=False, check=True, capture_output=True, timeout=120)
             logger.info({"event": "ast_ingest_success", "repo": repo_path, "project": project_name})
         else:
             logger.info({"event": "ast_ingest_skipped", "repo": repo_path, "project": project_name, "reason": "already_indexed"})
@@ -2465,19 +2465,18 @@ def api_system_sync_ast(x_flume_system_token: str = Header(None), settings: AppC
         logger.warning({"event": "auth_failure", "endpoint": "/api/system/sync-ast", "reason": "invalid_system_token"})
         raise HTTPException(status_code=403, detail="Forbidden: System architectural mapping strictly enforced")
         
-    workspace = settings.FLUME_WORKSPACE
+    flume_root = str(_SRC_ROOT.parent)
     try:
-        _deterministic_ast_ingest(workspace, "flume-core", "Flume Core Architecture")
-        exists, details = _check_ast_exists_natively(workspace)
+        _deterministic_ast_ingest(flume_root, "flume-core", "Flume Core Architecture")
+        exists, details = _check_ast_exists_natively(flume_root)
         if not exists:
             logger.error({
                 "event": "ast_verification_failure",
-                "workspace": workspace,
+                "workspace": flume_root,
                 "details": details,
             })
             return JSONResponse(status_code=500, content={
-                "error": "AST ingestion completed, but post-flight verification failed.",
-                "details": details
+                "error": "AST ingestion completed, but post-flight verification failed."
             })
         return {"success": True, "message": "AST Mapping securely synchronized via backend decoupling"}
     except (IOError, subprocess.CalledProcessError) as e:

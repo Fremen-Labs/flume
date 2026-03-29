@@ -31,6 +31,7 @@ services:
         condition: service_started
     environment:
       - VAULT_ADDR=http://openbao:8200
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
     volumes:
       - .:/app
       - openbao_data:/vault/file
