@@ -2003,15 +2003,28 @@ def health():
 
 
 
+from urllib.parse import urlparse, urlunparse
+
 @app.get('/api/exo-status')
 async def api_exo_status(request: Request):
-    from urllib.parse import urlparse, urlunparse
     http_client = request.app.state.http_client
     exo_url = os.environ.get("EXO_STATUS_URL", "http://host.docker.internal:52415/models")
     
     DEFAULT_EXO_TIMEOUT = 0.5
     try:
-        exo_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", str(DEFAULT_EXO_TIMEOUT)))
+        configured_timeout = float(os.environ.get("EXO_STATUS_TIMEOUT_SECONDS", str(DEFAULT_EXO_TIMEOUT)))
+        if configured_timeout > 0:
+            exo_timeout = configured_timeout
+        else:
+            logger.warning(
+                "Invalid EXO_STATUS_TIMEOUT_SECONDS value (must be > 0). Falling back to default.",
+                extra={
+                    "component": "exo_detector",
+                    "invalid_value": configured_timeout,
+                    "default_value": DEFAULT_EXO_TIMEOUT,
+                }
+            )
+            exo_timeout = DEFAULT_EXO_TIMEOUT
     except ValueError:
         logger.warning(
             "Invalid EXO_STATUS_TIMEOUT_SECONDS value. Falling back to default.",
@@ -2039,6 +2052,14 @@ async def api_exo_status(request: Request):
     try:
         resp = await http_client.get(exo_url, timeout=exo_timeout)
         resp.raise_for_status()
+        
+        logger.info(
+            "Successfully connected to Exo service",
+            extra={
+                "component": "exo_detector",
+                "target_url": exo_url,
+            }
+        )
         return {"active": True, "baseUrl": base_url}
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logger.warning(

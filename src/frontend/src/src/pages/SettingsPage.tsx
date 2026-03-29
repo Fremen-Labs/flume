@@ -283,11 +283,16 @@ export default function SettingsPage() {
     staleTime: 30_000,
   });
 
-  const { data: exoData } = useQuery<{ active: boolean }>({
+  const { data: exoData } = useQuery<{ active: boolean; baseUrl?: string }>({
     queryKey: ['settings', 'exo-status'],
     queryFn: async () => {
-      const res = await fetch('/api/exo-status');
-      return res.json();
+      try {
+        const res = await fetch('/api/exo-status');
+        if (!res.ok) return { active: false };
+        return await res.json();
+      } catch (e) {
+        return { active: false };
+      }
     },
     staleTime: 30_000,
   });
