@@ -2441,6 +2441,9 @@ def api_workflow_agents_status():
 
 
 
+import uuid
+import datetime
+
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
@@ -2449,10 +2452,28 @@ async def websocket_telemetry(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
+            try:
+                parsed = json.loads(data)
+                if not isinstance(parsed, dict):
+                    parsed = {"msg": str(parsed)}
+            except json.JSONDecodeError:
+                parsed = {"msg": data}
+            
+            payload = {
+                "id": parsed.get("id", uuid.uuid4().hex),
+                "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
+                "time": parsed.get("time", datetime.datetime.now().strftime("%H:%M:%S")),
+                "level": parsed.get("level", "INFO").upper()
+            }
+            
             for conn in active_connections:
-                await conn.send_text(json.dumps({"event": "update", "data": data}))
+                try:
+                    await conn.send_text(json.dumps({"event": "telemetry", "data": payload}))
+                except Exception:
+                    pass
     except Exception:
-        active_connections.remove(websocket)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
 # Static Mount for Frontend
 from fastapi.responses import FileResponse

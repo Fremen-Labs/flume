@@ -23,26 +23,10 @@ export function useTelemetryStream() {
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
-          let parsedData = payload;
-          if (payload.event === 'update' && typeof payload.data === 'string') {
-              try {
-                  parsedData = JSON.parse(payload.data);
-              } catch {
-                  parsedData = { msg: payload.data };
-              }
+          if (payload.event === 'telemetry') {
+              const newLog = payload.data as TelemetryLog;
+              setLogs(prev => [newLog, ...prev].slice(0, 100));
           }
-
-          const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          const newLog: TelemetryLog = {
-            id: parsedData.id || crypto.randomUUID(),
-            msg: parsedData.msg || parsedData.message || JSON.stringify(parsedData),
-            time: parsedData.time || time,
-            level: parsedData.level || (parsedData.msg?.toLowerCase().includes('error') ? 'ERROR' : 'INFO')
-          };
-          
-          setLogs(prev => {
-            return [newLog, ...prev].slice(0, 100);
-          });
         } catch (e) {
           console.error("Telemetry WebSocket parse error:", e);
         }
