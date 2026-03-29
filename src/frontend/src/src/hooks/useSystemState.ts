@@ -45,7 +45,15 @@ export function useSystemState() {
               setLogs(prev => {
                  if (logsJson.length === 0) return prev;
                  const combined = [...logsJson, ...prev];
-                 return combined.length > 60 ? combined.slice(0, 60) : combined;
+                 
+                 const uniqueMap = new Map();
+                 for (const log of combined) {
+                   if (!uniqueMap.has(log.id)) {
+                     uniqueMap.set(log.id, log);
+                   }
+                 }
+                 const distinct = Array.from(uniqueMap.values());
+                 return distinct.length > 60 ? distinct.slice(0, 60) : distinct;
               });
             }
           } catch(e) {
