@@ -173,6 +173,9 @@ def es_search(index, body):
         if e.code == 404:
             return {}
         raise
+    except urllib.error.URLError as e:
+        logger.warning(json.dumps({"event": "es_search_bypassed", "error": str(e), "index": index, "status": "fallback"}))
+        return {}
 
 
 def find_task_doc_by_logical_id(logical_id: str):
@@ -2420,10 +2423,11 @@ def api_settings_agent_models():
 
 @app.put("/api/settings/agent-models")
 def api_settings_agent_models_update(payload: dict):
-    from agent_models_settings import update_agent_models
-    ok, msg = update_agent_models(WORKSPACE_ROOT, payload)
+    from agent_models_settings import validate_save_agent_models, save_agent_models
+    ok, msg, data = validate_save_agent_models(WORKSPACE_ROOT, payload)
     if ok:
-        return {"success": True, "message": msg}
+        save_agent_models(WORKSPACE_ROOT, data)
+        return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.post("/api/settings/restart-services")
