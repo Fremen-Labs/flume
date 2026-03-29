@@ -15,7 +15,7 @@ func DeployWorker(ctx context.Context, id int, taskID string) error {
 	dir := fmt.Sprintf(".flume/agents/%s", branch)
 
 	fmt.Println(ui.SuccessBlue(fmt.Sprintf("Provisioning Parallel Agent [%d] -> %s", id, dir)))
-	
+
 	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branch, dir, "main")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git worktree synthesis failed: %w", err)
