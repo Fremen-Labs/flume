@@ -2396,18 +2396,31 @@ def api_snapshot():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:400], 'code': 'ES_CONNECTION'})
 
+import subprocess
+import json
+
 @app.get('/api/system-state')
 def api_system_state():
     try:
         workers = load_workers()
         active = sum(1 for w in workers if w.get('status') in ('busy', 'claimed'))
         total = len(workers)
+
+        telemetry = {}
+        try:
+            res = subprocess.run(["flume", "doctor", "--json"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                telemetry = json.loads(res.stdout)
+        except Exception as te:
+            logger.warning(f"Telemetry shell-out failed: {te}")
+
         return {
             "status": "online",
             "activeStreams": active,
             "totalNodes": total,
             "standbyNodes": total - active,
-            "workers": workers
+            "workers": workers,
+            "telemetry": telemetry
         }
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})

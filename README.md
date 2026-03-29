@@ -26,6 +26,8 @@ There is no pure-native fallback for the backend infrastructure. The Go CLI nati
 
 ### Quick Start (Cold Boot)
 
+> **Docker is mandatory. The Go CLI only orchestrates containers — no host pollution.**
+
 ```bash
 # 1. Download the ecosystem
 git clone https://github.com/Fremen-Labs/flume.git

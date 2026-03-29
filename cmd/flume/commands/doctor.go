@@ -14,11 +14,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Telemetry Structs
 type SystemState struct {
 	StandbyNodes  int `json:"standbyNodes"`
 	ActiveStreams int `json:"activeStreams"`
 	TotalNodes    int `json:"totalNodes"`
+}
+
+type ESHealthData struct {
+	Status string `json:"status"`
 }
 
 type TaskObj struct {
@@ -46,23 +49,27 @@ type VaultStatusData struct {
 
 // DiagnosticsReport stores aggregated telemetry globally.
 type DiagnosticsReport struct {
-	DockerOnline    bool
-	VaultSealed     bool
-	VaultOnline     bool
-	ElasticOnline   bool
-	ElasticASTCount int
+	DockerOnline    bool   `json:"dockerOnline"`
+	VaultSealed     bool   `json:"vaultSealed"`
+	VaultOnline     bool   `json:"vaultOnline"`
+	ElasticOnline   bool   `json:"elasticOnline"`
+	ElasticStatus   string `json:"elasticStatus"`
+	ElasticASTCount int    `json:"elasticAstCount"`
 
-	ApiOnline     bool
-	Projects      int
-	QueuedWork    int
-	CompletedWork int
-	AgentsReady   int
-	AgentsBusy    int
+	ApiOnline     bool `json:"apiOnline"`
+	Projects      int  `json:"projects"`
+	QueuedWork    int  `json:"queuedWork"`
+	CompletedWork int  `json:"completedWork"`
+	AgentsReady   int  `json:"agentsReady"`
+	AgentsBusy    int  `json:"agentsBusy"`
 
-	LlmOnline bool
-	LlmTarget string
+	LlmOnline   bool   `json:"llmOnline"`
+	LlmTarget   string `json:"llmTarget"`
+	LlmLatency  string `json:"llmLatency"`
 
-	mu sync.Mutex
+	Suggestions []string `json:"suggestions"`
+
+	mu sync.Mutex `json:"-"`
 }
 
 var labelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00F0FF")).Bold(true).Width(27)
@@ -78,54 +85,71 @@ func renderRow(label, value string) string {
 
 func fetchDocker(report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	err := exec.Command("docker", "info").Run()
-
 	report.mu.Lock()
 	defer report.mu.Unlock()
+
+	err := exec.Command("docker", "info").Run()
 	report.DockerOnline = (err == nil)
+	if !report.DockerOnline {
+		report.Suggestions = append(report.Suggestions, "Docker Daemon is unreachable. Start Docker Desktop or OrbStack.")
+	}
 }
 
 func fetchVault(client *http.Client, vaultURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	resp, err := client.Get(vaultURL + "/v1/sys/seal-status")
+	report.mu.Lock()
+	defer report.mu.Unlock()
 
-	if err == nil {
+	resp, err := client.Get(vaultURL + "/v1/sys/seal-status")
+	if err == nil && resp.StatusCode == 200 {
 		defer resp.Body.Close()
-		report.mu.Lock()
 		report.VaultOnline = true
 		var v VaultStatusData
 		if json.NewDecoder(resp.Body).Decode(&v) == nil {
 			report.VaultSealed = v.Sealed
+			if report.VaultSealed {
+				report.Suggestions = append(report.Suggestions, "OpenBao is SEALED. Ensure `flume start` booted properly without interruptions.")
+			}
 		}
-		report.mu.Unlock()
+	} else if err == nil && resp.StatusCode == 503 {
+	    defer resp.Body.Close()
+	    report.VaultOnline = true
+	    report.VaultSealed = true
+	    report.Suggestions = append(report.Suggestions, "OpenBao is SEALED (503). Ensure `docker-compose` executed the `bootstrap` container successfully.")
+	} else if err == nil && resp.StatusCode == 501 {
+        defer resp.Body.Close()
+        report.VaultOnline = true
+        report.VaultSealed = true
+        report.Suggestions = append(report.Suggestions, "OpenBao is UNINITIALIZED (501). Reboot `flume start -n` explicitly to force bootstrap cluster mapping.")
+	} else {
+		report.Suggestions = append(report.Suggestions, "OpenBao container is completely offline. Run `flume destroy` and `flume start -n` to rebuild cluster topology.")
 	}
 }
 
 func fetchElasticsearch(client *http.Client, esURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
-	respES, err := client.Get(esURL + "/_stats/docs")
+	report.mu.Lock()
+	defer report.mu.Unlock()
 
+	respES, err := client.Get(esURL + "/_stats/docs")
 	if err == nil {
 		defer respES.Body.Close()
-		report.mu.Lock()
 		report.ElasticOnline = true
 		var e ESStatsData
 		if json.NewDecoder(respES.Body).Decode(&e) == nil {
 			report.ElasticASTCount = e.All.Primaries.Docs.Count
 		}
-		report.mu.Unlock()
 	}
 }
 
 func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
+	report.mu.Lock()
+	defer report.mu.Unlock()
 
 	// Query both system-state and snapshot efficiently.
 	statResp, errStat := client.Get(apiURL + "/api/system-state")
 	snapResp, errSnap := client.Get(apiURL + "/api/snapshot")
-
-	report.mu.Lock()
-	defer report.mu.Unlock()
 
 	if errStat == nil {
 		defer statResp.Body.Close()
@@ -150,25 +174,39 @@ func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsRepor
 			}
 		}
 	}
+
+	if !report.ApiOnline {
+		report.Suggestions = append(report.Suggestions, "Flume REST API is unreachable. Check for port 8765 collisions natively.")
+	}
 }
 
 func fetchLlmGateway(client *http.Client, baseURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
 	defer wg.Done()
 	report.mu.Lock()
-	report.LlmTarget = baseURL
-	report.mu.Unlock()
+	defer report.mu.Unlock()
 
+	report.LlmTarget = baseURL
+	start := time.Now()
 	resp, err := client.Get(baseURL + "/models")
+	latency := time.Since(start)
+
 	if err == nil {
 		defer resp.Body.Close()
-		report.mu.Lock()
 		report.LlmOnline = true
-		report.mu.Unlock()
+		report.LlmLatency = latency.Truncate(time.Millisecond).String()
+	} else {
+		report.Suggestions = append(report.Suggestions, fmt.Sprintf("LLM Engine natively unreachable at %s. Ensure Exo or Ollama is running and LOCAL_LLM_HOST is configured.", baseURL))
 	}
 }
 
 // Presentation Layer Mapping
-func renderDiagnosticReport(report *DiagnosticsReport) {
+func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
+	if jsonOutput {
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
 	// Status resolutions
 	dockerStat := errStyle.Render("OFFLINE (Daemon Unreachable)")
 	if report.DockerOnline {
@@ -186,7 +224,14 @@ func renderDiagnosticReport(report *DiagnosticsReport) {
 
 	esStat := errStyle.Render("OFFLINE")
 	if report.ElasticOnline {
-		esStat = valueStyle.Render(fmt.Sprintf("ONLINE (%d AST Nodes Indexed)", report.ElasticASTCount))
+		esHealthColor := valueStyle
+		if report.ElasticStatus == "yellow" {
+			esHealthColor = warnStyle
+		} else if report.ElasticStatus == "red" {
+			esHealthColor = errStyle
+		}
+		
+		esStat = valueStyle.Render("ONLINE") + " (Status: " + esHealthColor.Render(report.ElasticStatus) + fmt.Sprintf(", %d AST Nodes)", report.ElasticASTCount)
 	}
 
 	apiStat := errStyle.Render("OFFLINE")
@@ -194,9 +239,9 @@ func renderDiagnosticReport(report *DiagnosticsReport) {
 		apiStat = valueStyle.Render("ONLINE")
 	}
 
-	llmStat := errStyle.Render(fmt.Sprintf("OFFLINE (%s unreachable, verify LOCAL_LLM_HOST if on Linux!)", report.LlmTarget))
+	llmStat := errStyle.Render(fmt.Sprintf("OFFLINE (%s unreachable)", report.LlmTarget))
 	if report.LlmOnline {
-		llmStat = valueStyle.Render(fmt.Sprintf("ONLINE (%s)", report.LlmTarget))
+		llmStat = valueStyle.Render(fmt.Sprintf("ONLINE (%s) - Latency: %s", report.LlmTarget, report.LlmLatency))
 	}
 
 	// UI Layout
@@ -220,6 +265,14 @@ func renderDiagnosticReport(report *DiagnosticsReport) {
 	fmt.Println(renderRow("Agents Ready (Standby):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsReady))))
 	fmt.Println(renderRow("Agents Executing (Busy):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsBusy))))
 	fmt.Println(borderStyle.Render("└─────────────────────────────────────────────────────────────────┘"))
+
+	if len(report.Suggestions) > 0 {
+		fmt.Println("\n" + ui.WarningGold("Diagnostic Healing Suggestions:"))
+		for _, idx := range report.Suggestions {
+			fmt.Println(errStyle.Render(" [!] ") + idx)
+		}
+	}
+
 	fmt.Println("\n" + ui.NeonGreen("Diagnostic Telemetry Matrix Extracted Parallel."))
 	fmt.Println()
 }
@@ -233,12 +286,15 @@ var DoctorCmd = &cobra.Command{
 		vaultURL, _ := cmd.Flags().GetString("vault-url")
 		dashboardURL, _ := cmd.Flags().GetString("dashboard-url")
 		llmURL, _ := cmd.Flags().GetString("llm-url")
+		jsonOutput, _ := cmd.Flags().GetBool("json")
 
 		client := &http.Client{Timeout: 3 * time.Second}
 		report := &DiagnosticsReport{}
 		var wg sync.WaitGroup
 
-		fmt.Println("\n" + ui.CyberGradient(":: FLUME ECOSYSTEM TELEMETRY DIAGNOSTICS ::") + "\n")
+		if !jsonOutput {
+			fmt.Println("\n" + ui.CyberGradient(":: FLUME ECOSYSTEM TELEMETRY DIAGNOSTICS ::") + "\n")
+		}
 
 		// Parallel Telemetry Execution Maps (Goroutines)
 		wg.Add(5)
@@ -251,7 +307,7 @@ var DoctorCmd = &cobra.Command{
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
 		// Dispatch Rendering
-		renderDiagnosticReport(report)
+		renderDiagnosticReport(report, jsonOutput)
 	},
 }
 
@@ -260,4 +316,5 @@ func init() {
 	DoctorCmd.Flags().StringP("vault-url", "v", "http://localhost:8200", "OpenBao Telemetry Endpoint")
 	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://localhost:8765", "Flume API Dashboard Endpoint")
 	DoctorCmd.Flags().StringP("llm-url", "l", "http://host.docker.internal:52415/v1", "Local LLM Inference Engine Endpoint")
+	DoctorCmd.Flags().BoolP("json", "j", false, "Output explicit raw JSON payload without any rendering")
 }

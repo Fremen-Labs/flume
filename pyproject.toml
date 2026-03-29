@@ -30,16 +30,13 @@ dev = [
     "ruff"
 ]
 
-[project.scripts]
-flume = "flume_cli.cli:cli"
-
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["flume_cli*", "src*"]
+include = ["src*"]
 exclude = ["*node_modules*"]
 
 [tool.pytest.ini_options]
