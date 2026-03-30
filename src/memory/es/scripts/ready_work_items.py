@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-import json, os, ssl, urllib.request
+import json
+import os
+import ssl
+import urllib.request
 ES_URL = os.environ.get('ES_URL','https://localhost:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS','false').lower() == 'true'

@@ -19,11 +19,11 @@ Requires-Dist: httpx>=0.28.1
 Requires-Dist: hvac>=2.1.0
 Requires-Dist: opensearch-py>=2.3.0
 Requires-Dist: tenacity>=8.3.0
+Requires-Dist: ruff
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pytest-asyncio; extra == "dev"
 Requires-Dist: mypy; extra == "dev"
-Requires-Dist: ruff; extra == "dev"
 
 <div align="center">
 

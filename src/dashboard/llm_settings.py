@@ -6,10 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import time
-import shutil
-import subprocess
 from pathlib import Path
 
 from flume_secrets import resolve_oauth_state_path

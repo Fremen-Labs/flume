@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 import json
@@ -18,18 +17,11 @@ class NetflixFaultTolerance:
     pass
 
 import subprocess
-import sys
-import threading
-import time
 import urllib.request
-from urllib.error import URLError, HTTPError
 import urllib.parse
 from urllib.parse import urlparse
-import glob
 from contextlib import asynccontextmanager
-import uuid
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
 from pydantic import BaseModel
 import traceback
 from fastapi import BackgroundTasks
@@ -483,7 +475,7 @@ def _planner_should_use_codex_app_server() -> bool:
         return False
     has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
     api_key = (os.environ.get('LLM_API_KEY') or '').strip()
-    if not has_oauth and not (force in ('1', 'true', 'on', 'yes')):
+    if not has_oauth and force not in ('1', 'true', 'on', 'yes'):
         return False
     if api_key.startswith('sk-') or api_key.startswith('sk_'):
         return False
@@ -1759,7 +1751,7 @@ def task_diff(task_id: str) -> dict:
             truncated = True
         else:
             diff_text = raw
-    except Exception as e:
+    except Exception:
         diff_text = ''
 
     # If remote three-dot ref failed, fall back to local two-dot
@@ -1969,13 +1961,12 @@ def _requeue_running_tasks():
             })
             requeued += 1
         return requeued
-    except Exception as e:
+    except Exception:
         return 0
 
 
 def agents_stop() -> dict:
     """Kill worker processes and re-queue any stuck running tasks."""
-    import signal
     pids = _find_worker_pids()
     killed = []
     for group in ('manager', 'handlers'):
@@ -2163,11 +2154,10 @@ def _count_plan_tasks(plan: Optional[dict]) -> int:
     return total
 
 
-from fastapi import FastAPI, BackgroundTasks, WebSocket, Request, Depends, HTTPException, Header
+from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import json
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -2304,7 +2294,7 @@ def api_intake_commit(session_id: str, payload: dict):
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlunparse
 
 def _parse_float_env(key: str, default: float) -> float:
     val_str = os.environ.get(key)
@@ -2396,8 +2386,6 @@ def api_snapshot():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:400], 'code': 'ES_CONNECTION'})
 
-import subprocess
-import json
 
 @app.get('/api/system-state')
 def api_system_state():
@@ -2523,7 +2511,8 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
 
 @app.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
-    import uuid, datetime
+    import uuid
+    import datetime
     name = (payload.get("name") or "").strip()
     if not name:
         return JSONResponse(status_code=400, content={"error": "Project name is absolutely required natively."})
@@ -2570,9 +2559,7 @@ def api_task_transition(task_id: str, payload: dict):
     return {"success": True}
 
 
-from fastapi import Depends, HTTPException, Request, Header
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import ValidationError
+from fastapi import Depends, Request, Header
 import secrets
 import httpx
 
@@ -2905,7 +2892,6 @@ def api_workflow_agents_status():
 
 
 
-import uuid
 import datetime
 
 active_connections = []
@@ -2993,7 +2979,7 @@ def get_telemetry_logs():
             })
         logs.reverse()
         return logs
-    except Exception as e:
+    except Exception:
         logger.error("Failed to query telemetry logs natively", exc_info=True)
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="Could not load logs")

@@ -1,6 +1,5 @@
 from utils.logger import get_logger
 logger = get_logger(__name__)
-from elastro_sync import sync_ast
 #!/usr/bin/env python3
 import json
 import os
@@ -71,7 +70,8 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
         hdrs = {'Content-Type': 'application/json'}
         if es_key: hdrs['Authorization'] = f'ApiKey {es_key}'
         req = urllib.request.Request(f"{es_url}/agent-token-telemetry/_doc", data=json.dumps(doc).encode(), headers=hdrs, method='POST')
-        with urllib.request.urlopen(req, timeout=2, context=ctx): pass
+        with urllib.request.urlopen(req, timeout=2, context=ctx):
+            pass
     except Exception as e:
         logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
 
@@ -351,7 +351,7 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         p.write_text(content)
         
         return f'OK: wrote {len(content)} chars to {p}'
-    except Exception as e:
+    except Exception:
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
@@ -367,7 +367,8 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
         
         total_bytes = 0
         for r, ds, fs in os.walk(target_path):
-            if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']): continue
+            if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']):
+                continue
             for fw in fs:
                 total_bytes += (Path(r) / fw).stat().st_size
         
@@ -393,7 +394,8 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                 method='POST'
             )
             try:
-                with urllib.request.urlopen(req, timeout=3): pass
+                with urllib.request.urlopen(req, timeout=3):
+                    pass
             except Exception:
                 pass
                 

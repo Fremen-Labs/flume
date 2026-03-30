@@ -1,6 +1,6 @@
 def bad_function():
     try:
-        data = fetch_secure_data()
+        fetch_secure_data()
     except Exception:
         pass # Netflix rule violation
 
