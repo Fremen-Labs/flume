@@ -251,19 +251,25 @@ def es_post(path, body, method='POST'):
 
 
 def load_session(session_id):
-    path = SESSIONS_DIR / f'{session_id}.json'
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+    try:
+        res = es_search('agent-plan-sessions', {'size': 1, 'query': {'term': {'_id': session_id}}})
+        hits = res.get('hits', {}).get('hits', [])
+        if hits:
+            return hits[0].get('_source')
+    except Exception as e:
+        print(f"Error loading session {session_id} from ES: {e}")
+    return None
 
 
 def save_session(session):
-    path = SESSIONS_DIR / f'{session["id"]}.json'
-    session['updated_at'] = datetime.utcnow().isoformat() + 'Z'
-    path.write_text(json.dumps(session, indent=2))
+    try:
+        session['updated_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        es_post(f'agent-plan-sessions/_doc/{session["id"]}', session)
+    except Exception as e:
+        print(f"Error saving session to ES: {e}")
 
 def _utcnow_iso() -> str:
-    return datetime.utcnow().isoformat() + 'Z'
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
@@ -811,7 +817,7 @@ def get_next_id_sequence(prefix: str) -> int:
     except Exception:
         if max_n == 0:
             # Fallback when both ES and the counter file are unavailable
-            return int(datetime.utcnow().timestamp()) % 1_000_000 + 1
+            return int(datetime.now(timezone.utc).timestamp()) % 1_000_000 + 1
     return max_n + 1
 
 
@@ -823,7 +829,7 @@ def commit_plan(repo: str, plan: dict):
     IDs are always freshly allocated by querying existing records, so numbers
     are never reused even after items are deleted.
     """
-    now = datetime.utcnow().isoformat() + 'Z'
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     docs = []
 
     # Allocate monotonically-increasing sequence numbers for each item type.
@@ -1215,12 +1221,30 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
 
 
 def load_workers() -> list:
-    if not WORKER_STATE.exists():
-        return []
+    workers = []
     try:
-        data = json.loads(WORKER_STATE.read_text())
-        workers = data.get('workers', [])
-    except Exception:
+        res = es_search('agent-system-workers', {'size': 100, 'sort': [{'updated_at': {'order': 'desc'}}]})
+        hits = res.get('hits', {}).get('hits', [])
+        now = datetime.now(timezone.utc)
+        for h in hits:
+            doc = h.get('_source', {})
+            node_workers = doc.get('workers', [])
+            for w in node_workers:
+                w['status'] = w.get('status', 'idle')
+                hb_str = w.get('heartbeat_at')
+                if hb_str:
+                    try:
+                        hb = datetime.fromisoformat(hb_str.replace('Z', '+00:00'))
+                        diff_sec = (now - hb).total_seconds()
+                        if diff_sec > 120:
+                            continue  # Garbage collect from UI view
+                        if diff_sec > 30:
+                            w['status'] = 'offline/terminated'
+                    except Exception:
+                        pass
+                workers.append(w)
+    except Exception as e:
+        print(f"Error loading workers from ES: {e}")
         return []
         
     try:
@@ -1298,8 +1322,8 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         return None
     doc = {
         'status': status,
-        'updated_at': datetime.utcnow().isoformat() + 'Z',
-        'last_update': datetime.utcnow().isoformat() + 'Z',
+        'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     }
     if owner:
         doc['owner'] = owner
@@ -1656,8 +1680,8 @@ def create_task_pr(task_id: str) -> dict:
                 'pr_number': pr_number,
                 'pr_status': 'open',
                 'target_branch': target_branch,
-                'updated_at': datetime.utcnow().isoformat() + 'Z',
-                'last_update': datetime.utcnow().isoformat() + 'Z',
+                'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             }
         })
 
@@ -1894,38 +1918,47 @@ WORKER_ENV_FILE = _SRC_ROOT / 'memory' / 'es' / '.env.local'
 
 
 def _find_worker_pids() -> dict:
-    """Return pids of manager.py and worker_handlers.py if running."""
-    pids = {'manager': None, 'handlers': None}
-    try:
-        out = subprocess.check_output(
-            ['pgrep', '-f', str(WORKER_MANAGER_SCRIPT)],
-            stderr=subprocess.DEVNULL,
-        ).decode().split()
-        pids['manager'] = [int(p) for p in out if p.strip()]
-    except Exception:
-        pass
-    try:
-        out = subprocess.check_output(
-            ['pgrep', '-f', str(WORKER_HANDLERS_SCRIPT)],
-            stderr=subprocess.DEVNULL,
-        ).decode().split()
-        pids['handlers'] = [int(p) for p in out if p.strip()]
-    except Exception:
-        pass
-    return pids
+    # Deprecated: Handled asynchronously heavily via agent-system-workers heartbeat schema
+    return {'manager': [], 'handlers': []}
 
 
 def agents_status() -> dict:
-    pids = _find_worker_pids()
-    manager_running = bool(pids['manager'])
-    handlers_running = bool(pids['handlers'])
-    return {
-        'running': manager_running or handlers_running,
-        'manager_running': manager_running,
-        'handlers_running': handlers_running,
-        'manager_pids': pids['manager'] or [],
-        'handler_pids': pids['handlers'] or [],
-    }
+    try:
+        # 1. Fetch Admin Control Status
+        clust = es_search('agent-system-cluster', {'size': 1, 'query': {'term': {'_id': 'config'}}})
+        c_hits = clust.get('hits', {}).get('hits', [])
+        status = 'running'
+        if c_hits:
+            status = c_hits[0].get('_source', {}).get('status', 'running')
+
+        # 2. Fetch Aggregated Node Heartbeats
+        w_res = es_search('agent-system-workers', {'size': 100, 'sort': [{'updated_at': {'order': 'desc'}}]})
+        w_hits = w_res.get('hits', {}).get('hits', [])
+        now = datetime.now(timezone.utc)
+        active_nodes = 0
+        
+        for h in w_hits:
+            doc = h.get('_source', {})
+            hb_str = doc.get('updated_at')
+            if hb_str:
+                try:
+                    hb = datetime.fromisoformat(hb_str.replace('Z', '+00:00'))
+                    if (now - hb).total_seconds() <= 30:
+                        active_nodes += 1
+                except Exception:
+                    pass
+
+        return {
+            'running': active_nodes > 0 and status != 'paused',
+            'manager_running': active_nodes > 0,
+            'handlers_running': active_nodes > 0,
+            'manager_pids': [],
+            'handler_pids': [],
+            'cluster_status': status
+        }
+    except Exception as e:
+        print(f"Error fetching agent status: {e}")
+        return {'running': False, 'error': str(e)}
 
 
 def _requeue_running_tasks():
@@ -1938,7 +1971,7 @@ def _requeue_running_tasks():
             'size': 200,
             'query': {'term': {'status': 'running'}},
         }).get('hits', {}).get('hits', [])
-        now = datetime.utcnow().isoformat() + 'Z'
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         requeued = 0
         for h in hits:
             es_id = h.get('_id')
@@ -2280,7 +2313,7 @@ def api_intake_commit(session_id: str, payload: dict):
         docs, _results = commit_plan(repo, plan)
         session['status'] = 'committed'
         session['draftPlan'] = plan
-        session['committed_at'] = datetime.utcnow().isoformat() + 'Z'
+        session['committed_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         session['committedDocs'] = [d.get('id') for d in docs]
         save_session(session)
         return {
@@ -2512,7 +2545,6 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
 @app.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
     import uuid
-    import datetime
     name = (payload.get("name") or "").strip()
     if not name:
         return JSONResponse(status_code=400, content={"error": "Project name is absolutely required natively."})
@@ -2522,7 +2554,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         "id": new_id,
         "name": name,
         "repoUrl": (payload.get("repoUrl") or "").strip(),
-        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "gitflow": {"autoPrOnApprove": True, "defaultBranch": None}
     }
     
@@ -2890,10 +2922,21 @@ def api_workflow_agents_status():
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
+@app.post('/api/workflow/agents/start')
+def api_workflow_agents_start():
+    try:
+        es_post('agent-system-cluster/_doc/config', {'status': 'running', 'updated_at': _utcnow_iso()})
+        return {'status': 'ok'}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
-
-import datetime
-
+@app.post('/api/workflow/agents/stop')
+def api_workflow_agents_stop():
+    try:
+        es_post('agent-system-cluster/_doc/config', {'status': 'paused', 'updated_at': _utcnow_iso()})
+        return {'status': 'ok'}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
@@ -2912,7 +2955,7 @@ async def websocket_telemetry(websocket: WebSocket):
             payload = {
                 "id": parsed.get("id", uuid.uuid4().hex),
                 "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
-                "time": parsed.get("time", datetime.datetime.now().strftime("%H:%M:%S")),
+                "time": parsed.get("time", datetime.now().strftime("%H:%M:%S")),
                 "level": parsed.get("level", "INFO").upper()
             }
             
@@ -3101,8 +3144,16 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
+    import os
+    json_mode = os.environ.get('FLUME_JSON_LOGS', 'false').lower() == 'true'
+    formatter = "utils.logger.JSONFormatter" if json_mode else "utils.logger.ConsoleFormatter"
+    
+    log_config = uvicorn.config.LOGGING_CONFIG
+    log_config["formatters"]["access"] = {"()": formatter}
+    log_config["formatters"]["default"] = {"()": formatter}
+    
     try:
-        uvicorn.run(app, host=HOST, port=PORT)
+        uvicorn.run(app, host=HOST, port=PORT, log_config=log_config)
     except WorkspaceInitializationError as e:
         logger.error(json.dumps({
             "event": "workspace_initialization_fatal",

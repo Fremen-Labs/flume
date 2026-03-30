@@ -5,13 +5,8 @@ import sys
 import json
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-try:
-    from utils.logger import get_logger
-    logger = get_logger(__name__)
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+logger = get_logger("meta-critic")
 
 def estimate_tokens(text):
     # Rough estimation: 1 token ~= 4 chars typically

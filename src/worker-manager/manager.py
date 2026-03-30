@@ -5,6 +5,7 @@ import ssl
 import sys
 import time
 # AST injected by Swarm Agent 3
+import socket
 import urllib.request
 import subprocess
 import threading
@@ -12,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
 
 _WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
@@ -64,34 +67,17 @@ def now_iso():
 
 
 import logging
-from logging.handlers import RotatingFileHandler
-
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        data = {
-            "timestamp": now_iso(),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "service": "worker-manager",
-            "pid": os.getpid()
-        }
-        if hasattr(record, 'structured_data'):
-            data.update(record.structured_data)
-        return json.dumps(data)
-
-_manager_logger = logging.getLogger('worker-manager')
-_manager_logger.setLevel(logging.INFO)
+from utils.logger import get_logger
 
 try:
     _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
     from utils.workspace import resolve_safe_workspace
     _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
     _log_dir.mkdir(parents=True, exist_ok=True)
-    _fh = RotatingFileHandler(_log_dir / 'manager.log', maxBytes=10*1024*1024, backupCount=5)
-    _fh.setFormatter(JSONFormatter())
-    _manager_logger.addHandler(_fh)
-except PermissionError:
-    pass
+    _manager_logger = get_logger('worker-manager', file_path=str(_log_dir / f'manager_{NODE_ID}.log'))
+except Exception as e:
+    _manager_logger = get_logger('worker-manager')
+    _manager_logger.error(f"Failed to provision JSON Rotating File Handler on manager node: {e}")
 
 def log(msg, **kwargs):
     if kwargs:
@@ -196,7 +182,7 @@ def build_workers():
         for idx in range(1, active_limit + 1):
             workers.append(
                 {
-                    'name': f"{role_def['role']}-worker-{idx}",
+                    'name': f"{role_def['role']}-{NODE_ID}-worker-{idx}",
                     'role': role_def['role'],
                     'model': role_def['model'],
                     'execution_host': role_def['execution_host'],
@@ -210,7 +196,6 @@ def build_workers():
 def es_request(path, body=None, method='GET'):
     es_key_val = os.environ.get("ES_API_KEY", "")
     es_url_val = os.environ.get("ES_URL", "http://elasticsearch:9200").rstrip("/")
-    log(f"DEBUG: es_request hitting {es_url_val}{path} with payload: {json.dumps(body) if body else 'None'}")
     headers = {'Authorization': f'ApiKey {es_key_val}'}
     data = None
     if body is not None:
@@ -336,8 +321,11 @@ def claim(
 
 
 def save_state(state):
-    BASE.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(state, indent=2) + '\n')
+    try:
+        state['updated_at'] = now_iso()
+        es_request(f'/agent-system-workers/_doc/{NODE_ID}', state, method='POST')
+    except Exception as e:
+        log(f"Error publishing worker state to ES: {e}")
 
 
 def _task_stale_seconds(src: dict) -> Optional[float]:
@@ -426,7 +414,15 @@ def requeue_stuck_implementer_tasks() -> int:
 
 
 def cycle():
-    pass
+    # 1. Check Global Cluster Paused state
+    is_paused = False
+    try:
+        clust = es_request('/agent-system-cluster/_doc/config', method='GET')
+        if clust and clust.get('_source', {}).get('status') == 'paused':
+            is_paused = True
+    except Exception as e:
+        pass
+
     sync_llm_env_from_workspace(_WS)
     try:
         rq = requeue_stuck_implementer_tasks()
@@ -467,20 +463,23 @@ def cycle():
             
         snapshot['status'] = 'idle'
         snapshot['current_task_id'] = None
+        if is_paused:
+            # Cluster is globally disabled. Heartbeat state as idle but do not pull new tasks
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            continue
+
         hits = ready_items_for_role(worker['role'])
         if hits:
             task = hits[0]
             item_id = task.get('_id')
             src = task.get('_source', {})
-            # Role config in agent_models.json must win when a worker claims a task.
-            # Older tasks may carry stale preferred_model / provider / credential values from
-            # queue generation or a previous claim; re-stamping them here keeps runtime settings
-            # authoritative and prevents task-local defaults from overriding the Agents UI.
             pref_model = worker['model']
             pref_prov = worker.get('llm_provider')
             pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             
-            # Request the Mutex Lock via Elasticsearch _seq_no tracking to prevent swarms
             if claim(
                 item_id,
                 worker['role'],
@@ -502,7 +501,6 @@ def cycle():
                 log(f"{worker['name']} claimed {snapshot['current_task_id']}")
                 log_telemetry_event(worker['name'], "TASK_CLAIM", f"Claimed task: {snapshot['current_task_title'][:50]}")
             else:
-                # OCC Mutex Lock denied (task snagged by a faster node in the cluster)
                 snapshot['status'] = 'idle'
                 wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
                 snapshot['preferred_llm_credential_id'] = wcid
@@ -513,9 +511,10 @@ def cycle():
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
         state['workers'].append(snapshot)
+    
     save_state(state)
-    sync_worker_processes(state)
-
+    if not is_paused:
+        sync_worker_processes(state)
 
 def sync_worker_processes(state):
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
