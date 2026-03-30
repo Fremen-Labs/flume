@@ -67,7 +67,10 @@ func main() {
 }
 
 func analyzeDiff(diff string) string {
-	apiKey := os.Getenv("OPENAI_API_KEY")
+	apiKey := os.Getenv("LLM_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENAI_API_KEY")
+	}
 	if apiKey != "" {
 		return analyzeWithLLM(diff, apiKey)
 	}
@@ -87,8 +90,18 @@ If you find ANY violations, provide a concise critique requesting changes.
 If the code is flawless, respond exactly with "APPROVED".
 Be highly technical and succinct.`, diff)
 
+	model := os.Getenv("LLM_MODEL")
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+
+	url := "https://api.openai.com/v1/chat/completions"
+	if os.Getenv("LLM_PROVIDER") == "gemini" {
+		url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+	}
+
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o-mini", // Can be overridden for local LLMs via env vars in a full setup
+		"model": model, 
 		"messages": []map[string]string{
 			{"role": "system", "content": "You are a senior engineer PR reviewer."},
 			{"role": "user", "content": prompt},
@@ -101,7 +114,7 @@ Be highly technical and succinct.`, diff)
 		return fmt.Sprintf("CRITIQUE BLOCKED: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Sprintf("CRITIQUE BLOCKED: %v", err)
 	}
