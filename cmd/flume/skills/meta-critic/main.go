@@ -18,6 +18,7 @@ type PRArgs struct {
 	Repo string `json:"repo,omitempty"`
 	PR   string `json:"pr,omitempty"`
 	Diff string `json:"diff,omitempty"`
+	Mode string `json:"mode,omitempty"`
 }
 
 func main() {
@@ -30,6 +31,11 @@ func main() {
 	var args PRArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		fatalError(fmt.Sprintf("Failed to parse JSON args: %v", err))
+	}
+
+	if args.Mode == "garbage_collection" {
+		runGitLedgerGarbageCollection()
+		return
 	}
 
 	if args.Diff == "" && (args.Repo == "" || args.PR == "") {
@@ -75,7 +81,7 @@ func main() {
 	critique := analyzeDiff(diff)
 
 	// 6. Save outcome to Elastic Cache
-	saveElasticCache(diffHash, critique)
+	saveElasticCache(diffHash, args.Repo, args.PR, critique)
 
 	// 7. Submit the review
 	if args.Repo != "" && args.PR != "" {
@@ -174,13 +180,79 @@ func checkElasticCache(diffHash string) (string, bool) {
 	return "", false
 }
 
-func saveElasticCache(diffHash, critique string) {
-	body := map[string]string{"critique": critique}
+func saveElasticCache(diffHash, repo, pr, critique string) {
+	body := map[string]string{
+		"repo":     repo,
+		"pr":       pr,
+		"critique": critique,
+	}
 	jsonData, _ := json.Marshal(body)
 	req, _ := http.NewRequest("PUT", fmt.Sprintf("http://127.0.0.1:9200/flume_meta_critic_cache/_doc/%s", diffHash), bytes.NewBuffer(jsonData))
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	client.Do(req)
+}
+
+func runGitLedgerGarbageCollection() {
+	cmd := exec.Command("git", "log", "--since=14.days", "--format=%s")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("Garbage Collection bypassed: Unable to read local git ledger: %v\n", err)
+		return
+	}
+
+	re := regexp.MustCompile(`(?:#|pull request #)(\d+)`)
+	matches := re.FindAllStringSubmatch(out.String(), -1)
+
+	var prIDs []string
+	seen := make(map[string]bool)
+	for _, match := range matches {
+		if len(match) > 1 {
+			prID := match[1]
+			if !seen[prID] {
+				seen[prID] = true
+				prIDs = append(prIDs, prID)
+			}
+		}
+	}
+
+	if len(prIDs) == 0 {
+		fmt.Println("Garbage Collection: 0 recently merged PRs detected in git ledger.")
+		return
+	}
+
+	query := map[string]interface{}{
+		"query": map[string]interface{}{
+			"terms": map[string]interface{}{
+				"pr.keyword": prIDs,
+			},
+		},
+	}
+	jsonData, _ := json.Marshal(query)
+
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:9200/flume_meta_critic_cache/_delete_by_query", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	resp, err := client.Do(req)
+
+	if err != nil || resp.StatusCode >= 400 {
+		fmt.Printf("Garbage Collection executed with errors: %v (Status: %d)\n", err, func() int {
+			if resp != nil {
+				return resp.StatusCode
+			}
+			return 0
+		}())
+		return
+	}
+	defer resp.Body.Close()
+
+	var resData struct {
+		Deleted int `json:"deleted"`
+	}
+	json.NewDecoder(resp.Body).Decode(&resData)
+
+	fmt.Printf("Meta-Critic Garbage Collection successful: Swept %d cached elements tied to merged PRs %v.\n", resData.Deleted, prIDs)
 }
 
 func extractModifiedFunctions(diff string) []string {
