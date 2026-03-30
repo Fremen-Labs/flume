@@ -60,7 +60,11 @@ func main() {
 	// 4. Submit the review
 	if args.Repo != "" && args.PR != "" {
 		submitReview(args.Repo, args.PR, critique)
-		fmt.Printf("Meta-Critic execution completed successfully for %s PR %s\n", args.Repo, args.PR)
+		if critique == "APPROVED" {
+			fmt.Printf("Meta-Critic execution completed successfully for %s PR %s\nStatus: APPROVED\n", args.Repo, args.PR)
+		} else {
+			fmt.Printf("Meta-Critic execution completed successfully for %s PR %s\nStatus: **Meta-Critic Agent Triggered**\nCritique: %s\n", args.Repo, args.PR, critique)
+		}
 	} else {
 		fmt.Printf("Meta-Critic execution completed locally. Critique:\n%s\n", critique)
 	}
@@ -71,7 +75,7 @@ func analyzeDiff(diff string) string {
 	if apiKey == "" {
 		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
-	if apiKey != "" {
+	if apiKey != "" || os.Getenv("LLM_BASE_URL") != "" {
 		return analyzeWithLLM(diff, apiKey)
 	}
 	return generateMockCritique(diff)
@@ -98,6 +102,9 @@ Be highly technical and succinct.`, diff)
 	url := "https://api.openai.com/v1/chat/completions"
 	if os.Getenv("LLM_PROVIDER") == "gemini" {
 		url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+	}
+	if baseURL := os.Getenv("LLM_BASE_URL"); baseURL != "" {
+		url = strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
 	}
 
 	reqBody := map[string]interface{}{
