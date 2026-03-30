@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,11 +109,15 @@ func runLinters(diff string) (string, bool) {
 		cmd.Stdout = &out
 		cmd.Stderr = &out
 		if err := cmd.Run(); err != nil {
-			msg := out.String()
-			if msg == "" {
-				msg = err.Error()
+			if errors.Is(err, exec.ErrNotFound) {
+				fmt.Println("[TELEMETRY] 'ruff' executable not found in PATH. Bypassing Zero-LLM Python checks.")
+			} else {
+				msg := strings.TrimSpace(out.String())
+				if msg == "" {
+					msg = err.Error()
+				}
+				violations = append(violations, "### Ruff Python Linter Violations:\n```text\n"+msg+"\n```")
 			}
-			violations = append(violations, "### Ruff Python Linter Violations:\n```text\n"+strings.TrimSpace(msg)+"\n```")
 		}
 	}
 
@@ -122,11 +127,15 @@ func runLinters(diff string) (string, bool) {
 		cmd.Stdout = &out
 		cmd.Stderr = &out
 		if err := cmd.Run(); err != nil {
-			msg := out.String()
-			if msg == "" {
-				msg = err.Error()
+			if errors.Is(err, exec.ErrNotFound) {
+				fmt.Println("[TELEMETRY] 'golangci-lint' executable not found in PATH. Bypassing Zero-LLM Go checks.")
+			} else {
+				msg := strings.TrimSpace(out.String())
+				if msg == "" {
+					msg = err.Error()
+				}
+				violations = append(violations, "### GolangCI-Lint Violations:\n```text\n"+msg+"\n```")
 			}
-			violations = append(violations, "### GolangCI-Lint Violations:\n```text\n"+strings.TrimSpace(msg)+"\n```")
 		}
 	}
 
@@ -276,7 +285,12 @@ func getBlastRadius(funcs []string) string {
 		cmd := exec.Command("elastro", "doc", "search", "fremen_codebase_rag", "--match", "functions_called="+f)
 		var out bytes.Buffer
 		cmd.Stdout = &out
-		if err := cmd.Run(); err == nil && out.String() != "" && !strings.Contains(out.String(), "0 hits") {
+		if err := cmd.Run(); err != nil {
+			if errors.Is(err, exec.ErrNotFound) {
+				fmt.Println("[TELEMETRY] 'elastro' executable not found in PATH. Bypassing native blast-radius lookup.")
+				return ""
+			}
+		} else if out.String() != "" && !strings.Contains(out.String(), "0 hits") {
 			blast = append(blast, fmt.Sprintf("- Function '%s' triggers callers in:\n  %s", f, strings.TrimSpace(out.String())))
 		}
 	}
