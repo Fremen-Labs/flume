@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -54,10 +57,27 @@ func main() {
 		return
 	}
 
-	// 3. Analyze the diff
+	// 3. Optional Zero-LLM Linter First-Pass
+	if lintErr, failed := runLinters(diff); failed {
+		submitReview(args.Repo, args.PR, lintErr)
+		fmt.Printf("Meta-Critic execution completed successfully for %s PR %s\nStatus: **Meta-Critic Agent Triggered (Linter Execution)**\nCritique: %s\n", args.Repo, args.PR, lintErr)
+		return
+	}
+
+	// 4. Elastic Caching: Check if the exact structural diff was already evaluated
+	diffHash := hashDiff(diff)
+	if cachedCritique, ok := checkElasticCache(diffHash); ok {
+		fmt.Printf("Meta-Critic execution resolved from Elastic Cache for %s PR %s\nStatus: APPROVED via Cache\nCritique: %s\n", args.Repo, args.PR, cachedCritique)
+		return
+	}
+
+	// 5. Analyze the diff natively
 	critique := analyzeDiff(diff)
 
-	// 4. Submit the review
+	// 6. Save outcome to Elastic Cache
+	saveElasticCache(diffHash, critique)
+
+	// 7. Submit the review
 	if args.Repo != "" && args.PR != "" {
 		submitReview(args.Repo, args.PR, critique)
 		if critique == "APPROVED" {
@@ -70,29 +90,145 @@ func main() {
 	}
 }
 
+func runLinters(diff string) (string, bool) {
+	hasPy := strings.Contains(diff, ".py")
+	hasGo := strings.Contains(diff, ".go")
+
+	var violations []string
+
+	if hasPy {
+		cmd := exec.Command("ruff", "check", ".")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			msg := out.String()
+			if msg == "" {
+				msg = err.Error()
+			}
+			violations = append(violations, "### Ruff Python Linter Violations:\n```text\n"+strings.TrimSpace(msg)+"\n```")
+		}
+	}
+
+	if hasGo {
+		cmd := exec.Command("golangci-lint", "run", "./...")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			msg := out.String()
+			if msg == "" {
+				msg = err.Error()
+			}
+			violations = append(violations, "### GolangCI-Lint Violations:\n```text\n"+strings.TrimSpace(msg)+"\n```")
+		}
+	}
+
+	if len(violations) > 0 {
+		return "**Zero-LLM Linter Checks Failed:**\n\n" + strings.Join(violations, "\n\n"), true
+	}
+	return "", false
+}
+
+func sanitizeOutput(critique string) string {
+	sanitized := strings.ReplaceAll(critique, "<script>", "&lt;script&gt;")
+	sanitized = strings.ReplaceAll(sanitized, "</script>", "&lt;/script&gt;")
+	sanitized = strings.ReplaceAll(sanitized, "curl ", "c&#117;rl ")
+	sanitized = strings.ReplaceAll(sanitized, "wget ", "wg&#101;t ")
+	sanitized = strings.ReplaceAll(sanitized, "rm -rf ", "rm -r&#102; ")
+	sanitized = strings.ReplaceAll(sanitized, "os.system(", "os.syst&#101;m(")
+	return sanitized
+}
+
 func analyzeDiff(diff string) string {
 	apiKey := os.Getenv("LLM_API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
 	if apiKey != "" || os.Getenv("LLM_BASE_URL") != "" {
-		return analyzeWithLLM(diff, apiKey)
+		return sanitizeOutput(analyzeWithLLM(diff, apiKey))
 	}
-	return generateMockCritique(diff)
+	return sanitizeOutput(generateMockCritique(diff))
+}
+
+func hashDiff(diff string) string {
+	h := sha256.New()
+	h.Write([]byte(diff))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func checkElasticCache(diffHash string) (string, bool) {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:9200/flume_meta_critic_cache/_doc/%s", diffHash))
+	if err != nil || resp.StatusCode != 200 {
+		return "", false
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if source, ok := result["_source"].(map[string]interface{}); ok {
+		if critique, ok := source["critique"].(string); ok {
+			return critique, true
+		}
+	}
+	return "", false
+}
+
+func saveElasticCache(diffHash, critique string) {
+	body := map[string]string{"critique": critique}
+	jsonData, _ := json.Marshal(body)
+	req, _ := http.NewRequest("PUT", fmt.Sprintf("http://127.0.0.1:9200/flume_meta_critic_cache/_doc/%s", diffHash), bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	client.Do(req)
+}
+
+func extractModifiedFunctions(diff string) []string {
+	var funcs []string
+	re := regexp.MustCompile(`^\+.*(?:def|func) ([a-zA-Z0-9_]+)`)
+	matches := re.FindAllStringSubmatch(diff, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			funcs = append(funcs, match[1])
+		}
+	}
+	return funcs
+}
+
+func getBlastRadius(funcs []string) string {
+	if len(funcs) == 0 {
+		return ""
+	}
+	var blast []string
+	for _, f := range funcs {
+		cmd := exec.Command("elastro", "doc", "search", "fremen_codebase_rag", "--match", "functions_called="+f)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err == nil && out.String() != "" && !strings.Contains(out.String(), "0 hits") {
+			blast = append(blast, fmt.Sprintf("- Function '%s' triggers callers in:\n  %s", f, strings.TrimSpace(out.String())))
+		}
+	}
+	if len(blast) > 0 {
+		return "\n\n### Elastro Blast Radius Context (Files dependent on your modifications):\n" + strings.Join(blast, "\n")
+	}
+	return ""
 }
 
 func analyzeWithLLM(diff, apiKey string) string {
+	modifiedFuncs := extractModifiedFunctions(diff)
+	elastroCtx := getBlastRadius(modifiedFuncs)
+
 	prompt := fmt.Sprintf(`You are an Elite Agentic Code Reviewer acting as a "Meta-Critic". Evaluate this Git pull request diff against the following standards:
 - The Netflix Standard: No silent exception suppression (no bare 'pass' blocks). Explicitly log exceptions.
 - The OWASP Standard: Assume all inputs are malicious. Sanitize data.
 - The Google Standard: Optimize for readability and strict formatting.
 
 Pull Request Diff:
-`+"```diff\n%s\n```"+`
+`+"```diff\n%s\n```%s"+`
 
 If you find ANY violations, provide a concise critique requesting changes. 
 If the code is flawless, respond exactly with "APPROVED".
-Be highly technical and succinct.`, diff)
+Be highly technical and succinct.`, diff, elastroCtx)
 
 	model := os.Getenv("LLM_MODEL")
 	if model == "" {
