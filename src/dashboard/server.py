@@ -263,13 +263,13 @@ def load_session(session_id):
 
 def save_session(session):
     try:
-        session['updated_at'] = datetime.now(timezone.utc).isoformat() + 'Z'
+        session['updated_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         es_post(f'agent-plan-sessions/_doc/{session["id"]}', session)
     except Exception as e:
         print(f"Error saving session to ES: {e}")
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat() + 'Z'
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
@@ -829,7 +829,7 @@ def commit_plan(repo: str, plan: dict):
     IDs are always freshly allocated by querying existing records, so numbers
     are never reused even after items are deleted.
     """
-    now = datetime.now(timezone.utc).isoformat() + 'Z'
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     docs = []
 
     # Allocate monotonically-increasing sequence numbers for each item type.
@@ -1223,7 +1223,7 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
 def load_workers() -> list:
     workers = []
     try:
-        res = es_search('agent-system-workers', {'size': 100})
+        res = es_search('agent-system-workers', {'size': 100, 'sort': [{'updated_at': {'order': 'desc'}}]})
         hits = res.get('hits', {}).get('hits', [])
         now = datetime.now(timezone.utc)
         for h in hits:
@@ -1322,8 +1322,8 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         return None
     doc = {
         'status': status,
-        'updated_at': datetime.now(timezone.utc).isoformat() + 'Z',
-        'last_update': datetime.now(timezone.utc).isoformat() + 'Z',
+        'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     }
     if owner:
         doc['owner'] = owner
@@ -1680,8 +1680,8 @@ def create_task_pr(task_id: str) -> dict:
                 'pr_number': pr_number,
                 'pr_status': 'open',
                 'target_branch': target_branch,
-                'updated_at': datetime.now(timezone.utc).isoformat() + 'Z',
-                'last_update': datetime.now(timezone.utc).isoformat() + 'Z',
+                'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             }
         })
 
@@ -1932,7 +1932,7 @@ def agents_status() -> dict:
             status = c_hits[0].get('_source', {}).get('status', 'running')
 
         # 2. Fetch Aggregated Node Heartbeats
-        w_res = es_search('agent-system-workers', {'size': 100})
+        w_res = es_search('agent-system-workers', {'size': 100, 'sort': [{'updated_at': {'order': 'desc'}}]})
         w_hits = w_res.get('hits', {}).get('hits', [])
         now = datetime.now(timezone.utc)
         active_nodes = 0
@@ -1971,7 +1971,7 @@ def _requeue_running_tasks():
             'size': 200,
             'query': {'term': {'status': 'running'}},
         }).get('hits', {}).get('hits', [])
-        now = datetime.now(timezone.utc).isoformat() + 'Z'
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         requeued = 0
         for h in hits:
             es_id = h.get('_id')
@@ -2313,7 +2313,7 @@ def api_intake_commit(session_id: str, payload: dict):
         docs, _results = commit_plan(repo, plan)
         session['status'] = 'committed'
         session['draftPlan'] = plan
-        session['committed_at'] = datetime.now(timezone.utc).isoformat() + 'Z'
+        session['committed_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         session['committedDocs'] = [d.get('id') for d in docs]
         save_session(session)
         return {
