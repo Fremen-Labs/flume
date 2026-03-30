@@ -12,6 +12,13 @@ import os
 import sys
 from pathlib import Path
 
+_BS_WS = Path(__file__).resolve().parent
+if str(_BS_WS) not in sys.path:
+    sys.path.insert(0, str(_BS_WS))
+
+from utils.logger import get_logger
+logger = get_logger("workspace_llm_env")
+
 # Hosted APIs — model id "llama3.2" is the Ollama default and is invalid here; use Settings model.
 _CLOUD_LLM_PROVIDER_IDS = frozenset({"openai", "anthropic", "gemini", "xai", "mistral", "cohere"})
 
@@ -95,8 +102,7 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
         if cbase and prov == "openai_compatible":
             os.environ["LLM_BASE_URL"] = cbase
     except Exception as e:
-        import logging
-        logging.error(f'Agent swarm captured suppressed exception: {e}')
+        logger.error(f'Agent swarm captured suppressed exception: {e}')
 
 
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
@@ -130,14 +136,4 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
             os.environ[key] = s
         _inject_llm_key_from_active_credential(wr)
     except Exception as e:
-        try:
-            logf = wr / "worker-manager" / "llm_sync_errors.log"
-            logf.parent.mkdir(parents=True, exist_ok=True)
-            from datetime import datetime, timezone
-
-            with logf.open("a", encoding="utf-8") as lf:
-                lf.write(
-                    f"{datetime.now(timezone.utc).isoformat()} sync_llm_env_from_workspace: {e!r}\n"
-                )
-        except OSError:
-            pass
+        logger.error(f"sync_llm_env_from_workspace exception: {e!r}")

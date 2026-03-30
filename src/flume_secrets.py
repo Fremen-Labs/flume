@@ -3,11 +3,17 @@ import json
 import logging
 import urllib.request
 import urllib.error
+import sys
 from pathlib import Path
 from typing import Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logger = logging.getLogger("flume_secrets")
+_BS_WS = Path(__file__).resolve().parent
+if str(_BS_WS) not in sys.path:
+    sys.path.insert(0, str(_BS_WS))
+
+from utils.logger import get_logger
+logger = get_logger("flume_secrets")
 
 class FlumeSettings(BaseSettings):
     LLM_PROVIDER: str = "exo"

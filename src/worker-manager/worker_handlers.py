@@ -6,9 +6,13 @@ import subprocess
 import sys
 import time
 import urllib.request
+
 import uuid
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
+
+NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
 
 _WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
@@ -46,35 +50,23 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-import logging
-from logging.handlers import RotatingFileHandler
-
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "timestamp": now_iso(),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "service": "worker-handlers",
-            "pid": os.getpid()
-        })
-
-_handlers_logger = logging.getLogger('worker-handlers')
-_handlers_logger.setLevel(logging.INFO)
+from utils.logger import get_logger
 
 try:
     _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
     from utils.workspace import resolve_safe_workspace
     _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
     _log_dir.mkdir(parents=True, exist_ok=True)
-    _fh = RotatingFileHandler(_log_dir / 'worker_handlers.log', maxBytes=10*1024*1024, backupCount=5)
-    _fh.setFormatter(JSONFormatter())
-    _handlers_logger.addHandler(_fh)
-except PermissionError:
-    pass
+    _handlers_logger = get_logger('worker-handlers', file_path=str(_log_dir / f'worker_handlers_{NODE_ID}.log'))
+except Exception as e:
+    _handlers_logger = get_logger('worker-handlers')
+    _handlers_logger.error(f"Failed to provision JSON Rotating File Handler on handlers node: {e}")
 
-def log(msg):
-    _handlers_logger.info(str(msg))
+def log(msg, **kwargs):
+    if kwargs:
+        _handlers_logger.info(str(msg), extra={'structured_data': kwargs})
+    else:
+        _handlers_logger.info(str(msg))
 
 
 def es_request(path, body=None, method='GET'):

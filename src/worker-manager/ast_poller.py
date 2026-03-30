@@ -7,17 +7,19 @@ from pathlib import Path
 from opensearchpy import OpenSearch
 from utils.workspace import resolve_safe_workspace
 
+import sys
+from utils.logger import get_logger
+
+logger = get_logger("ast-poller")
+
 def json_log(level: str, msg: str, **kwargs):
-    doc = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "level": level.upper(),
-        "message": str(msg),
-        "service": "ast-poller",
-        "pid": os.getpid()
-    }
-    if kwargs:
-        doc.update(kwargs)
-    print(json.dumps(doc), flush=True)
+    extra = {'structured_data': kwargs} if kwargs else {}
+    if level.upper() == "INFO":
+        logger.info(msg, extra=extra)
+    elif level.upper() == "ERROR":
+        logger.error(msg, extra=extra)
+    else:
+        logger.warning(msg, extra=extra)
 
 def init_es_client() -> OpenSearch:
     target = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
