@@ -36,7 +36,7 @@ if __name__ == "__main__":
     print("Enabling OpenBao KV-V2 engine at secret/...")
     try:
         call_vault("/v1/sys/mounts/secret", {"type": "kv", "options": {"version": "2"}})
-    except urllib.error.HTTPError as e:
+    except urllib.error.HTTPError:
         pass # Normally returns 400 Bad Request if mount already exists
 
     print("Minting dynamic Elasticsearch API Key via xpack.security...")

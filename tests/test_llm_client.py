@@ -1,4 +1,3 @@
-import pytest
 from utils import llm_client
 
 def test_normalize_gemini_model():

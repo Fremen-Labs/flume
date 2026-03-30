@@ -59,7 +59,7 @@ DIFF:
     cwd = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 
     # 2. Run the native Go binary (it handles the GH interactions natively)
-    logger.info(f"[TELEMETRY] Firing native Go meta-critic parser...")
+    logger.info("[TELEMETRY] Firing native Go meta-critic parser...")
     try:
         payload = json.dumps({"pr": pr_num, "repo": "Fremen-Labs/flume", "diff": diff_output})
         result = subprocess.run(

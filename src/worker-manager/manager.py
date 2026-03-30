@@ -4,12 +4,10 @@ import os
 import ssl
 import sys
 import time
-import asyncio
 # AST injected by Swarm Agent 3
 import urllib.request
 import subprocess
 import threading
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -179,7 +177,7 @@ def get_dynamic_worker_limit() -> int:
         # Reserve ~20% overhead for macOS Desktop & Elasticsearch buffers natively
         available = max(1, int(cores * 0.8))
         return available
-    except BaseException as os_err:
+    except BaseException:
         return 4
 
 
@@ -190,7 +188,7 @@ def build_workers():
     if raw:
         try:
             limit = int(raw)
-        except ValueError as err:
+        except ValueError:
             limit = get_dynamic_worker_limit()
 
     for role_def in load_agent_role_defs():
@@ -313,11 +311,16 @@ def claim(
         'updated_at': now_iso(),
         'last_update': now_iso(),
     }
-    if execution_host: doc['execution_host'] = execution_host
-    if preferred_model: doc['preferred_model'] = preferred_model
-    if preferred_llm_provider: doc['preferred_llm_provider'] = preferred_llm_provider
-    if preferred_llm_credential_id: doc['preferred_llm_credential_id'] = preferred_llm_credential_id
-    if worker_name: doc['active_worker'] = worker_name
+    if execution_host:
+        doc['execution_host'] = execution_host
+    if preferred_model:
+        doc['preferred_model'] = preferred_model
+    if preferred_llm_provider:
+        doc['preferred_llm_provider'] = preferred_llm_provider
+    if preferred_llm_credential_id:
+        doc['preferred_llm_credential_id'] = preferred_llm_credential_id
+    if worker_name:
+        doc['active_worker'] = worker_name
     
     endpoint = f'/{TASK_INDEX}/_update/{item_id}?refresh=true'
     # Distributed Task Lease Coordinator: Prevent Thundering Herd via OCC Mutex Locks

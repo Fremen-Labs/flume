@@ -1,4 +1,3 @@
-import sys
 import time
 import os
 import subprocess
@@ -27,7 +26,8 @@ def init_es_client() -> OpenSearch:
     ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
     
     headers = {}
-    if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+    if api_key:
+        headers['Authorization'] = f'ApiKey {api_key}'
     
     kwargs = {
         "hosts": [target],

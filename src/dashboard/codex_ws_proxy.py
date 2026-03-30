@@ -11,7 +11,6 @@ trust boundary as the dashboard HTTP port. Bind to loopback if the host is share
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import threading
 import traceback
