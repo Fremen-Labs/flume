@@ -53,6 +53,8 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 
 ### 🔮 Walkthroughs & Capabilities
 *How to unlock the maximum potential of Flume's native AI edge capabilities.*
+- **[GUI Onboarding & Dispatch](./docs/walkthroughs/gui-onboarding.md)**: Zero-friction visual dashboard setup connecting active React 18 interfaces to your absolute repository safely.
+- **[API Headless Onboarding](./docs/walkthroughs/api-onboarding.md)**: Explicit `curl` API mappings to deterministically invoke Agent planning chains outside a UI context safely.
 - **[Zero-Cost Local Inference Setup](./docs/walkthroughs/local-inference.md)**: Bypass OpenAI completely and run open-weight models (via Exo / Ollama) through the `host.docker.internal` bridge smoothly.
 - **[Zero-LLM Meta-Critic CI/CD Pipeline](./docs/walkthroughs/meta-critic-pipeline.md)**: Secure your repository with our mathematically exact automated garbage-collected code linter securely.
 - **[Elastro Code Graph Indexing](./docs/walkthroughs/elastro-code-graph.md)**: Replace flawed token-RAG with AST semantic maps natively parsing variable dependencies locally.
@@ -61,3 +63,4 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 *Deep architectural explanations of Flume's matrix integrations.*
 - **[CLI Parameter Maps](./docs/reference/cli.md)**: Safely inspect exactly how `start`, `destroy`, and `doctor` flags behave cleanly.
 - **[The Container Matrix Architecture](./docs/reference/architecture.md)**: Understand the strict isolation paradigm splitting the execution logic from your raw SSD safely.
+- **[Settings & System Configuration](./docs/reference/settings-management.md)**: Deep dive into the Flume configuration GUI managing strict LLM limits, Vault keys, and GitHub/ADO tokens securely.
