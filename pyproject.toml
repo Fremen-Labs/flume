@@ -20,14 +20,14 @@ dependencies = [
     "hvac>=2.1.0",
     "opensearch-py>=2.3.0",
     "tenacity>=8.3.0",
+    "ruff",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "mypy",
-    "ruff"
+    "mypy"
 ]
 
 [build-system]

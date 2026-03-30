@@ -300,6 +300,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "ruff" },
     { name = "tenacity" },
     { name = "toml" },
     { name = "uvicorn" },
@@ -310,7 +311,6 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -330,7 +330,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff" },
     { name = "tenacity", specifier = ">=8.3.0" },
     { name = "toml", specifier = ">=0.10.2" },
     { name = "uvicorn", specifier = ">=0.42.0" },
