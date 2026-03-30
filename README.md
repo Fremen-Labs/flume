@@ -63,3 +63,4 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 *Deep architectural explanations of Flume's matrix integrations.*
 - **[CLI Parameter Maps](./docs/reference/cli.md)**: Safely inspect exactly how `start`, `destroy`, and `doctor` flags behave cleanly.
 - **[The Container Matrix Architecture](./docs/reference/architecture.md)**: Understand the strict isolation paradigm splitting the execution logic from your raw SSD safely.
+- **[Settings & System Configuration](./docs/reference/settings-management.md)**: Deep dive into the Flume configuration GUI managing strict LLM limits, Vault keys, and GitHub/ADO tokens securely.
