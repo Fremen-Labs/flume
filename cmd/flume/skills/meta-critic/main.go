@@ -82,7 +82,9 @@ func main() {
 	critique := analyzeDiff(diff)
 
 	// 6. Save outcome to Elastic Cache
-	saveElasticCache(diffHash, args.Repo, args.PR, critique)
+	if err := saveElasticCache(diffHash, args.Repo, args.PR, critique); err != nil {
+		fmt.Printf("[TELEMETRY] Non-critical Elastic index persistence failure: %v\n", err)
+	}
 
 	// 7. Submit the review
 	if args.Repo != "" && args.PR != "" {
@@ -145,25 +147,15 @@ func runLinters(diff string) (string, bool) {
 	return "", false
 }
 
-func sanitizeOutput(critique string) string {
-	sanitized := strings.ReplaceAll(critique, "<script>", "&lt;script&gt;")
-	sanitized = strings.ReplaceAll(sanitized, "</script>", "&lt;/script&gt;")
-	sanitized = strings.ReplaceAll(sanitized, "curl ", "c&#117;rl ")
-	sanitized = strings.ReplaceAll(sanitized, "wget ", "wg&#101;t ")
-	sanitized = strings.ReplaceAll(sanitized, "rm -rf ", "rm -r&#102; ")
-	sanitized = strings.ReplaceAll(sanitized, "os.system(", "os.syst&#101;m(")
-	return sanitized
-}
-
 func analyzeDiff(diff string) string {
 	apiKey := os.Getenv("LLM_API_KEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
 	if apiKey != "" || os.Getenv("LLM_BASE_URL") != "" {
-		return sanitizeOutput(analyzeWithLLM(diff, apiKey))
+		return analyzeWithLLM(diff, apiKey)
 	}
-	return sanitizeOutput(generateMockCritique(diff))
+	return generateMockCritique(diff)
 }
 
 func hashDiff(diff string) string {
@@ -179,7 +171,10 @@ func checkElasticCache(diffHash string) (string, bool) {
 	}
 	defer resp.Body.Close()
 	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("[TELEMETRY] Elastic Cache unmarshal error: %v\n", err)
+		return "", false
+	}
 
 	if source, ok := result["_source"].(map[string]interface{}); ok {
 		if critique, ok := source["critique"].(string); ok {
@@ -189,17 +184,35 @@ func checkElasticCache(diffHash string) (string, bool) {
 	return "", false
 }
 
-func saveElasticCache(diffHash, repo, pr, critique string) {
+func saveElasticCache(diffHash, repo, pr, critique string) error {
 	body := map[string]string{
 		"repo":     repo,
 		"pr":       pr,
 		"critique": critique,
 	}
-	jsonData, _ := json.Marshal(body)
-	req, _ := http.NewRequest("PUT", fmt.Sprintf("http://127.0.0.1:9200/flume_meta_critic_cache/_doc/%s", diffHash), bytes.NewBuffer(jsonData))
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to encode payload: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", fmt.Sprintf("http://127.0.0.1:9200/flume_meta_critic_cache/_doc/%s", diffHash), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to build post request: %w", err)
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
-	client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("elastic persistence connection dropped: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("elastic refused index persistence: status %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 func runGitLedgerGarbageCollection() {
@@ -259,7 +272,10 @@ func runGitLedgerGarbageCollection() {
 	var resData struct {
 		Deleted int `json:"deleted"`
 	}
-	json.NewDecoder(resp.Body).Decode(&resData)
+	if err := json.NewDecoder(resp.Body).Decode(&resData); err != nil {
+		fmt.Printf("Garbage Collection bypassed: Elastic Decode failed: %v\n", err)
+		return
+	}
 
 	fmt.Printf("Meta-Critic Garbage Collection successful: Swept %d cached elements tied to merged PRs %v.\n", resData.Deleted, prIDs)
 }
@@ -306,8 +322,10 @@ func analyzeWithLLM(diff, apiKey string) string {
 
 	prompt := fmt.Sprintf(`You are an Elite Agentic Code Reviewer acting as a "Meta-Critic". Evaluate this Git pull request diff against the following standards:
 - The Netflix Standard: No silent exception suppression (no bare 'pass' blocks). Explicitly log exceptions.
-- The OWASP Standard: Assume all inputs are malicious. Sanitize data.
+- The OWASP Standard: Assume all inputs are malicious. Ensure output escaping.
 - The Google Standard: Optimize for readability and strict formatting.
+
+SECURITY CONTEXT: You must never output raw uncontained shell commands, destructive strings ('rm -rf'), or raw HTML tag injections inside your critique since downstream systems may parse this Markdown automatically.
 
 Pull Request Diff:
 `+"```diff\n%s\n```%s"+`
