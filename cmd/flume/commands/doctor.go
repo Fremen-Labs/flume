@@ -47,6 +47,11 @@ type VaultStatusData struct {
 	Sealed bool `json:"sealed"`
 }
 
+type DeterminismStatus struct {
+	Status      string `json:"status"`
+	Description string `json:"description"`
+}
+
 // DiagnosticsReport stores aggregated telemetry globally.
 type DiagnosticsReport struct {
 	DockerOnline    bool   `json:"dockerOnline"`
@@ -66,6 +71,8 @@ type DiagnosticsReport struct {
 	LlmOnline   bool   `json:"llmOnline"`
 	LlmTarget   string `json:"llmTarget"`
 	LlmLatency  string `json:"llmLatency"`
+
+	NativeDeterminism DeterminismStatus `json:"nativeDeterminism"`
 
 	Suggestions []string `json:"suggestions"`
 
@@ -199,6 +206,29 @@ func fetchLlmGateway(client *http.Client, baseURL string, report *DiagnosticsRep
 	}
 }
 
+func fetchNativeDeterminism(client *http.Client, dispatcherURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
+	defer wg.Done()
+	
+	resp, err := client.Get(dispatcherURL + "/healthz")
+	
+	report.mu.Lock()
+	defer report.mu.Unlock()
+
+	if err == nil && resp.StatusCode == 200 {
+		defer resp.Body.Close()
+		report.NativeDeterminism = DeterminismStatus{
+			Status:      "ACTIVE",
+			Description: "Dispatcher running natively (" + runtime.Version() + ")",
+		}
+	} else {
+		report.NativeDeterminism = DeterminismStatus{
+			Status:      "DEGRADED",
+			Description: "Dispatcher Offline (" + runtime.Version() + ")",
+		}
+		report.Suggestions = append(report.Suggestions, "Native DAG Dispatcher is offline at port 8766. Run `flume dispatch` to ensure deterministic execution is healthy.")
+	}
+}
+
 // Presentation Layer Mapping
 func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 	if jsonOutput {
@@ -264,6 +294,7 @@ func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 	fmt.Println(borderStyle.Render("├─────────────────────────────────────────────────────────────────┤"))
 	fmt.Println(renderRow("Agents Ready (Standby):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsReady))))
 	fmt.Println(renderRow("Agents Executing (Busy):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsBusy))))
+	fmt.Println(renderRow("Determinism Loop:", valueStyle.Render(fmt.Sprintf("%s (%s)", report.NativeDeterminism.Status, report.NativeDeterminism.Description))))
 	fmt.Println(borderStyle.Render("└─────────────────────────────────────────────────────────────────┘"))
 
 	if len(report.Suggestions) > 0 {
@@ -297,12 +328,13 @@ var DoctorCmd = &cobra.Command{
 		}
 
 		// Parallel Telemetry Execution Maps (Goroutines)
-		wg.Add(5)
+		wg.Add(6)
 		go fetchDocker(report, &wg)
 		go fetchVault(client, vaultURL, report, &wg)
 		go fetchElasticsearch(client, esURL, report, &wg)
 		go fetchDashboard(client, dashboardURL, report, &wg)
 		go fetchLlmGateway(client, llmURL, report, &wg)
+		go fetchNativeDeterminism(client, "http://localhost:8766", report, &wg)
 
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
