@@ -54,6 +54,8 @@ export interface ApiWorker {
   preferred_model?: string;
   preferred_llm_provider?: string;
   heartbeat_at?: string;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 export interface ApiRepo {
@@ -93,6 +95,7 @@ export interface Snapshot {
   provenance: unknown[];
   repos: ApiRepo[];
   projects: ApiProject[];
+  elastro_savings?: number;
 }
 
 // ─── LLM Settings API ──────────────────────────────────────────────────────────
