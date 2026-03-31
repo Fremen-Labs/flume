@@ -18,6 +18,7 @@ export default function AnalyticsPage() {
   const running = tasks.filter(t => t.status === 'running').length;
   const planned = tasks.filter(t => t.status === 'planned' || t.status === 'ready').length;
   const blocked = tasks.filter(t => t.status === 'blocked').length;
+  const totalFailuresAndBlocked = failures.length + blocked;
   const total = tasks.length;
 
   // Tasks by item type
@@ -68,7 +69,7 @@ export default function AnalyticsPage() {
             <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
             <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
-            <GlassMetricCard title="Failure Count" value={String(failures.length)} icon={Clock} trend={{ value: failures.length, label: 'since start' }} />
+            <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
             <GlassMetricCard title="AST Tokens Saved" value={elastro_savings > 1000000 ? `${(elastro_savings / 1000000).toFixed(1)}M` : (elastro_savings > 1000 ? `${(elastro_savings / 1000).toFixed(1)}K` : String(elastro_savings))} icon={TrendingUp} trend={{ value: elastro_savings, label: 'efficiency via Elastro' }} />
           </div>
 
