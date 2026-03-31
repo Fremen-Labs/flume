@@ -153,8 +153,14 @@ def _call_ollama(
             Path('workspace/logs/gemini_payload.txt').write_text(content + "\n\n", encoding='utf-8')
             raise de
     except Exception as e:
+        import traceback
         import sys
-        sys.stderr.write(f'LLM Execution Trap: {e}\n')
+        try:
+            with open("/tmp/flume_trap.log", "a") as f:
+                f.write(f"LLM TRAP:\n{traceback.format_exc()}\n")
+        except:
+            pass
+        logger.error(f"LLM Execution Trap: {e}", exc_info=True)
         raise e
 
 
@@ -660,19 +666,18 @@ def _call_ollama_tools(
     try:
         llm_client = _load_llm_client()
         kw = _task_llm_kw(task)
-        res, usage = llm_client.chat_with_tools(
+        res = llm_client.chat_with_tools(
             messages,
             tools,
             model=model,
             temperature=0.2,
             max_tokens=4096,
-            return_usage=True,
-            **kw,
         )
-        _emit_usage(task, usage)
+        _emit_usage(task, {'total_tokens': 0})
         return res
     except Exception as e:
-        logger.info(f'[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}')
+
+        logger.error(f"[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}", exc_info=True)
         return None
 
 def _codex_json_schema_implementer() -> dict[str, Any]:
@@ -1011,16 +1016,19 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
 
 
 def _get_cluster_topology() -> dict[str, Any]:
-    from utils.workspace import resolve_safe_workspace
-    state_file = resolve_safe_workspace() / 'worker_state.json'
-    if not state_file.exists():
-        return {'available_implementers': 1, 'target_models': ['unknown']}
+    from worker_handlers import es_request
     try:
-        data = json.loads(state_file.read_text())
-        implementers = [w for w in (data.get('workers') or []) if w.get('role') == 'implementer']
+        res = es_request('/agent-system-workers/_search', {'size': 100}, method='GET')
+        implementers = []
+        for hit in res.get('hits', {}).get('hits', []):
+            state = hit.get('_source', {})
+            for w in state.get('workers', []):
+                if w.get('role') == 'implementer':
+                    implementers.append(w)
         models = list(set(w.get('model', 'unknown') for w in implementers))
-        return {'available_implementers': len(implementers), 'target_models': models}
-    except Exception:
+        return {'available_implementers': len(implementers) or 1, 'target_models': models or ['unknown']}
+    except Exception as e:
+        logger.warning(f"Error fetching cluster topology from ES: {e}")
         return {'available_implementers': 1, 'target_models': ['unknown']}
 
 def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:

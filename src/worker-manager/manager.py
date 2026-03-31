@@ -35,7 +35,6 @@ try:
 except ImportError:
     pass
 
-STATE = resolve_safe_workspace() / 'worker_state.json'
 AGENT_MODELS_FILE = resolve_safe_workspace() / 'worker-manager' / 'agent_models.json'
 
 ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
@@ -210,7 +209,10 @@ def es_request(path, body=None, method='GET'):
         return json.loads(raw) if raw else {}
 
 
+import random
+
 def ready_items_for_role(role):
+    """Query-only: return candidate tasks for a role without claiming them."""
     must = []
     if role == 'implementer':
         must = [
@@ -275,6 +277,137 @@ def ready_items_for_role(role):
         ]
     }
     return es_request(f'/{TASK_INDEX}/_search', body, method='GET').get('hits', {}).get('hits', [])
+
+
+def try_atomic_claim(
+    role: str,
+    worker_name: str,
+    execution_host: Optional[str] = None,
+    preferred_model: Optional[str] = None,
+    preferred_llm_provider: Optional[str] = None,
+    preferred_llm_credential_id: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Kubernetes-grade atomic task claim using a single _update_by_query roundtrip.
+
+    Instead of fetch→CAS (which causes O(N²) 409 collisions under a swarm), this
+    executes a Painless script that atomically transitions exactly one ``ready``
+    task to ``running`` in a single ES operation — equivalent to:
+
+        UPDATE tasks SET status='running', active_worker=? WHERE status='ready'
+        AND role=? ORDER BY updated_at ASC LIMIT 1
+
+    A per-worker random seed scatters which task each worker targets so the entire
+    pool claims N *different* tasks concurrently instead of thundering on position 0.
+
+    Returns the claimed task _source dict on success, or None if no task was available
+    or the script raced with another worker (both of which are safe no-ops).
+    """
+    target_status = 'planned' if role == 'pm' else 'ready'
+
+    # Build the role filter
+    if role == 'pm':
+        role_filter = {'bool': {
+            'should': [
+                {'term': {'owner': 'pm'}},
+                {'term': {'assigned_agent_role': 'pm'}},
+            ],
+            'minimum_should_match': 1,
+        }}
+    else:
+        role_filter = {'bool': {'should': [
+            {'term': {'assigned_agent_role': role}},
+            {'term': {'owner': role}},
+        ], 'minimum_should_match': 1}}
+
+    # Per-worker-seeded random score scatters task selection across the swarm.
+    # Each worker hashes its name to a stable seed so the same worker consistently
+    # picks up the same "slice" of tasks, minimising cross-worker contention.
+    seed = abs(hash(worker_name)) % 2147483647
+
+    query = {
+        'function_score': {
+            'query': {'bool': {'must': [
+                {'term': {'status': target_status}},
+                role_filter,
+            ]}},
+            'functions': [{'random_score': {'seed': seed, 'field': '_seq_no'}}],
+            'boost_mode': 'replace',
+        }
+    }
+
+    now = now_iso()
+    new_status = 'running' if role != 'pm' else 'planned'
+    script = {
+        'source': (
+            'if (ctx._source.status == params.expected_status '
+            '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
+            '  ctx._source.status = params.new_status;'
+            '  ctx._source.queue_state = "active";'
+            '  ctx._source.active_worker = params.worker_name;'
+            '  ctx._source.assigned_agent_role = params.role;'
+            '  ctx._source.owner = params.role;'
+            '  ctx._source.updated_at = params.now;'
+            '  ctx._source.last_update = params.now;'
+            '  if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }'
+            '  if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }'
+            '  if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }'
+            '  if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }'
+            '} else {'
+            '  ctx.op = "noop";'
+            '}'
+        ),
+        'lang': 'painless',
+        'params': {
+            'expected_status': target_status,
+            'new_status': new_status,
+            'worker_name': worker_name,
+            'role': role,
+            'now': now,
+            'execution_host': execution_host,
+            'preferred_model': preferred_model,
+            'preferred_llm_provider': preferred_llm_provider,
+            'preferred_llm_credential_id': preferred_llm_credential_id,
+        },
+    }
+
+    body = {
+        'query': query,
+        'script': script,
+        'max_docs': 1,
+    }
+
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_update_by_query?conflicts=proceed&refresh=true',
+            body,
+            method='POST',
+        )
+        updated = res.get('updated', 0)
+        noops = res.get('noops', 0)
+        if updated != 1:
+            # 0 updated: either no ready tasks or lost a benign race — both are fine
+            return None
+
+        # Fetch the doc we just claimed to return full task data to the caller
+        # (needed so sync_worker_processes gets the task title/id for state tracking)
+        hits = es_request(
+            f'/{TASK_INDEX}/_search',
+            {
+                'size': 1,
+                'query': {'term': {'active_worker': worker_name}},
+                'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+                'seq_no_primary_term': True,
+            },
+            method='GET',
+        ).get('hits', {}).get('hits', [])
+        if hits:
+            return hits[0]
+        return None
+    except Exception as e:
+        # Log but don't surface — callers treat None as "nothing available"
+        log(f"atomic claim error for {worker_name}: {e}")
+        return None
 
 
 def claim(
@@ -471,42 +604,31 @@ def cycle():
             state['workers'].append(snapshot)
             continue
 
-        hits = ready_items_for_role(worker['role'])
-        if hits:
-            task = hits[0]
-            item_id = task.get('_id')
-            src = task.get('_source', {})
-            pref_model = worker['model']
-            pref_prov = worker.get('llm_provider')
-            pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
-            
-            if claim(
-                item_id,
-                worker['role'],
-                worker.get('execution_host'),
-                pref_model,
-                worker['name'],
-                pref_prov,
-                pref_cred,
-                seq_no=task.get('_seq_no'),
-                primary_term=task.get('_primary_term')
-            ):
-                snapshot['status'] = 'claimed'
-                snapshot['current_task_id'] = src.get('id', item_id)
-                snapshot['current_task_title'] = src.get('title')
-                snapshot['preferred_model'] = pref_model
-                snapshot['preferred_llm_provider'] = pref_prov
-                snapshot['preferred_llm_credential_id'] = pref_cred
-                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
-                log(f"{worker['name']} claimed {snapshot['current_task_id']}")
-                log_telemetry_event(worker['name'], "TASK_CLAIM", f"Claimed task: {snapshot['current_task_title'][:50]}")
-            else:
-                snapshot['status'] = 'idle'
-                wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
-                snapshot['preferred_llm_credential_id'] = wcid
-                snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
-            
+        pref_model = worker['model']
+        pref_prov = worker.get('llm_provider')
+        pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+
+        claimed_task = try_atomic_claim(
+            worker['role'],
+            worker['name'],
+            worker.get('execution_host'),
+            pref_model,
+            pref_prov,
+            pref_cred,
+        )
+        if claimed_task:
+            src = claimed_task.get('_source', {})
+            snapshot['status'] = 'claimed'
+            snapshot['current_task_id'] = src.get('id', claimed_task.get('_id'))
+            snapshot['current_task_title'] = src.get('title')
+            snapshot['preferred_model'] = pref_model
+            snapshot['preferred_llm_provider'] = pref_prov
+            snapshot['preferred_llm_credential_id'] = pref_cred
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, pref_cred)
+            log(f"{worker['name']} claimed {snapshot['current_task_id']}")
+            log_telemetry_event(worker['name'], "TASK_CLAIM", f"Claimed task: {(snapshot['current_task_title'] or '')[:50]}")
         else:
+            snapshot['status'] = 'idle'
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
@@ -526,8 +648,8 @@ def sync_worker_processes(state):
         if proc is None or proc.poll() is not None:
             active_worker_processes[name] = subprocess.Popen(
                 [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=open(f'workspace/logs/worker_stderr_{name}.log', 'a'),
+                stderr=subprocess.STDOUT
             )
             log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
 def main():
@@ -540,11 +662,13 @@ def main():
         )
         
     def ping_local_llm():
-        url = os.environ.get("LLM_BASE_URL") or os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+        raw = os.environ.get("LLM_BASE_URL") or os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        # Strip /v1 suffix — Ollama's native API endpoints are at /api/*, not /v1/api/*
+        url = raw.rstrip('/').removesuffix('/v1')
         if "docker" in url and sys.platform.startswith("linux"):
             log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="define LOCAL_LLM_HOST=172.17.0.1 in .env")
         try:
-            req = urllib.request.Request(f"{url}/models", method="GET")
+            req = urllib.request.Request(f"{url}/api/tags", method="GET")
             with urllib.request.urlopen(req, timeout=3):
                 pass
         except Exception as e:

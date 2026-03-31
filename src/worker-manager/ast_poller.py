@@ -113,11 +113,11 @@ def poll_and_sync():
                 "query": {
                     "bool": {
                         "must": [
-                            {"term": {"status.keyword": "completed"}}
+                            {"term": {"status": "completed"}}
                         ],
                         "must_not": [
                             {"term": {"ast_synced": True}},
-                            {"term": {"ast_sync_status.keyword": "failed_terminal"}}
+                            {"term": {"ast_sync_status": "failed_terminal"}}
                         ]
                     }
                 },

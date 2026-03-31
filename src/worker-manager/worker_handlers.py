@@ -26,7 +26,6 @@ from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_t
 
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace
-STATE = resolve_safe_workspace() / 'worker_state.json'
 
 ES_URL = os.environ.get('ES_URL', 'http://127.0.0.1:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -554,7 +553,7 @@ def handle_pm_dispatcher_worker(task):
 
         if es_id:
             update_task_doc(es_id, {
-                'status': 'blocked',
+                'status': 'running',
                 'active_worker': None,
                 'queue_state': 'queued',
             })
@@ -767,7 +766,7 @@ def handle_implementer_worker(task, es_id):
 
     try:
         result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress)
-        implementer_model = task.get('preferred_model') or 'qwen3-coder:30b'
+        implementer_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
 
         if result.metadata.get('source') == 'llm_no_response':
             _implementer_handle_llm_failure(es_id, task, task_id)
@@ -940,7 +939,7 @@ def handle_tester_worker(task, es_id):
         return True
 
     result = run_tester(task)
-    tester_model = task.get('preferred_model') or 'qwen3-coder:30b'
+    tester_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
     if result.action == 'fail':
         bugs = result.bugs or [{
             'title': f"Bug follow-up for {task.get('title', task.get('id'))}",
@@ -1006,7 +1005,7 @@ def handle_reviewer_worker(task, es_id):
         return True
 
     result = run_reviewer(task)
-    reviewer_model = task.get('preferred_model') or 'qwen3-coder:30b'
+    reviewer_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
     verdict = result.verdict or 'approved'
     task_id = task.get('id')
     write_doc(REVIEW_INDEX, {
@@ -1168,7 +1167,16 @@ def main():
         try:
             apply_runtime_config(_WS)
             sync_llm_env_from_workspace(resolve_safe_workspace())
-            state = json.loads(STATE.read_text()) if STATE.exists() else {'workers': []}
+            
+            NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
+            try:
+                node_doc = es_request(f'/agent-system-workers/_doc/{NODE_ID}', method='GET')
+                state = node_doc.get('_source', {}) if (node_doc and '_source' in node_doc) else {'workers': []}
+            except Exception as es_err:
+                # Catch 404s or connection refused securely without crashing the daemon loop
+                log(f"ES worker telemetry fetch failed: {es_err}")
+                state = {'workers': []}
+                
             claimed_workers = {w.get('name') for w in state.get('workers', []) if w.get('status') == 'claimed'}
 
             # Release orphaned tasks: active_worker set but no matching claimed worker

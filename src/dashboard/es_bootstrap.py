@@ -67,6 +67,66 @@ INDEX_TEMPLATES = {
     }
 }
 
+TASK_RECORDS_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            # Identity
+            "id":                          {"type": "keyword"},
+            "title":                       {"type": "text"},
+            "objective":                   {"type": "text"},
+            "acceptance_criteria":         {"type": "text"},
+            "artifacts":                   {"type": "text"},
+            "agent_log":                   {
+                "type": "nested",
+                "properties": {
+                    "ts":   {"type": "date"},
+                    "note": {"type": "text"},
+                }
+            },
+            # Taxonomy / routing
+            "item_type":                   {"type": "keyword"},
+            "repo":                        {"type": "keyword"},
+            "worktree":                    {"type": "keyword"},
+            "priority":                    {"type": "keyword"},
+            "risk":                        {"type": "keyword"},
+            "depends_on":                  {"type": "keyword"},
+            # Worker ownership — ALL keyword so ES term queries & Painless scripts work
+            "owner":                       {"type": "keyword"},
+            "assigned_agent_role":         {"type": "keyword"},
+            "active_worker":               {"type": "keyword"},
+            "execution_host":              {"type": "keyword"},
+            # State machine — keyword ensures term/terms queries are exact-match
+            "status":                      {"type": "keyword"},
+            "queue_state":                 {"type": "keyword"},
+            "ast_sync_status":             {"type": "keyword"},
+            "ast_synced":                  {"type": "boolean"},
+            "ast_sync_attempts":           {"type": "integer"},
+            "needs_human":                 {"type": "boolean"},
+            # LLM preferences
+            "preferred_model":             {"type": "keyword"},
+            "preferred_llm_provider":      {"type": "keyword"},
+            "preferred_llm_credential_id": {"type": "keyword"},
+            # VCS
+            "commit_sha":                  {"type": "keyword"},
+            "branch":                      {"type": "keyword"},
+            # Timestamps
+            "created_at":                  {"type": "date"},
+            "updated_at":                  {"type": "date"},
+            "last_update":                 {"type": "date"},
+        }
+    }
+}
+
+# Per-index explicit mappings used during initial creation.
+# Only applied when the index does not already exist.
+EXPLICIT_INDEX_MAPPINGS = {
+    "agent-task-records": TASK_RECORDS_MAPPING,
+}
+
 def ensure_es_indices():
     """Bootstraps all explicit Elasticsearch namespaces required by the Autonomous Docker architecture."""
     es_url = os.environ.get("ES_URL", "http://elasticsearch:9200")
@@ -86,7 +146,7 @@ def ensure_es_indices():
         except Exception as e:
             logger.error(f"Failed to apply ES template {tpl_name}: {e}")
 
-    # 2. Boot Indices Native Data Structures
+    # 2. Boot Indices with Explicit Mappings Where Required
     for index in REQUIRED_INDICES:
         url = f"{es_url}/{index}"
         
@@ -94,6 +154,22 @@ def ensure_es_indices():
         try:
             with urllib.request.urlopen(req_check, timeout=5) as r:
                 if r.status == 200:
+                    # Index exists — ensure critical keyword field mappings are up-to-date
+                    # via a no-op PUT mapping (ES ignores existing compatible types).
+                    if index in EXPLICIT_INDEX_MAPPINGS:
+                        mapping_body = EXPLICIT_INDEX_MAPPINGS[index].get("mappings", {})
+                        mapping_url = f"{es_url}/{index}/_mapping"
+                        mapping_req = urllib.request.Request(
+                            mapping_url,
+                            headers=headers,
+                            data=json.dumps(mapping_body).encode(),
+                            method="PUT",
+                        )
+                        try:
+                            with urllib.request.urlopen(mapping_req, timeout=5):
+                                pass
+                        except Exception:
+                            pass  # Mapping conflicts on existing indices are non-fatal
                     continue
         except urllib.error.HTTPError as e:
             if e.code != 404:
@@ -103,7 +179,10 @@ def ensure_es_indices():
             logger.error(f"Cannot reach Elasticsearch at {es_url}: {e}")
             return
             
-        req_create = urllib.request.Request(url, headers=headers, method="PUT")
+        # Index does not exist — create with full explicit mapping if available
+        mapping = EXPLICIT_INDEX_MAPPINGS.get(index)
+        body = json.dumps(mapping).encode() if mapping else None
+        req_create = urllib.request.Request(url, headers=headers, data=body, method="PUT")
         try:
             with urllib.request.urlopen(req_create, timeout=5) as r:
                 logger.info(f"Successfully bootstrapped ES Index natively: {index}")
