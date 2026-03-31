@@ -166,22 +166,23 @@ def _call_ollama(
 
 
 
-_IMPLEMENTER_TOOLS = [
-    {
-        'type': 'function',
-        'function': {
-            'name': 'elastro_query_ast',
-            'description': 'Query the Elastro AST index for precise code mappings and snippets matching your work item. MUST be used before modifying code to dynamically save tokens contextually.',
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'query': {'type': 'string', 'description': 'The search query, e.g., a function name or class.'},
-                    'target_path': {'type': 'string', 'description': 'The absolute path to the target repository.'},
-                },
-                'required': ['query', 'target_path'],
+_ELASTRO_QUERY_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'elastro_query_ast',
+        'description': 'Query the Elastro AST index for precise code mappings and snippets matching your work item. MUST be used before modifying code to dynamically save tokens contextually.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {'type': 'string', 'description': 'The search query, e.g., a function name or class.'},
+                'target_path': {'type': 'string', 'description': 'The absolute path to the target repository.'},
             },
+            'required': ['query', 'target_path'],
         },
     },
+}
+
+_IMPLEMENTER_TOOLS = [
     {
         'type': 'function',
         'function': {
@@ -814,6 +815,9 @@ def run_implementer(
             metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
         )
 
+    if task.get('ast_synced'):
+        system_prompt += "\n\nCRITICAL CONTEXT: An Elastro AST index is present natively. You MUST use the `elastro_query_ast` tool to search for node graphs, struct layouts, or function names BEFORE writing ANY files."
+
     messages: list[dict] = [
         {'role': 'system', 'content': system_prompt},
         {
@@ -848,7 +852,11 @@ def run_implementer(
 
     for _iteration in range(25):
         _progress(f'Thinking… (step {_iteration + 1})')
-        raw = _call_ollama_tools(messages, _IMPLEMENTER_TOOLS, model, task=task)
+        dynamic_tools = _IMPLEMENTER_TOOLS.copy()
+        if task.get('ast_synced'):
+            dynamic_tools.append(_ELASTRO_QUERY_TOOL)
+            
+        raw = _call_ollama_tools(messages, dynamic_tools, model, task=task)
         if not raw:
             # Backoff before retrying to avoid tight error loops (e.g., rate limits)
             time.sleep(min(2 + _iteration, 8))
