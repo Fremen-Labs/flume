@@ -29,6 +29,7 @@ REQUIRED_INDICES = [
     "agent-plan-sessions",
     "agent-system-cluster",
     "agent-system-workers",
+    "agent-token-telemetry",
 ]
 
 INDEX_TEMPLATES = {
@@ -121,10 +122,48 @@ TASK_RECORDS_MAPPING = {
     }
 }
 
+TOKEN_TELEMETRY_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "worker_name": {"type": "keyword"},
+            "worker_role": {"type": "keyword"},
+            "provider": {"type": "keyword"},
+            "model": {"type": "keyword"},
+            "input_tokens": {"type": "long"},
+            "output_tokens": {"type": "long"},
+            "savings": {"type": "long"},
+            "created_at": {"type": "date"}
+        }
+    }
+}
+
+SECURITY_AUDIT_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "@timestamp": {"type": "date"},
+            "message": {"type": "text"},
+            "agent_roles": {"type": "keyword"},
+            "worker_name": {"type": "keyword"},
+            "secret_path": {"type": "keyword"},
+            "keys_retrieved": {"type": "keyword"}
+        }
+    }
+}
+
 # Per-index explicit mappings used during initial creation.
 # Only applied when the index does not already exist.
 EXPLICIT_INDEX_MAPPINGS = {
     "agent-task-records": TASK_RECORDS_MAPPING,
+    "agent-token-telemetry": TOKEN_TELEMETRY_MAPPING,
+    "agent-security-audits": SECURITY_AUDIT_MAPPING,
 }
 
 def ensure_es_indices():

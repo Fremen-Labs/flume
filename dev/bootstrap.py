@@ -191,6 +191,10 @@ def main():
     
     configure_secrets_engine(client, openai_key)
     provision_approle(client)
+    
+    sys.path.insert(0, "/app/src")
+    from dashboard.es_bootstrap import ensure_es_indices
+    ensure_es_indices()
 
 if __name__ == "__main__":
     main()
