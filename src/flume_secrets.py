@@ -16,9 +16,9 @@ from utils.logger import get_logger
 logger = get_logger("flume_secrets")
 
 class FlumeSettings(BaseSettings):
-    LLM_PROVIDER: str = "exo"
-    LLM_MODEL: str = "qwen3-30b-A3B-4bit"
-    LLM_BASE_URL: str = "http://host.docker.internal:52415/v1"
+    LLM_PROVIDER: str = "ollama"
+    LLM_MODEL: str = "llama3.2"
+    LLM_BASE_URL: str = "http://host.docker.internal:11434"
     LLM_API_KEY: str = ""
     GIT_USER_NAME: str = "FlumeAgent"
     GIT_USER_EMAIL: str = "agent@flume.local"
@@ -56,34 +56,27 @@ class FlumeSettings(BaseSettings):
 
 FLUME_ENV_KEYS = frozenset(FlumeSettings.model_fields.keys())
 
-def load_toml_config() -> dict[str, Any]:
-    """Reads structured parameters from config.toml safely bridging Docker constraints."""
-    config_path = os.environ.get("FLUME_CONFIG", "config.toml")
+def load_elastic_config() -> dict[str, Any]:
+    """Reads configuration natively from Elasticsearch bounding ephemeral pod orchestration."""
     data = {}
-    if os.path.exists(config_path):
-        try:
-            import tomllib
-            with open(config_path, "rb") as f:
-                raw = tomllib.load(f)
-            if 'llm' in raw:
-                if 'provider' in raw['llm']: data['LLM_PROVIDER'] = raw['llm']['provider']
-                if 'model' in raw['llm']: data['LLM_MODEL'] = raw['llm']['model']
-                if 'base_url' in raw['llm']: data['LLM_BASE_URL'] = raw['llm']['base_url']
-                if 'api_key' in raw['llm']: data['LLM_API_KEY'] = raw['llm']['api_key']
-            if 'git' in raw:
-                if 'user' in raw['git']: data['GIT_USER_NAME'] = raw['git']['user']
-                if 'email' in raw['git']: data['GIT_USER_EMAIL'] = raw['git']['email']
-            if 'system' in raw:
-                # Explicitly blocking the legacy docker defaults from hijacking OS arrays natively!
-                if 'es_url' in raw['system']: data['ES_URL'] = raw['system']['es_url']
-                if 'es_api_key' in raw['system']: data['ES_API_KEY'] = raw['system']['es_api_key']
-                if 'openbao_url' in raw['system']: data['OPENBAO_ADDR'] = raw['system']['openbao_url']
-                if 'openbao_token' in raw['system']: data['OPENBAO_TOKEN'] = raw['system']['openbao_token']
-        except Exception as e:
-            logger.warning(f"Failed parsing TOML config {config_path}: {e}")
     
-    # Absolute override: If TOML explicitly mapped to docker, and we are native, enforce localhost regardless recursively
-    if os.environ.get("FLUME_NATIVE_MODE") == "1":
+    # Elasticsearch connection bounding
+    es_native = os.environ.get("FLUME_NATIVE_MODE") == "1"
+    es_url = "http://localhost:9200" if es_native else "http://elasticsearch:9200"
+    
+    # Query system settings from elastic cluster natively
+    try:
+        req = urllib.request.Request(f"{es_url}/flume-settings/_doc/system")
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            res = json.loads(r.read())
+            doc = res.get("_source", {})
+            if "es_url" in doc: data["ES_URL"] = doc["es_url"]
+            if "es_api_key" in doc and doc["es_api_key"] != "***": data["ES_API_KEY"] = doc["es_api_key"]
+            if "openbao_url" in doc: data["OPENBAO_ADDR"] = doc["openbao_url"]
+    except Exception as e:
+        logger.warning(f"Failed to bootstrap configuration natively from Elasticsearch: {e}")
+
+    if es_native:
         if "ES_URL" in data and "elasticsearch" in data["ES_URL"]:
             data["ES_URL"] = "http://localhost:9200"
         if "OPENBAO_ADDR" in data and "openbao" in data["OPENBAO_ADDR"]:
@@ -91,7 +84,7 @@ def load_toml_config() -> dict[str, Any]:
             
     return data
 
-settings = FlumeSettings(**load_toml_config())
+settings = FlumeSettings(**load_elastic_config())
 
 def apply_runtime_config(workspace_root: Path | None = None) -> None:
     """Invoked globally by Flume daemon servers applying deterministic limits."""
