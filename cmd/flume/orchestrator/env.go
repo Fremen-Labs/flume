@@ -17,6 +17,8 @@ type EnvConfig struct {
 	LocalOllamaBaseURL string
 	Host               string
 	AdminToken         string
+	Model              string
+	IsNative           bool
 }
 
 // GenerateAdminToken creates a 256-bit cryptographically secure token.
@@ -28,7 +30,18 @@ func GenerateAdminToken() (string, error) {
 	return "flume_adm_" + hex.EncodeToString(bytes), nil
 }
 
-// GenerateEnv dynamically overrides the interactive terminal requirements mapping templates securely using os/fs.
+// rewriteLoopbackForDocker replaces 127.0.0.1 / localhost with
+// host.docker.internal for Docker container accessibility.
+func RewriteLoopbackForDockerEnv(url string) string {
+	if url == "" {
+		return url
+	}
+	url = strings.ReplaceAll(url, "://127.0.0.1", "://host.docker.internal")
+	url = strings.ReplaceAll(url, "://localhost", "://host.docker.internal")
+	return url
+}
+
+// GenerateEnv dynamically writes the .env topology consumed by docker-compose.
 func GenerateEnv(config EnvConfig) error {
 	log.Info("Constructing `.env` topology dynamically natively via os/fs...")
 
@@ -50,17 +63,29 @@ OPENBAO_TOKEN=flume-dev-token
 	if config.Provider != "" {
 		content += fmt.Sprintf("LLM_PROVIDER=%s\n", config.Provider)
 	}
-	if config.BaseURL != "" {
-		content += fmt.Sprintf("LLM_BASE_URL=%s\n", config.BaseURL)
+
+	// For Docker mode, rewrite loopback URLs to host.docker.internal
+	baseURL := config.BaseURL
+	ollamaURL := config.LocalOllamaBaseURL
+	if !config.IsNative {
+		baseURL = RewriteLoopbackForDockerEnv(baseURL)
+		ollamaURL = RewriteLoopbackForDockerEnv(ollamaURL)
 	}
-	if config.LocalOllamaBaseURL != "" {
-		content += fmt.Sprintf("LOCAL_OLLAMA_BASE_URL=%s\n", config.LocalOllamaBaseURL)
+
+	if baseURL != "" {
+		content += fmt.Sprintf("LLM_BASE_URL=%s\n", baseURL)
+	}
+	if ollamaURL != "" {
+		content += fmt.Sprintf("LOCAL_OLLAMA_BASE_URL=%s\n", ollamaURL)
 	}
 	if config.Host != "" {
 		content += fmt.Sprintf("LLM_HOST=%s\n", config.Host)
 	}
 	if strings.TrimSpace(config.APIKey) != "" {
 		content += fmt.Sprintf("LLM_API_KEY=%s\n", config.APIKey)
+	}
+	if config.Model != "" {
+		content += fmt.Sprintf("LLM_MODEL=%s\n", config.Model)
 	}
 
 	err := os.WriteFile(".env", []byte(content), 0644)
@@ -71,3 +96,4 @@ OPENBAO_TOKEN=flume-dev-token
 	log.Info("Successfully serialized `.env` topology into Swarm cache.", "isolation", "Workspace isolation protects UI configurations")
 	return nil
 }
+

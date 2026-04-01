@@ -2421,6 +2421,21 @@ def api_snapshot():
         return JSONResponse(status_code=502, content={'error': str(e)[:400], 'code': 'ES_CONNECTION'})
 
 
+import shutil
+
+_flume_cli_checked: bool = False
+_flume_cli_found: bool = False
+
+
+def _flume_cli_available() -> bool:
+    """Cache whether the `flume` CLI binary exists on $PATH (checked once per process)."""
+    global _flume_cli_checked, _flume_cli_found
+    if not _flume_cli_checked:
+        _flume_cli_found = shutil.which("flume") is not None
+        _flume_cli_checked = True
+    return _flume_cli_found
+
+
 @app.get('/api/system-state')
 def api_system_state():
     try:
@@ -2429,12 +2444,13 @@ def api_system_state():
         total = len(workers)
 
         telemetry = {}
-        try:
-            res = subprocess.run(["flume", "doctor", "--json"], capture_output=True, text=True, timeout=5)
-            if res.returncode == 0:
-                telemetry = json.loads(res.stdout)
-        except Exception as te:
-            logger.warning(f"Telemetry shell-out failed: {te}")
+        if _flume_cli_available():
+            try:
+                res = subprocess.run(["flume", "doctor", "--json"], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    telemetry = json.loads(res.stdout)
+            except Exception:
+                pass  # Binary exists but call failed — don't spam logs
 
         return {
             "status": "online",

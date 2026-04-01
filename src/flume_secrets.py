@@ -164,7 +164,17 @@ def hydrate_secrets_from_openbao() -> None:
     
     if not token:
         role_id = os.environ.get("VAULT_ROLE_ID")
-        secret_id = os.environ.get("VAULT_SECRET_ID")
+        # Bootstrap writes the dynamic BAO_SECRET_ID to /app/.env after
+        # AppRole provisioning. Compose env was evaluated BEFORE bootstrap ran,
+        # so VAULT_SECRET_ID may have the stale default. Read from .env directly.
+        secret_id = os.environ.get("VAULT_SECRET_ID", "")
+        env_file = Path("/app/.env")
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BAO_SECRET_ID="):
+                    secret_id = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
         if role_id and secret_id:
             try:
                 import hvac
@@ -190,15 +200,23 @@ def hydrate_secrets_from_openbao() -> None:
     }))
     
     data = fetch_openbao_kv(addr, token, "secret", "flume/keys")
-    if data and "ES_API_KEY" in data:
-        os.environ["ES_API_KEY"] = data["ES_API_KEY"]
-        logger.info(json.dumps({
-            "event": "openbao_fetch_success",
-            "message": "Vault seamlessly unlocked over HTTP layer.",
-            "keys_hydrated": list(data.keys())
-        }))
-    else:
+    if not data:
         logger.warning(json.dumps({
             "event": "openbao_fetch_failure",
             "message": "Vault returned empty structures or unreachable configurations cleanly bypassing crashes."
         }))
+        return
+
+    # Apply ALL keys from OpenBao KV to os.environ — this makes OpenBao the
+    # single source of truth for LLM config, eliminating .env file dependency.
+    hydrated_keys = []
+    for key, value in data.items():
+        if value is not None and str(value).strip():
+            os.environ[key] = str(value).strip()
+            hydrated_keys.append(key)
+
+    logger.info(json.dumps({
+        "event": "openbao_fetch_success",
+        "message": "Vault seamlessly unlocked over HTTP layer.",
+        "keys_hydrated": hydrated_keys
+    }))

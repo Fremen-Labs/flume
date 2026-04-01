@@ -82,6 +82,8 @@ var StartCmd = &cobra.Command{
 			BaseURL:            strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
 			LocalOllamaBaseURL: strings.TrimSpace(os.Getenv("LOCAL_OLLAMA_BASE_URL")),
 			Host:               strings.TrimSpace(os.Getenv("LLM_HOST")),
+			Model:              strings.TrimSpace(os.Getenv("LLM_MODEL")),
+			IsNative:           NativeFlag,
 		}
 
 		existingPromptCfg := ui.PromptConfig{
@@ -231,15 +233,18 @@ var StartCmd = &cobra.Command{
 			wg.Wait()
 		} else {
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
+			// Docker containers need host.docker.internal, not 127.0.0.1/localhost
+			dockerBaseURL := orchestrator.RewriteLoopbackForDockerEnv(envCfg.BaseURL)
+			dockerOllamaURL := orchestrator.RewriteLoopbackForDockerEnv(envCfg.LocalOllamaBaseURL)
 			dockerEnv := append([]string{}, portEnvOverrides...)
 			if envCfg.Provider != "" {
 				dockerEnv = append(dockerEnv, "LLM_PROVIDER="+envCfg.Provider)
 			}
-			if envCfg.BaseURL != "" {
-				dockerEnv = append(dockerEnv, "LLM_BASE_URL="+envCfg.BaseURL)
+			if dockerBaseURL != "" {
+				dockerEnv = append(dockerEnv, "LLM_BASE_URL="+dockerBaseURL)
 			}
-			if envCfg.LocalOllamaBaseURL != "" {
-				dockerEnv = append(dockerEnv, "LOCAL_OLLAMA_BASE_URL="+envCfg.LocalOllamaBaseURL)
+			if dockerOllamaURL != "" {
+				dockerEnv = append(dockerEnv, "LOCAL_OLLAMA_BASE_URL="+dockerOllamaURL)
 			}
 			if envCfg.Host != "" {
 				dockerEnv = append(dockerEnv, "LLM_HOST="+envCfg.Host)
@@ -247,7 +252,7 @@ var StartCmd = &cobra.Command{
 			if envCfg.APIKey != "" {
 				dockerEnv = append(dockerEnv, "LLM_API_KEY="+envCfg.APIKey)
 			}
-			c := exec.Command("docker", "compose", "up", "-d", "--wait")
+			c := exec.Command("docker", "compose", "up", "-d", "--build", "--wait")
 			c.Env = dockerEnv
 
 			var outBuf, errBuf bytes.Buffer
