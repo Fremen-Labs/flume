@@ -70,12 +70,16 @@ def embed_credentials(repo_url: str, repo_type: str | None = None) -> str:
         recognise for rotation/revocation.
       - PAT values are percent-encoded via urllib.parse.quote(safe='') to
         handle special characters without breaking URL parsing.
+      - Any existing userinfo (including ADO org usernames like
+        'mentat-automation@dev.azure.com') is stripped before embedding, so
+        org-name-prefixed clone URLs received from Azure DevOps are handled
+        correctly without triggering an interactive password prompt.
       - SSH remotes are returned unchanged (credentials must be injected via
         SSH agent or mounted key — out of scope for this utility).
       - If the required env var for a provider is absent the original URL is
         returned unchanged; the caller should handle authentication failure.
 
-    Supported providers (extend _PROVIDER_ADAPTERS to add more):
+    Supported providers (extend _resolve_token() to add more):
         github        → GH_TOKEN / GITHUB_TOKEN env var
         ado           → ADO_TOKEN / ADO_PERSONAL_ACCESS_TOKEN env var
         generic_https → no embedding (pass-through)
@@ -87,15 +91,15 @@ def embed_credentials(repo_url: str, repo_type: str | None = None) -> str:
     if repo_type in ("local", "ssh", "generic_https"):
         return repo_url
 
-    # Already has credentials embedded — do not double-embed
-    if _has_credentials(repo_url):
-        return repo_url
-
     token = _resolve_token(repo_type)
     if not token:
         return repo_url
 
-    return _rewrite_url(repo_url, token)
+    # Always strip any existing userinfo (including bare org usernames like
+    # 'mentat-automation@') before embedding the real PAT so we never end up
+    # with a URL that has a username but no password, which causes git to
+    # prompt interactively and fail inside Docker.
+    return _rewrite_url(strip_credentials(repo_url), token)
 
 
 def strip_credentials(repo_url: str) -> str:
