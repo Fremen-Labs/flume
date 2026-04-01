@@ -865,7 +865,8 @@ def handle_implementer_worker(task, es_id):
 
         commit_message = result.metadata.get('commit_message') or f"Implement task: {task.get('title', task_id)}"
         commit_sha = ''
-        branch = None
+        # NOTE: do NOT shadow `branch` here — it was set by ensure_task_branch() above.
+        # The previous `branch = None` here was the root cause of all push failures.
         has_changes = False
         agent_completed = result.metadata.get('source') == 'llm_agentic'
 
@@ -1026,13 +1027,17 @@ def handle_implementer_worker(task, es_id):
 def handle_tester_worker(task, es_id):
     # Gate: refuse to test a task that has no real commit — nothing to validate
     if not task.get('commit_sha'):
+        note = ('Blocked: no commit_sha recorded. The implementer did not push any code changes. '
+                'Check worker_handlers.log for worktree/push errors, then reset this task to **ready**.')
+        append_agent_note(es_id, note)
         update_task_doc(es_id, {
             'status': 'blocked',
             'needs_human': True,
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
-        log(f"tester: task={task.get('id')} has no commit_sha — blocking, implementer must make real changes first")
+        log(f"tester: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
     result = run_tester(task)
@@ -1092,13 +1097,17 @@ def handle_tester_worker(task, es_id):
 def handle_reviewer_worker(task, es_id):
     # Gate: don't approve if no real commit was recorded by the implementer
     if not task.get('commit_sha'):
+        note = ('Blocked: no commit_sha recorded. The implementer did not push any code changes. '
+                'Check worker_handlers.log for worktree/push errors, then reset this task to **ready**.')
+        append_agent_note(es_id, note)
         update_task_doc(es_id, {
             'status': 'blocked',
             'needs_human': True,
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
-        log(f"reviewer: task={task.get('id')} has no commit_sha — blocking, implementer must make real changes first")
+        log(f"reviewer: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
     result = run_reviewer(task)
