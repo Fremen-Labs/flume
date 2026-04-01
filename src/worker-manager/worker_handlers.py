@@ -648,42 +648,46 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
             check=True, capture_output=True,
         )
 
-        # --- Credential-embedded push ---
+        # --- Credential-embedded push (token-safe) ---
+        # Read the stored remote URL; strip any previously embedded credentials so we
+        # get the canonical clean URL, then embed a fresh PAT for this push only.
+        # We NEVER write the auth URL back to the remote config — instead we pass it
+        # directly to `git push <url>` so the token only lives in process argv (ephemeral)
+        # and never in .git/config.
         origin_url_res = subprocess.run(
             ['git', '-C', repo_path, 'remote', 'get-url', 'origin'],
             capture_output=True, text=True,
         )
-        origin_url = (origin_url_res.stdout or '').strip()
-        repo_type = detect_repo_type(origin_url)
-        auth_url = embed_credentials(origin_url, repo_type)
+        stored_url = (origin_url_res.stdout or '').strip()
+        # Strip any leaked token from the stored URL (defensive cleanup)
+        clean_url = strip_credentials(stored_url)
+        if clean_url != stored_url:
+            subprocess.run(
+                ['git', '-C', repo_path, 'remote', 'set-url', 'origin', clean_url],
+                capture_output=True,
+            )
+        repo_type = detect_repo_type(clean_url)
+        auth_url = embed_credentials(clean_url, repo_type)
 
         push_failed = False
         push_stderr = ''
         try:
-            if auth_url != origin_url:
-                # Temporarily embed credentials for the push
+            if auth_url != clean_url:
+                # Push directly to the authenticated URL without storing it in config
                 subprocess.run(
-                    ['git', '-C', repo_path, 'remote', 'set-url', 'origin', auth_url],
-                    check=True, capture_output=True,
+                    ['git', '-C', repo_path, 'push', auth_url, f'{branch}:refs/heads/{branch}', '--set-upstream'],
+                    check=True, capture_output=True, timeout=60,
                 )
-            subprocess.run(
-                ['git', '-C', repo_path, 'push', '-u', 'origin', branch],
-                check=True, capture_output=True, timeout=60,
-            )
+            else:
+                # SSH or no-creds path — push normally via named remote
+                subprocess.run(
+                    ['git', '-C', repo_path, 'push', '-u', 'origin', branch],
+                    check=True, capture_output=True, timeout=60,
+                )
         except subprocess.CalledProcessError as push_err:
             push_failed = True
-            push_stderr = (push_err.stderr.decode(errors='replace') if push_err.stderr else str(push_err))[:300]
-            push_stderr = strip_credentials(push_stderr)
-        finally:
-            if auth_url != origin_url:
-                # Always restore the clean URL (no embedded token in repo config)
-                try:
-                    subprocess.run(
-                        ['git', '-C', repo_path, 'remote', 'set-url', 'origin', origin_url],
-                        capture_output=True,
-                    )
-                except Exception:
-                    pass
+            raw_err = push_err.stderr.decode(errors='replace') if push_err.stderr else str(push_err)
+            push_stderr = strip_credentials(raw_err[:300])
 
         if push_failed:
             log(f"auto_commit: push failed for task={task_id} branch={branch}: {push_stderr}")
@@ -692,6 +696,7 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
         sha, _ = get_latest_commit_sha(repo_path)
         log(f"auto_commit: committed and pushed task={task_id} branch={branch} sha={sha[:8] if sha else 'n/a'}")
         return sha
+
     except subprocess.CalledProcessError as e:
         log(f"auto_commit: git error for task={task_id}: {e.stderr.decode() if e.stderr else e}")
         return ''
