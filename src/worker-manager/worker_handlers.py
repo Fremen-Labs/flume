@@ -224,7 +224,10 @@ def ensure_task_branch(task):
         branch_key = parent_id
 
     safe_task_id = ''.join(ch if ch.isalnum() or ch in ('-', '_', '/') else '-' for ch in branch_key).strip('-')
-    branch = f"{prefix}/{safe_task_id}"
+    # Branch is always keyed on the TASK ID, never the story/parent ID.
+    # Using the parent story ID caused concurrent siblings to fight over the
+    # same worktree branch, producing git error 128 ('already used by worktree').
+    branch = f"{prefix}/{task_id}"
     
     # OS native topology: Mount sandboxes adjacent to original repo avoiding concurrent collisions
     worktree_mgr_path = repo_path.parent / f"{repo_path.name}-worktrees"
@@ -731,11 +734,16 @@ def task_requires_code(task: dict) -> bool:
     # *title* which is specific to whether this is a replace/modify vs verify/test
     # step.
     text = f"{task.get('title', '')}".lower()
-    # Code-edit verbs (keep this list conservative to avoid flagging pure
-    # validation tasks like "verify"/"validate"/"test").
+    # Code-edit / content-edit verbs. Keep this list conservative to avoid
+    # flagging pure validation tasks ("verify"/"validate"/"test").
+    # Documentation tasks use verbs like "reorganize", "convert", "restructure",
+    # "migrate", "rewrite", and "move" which must be included so doc-update
+    # tasks produce commits rather than being silently classified as analysis-only.
     code_triggers = [
         'replace', 'update', 'modify', 'implement', 'write', 'add ', 'remove ',
-        'create', 'change', 'set ', 'edit ',
+        'create', 'change', 'set ', 'edit ', 'reorganize', 'convert', 'restructure',
+        'migrate', 'rewrite', 'move ', 'rename', 'refactor', 'format', 'reformat',
+        'correct', 'fix ', 'patch', 'delete', 'insert', 'append',
     ]
     return any(t in text for t in code_triggers)
 
