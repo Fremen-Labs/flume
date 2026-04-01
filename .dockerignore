@@ -1,0 +1,17 @@
+**/.git
+**/.github
+**/node_modules
+**/dist
+**/.uv
+**/.venv
+**/venv
+**/env
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/workspace
+**/logs
+**/*.log
+**/*.pid
+flume
+cmd/flume/flume

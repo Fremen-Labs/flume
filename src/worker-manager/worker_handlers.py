@@ -676,9 +676,12 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
         push_stderr = ''
         try:
             if auth_url != clean_url:
-                # Push directly to the authenticated URL without storing it in config
+                # Push directly to the authenticated URL without storing it in config.
+                # IMPORTANT: do NOT pass --set-upstream here — that flag requires a
+                # named remote (e.g. 'origin'), not a raw URL, and will make git
+                # exit non-zero with "fatal: --set-upstream requires a remote name".
                 subprocess.run(
-                    ['git', '-C', repo_path, 'push', auth_url, f'{branch}:refs/heads/{branch}', '--set-upstream'],
+                    ['git', '-C', repo_path, 'push', auth_url, f'{branch}:refs/heads/{branch}'],
                     check=True, capture_output=True, timeout=60,
                 )
             else:
@@ -744,6 +747,10 @@ def task_requires_code(task: dict) -> bool:
         'create', 'change', 'set ', 'edit ', 'reorganize', 'convert', 'restructure',
         'migrate', 'rewrite', 'move ', 'rename', 'refactor', 'format', 'reformat',
         'correct', 'fix ', 'patch', 'delete', 'insert', 'append',
+        # Publication / drafting verbs — tasks like 'Publish the finalized documentation'
+        # or 'Draft the release notes' produce real file changes and must be committed.
+        'publish', 'draft ', 'finalize', 'generate ', 'produce', 'build ',
+        'compile', 'assemble', 'populate', 'fill ', 'complete ', 'expand',
     ]
     return any(t in text for t in code_triggers)
 
