@@ -56,6 +56,10 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+      - ..:/workspace
+      # Mount host SSH keys read-only so the dashboard can clone SSH remotes.
+      # The container user runs as root; adjust source path if using a non-root host user.
+      - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
     extra_hosts:
@@ -78,7 +82,9 @@ services:
       - LLM_API_KEY
       - LLM_MODEL
       - FLUME_ES_URL
+      - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - GITHUB_TOKEN
+      - ADO_TOKEN=${ADO_TOKEN:-${ADO_PERSONAL_ACCESS_TOKEN:-}}
       - ADO_ORGANIZATION
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
@@ -92,6 +98,10 @@ services:
           mkdir -p /app/src/frontend/dist
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
+        # Ensure SSH host keys are accepted for known git providers (non-interactive clone)
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org >> /root/.ssh/known_hosts 2>/dev/null || true
         cd /app
         exec /opt/venv/bin/python src/dashboard/server.py
     healthcheck:
@@ -113,6 +123,8 @@ services:
     volumes:
       - .:/app
       - ..:/workspace
+      # Mount host SSH keys read-only so workers can clone/push SSH remotes.
+      - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     extra_hosts:
       - "${LOCAL_LLM_HOST:-host.docker.internal}:host-gateway"
     environment:
@@ -132,11 +144,22 @@ services:
       - LLM_API_KEY
       - LLM_MODEL
       - FLUME_ES_URL
+      - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - GITHUB_TOKEN
+      - ADO_TOKEN=${ADO_TOKEN:-${ADO_PERSONAL_ACCESS_TOKEN:-}}
       - ADO_ORGANIZATION
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
-    command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        # Ensure SSH host keys are accepted for known git providers (non-interactive clone/push)
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org >> /root/.ssh/known_hosts 2>/dev/null || true
+        exec /opt/venv/bin/python src/worker-manager/manager.py
     deploy:
       mode: replicated
       replicas: 2

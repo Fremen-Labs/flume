@@ -2719,16 +2719,39 @@ def _clone_project_sync(project_id: str, repo_url: str, repo_type: str, project_
             logger.info({"event": "clone_already_exists", "project": project_id, "path": str(dest)})
         else:
             auth_url = embed_credentials(repo_url, repo_type)
+
+            # Build env for the clone subprocess.
+            # For SSH remotes, set GIT_SSH_COMMAND to use the host-mounted key
+            # with BatchMode=yes (abort instead of prompting) and accept-new host keys
+            # (ssh-keyscan at container startup populates known_hosts for major providers).
+            clone_env = os.environ.copy()
+            if repo_type == "ssh":
+                ssh_key = os.path.expanduser("~/.ssh/id_rsa")
+                if not os.path.exists(ssh_key):
+                    ssh_key = os.path.expanduser("~/.ssh/id_ed25519")
+                clone_env["GIT_SSH_COMMAND"] = (
+                    f"ssh -i {ssh_key} "
+                    "-o StrictHostKeyChecking=accept-new "
+                    "-o BatchMode=yes "
+                    "-o ConnectTimeout=15"
+                )
+
             result = subprocess.run(
                 ["git", "clone", "--depth=1", auth_url, str(dest)],
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=clone_env,
             )
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip()[:500]
-                # Strip any embedded token from error before storing
                 clean_err = strip_credentials(err)
+                if repo_type == "ssh" and any(k in clean_err for k in ("Permission denied", "Could not read", "Host key")):
+                    clean_err += (
+                        "\n\nSSH clone failed. Ensure your SSH private key (~/.ssh/id_rsa or "
+                        "~/.ssh/id_ed25519) is present on the host and its public key is registered "
+                        "with your git provider. Override the SSH directory with FLUME_SSH_DIR."
+                    )
                 _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": clean_err})
                 logger.error({"event": "clone_failed", "project": project_id, "error": clean_err})
                 return
