@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
@@ -254,78 +252,7 @@ var StartCmd = &cobra.Command{
 			return err
 		}
 
-		if eco.HasElastro {
-			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
 
-			type ASTConfig struct {
-				DashboardAPIURL string
-				RetriesLimit    int
-				InitialBackoff  int
-			}
-
-			cfg := ASTConfig{
-				DashboardAPIURL: os.Getenv("FLUME_DASHBOARD_API_URL"),
-				RetriesLimit:    5,
-				InitialBackoff:  500,
-			}
-			if cfg.DashboardAPIURL == "" {
-				cfg.DashboardAPIURL = fmt.Sprintf("http://localhost:%s", dashboardPort)
-			}
-			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
-				cfg.RetriesLimit = r
-			}
-			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
-				cfg.InitialBackoff = b
-			}
-
-			endpoint := fmt.Sprintf("%s/api/system/sync-ast", cfg.DashboardAPIURL)
-
-			var res *http.Response
-			var reqErr error
-
-			astSyncClient := &http.Client{
-				Timeout: 15 * time.Second,
-			}
-
-			backoff := time.Duration(cfg.InitialBackoff) * time.Millisecond
-			for retries := 1; retries <= cfg.RetriesLimit; retries++ {
-				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
-				if err != nil {
-					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
-				}
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("X-Flume-System-Token", envCfg.AdminToken)
-
-				res, reqErr = astSyncClient.Do(req)
-				if reqErr == nil && res.StatusCode == 200 {
-					defer res.Body.Close()
-					break
-				}
-
-				if res != nil {
-					res.Body.Close()
-				}
-				if retries < cfg.RetriesLimit {
-					log.Warn("AST synchronization handshake failed, retrying...",
-						"attempt", fmt.Sprintf("%d/%d", retries, cfg.RetriesLimit),
-						"retry_in", backoff.String(),
-					)
-					time.Sleep(backoff)
-					backoff *= 2
-				}
-			}
-
-			if reqErr != nil || (res != nil && res.StatusCode != 200) {
-				statusCode := 0
-				if res != nil {
-					statusCode = res.StatusCode
-				}
-				log.Error("Failed to synchronize AST with the Flume dashboard", "error", reqErr, "http_status", statusCode)
-				return fmt.Errorf("could not connect to the Flume dashboard to sync AST after 5 attempts. Please check the dashboard container logs for errors")
-			}
-
-			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
-		}
 
 		return nil
 	},

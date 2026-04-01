@@ -45,6 +45,9 @@ var DestroyCmd = &cobra.Command{
 		c := exec.Command("docker", "compose", "down", "-v")
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
+		// Supply a placeholder so compose doesn't warn about an unset OPENBAO_TOKEN variable.
+		destroyEnv := append(os.Environ(), "OPENBAO_TOKEN=flume-dev-token")
+		c.Env = destroyEnv
 		if err := c.Run(); err != nil {
 			fmt.Println(ui.ErrorRed("Failed to execute docker compose down: " + err.Error()))
 			return

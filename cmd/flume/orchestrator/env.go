@@ -53,7 +53,6 @@ func GenerateEnv(config EnvConfig) []string {
 	log.Debug("Constructing ecosystem telemetry environment purely via memory arrays natively...")
 
 	var env []string
-	env = append(env, "VAULT_TOKEN=flume-dev-token", "OPENBAO_TOKEN=flume-dev-token")
 
 	if config.AdminToken != "" {
 		env = append(env, "FLUME_ADMIN_TOKEN="+config.AdminToken)

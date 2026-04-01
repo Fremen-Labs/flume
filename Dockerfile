@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/root/.local/bin:${PATH}"
+    PATH="/root/.local/bin:${PATH}" \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -20,8 +21,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 WORKDIR /app
 
+# Install deps into /opt/venv (outside /app) so the runtime .:/app volume mount
+# does NOT shadow the installed packages. UV_PROJECT_ENVIRONMENT is set above
+# and matched by docker-compose so both build and runtime use the same venv.
 COPY pyproject.toml .
-RUN uv pip install --system -e .
+RUN uv venv /opt/venv && uv pip install --python /opt/venv -e .
 
 COPY . /app
 
@@ -33,4 +37,4 @@ RUN cp -R /app/src/frontend/dist /dist-cache
 WORKDIR /app
 
 # Command is explicitly overridden per service via docker-compose.yml
-CMD ["python", "-m", "src.dashboard.server"]
+CMD ["/opt/venv/bin/python", "-m", "src.dashboard.server"]

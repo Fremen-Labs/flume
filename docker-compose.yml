@@ -70,7 +70,7 @@ services:
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
       - VAULT_ROLE_ID=flume-client-role
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-token}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - FLUME_ADMIN_TOKEN
       - LLM_PROVIDER
       - LLM_BASE_URL
@@ -93,7 +93,7 @@ services:
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
         cd /app
-        exec uv run python src/dashboard/server.py
+        exec /opt/venv/bin/python src/dashboard/server.py
     healthcheck:
       test: ["CMD-SHELL", "curl -s http://localhost:8765/api/health || exit 1"]
       interval: 10s
@@ -124,7 +124,7 @@ services:
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - VAULT_ROLE_ID=flume-client-role
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-token}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - FLUME_ADMIN_TOKEN
       - LLM_PROVIDER
       - LLM_BASE_URL
@@ -136,7 +136,7 @@ services:
       - ADO_ORGANIZATION
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
-    command: ["uv", "run", "python", "src/worker-manager/manager.py"]
+    command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated
       replicas: 2

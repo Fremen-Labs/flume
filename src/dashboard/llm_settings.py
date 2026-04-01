@@ -402,7 +402,7 @@ def is_openbao_installed() -> bool:
 
 def _openbao_secret_ref(pairs: dict[str, str]) -> str:
     mount = str(pairs.get("OPENBAO_MOUNT", "secret") or "secret").strip().strip("/")
-    path = str(pairs.get("OPENBAO_PATH", "flume") or "flume").strip().strip("/")
+    path = str(pairs.get("OPENBAO_PATH", "flume/keys") or "flume/keys").strip().strip("/")
     return f"{mount}/data/{path}"
 
 

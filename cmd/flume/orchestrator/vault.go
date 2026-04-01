@@ -298,22 +298,24 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 				for k, v := range kvPayload {
 					if k == "ES_API_KEY" {
 						combined[k] = v // Always overwrite
-					} else {
-						// Natively check if these values came dynamically from explicitly mapped wizard questions
-						envCheck := k
-						if k == "GH_TOKEN" {
-							envCheck = "GITHUB_TOKEN"
-						} else if k == "ADO_TOKEN" {
-							envCheck = "ADO_PERSONAL_ACCESS_TOKEN"
-						} else if k == "ADO_ORG_URL" {
-							envCheck = "ADO_ORGANIZATION"
+					} else if k == "LLM_PROVIDER" || k == "LLM_MODEL" || k == "LLM_BASE_URL" {
+						explicitOverride := false
+						if k == "LLM_PROVIDER" && envCfg.Provider != "" {
+							explicitOverride = true
+						} else if k == "LLM_MODEL" && envCfg.Model != "" {
+							explicitOverride = true
+						} else if k == "LLM_BASE_URL" && (envCfg.BaseURL != "" || envCfg.LocalOllamaBaseURL != "" || envCfg.Host != "") {
+							explicitOverride = true
 						}
 
-						// If explicitly requested by process, replace the Vault existing dynamically!
-						if os.Getenv(envCheck) != "" || envCheck == "LLM_PROVIDER" || envCheck == "LLM_MODEL" || envCheck == "LLM_BASE_URL" {
-							// If any LLM attributes triggered an explicit change flag upstream natively
+						if explicitOverride {
+							combined[k] = v
+						} else if _, exists := combined[k]; !exists {
 							combined[k] = v
 						}
+					} else {
+						// Any other key in kvPayload (GH_TOKEN, ADO_TOKEN, API keys) is ONLY there because it was explicitly provided by the user in this run.
+						combined[k] = v
 					}
 				}
 				kvPayload = combined
