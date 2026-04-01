@@ -56,6 +56,10 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+      - ..:/workspace
+      # Mount host SSH keys read-only so the dashboard can clone SSH remotes.
+      # The container user runs as root; adjust source path if using a non-root host user.
+      - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
     extra_hosts:
@@ -92,6 +96,17 @@ services:
           mkdir -p /app/src/frontend/dist
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
+        # Set up a writable SSH workspace. /root/.ssh is mounted :ro from the host
+        # so we cannot chmod it or write known_hosts there. Instead we write
+        # known_hosts to /tmp and export GIT_SSH_COMMAND so all git operations
+        # inside this container use the correct config non-interactively.
+        mkdir -p /tmp/flume_ssh
+        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org \
+          >> /tmp/flume_ssh/known_hosts 2>/dev/null || true
+        export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/tmp/flume_ssh/known_hosts \
+          -o StrictHostKeyChecking=accept-new \
+          -o BatchMode=yes \
+          -o ConnectTimeout=15"
         cd /app
         exec /opt/venv/bin/python src/dashboard/server.py
     healthcheck:
@@ -113,6 +128,8 @@ services:
     volumes:
       - .:/app
       - ..:/workspace
+      # Mount host SSH keys read-only so workers can clone/push SSH remotes.
+      - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     extra_hosts:
       - "${LOCAL_LLM_HOST:-host.docker.internal}:host-gateway"
     environment:

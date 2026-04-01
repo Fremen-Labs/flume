@@ -143,23 +143,69 @@ def append_agent_note(es_id: str, note: str) -> None:
         pass
 
 
+def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
+    """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("ES_API_KEY", "")
+    if api_key:
+        headers["Authorization"] = f"ApiKey {api_key}"
+    data = json.dumps(body).encode() if body is not None else None
+    if data and method == "GET":
+        method = "POST"
+    import ssl as _ssl, urllib.request as _ureq, urllib.error as _uerr
+    _ctx = None
+    if os.environ.get('ES_VERIFY_TLS', 'false').lower() != 'true':
+        _ctx = _ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode = _ssl.CERT_NONE
+    req = _ureq.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+    try:
+        with _ureq.urlopen(req, context=_ctx) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+    except _uerr.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
+
+
 def load_project_repo_path(repo_id):
-    if not repo_id or not PROJECTS_REGISTRY.exists():
+    """
+    Resolve the local filesystem path for a registered project.
+    Queries the flume-projects ES index (primary) and falls back to
+    WORKSPACE_ROOT/repos/<name> or WORKSPACE_ROOT/<name> for
+    clone-in-progress or legacy entries.
+    """
+    if not repo_id:
         return None
     try:
-        raw = json.loads(PROJECTS_REGISTRY.read_text())
-        entries = raw.get('projects') if isinstance(raw, dict) else raw
-        if not isinstance(entries, list):
+        res = _es_projects_request_worker(f"/flume-projects/_doc/{repo_id}")
+        src = res.get("_source") or {}
+        clone_status = src.get("cloneStatus", "")
+        local_path = src.get("localPath")
+
+        if clone_status == "cloning":
+            log(f"load_project_repo_path: repo={repo_id} is still cloning — worker should re-queue")
             return None
-        for p in entries:
-            if not isinstance(p, dict):
-                continue
-            if p.get('id') == repo_id:
-                path = p.get('path')
-                return Path(path) if path else None
-    except Exception:
+
+        if local_path and Path(local_path).exists():
+            return Path(local_path)
+
+        # Fallback: check workspace/repos/<name> and workspace/<name>
+        name = src.get("name", "")
+        for candidate_dir in (
+            Path(_WS.parent) / "repos" / name,
+            Path(_WS.parent) / name,
+        ):
+            if name and candidate_dir.exists() and (candidate_dir / ".git").exists():
+                log(f"load_project_repo_path: using fallback path {candidate_dir} for repo={repo_id}")
+                return candidate_dir
+
+        log(f"load_project_repo_path: no local path found for repo={repo_id} (cloneStatus={clone_status})")
         return None
-    return None
+    except Exception as e:
+        log(f"load_project_repo_path: ES lookup failed for repo={repo_id}: {e}")
+        return None
 
 
 def ensure_task_branch(task):
@@ -178,7 +224,10 @@ def ensure_task_branch(task):
         branch_key = parent_id
 
     safe_task_id = ''.join(ch if ch.isalnum() or ch in ('-', '_', '/') else '-' for ch in branch_key).strip('-')
-    branch = f"{prefix}/{safe_task_id}"
+    # Branch is always keyed on the TASK ID, never the story/parent ID.
+    # Using the parent story ID caused concurrent siblings to fight over the
+    # same worktree branch, producing git error 128 ('already used by worktree').
+    branch = f"{prefix}/{task_id}"
     
     # OS native topology: Mount sandboxes adjacent to original repo avoiding concurrent collisions
     worktree_mgr_path = repo_path.parent / f"{repo_path.name}-worktrees"
@@ -572,7 +621,13 @@ def handle_pm_dispatcher_worker(task):
 
 
 def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_id: str) -> str:
-    """Stage all changes, commit, push, and return the new SHA. Returns '' on failure."""
+    """Stage all changes, commit, push with embedded auth, and return the new SHA. Returns '' on failure."""
+    _src_root = Path(__file__).resolve().parent.parent
+    _utils_path = str(_src_root)
+    if _utils_path not in sys.path:
+        sys.path.insert(0, _utils_path)
+    from utils.git_credentials import detect_repo_type, embed_credentials, strip_credentials  # noqa
+
     try:
         status = subprocess.run(
             ['git', '-C', repo_path, 'status', '--porcelain'],
@@ -582,39 +637,69 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
             log(f"auto_commit: no changes to commit for task={task_id}")
             return ''
 
-        # Some environments (containers/CI) don't have git identity configured.
-        # Ensure commits don't fail with "Author identity unknown".
-        email = subprocess.run(
-            ['git', '-C', repo_path, 'config', 'user.email'],
-            capture_output=True, text=True,
-        )
+        # Ensure git identity is set (required in containerised/CI environments)
+        email = subprocess.run(['git', '-C', repo_path, 'config', 'user.email'], capture_output=True, text=True)
         if email.returncode != 0 or not (email.stdout or '').strip():
-            subprocess.run(
-                ['git', '-C', repo_path, 'config', 'user.email', 'ai-bot@local'],
-                check=True, capture_output=True, text=True,
-            )
-        name = subprocess.run(
-            ['git', '-C', repo_path, 'config', 'user.name'],
-            capture_output=True, text=True,
-        )
+            subprocess.run(['git', '-C', repo_path, 'config', 'user.email', 'ai-bot@flume.local'], check=True, capture_output=True)
+        name = subprocess.run(['git', '-C', repo_path, 'config', 'user.name'], capture_output=True, text=True)
         if name.returncode != 0 or not (name.stdout or '').strip():
-            subprocess.run(
-                ['git', '-C', repo_path, 'config', 'user.name', 'AI Bot'],
-                check=True, capture_output=True, text=True,
-            )
+            subprocess.run(['git', '-C', repo_path, 'config', 'user.name', 'Flume AI Bot'], check=True, capture_output=True)
 
         subprocess.run(['git', '-C', repo_path, 'add', '-A'], check=True, capture_output=True)
         subprocess.run(
             ['git', '-C', repo_path, 'commit', '-m', commit_message or f'Implement task {task_id}'],
             check=True, capture_output=True,
         )
-        subprocess.run(
-            ['git', '-C', repo_path, 'push', '-u', 'origin', branch],
-            check=True, capture_output=True, timeout=60,
+
+        # --- Credential-embedded push (token-safe) ---
+        # Read the stored remote URL; strip any previously embedded credentials so we
+        # get the canonical clean URL, then embed a fresh PAT for this push only.
+        # We NEVER write the auth URL back to the remote config — instead we pass it
+        # directly to `git push <url>` so the token only lives in process argv (ephemeral)
+        # and never in .git/config.
+        origin_url_res = subprocess.run(
+            ['git', '-C', repo_path, 'remote', 'get-url', 'origin'],
+            capture_output=True, text=True,
         )
+        stored_url = (origin_url_res.stdout or '').strip()
+        # Strip any leaked token from the stored URL (defensive cleanup)
+        clean_url = strip_credentials(stored_url)
+        if clean_url != stored_url:
+            subprocess.run(
+                ['git', '-C', repo_path, 'remote', 'set-url', 'origin', clean_url],
+                capture_output=True,
+            )
+        repo_type = detect_repo_type(clean_url)
+        auth_url = embed_credentials(clean_url, repo_type)
+
+        push_failed = False
+        push_stderr = ''
+        try:
+            if auth_url != clean_url:
+                # Push directly to the authenticated URL without storing it in config
+                subprocess.run(
+                    ['git', '-C', repo_path, 'push', auth_url, f'{branch}:refs/heads/{branch}', '--set-upstream'],
+                    check=True, capture_output=True, timeout=60,
+                )
+            else:
+                # SSH or no-creds path — push normally via named remote
+                subprocess.run(
+                    ['git', '-C', repo_path, 'push', '-u', 'origin', branch],
+                    check=True, capture_output=True, timeout=60,
+                )
+        except subprocess.CalledProcessError as push_err:
+            push_failed = True
+            raw_err = push_err.stderr.decode(errors='replace') if push_err.stderr else str(push_err)
+            push_stderr = strip_credentials(raw_err[:300])
+
+        if push_failed:
+            log(f"auto_commit: push failed for task={task_id} branch={branch}: {push_stderr}")
+            return ''
+
         sha, _ = get_latest_commit_sha(repo_path)
         log(f"auto_commit: committed and pushed task={task_id} branch={branch} sha={sha[:8] if sha else 'n/a'}")
         return sha
+
     except subprocess.CalledProcessError as e:
         log(f"auto_commit: git error for task={task_id}: {e.stderr.decode() if e.stderr else e}")
         return ''
@@ -649,11 +734,16 @@ def task_requires_code(task: dict) -> bool:
     # *title* which is specific to whether this is a replace/modify vs verify/test
     # step.
     text = f"{task.get('title', '')}".lower()
-    # Code-edit verbs (keep this list conservative to avoid flagging pure
-    # validation tasks like "verify"/"validate"/"test").
+    # Code-edit / content-edit verbs. Keep this list conservative to avoid
+    # flagging pure validation tasks ("verify"/"validate"/"test").
+    # Documentation tasks use verbs like "reorganize", "convert", "restructure",
+    # "migrate", "rewrite", and "move" which must be included so doc-update
+    # tasks produce commits rather than being silently classified as analysis-only.
     code_triggers = [
         'replace', 'update', 'modify', 'implement', 'write', 'add ', 'remove ',
-        'create', 'change', 'set ', 'edit ',
+        'create', 'change', 'set ', 'edit ', 'reorganize', 'convert', 'restructure',
+        'migrate', 'rewrite', 'move ', 'rename', 'refactor', 'format', 'reformat',
+        'correct', 'fix ', 'patch', 'delete', 'insert', 'append',
     ]
     return any(t in text for t in code_triggers)
 
@@ -775,7 +865,8 @@ def handle_implementer_worker(task, es_id):
 
         commit_message = result.metadata.get('commit_message') or f"Implement task: {task.get('title', task_id)}"
         commit_sha = ''
-        branch = None
+        # NOTE: do NOT shadow `branch` here — it was set by ensure_task_branch() above.
+        # The previous `branch = None` here was the root cause of all push failures.
         has_changes = False
         agent_completed = result.metadata.get('source') == 'llm_agentic'
 
@@ -800,6 +891,13 @@ def handle_implementer_worker(task, es_id):
                 # Code was written inside the physically isolated worktree natively
                 if branch:
                     commit_sha = auto_commit_and_push(repo_path, branch, commit_message, task_id)
+                    if has_changes and not commit_sha:
+                        # Push failed — surface the error in the agent log so it's visible in the UI
+                        append_agent_note(
+                            es_id,
+                            f"Push to remote failed for branch `{branch}`. "
+                            "Check ADO_TOKEN / GH_TOKEN env vars on the worker and review worker_handlers.log.",
+                        )
 
             # Edge case: branch already had commits from a previous partial run
             if not commit_sha and branch and _branch_has_new_commits(repo_path, branch):
@@ -929,13 +1027,17 @@ def handle_implementer_worker(task, es_id):
 def handle_tester_worker(task, es_id):
     # Gate: refuse to test a task that has no real commit — nothing to validate
     if not task.get('commit_sha'):
+        note = ('Blocked: no commit_sha recorded. The implementer did not push any code changes. '
+                'Check worker_handlers.log for worktree/push errors, then reset this task to **ready**.')
+        append_agent_note(es_id, note)
         update_task_doc(es_id, {
             'status': 'blocked',
             'needs_human': True,
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
-        log(f"tester: task={task.get('id')} has no commit_sha — blocking, implementer must make real changes first")
+        log(f"tester: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
     result = run_tester(task)
@@ -995,13 +1097,17 @@ def handle_tester_worker(task, es_id):
 def handle_reviewer_worker(task, es_id):
     # Gate: don't approve if no real commit was recorded by the implementer
     if not task.get('commit_sha'):
+        note = ('Blocked: no commit_sha recorded. The implementer did not push any code changes. '
+                'Check worker_handlers.log for worktree/push errors, then reset this task to **ready**.')
+        append_agent_note(es_id, note)
         update_task_doc(es_id, {
             'status': 'blocked',
             'needs_human': True,
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
-        log(f"reviewer: task={task.get('id')} has no commit_sha — blocking, implementer must make real changes first")
+        log(f"reviewer: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
     result = run_reviewer(task)

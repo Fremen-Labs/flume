@@ -152,8 +152,137 @@ def load_projects_registry() -> list:
     return out
 
 
-def save_projects_registry(registry):
-    PROJECTS_REGISTRY.write_text(json.dumps({"projects": registry}, indent=2))
+# ---------------------------------------------------------------------------
+# Projects Registry — Elasticsearch-backed (replaces projects.json)
+# ---------------------------------------------------------------------------
+
+PROJECTS_INDEX = "flume-projects"
+
+
+def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
+    """Low-level ES request scoped to the projects index."""
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("ES_API_KEY", "")
+    if api_key:
+        headers["Authorization"] = f"ApiKey {api_key}"
+    data = json.dumps(body).encode() if body is not None else None
+    if data and method == "GET":
+        method = "POST"
+    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
+
+
+def _migrate_legacy_projects_json():
+    """
+    One-time migration: if projects.json exists and has content, write each
+    entry to the ES flume-projects index then rename the file to .migrated
+    so this only runs once.
+    """
+    if not PROJECTS_REGISTRY.exists():
+        return
+    migrated_path = PROJECTS_REGISTRY.with_suffix(".json.migrated")
+    if migrated_path.exists():
+        return  # Already migrated
+    try:
+        raw = json.loads(PROJECTS_REGISTRY.read_text())
+        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            entry = _ensure_gitflow_defaults(entry)
+            # Detect local path vs remote URL and set cloneStatus
+            from utils.git_credentials import detect_repo_type  # noqa
+            repo_url = entry.get("repoUrl", "")
+            repo_type = detect_repo_type(repo_url)
+            if "cloneStatus" not in entry:
+                if repo_type == "local":
+                    local_path = entry.get("path") or repo_url
+                    entry["localPath"] = local_path
+                    entry["cloneStatus"] = "local"
+                else:
+                    # Check if a clone already landed in WORKSPACE_ROOT
+                    import urllib.parse as _up
+                    basename = os.path.basename(_up.urlparse(repo_url).path).replace(".git", "")
+                    candidate = WORKSPACE_ROOT / "repos" / basename
+                    if candidate.exists() and (candidate / ".git").exists():
+                        entry["localPath"] = str(candidate)
+                        entry["cloneStatus"] = "ready"
+                    else:
+                        entry["cloneStatus"] = "pending"
+            entry["repoType"] = repo_type
+            entry.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
+            _es_projects_request(
+                f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
+                entry,
+                method="PUT",
+            )
+        PROJECTS_REGISTRY.rename(migrated_path)
+        logger.info({"event": "projects_migration", "count": len(entries), "status": "success"})
+    except Exception as e:
+        logger.warning({"event": "projects_migration_error", "error": str(e)})
+
+
+def load_projects_registry() -> list:
+    """Return all registered projects from Elasticsearch."""
+    try:
+        res = _es_projects_request(
+            f"/{PROJECTS_INDEX}/_search",
+            {"size": 500, "query": {"match_all": {}}, "sort": [{"created_at": {"order": "asc"}}]},
+        )
+        hits = res.get("hits", {}).get("hits", [])
+        return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
+    except Exception as e:
+        logger.warning({"event": "projects_load_error", "error": str(e)})
+        return []
+
+
+def save_projects_registry(registry: list):
+    """
+    Upsert the full list of projects into ES.
+    Used for legacy callers that rewrite the entire list.
+    """
+    for entry in registry:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _es_projects_request(
+                f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
+                entry,
+                method="PUT",
+            )
+        except Exception as e:
+            logger.warning({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)})
+
+
+def _upsert_project(entry: dict):
+    """Upsert a single project document to ES."""
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _es_projects_request(
+        f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
+        entry,
+        method="PUT",
+    )
+
+
+def _delete_project_from_es(project_id: str):
+    """Delete a project document from ES."""
+    try:
+        _es_projects_request(
+            f"/{PROJECTS_INDEX}/_doc/{project_id}",
+            method="DELETE",
+        )
+    except Exception as e:
+        logger.warning({"event": "projects_delete_error", "id": project_id, "error": str(e)})
 
 
 def es_search(index, body):
@@ -2217,9 +2346,12 @@ async def lifespan(app: FastAPI):
         }))
         raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
+    # Run one-time migration: move projects.json → ES (no-op if already done)
+    _migrate_legacy_projects_json()
+
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
-    
+
     app.state.http_client = httpx.AsyncClient()
     yield
     await app.state.http_client.aclose()
@@ -2557,37 +2689,181 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
         })
         return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
+# ---------------------------------------------------------------------------
+# Project clone helpers
+# ---------------------------------------------------------------------------
+
+def _clone_project_sync(project_id: str, repo_url: str, repo_type: str, project_name: str) -> None:
+    """
+    Clone a remote repository into /workspace/repos/<sanitized_name>.
+    Updates the flume-projects ES document with localPath + cloneStatus.
+    Runs in a background thread (spawned from the FastAPI BackgroundTasks queue).
+    """
+    from utils.git_credentials import embed_credentials, strip_credentials  # noqa
+
+    safe_name = re.sub(r"[^\w\-]", "_", project_name).strip("_") or project_id
+    dest = WORKSPACE_ROOT / "repos" / safe_name
+
+    # Mark cloning in progress
+    _upsert_project({"id": project_id, "cloneStatus": "cloning"})
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # If a previous partial clone exists, remove it
+        if dest.exists() and not (dest / ".git").exists():
+            import shutil
+            shutil.rmtree(dest, ignore_errors=True)
+
+        if dest.exists() and (dest / ".git").exists():
+            logger.info({"event": "clone_already_exists", "project": project_id, "path": str(dest)})
+        else:
+            auth_url = embed_credentials(repo_url, repo_type)
+
+            # Build env for the clone subprocess.
+            # For SSH remotes, use GIT_SSH_COMMAND if already set by container startup
+            # (which writes known_hosts to /tmp/flume_ssh and sets the env var).
+            # If not set (e.g. native/local mode), build it from the host key directly.
+            clone_env = os.environ.copy()
+            if repo_type == "ssh" and not clone_env.get("GIT_SSH_COMMAND"):
+                # Resolve key: prefer /tmp/flume_ssh copies (writable), fall back to /root/.ssh
+                ssh_key = ""
+                for candidate in (
+                    "/tmp/flume_ssh/id_rsa",
+                    "/tmp/flume_ssh/id_ed25519",
+                    os.path.expanduser("~/.ssh/id_rsa"),
+                    os.path.expanduser("~/.ssh/id_ed25519"),
+                ):
+                    if os.path.exists(candidate):
+                        ssh_key = candidate
+                        break
+                known_hosts = (
+                    "/tmp/flume_ssh/known_hosts"
+                    if os.path.exists("/tmp/flume_ssh/known_hosts")
+                    else os.path.expanduser("~/.ssh/known_hosts")
+                )
+                key_part = f"-i {ssh_key} " if ssh_key else ""
+                clone_env["GIT_SSH_COMMAND"] = (
+                    f"ssh {key_part}"
+                    f"-o UserKnownHostsFile={known_hosts} "
+                    "-o StrictHostKeyChecking=accept-new "
+                    "-o BatchMode=yes "
+                    "-o ConnectTimeout=15"
+                )
+
+            result = subprocess.run(
+                ["git", "clone", "--depth=1", auth_url, str(dest)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=clone_env,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "").strip()[:500]
+                clean_err = strip_credentials(err)
+                if repo_type == "ssh" and any(k in clean_err for k in ("Permission denied", "Could not read", "Host key")):
+                    clean_err += (
+                        "\n\nSSH clone failed. Ensure your SSH private key (~/.ssh/id_rsa or "
+                        "~/.ssh/id_ed25519) is present on the host and its public key is registered "
+                        "with your git provider. Override the SSH directory with FLUME_SSH_DIR."
+                    )
+                _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": clean_err})
+                logger.error({"event": "clone_failed", "project": project_id, "error": clean_err})
+                return
+
+        local_path = str(dest)
+        _upsert_project({
+            "id": project_id,
+            "localPath": local_path,
+            "cloneStatus": "ready",
+            "cloneError": None,
+        })
+        logger.info({"event": "clone_success", "project": project_id, "path": local_path})
+
+        # Trigger AST ingest now that we have a real local path
+        # Run synchronously here (already in a background thread)
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            async def _run():
+                async with httpx.AsyncClient() as client:
+                    await _deterministic_ast_ingest(client, local_path, project_id, project_name)
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    except subprocess.TimeoutExpired:
+        _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": "git clone timed out after 120s"})
+        logger.error({"event": "clone_timeout", "project": project_id})
+    except Exception as e:
+        _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": str(e)[:500]})
+        logger.error({"event": "clone_error", "project": project_id, "error": str(e)})
+
+
 @app.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
-    import uuid
+    from utils.git_credentials import detect_repo_type, embed_credentials  # noqa
+
     name = (payload.get("name") or "").strip()
     if not name:
-        return JSONResponse(status_code=400, content={"error": "Project name is absolutely required natively."})
-    
+        return JSONResponse(status_code=400, content={"error": "Project name is required."})
+
     new_id = f"proj-{uuid.uuid4().hex[:8]}"
+    repo_url = (payload.get("repoUrl") or "").strip()
+    repo_type = detect_repo_type(repo_url)
+
     entry = {
         "id": new_id,
         "name": name,
-        "repoUrl": (payload.get("repoUrl") or "").strip(),
+        "repoUrl": repo_url,
+        "repoType": repo_type,
+        "cloneStatus": "local" if repo_type == "local" else "pending",
+        "localPath": repo_url if repo_type == "local" else None,
+        "cloneError": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "gitflow": {"autoPrOnApprove": True, "defaultBranch": None}
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "gitflow": {"autoPrOnApprove": True, "defaultBranch": None},
     }
-    
-    registry = load_projects_registry()
-    registry.append(entry)
-    save_projects_registry(registry)
-    
-    http_client = request.app.state.http_client
-    background_tasks.add_task(_deterministic_ast_ingest, http_client, entry["repoUrl"], new_id, name)
-    
-    return {"success": True, "projectId": new_id, "message": "Project dynamically constructed seamlessly natively."}
+
+    _upsert_project(entry)
+
+    if repo_type == "local":
+        # Local path — verify it exists, then run AST ingest directly
+        local_path = repo_url
+        http_client = request.app.state.http_client
+        background_tasks.add_task(_deterministic_ast_ingest, http_client, local_path, new_id, name)
+    else:
+        # Remote URI — clone asynchronously, AST ingest runs after clone completes
+        background_tasks.add_task(
+            lambda: __import__("threading").Thread(
+                target=_clone_project_sync,
+                args=(new_id, repo_url, repo_type, name),
+                daemon=True,
+            ).start()
+        )
+
+    return {"success": True, "projectId": new_id, "message": "Project registered. Clone initiated in background."}
 
 @app.post("/api/projects/{project_id}/delete")
 def api_delete_project(project_id: str):
-    registry = load_projects_registry()
-    filtered = [p for p in registry if p.get("id") != project_id]
-    save_projects_registry(filtered)
-    return {"success": True, "message": "Project removed natively"}
+    _delete_project_from_es(project_id)
+    return {"success": True, "message": "Project removed"}
+
+
+@app.get("/api/projects/{project_id}/clone-status")
+def api_project_clone_status(project_id: str):
+    """Poll endpoint so the UI can track clone progress."""
+    try:
+        res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{project_id}")
+        src = res.get("_source") or {}
+        return {
+            "cloneStatus": src.get("cloneStatus", "unknown"),
+            "localPath": src.get("localPath"),
+            "cloneError": src.get("cloneError"),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
 
 @app.get("/api/tasks/{task_id}/history")
 def api_task_history(task_id: str):
@@ -2595,7 +2871,55 @@ def api_task_history(task_id: str):
 
 @app.get("/api/tasks/{task_id}/diff")
 def api_task_diff(task_id: str):
-    return {"diff": ""}
+    """
+    Return the git diff for the branch associated with a task.
+    Compares the task branch against origin/<default_branch>.
+    """
+    try:
+        es_id, task = find_task_doc_by_logical_id(task_id)
+        if not task:
+            return {"diff": "", "error": "Task not found"}
+
+        branch = task.get("branch")
+        if not branch:
+            return {"diff": "", "error": "No branch recorded for this task"}
+
+        # Resolve local repo path from the flume-projects index
+        repo_id = task.get("repo")
+        local_path = None
+        if repo_id:
+            try:
+                proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
+                proj = proj_res.get("_source") or {}
+                local_path = proj.get("localPath") or task.get("worktree")
+            except Exception:
+                local_path = task.get("worktree")
+
+        if not local_path or not Path(local_path).exists():
+            return {"diff": "", "error": "Repository not cloned locally yet"}
+
+        # Determine default branch for comparison base
+        try:
+            ref_out = subprocess.run(
+                ["git", "-C", local_path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            base = ref_out.stdout.strip().split("/")[-1] if ref_out.returncode == 0 else "main"
+        except Exception:
+            base = "main"
+
+        diff_out = subprocess.run(
+            ["git", "-C", local_path, "diff", f"origin/{base}...{branch}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        diff_text = diff_out.stdout if diff_out.returncode == 0 else ""
+        # Cap diff size to prevent huge payloads
+        if len(diff_text) > 80_000:
+            diff_text = diff_text[:80_000] + "\n\n... [diff truncated at 80k chars] ..."
+        return {"diff": diff_text, "branch": branch, "base": f"origin/{base}"}
+    except Exception as e:
+        logger.warning({"event": "task_diff_error", "task_id": task_id, "error": str(e)})
+        return {"diff": "", "error": str(e)}
 
 @app.get("/api/tasks/{task_id}/commits")
 def api_task_commits(task_id: str):
@@ -2953,6 +3277,7 @@ def api_workflow_agents_stop():
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
+    from starlette.websockets import WebSocketDisconnect  # noqa
     await websocket.accept()
     active_connections.append(websocket)
     try:
@@ -2964,14 +3289,14 @@ async def websocket_telemetry(websocket: WebSocket):
                     parsed = {"msg": str(parsed)}
             except json.JSONDecodeError:
                 parsed = {"msg": data}
-            
+
             payload = {
                 "id": parsed.get("id", uuid.uuid4().hex),
                 "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
                 "time": parsed.get("time", datetime.now().strftime("%H:%M:%S")),
                 "level": parsed.get("level", "INFO").upper()
             }
-            
+
             for conn in active_connections[:]:
                 try:
                     await conn.send_text(json.dumps({"event": "telemetry", "data": payload}))
@@ -2981,11 +3306,17 @@ async def websocket_telemetry(websocket: WebSocket):
                         active_connections.remove(conn)
                     except ValueError:
                         pass
+    except WebSocketDisconnect:
+        # Normal browser close (tab navigation, page reload, window close).
+        # CloseCode.NO_STATUS_RCVD (1005) is the standard clean-close code — not an error.
+        pass
     except Exception as e:
         logger.error({"event": "websocket_handler_crashed", "client": str(websocket.client), "error": str(e), "traceback": traceback.format_exc()})
     finally:
-        if websocket in active_connections:
+        try:
             active_connections.remove(websocket)
+        except ValueError:
+            pass
 
 
 

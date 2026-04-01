@@ -129,6 +129,10 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cfg.Provider = "ollama"
 				case "4":
 					m.cfg.Provider = "exo"
+				case "5":
+					m.cfg.Provider = "gemini"
+				case "6":
+					m.cfg.Provider = "grok"
 				default:
 					return m, textinput.Blink
 				}
@@ -209,7 +213,7 @@ func (m promptModel) View() string {
 	case StepExoPrompt:
 		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
 	case StepProvider:
-		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
 	case StepModel:
 		return NeonGreen("Enter specific LLM Model constraint (e.g. qwen, llama3.2):\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
 	case StepOllamaScope:
