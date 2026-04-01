@@ -2721,16 +2721,31 @@ def _clone_project_sync(project_id: str, repo_url: str, repo_type: str, project_
             auth_url = embed_credentials(repo_url, repo_type)
 
             # Build env for the clone subprocess.
-            # For SSH remotes, set GIT_SSH_COMMAND to use the host-mounted key
-            # with BatchMode=yes (abort instead of prompting) and accept-new host keys
-            # (ssh-keyscan at container startup populates known_hosts for major providers).
+            # For SSH remotes, use GIT_SSH_COMMAND if already set by container startup
+            # (which writes known_hosts to /tmp/flume_ssh and sets the env var).
+            # If not set (e.g. native/local mode), build it from the host key directly.
             clone_env = os.environ.copy()
-            if repo_type == "ssh":
-                ssh_key = os.path.expanduser("~/.ssh/id_rsa")
-                if not os.path.exists(ssh_key):
-                    ssh_key = os.path.expanduser("~/.ssh/id_ed25519")
+            if repo_type == "ssh" and not clone_env.get("GIT_SSH_COMMAND"):
+                # Resolve key: prefer /tmp/flume_ssh copies (writable), fall back to /root/.ssh
+                ssh_key = ""
+                for candidate in (
+                    "/tmp/flume_ssh/id_rsa",
+                    "/tmp/flume_ssh/id_ed25519",
+                    os.path.expanduser("~/.ssh/id_rsa"),
+                    os.path.expanduser("~/.ssh/id_ed25519"),
+                ):
+                    if os.path.exists(candidate):
+                        ssh_key = candidate
+                        break
+                known_hosts = (
+                    "/tmp/flume_ssh/known_hosts"
+                    if os.path.exists("/tmp/flume_ssh/known_hosts")
+                    else os.path.expanduser("~/.ssh/known_hosts")
+                )
+                key_part = f"-i {ssh_key} " if ssh_key else ""
                 clone_env["GIT_SSH_COMMAND"] = (
-                    f"ssh -i {ssh_key} "
+                    f"ssh {key_part}"
+                    f"-o UserKnownHostsFile={known_hosts} "
                     "-o StrictHostKeyChecking=accept-new "
                     "-o BatchMode=yes "
                     "-o ConnectTimeout=15"

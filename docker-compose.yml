@@ -98,10 +98,17 @@ services:
           mkdir -p /app/src/frontend/dist
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
-        # Ensure SSH host keys are accepted for known git providers (non-interactive clone)
-        mkdir -p /root/.ssh
-        chmod 700 /root/.ssh
-        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org >> /root/.ssh/known_hosts 2>/dev/null || true
+        # Set up a writable SSH workspace. /root/.ssh is mounted :ro from the host
+        # so we cannot chmod it or write known_hosts there. Instead we write
+        # known_hosts to /tmp and export GIT_SSH_COMMAND so all git operations
+        # inside this container use the correct config non-interactively.
+        mkdir -p /tmp/flume_ssh
+        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org \
+          >> /tmp/flume_ssh/known_hosts 2>/dev/null || true
+        export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/tmp/flume_ssh/known_hosts \
+          -o StrictHostKeyChecking=accept-new \
+          -o BatchMode=yes \
+          -o ConnectTimeout=15"
         cd /app
         exec /opt/venv/bin/python src/dashboard/server.py
     healthcheck:
@@ -155,10 +162,17 @@ services:
       - -c
       - |
         set -euo pipefail
-        # Ensure SSH host keys are accepted for known git providers (non-interactive clone/push)
-        mkdir -p /root/.ssh
-        chmod 700 /root/.ssh
-        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org >> /root/.ssh/known_hosts 2>/dev/null || true
+        # Set up a writable SSH workspace. /root/.ssh is mounted :ro from the host
+        # so we cannot chmod it or write known_hosts there. Instead we write
+        # known_hosts to /tmp and export GIT_SSH_COMMAND so all git operations
+        # inside this container use the correct config non-interactively.
+        mkdir -p /tmp/flume_ssh
+        ssh-keyscan -H github.com ssh.dev.azure.com dev.azure.com gitlab.com bitbucket.org \
+          >> /tmp/flume_ssh/known_hosts 2>/dev/null || true
+        export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/tmp/flume_ssh/known_hosts \
+          -o StrictHostKeyChecking=accept-new \
+          -o BatchMode=yes \
+          -o ConnectTimeout=15"
         exec /opt/venv/bin/python src/worker-manager/manager.py
     deploy:
       mode: replicated
