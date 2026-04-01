@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +48,31 @@ var DestroyCmd = &cobra.Command{
 		if err := c.Run(); err != nil {
 			fmt.Println(ui.ErrorRed("Failed to execute docker compose down: " + err.Error()))
 			return
+		}
+
+		fmt.Println(ui.CyberGradient("Pruning native OS-level parallel Git Worktrees and environment locks..."))
+		
+		// 1. Wipe out dynamically generated `.env` topology to avoid conflicts
+		os.Remove(".env")
+		
+		// 2. Erase physical worktree directories
+		os.RemoveAll(".flume/agents")
+		
+		// 3. Purge orphaned git worktree metadata natively
+		pruneCmd := exec.Command("git", "worktree", "prune")
+		pruneCmd.Run()
+		
+		// 4. Force delete residual logical branches map to agents
+		out, err := exec.Command("git", "branch", "--list", "agent-worker-*").Output()
+		if err == nil {
+			branches := strings.Split(string(out), "\n")
+			for _, b := range branches {
+				b = strings.TrimSpace(b)
+				b = strings.TrimPrefix(b, "* ")
+				if b != "" {
+					exec.Command("git", "branch", "-D", b).Run()
+				}
+			}
 		}
 
 		// Wipe LLM Credentials Split-Brain Native Caches
