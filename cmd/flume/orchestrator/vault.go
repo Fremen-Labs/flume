@@ -18,8 +18,8 @@ import (
 
 // VaultKeys represents the data structured natively during initialization securely.
 type VaultKeys struct {
-	UnsealKeysB64 []string `json:"unseal_keys_b64"`
-	RootToken     string   `json:"root_token"`
+	KeysB64   []string `json:"keys_base64"`
+	RootToken string   `json:"root_token"`
 }
 
 // GenerateESAPIKey securely generates a 32-byte hex entropy key.
@@ -97,9 +97,10 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		log.Warn("==================================================================")
 		log.Warn("🔐 OPENBAO NATIVE KMS DEPLOYED SUCCESSFULLY 🔐")
 		log.Warn("Please save these credentials to a secure password manager NOW.")
-		log.Warn("Flume operates strictly in-memory and will NOT save these to disk.")
 		log.Warn(fmt.Sprintf("Root Token : %s", keys.RootToken))
-		log.Warn(fmt.Sprintf("Unseal Key : %s", keys.UnsealKeysB64[0]))
+		if len(keys.KeysB64) > 0 {
+			log.Warn(fmt.Sprintf("Unseal Key : %s", keys.KeysB64[0]))
+		}
 		log.Warn("==================================================================")
 	} else {
 		log.Info("Persistent OpenBao cluster detected.")
@@ -115,11 +116,11 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 	
 	if respHealth.StatusCode == 503 { // Sealed natively
 		log.Warn("Your OpenBao cluster is natively sealed.")
-		if len(keys.UnsealKeysB64) == 0 {
+		if len(keys.KeysB64) == 0 {
 			var inputUnseal string
 			fmt.Print("Please enter your OpenBao Unseal Key: ")
 			fmt.Scanln(&inputUnseal)
-			keys.UnsealKeysB64 = append(keys.UnsealKeysB64, strings.TrimSpace(inputUnseal))
+			keys.KeysB64 = append(keys.KeysB64, strings.TrimSpace(inputUnseal))
 			
 			var inputRoot string
 			fmt.Print("Please enter your OpenBao Root Token: ")
@@ -132,7 +133,7 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		}
 
 		unsealPayload := map[string]interface{}{
-			"key": keys.UnsealKeysB64[0],
+			"key": keys.KeysB64[0],
 		}
 		bodyBytes, _ := json.Marshal(unsealPayload)
 		req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/sys/unseal", vaultURL), bytes.NewReader(bodyBytes))
