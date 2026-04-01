@@ -158,9 +158,31 @@ SECURITY_AUDIT_MAPPING = {
     }
 }
 
+PROJECTS_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "id":           { "type": "keyword" },
+            "name":         { "type": "keyword" },
+            "repoUrl":      { "type": "keyword" },
+            "localPath":    { "type": "keyword" },
+            "cloneStatus": { "type": "keyword" },
+            "cloneError":  { "type": "text" },
+            "repoType":    { "type": "keyword" },
+            "gitflow":     { "type": "object", "enabled": False },
+            "created_at":  { "type": "date" },
+            "updated_at":  { "type": "date" },
+        }
+    }
+}
+
 # Per-index explicit mappings used during initial creation.
 # Only applied when the index does not already exist.
 EXPLICIT_INDEX_MAPPINGS = {
+    "flume-projects":      PROJECTS_MAPPING,
     "agent-task-records": TASK_RECORDS_MAPPING,
     "agent-token-telemetry": TOKEN_TELEMETRY_MAPPING,
     "agent-security-audits": SECURITY_AUDIT_MAPPING,
