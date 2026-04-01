@@ -105,6 +105,24 @@ def _inject_llm_key_from_active_credential(workspace_root: Path) -> None:
         logger.error(f'Agent swarm captured suppressed exception: {e}')
 
 
+def _is_docker_mode() -> bool:
+    """True when running inside a Docker container (not native macOS/Linux dev mode)."""
+    if os.environ.get("FLUME_NATIVE_MODE", "").strip() == "1":
+        return False
+    # Standard container detection heuristics
+    return os.path.isfile("/.dockerenv") or os.path.isfile("/run/.containerenv")
+
+
+def _rewrite_loopback_for_docker(url: str) -> str:
+    """Replace 127.0.0.1/localhost with host.docker.internal inside Docker."""
+    if not url:
+        return url
+    for loopback in ("://127.0.0.1", "://localhost"):
+        if loopback in url:
+            url = url.replace(loopback, "://host.docker.internal")
+    return url
+
+
 def sync_llm_env_from_workspace(workspace_root: Path) -> None:
     """Overlay os.environ with dashboard-equivalent LLM_* from load_effective_pairs."""
     wr = workspace_root.resolve()
@@ -134,6 +152,17 @@ def sync_llm_env_from_workspace(workspace_root: Path) -> None:
                     continue
                 continue
             os.environ[key] = s
+
+        # Docker safety net: rewrite loopback URLs so workers can reach host services
+        if _is_docker_mode():
+            for url_key in ("LLM_BASE_URL", "LOCAL_OLLAMA_BASE_URL"):
+                cur = os.environ.get(url_key, "")
+                if cur:
+                    fixed = _rewrite_loopback_for_docker(cur)
+                    if fixed != cur:
+                        os.environ[url_key] = fixed
+                        logger.info(f"Docker loopback fix: {url_key} {cur} → {fixed}")
+
         _inject_llm_key_from_active_credential(wr)
     except Exception as e:
         logger.error(f"sync_llm_env_from_workspace exception: {e!r}")

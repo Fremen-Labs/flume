@@ -30,6 +30,34 @@ def await_openbao_boot():
 
 def initialize_and_unseal(client, keys_path):
     if not os.path.exists(keys_path):
+        # Check if vault is already initialized (orphaned persistent volume)
+        try:
+            already_init = client.sys.is_initialized()
+        except Exception:
+            already_init = False
+
+        if already_init:
+            log("warn", "OpenBao already initialized but keys.json missing. "
+                "Vault data is orphaned from a previous run. "
+                "Remove the openbao_data volume and restart: "
+                "docker volume rm flume-fix-e2e_openbao_data")
+            # Attempt graceful recovery: try accessing with the dev token
+            dev_token = os.environ.get("OPENBAO_TOKEN", "flume-dev-token")
+            client.token = dev_token
+            try:
+                if client.sys.is_sealed():
+                    log("error", "Vault is sealed and keys are lost. "
+                        "Run: docker volume rm flume-fix-e2e_openbao_data && flume start -p ollama",
+                        component="vault_init")
+                    sys.exit(1)
+                # If unsealed with dev token, proceed
+                log("info", "Vault already initialized and unsealed. Recovering with existing token.")
+                return dev_token
+            except Exception as e:
+                log("error", "Vault recovery failed. Remove openbao_data volume and restart.",
+                    component="vault_init", error_details=str(e))
+                sys.exit(1)
+
         log("info", "First true boot detected: Initializing OpenBao cluster securely.")
         try:
             init_result = client.sys.initialize(secret_shares=1, secret_threshold=1)
@@ -66,6 +94,28 @@ def initialize_and_unseal(client, keys_path):
 
     return root_token
 
+def _resolve_llm_base_url():
+    """Build the canonical LLM_BASE_URL from compose environment.
+
+    Inside Docker, 127.0.0.1 is unreachable on the host.  The compose file
+    already sets LOCAL_OLLAMA_BASE_URL with host.docker.internal; prefer that.
+    Strip /v1 suffix since agent_runner adds the right path per provider.
+    """
+    local_ollama = os.environ.get('LOCAL_OLLAMA_BASE_URL', '').strip()
+    llm_base = os.environ.get('LLM_BASE_URL', '').strip()
+
+    url = local_ollama or llm_base or 'http://host.docker.internal:11434'
+    # Strip /v1 or /api suffix — workers append what they need
+    for suffix in ('/v1', '/api'):
+        if url.endswith(suffix):
+            url = url[:-len(suffix)]
+    # Rewrite loopback to Docker-reachable address
+    for loopback in ('://127.0.0.1', '://localhost'):
+        if loopback in url:
+            url = url.replace(loopback, '://host.docker.internal')
+    return url.rstrip('/')
+
+
 def configure_secrets_engine(client, openai_key):
     try:
         secrets_engines = client.sys.list_mounted_secrets_engines()
@@ -80,16 +130,47 @@ def configure_secrets_engine(client, openai_key):
         
     es_key = secrets.token_hex(32)
     log("info", "Generated Dynamic Elastic Token.")
-    
+
+    # Build full LLM config from compose environment — eliminates .env file dependency
+    llm_provider = os.environ.get('LLM_PROVIDER', 'ollama').strip() or 'ollama'
+    llm_model = os.environ.get('LLM_MODEL', 'llama3.2').strip() or 'llama3.2'
+    llm_base_url = _resolve_llm_base_url()
+    llm_api_key = os.environ.get('LLM_API_KEY', '').strip()
+
+    kv_payload = {
+        'ES_API_KEY': es_key,
+        'OPENAI_API_KEY': openai_key or llm_api_key,
+        'LLM_PROVIDER': llm_provider,
+        'LLM_MODEL': llm_model,
+        'LLM_BASE_URL': llm_base_url,
+        'LLM_API_KEY': llm_api_key,
+    }
+    # Only include non-empty values
+    kv_payload = {k: v for k, v in kv_payload.items() if v}
+
     try:
+        # Merge with existing KV data so Settings/dashboard writes are preserved
+        try:
+            existing = client.secrets.kv.v2.read_secret_version(path='flume/keys')
+            existing_data = existing.get('data', {}).get('data', {})
+            if existing_data:
+                # Existing values win for LLM keys that the user may have configured via Settings
+                for key in ('LLM_PROVIDER', 'LLM_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY'):
+                    if key in existing_data and existing_data[key].strip():
+                        kv_payload[key] = existing_data[key]
+                # Always update ES_API_KEY (it's generated fresh)
+                existing_data.update(kv_payload)
+                kv_payload = existing_data
+        except Exception:
+            pass  # First boot — no existing secret
+
         client.secrets.kv.v2.create_or_update_secret(
             path='flume/keys',
-            secret={
-                'ES_API_KEY': es_key,
-                'OPENAI_API_KEY': openai_key
-            }
+            secret=kv_payload
         )
-        log("info", "Injected Matrix API keys into Vault KV-v2 secret/flume/keys block natively.", component="vault_kv_write", status="success")
+        log("info", "Injected LLM config + API keys into OpenBao KV.",
+            component="vault_kv_write", status="success",
+            keys_written=list(kv_payload.keys()))
     except VaultError as e:
         log("error", "Failed to push keys to Vault", component="vault_kv_write", error_details=str(e))
         sys.exit(1)

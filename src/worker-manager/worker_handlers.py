@@ -669,7 +669,7 @@ def _implementer_max_llm_failures_cap() -> int:
     After this many consecutive failures the task is blocked for human attention.
     Set FLUME_IMPLEMENTER_MAX_LLM_FAILURES=0 to disable (previous behavior).
     """
-    raw = os.environ.get('FLUME_IMPLEMENTER_MAX_LLM_FAILURES', '0').strip()
+    raw = os.environ.get('FLUME_IMPLEMENTER_MAX_LLM_FAILURES', '10').strip()
     try:
         n = int(raw)
     except ValueError:
