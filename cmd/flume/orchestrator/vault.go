@@ -117,15 +117,20 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 	if respHealth.StatusCode == 503 { // Sealed natively
 		log.Warn("Your OpenBao cluster is natively sealed.")
 		if len(keys.KeysB64) == 0 {
-			var inputUnseal string
-			fmt.Print("Please enter your OpenBao Unseal Key: ")
-			fmt.Scanln(&inputUnseal)
-			keys.KeysB64 = append(keys.KeysB64, strings.TrimSpace(inputUnseal))
+			unsealKey := os.Getenv("FLUME_BAO_UNSEAL_KEY")
+			rootToken := os.Getenv("FLUME_BAO_ROOT_TOKEN")
+
+			if unsealKey == "" {
+				fmt.Print("Please enter your OpenBao Unseal Key: ")
+				fmt.Scanln(&unsealKey)
+			}
+			keys.KeysB64 = append(keys.KeysB64, strings.TrimSpace(unsealKey))
 			
-			var inputRoot string
-			fmt.Print("Please enter your OpenBao Root Token: ")
-			fmt.Scanln(&inputRoot)
-			keys.RootToken = strings.TrimSpace(inputRoot)
+			if rootToken == "" {
+				fmt.Print("Please enter your OpenBao Root Token (or press Enter for default dev token): ")
+				fmt.Scanln(&rootToken)
+			}
+			keys.RootToken = strings.TrimSpace(rootToken)
 			
 			if keys.RootToken == "" {
 				keys.RootToken = "flume-dev-token" // Fallback to dev map if they bypassed it initially
