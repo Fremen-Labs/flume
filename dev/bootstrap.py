@@ -144,6 +144,10 @@ def configure_secrets_engine(client, openai_key):
         'LLM_MODEL': llm_model,
         'LLM_BASE_URL': llm_base_url,
         'LLM_API_KEY': llm_api_key,
+        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+        'ADO_ORGANIZATION': os.environ.get('ADO_ORGANIZATION', ''),
+        'ADO_PROJECT': os.environ.get('ADO_PROJECT', ''),
+        'ADO_PERSONAL_ACCESS_TOKEN': os.environ.get('ADO_PERSONAL_ACCESS_TOKEN', ''),
     }
     # Only include non-empty values
     kv_payload = {k: v for k, v in kv_payload.items() if v}
@@ -154,13 +158,13 @@ def configure_secrets_engine(client, openai_key):
             existing = client.secrets.kv.v2.read_secret_version(path='flume/keys')
             existing_data = existing.get('data', {}).get('data', {})
             if existing_data:
-                # Existing values win for LLM keys that the user may have configured via Settings
-                for key in ('LLM_PROVIDER', 'LLM_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY'):
-                    if key in existing_data and existing_data[key].strip():
-                        kv_payload[key] = existing_data[key]
-                # Always update ES_API_KEY (it's generated fresh)
-                existing_data.update(kv_payload)
-                kv_payload = existing_data
+                # Flume Wizard OS Overrides natively win. 
+                # If a value exists in the OS Env (from the CLI start prompt), use it. Else fallback to Vault existing.
+                combined = existing_data.copy()
+                for k, v in kv_payload.items():
+                    if k == 'ES_API_KEY' or os.environ.get(k):
+                        combined[k] = v
+                kv_payload = combined
         except Exception:
             pass  # First boot — no existing secret
 
@@ -168,7 +172,7 @@ def configure_secrets_engine(client, openai_key):
             path='flume/keys',
             secret=kv_payload
         )
-        log("info", "Injected LLM config + API keys into OpenBao KV.",
+        log("info", "Injected Infrastructure Configuration + API keys seamlessly into OpenBao KV.",
             component="vault_kv_write", status="success",
             keys_written=list(kv_payload.keys()))
     except VaultError as e:
@@ -214,23 +218,24 @@ def provision_approle(client):
         secret_id = secret_resp['data']['secret_id']
         
         env_path = "/app/.env"
+        lines = []
         if os.path.exists(env_path):
             with open(env_path, "r") as f:
                 lines = f.readlines()
-            
-            replaced = False
-            with open(env_path, "w") as f:
-                for line in lines:
-                    if line.startswith("BAO_SECRET_ID="):
-                        f.write(f'BAO_SECRET_ID="{secret_id}"\n')
-                        replaced = True
-                    else:
-                        f.write(line)
-                if not replaced:
-                    if lines and not lines[-1].endswith("\n"):
-                        f.write("\n")
+        
+        replaced = False
+        with open(env_path, "w") as f:
+            for line in lines:
+                if line.startswith("BAO_SECRET_ID="):
                     f.write(f'BAO_SECRET_ID="{secret_id}"\n')
-            log("info", "Injected dynamically generated BAO_SECRET_ID into /app/.env")
+                    replaced = True
+                else:
+                    f.write(line)
+            if not replaced:
+                if lines and not lines[-1].endswith("\n"):
+                    f.write("\n")
+                f.write(f'BAO_SECRET_ID="{secret_id}"\n')
+        log("info", "Injected dynamically generated BAO_SECRET_ID into /app/.env dynamically.")
             
         log("info", "Successfully provisioned dynamic AppRole flume-worker.")
     except VaultError as e:

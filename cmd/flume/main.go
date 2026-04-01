@@ -9,7 +9,6 @@ import (
 
 	"github.com/Fremen-Labs/flume/cmd/flume/commands"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +18,6 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	log.SetFormatter(log.JSONFormatter)
 	rootCmd.AddCommand(commands.StartCmd)
 	rootCmd.AddCommand(commands.DestroyCmd)
 	rootCmd.AddCommand(commands.DoctorCmd)
