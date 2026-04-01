@@ -52,7 +52,8 @@ apply_runtime_config(_SRC_ROOT)
 hydrate_secrets_from_openbao()
 
 # Execute Elasticsearch Index Bootstrapping natively now that auth is fully populated
-
+from es_bootstrap import ensure_es_indices
+ensure_es_indices()
 
 from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # noqa: E402
 

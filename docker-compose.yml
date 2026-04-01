@@ -5,6 +5,7 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+        required: false
     command: server
     environment:
       - VAULT_API_ADDR=http://127.0.0.1:8200
@@ -20,26 +21,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  bootstrap:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: flume-bootstrap
-    depends_on:
-      openbao:
-        condition: service_healthy
-    environment:
-      - VAULT_ADDR=http://openbao:8200
-      - UV_PROJECT_ENVIRONMENT=/opt/venv
-    volumes:
-      - .:/app
-      - openbao_data:/vault/file
-    command: ["uv", "run", "python", "/app/dev/bootstrap.py"]
-
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: flume-elasticsearch
+    profiles: ["managed_elastic"]
     environment:
       - discovery.type=single-node
       # DEVELOPMENT ISOLATION TOPOLOGY: Single-node container domains disable xpack.security natively bypassing volatile self-signed certificate overheads natively.
@@ -64,10 +49,9 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+        required: false
       openbao:
         condition: service_healthy
-      bootstrap:
-        condition: service_completed_successfully
       worker:
         condition: service_healthy
     volumes:
@@ -86,7 +70,18 @@ services:
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
       - VAULT_ROLE_ID=flume-client-role
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-token}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN}
+      - FLUME_ADMIN_TOKEN
+      - LLM_PROVIDER
+      - LLM_BASE_URL
+      - LLM_HOST
+      - LLM_API_KEY
+      - LLM_MODEL
+      - FLUME_ES_URL
+      - GITHUB_TOKEN
+      - ADO_ORGANIZATION
+      - ADO_PROJECT
+      - ADO_PERSONAL_ACCESS_TOKEN
     command:
       - /bin/bash
       - -c
@@ -98,7 +93,7 @@ services:
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
         cd /app
-        exec uv run python src/dashboard/server.py
+        exec /opt/venv/bin/python src/dashboard/server.py
     healthcheck:
       test: ["CMD-SHELL", "curl -s http://localhost:8765/api/health || exit 1"]
       interval: 10s
@@ -112,10 +107,9 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+        required: false
       openbao:
         condition: service_healthy
-      bootstrap:
-        condition: service_completed_successfully
     volumes:
       - .:/app
       - ..:/workspace
@@ -130,8 +124,19 @@ services:
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - VAULT_ROLE_ID=flume-client-role
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-token}
-    command: ["uv", "run", "python", "src/worker-manager/manager.py"]
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN}
+      - FLUME_ADMIN_TOKEN
+      - LLM_PROVIDER
+      - LLM_BASE_URL
+      - LLM_HOST
+      - LLM_API_KEY
+      - LLM_MODEL
+      - FLUME_ES_URL
+      - GITHUB_TOKEN
+      - ADO_ORGANIZATION
+      - ADO_PROJECT
+      - ADO_PERSONAL_ACCESS_TOKEN
+    command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated
       replicas: 2

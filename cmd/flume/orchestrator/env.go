@@ -3,8 +3,6 @@ package orchestrator
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/charmbracelet/log"
@@ -19,6 +17,15 @@ type EnvConfig struct {
 	AdminToken         string
 	Model              string
 	IsNative           bool
+
+	ExternalElastic bool
+	ESUrl           string
+
+	RepoType    string // "github" or "ado"
+	GithubToken string
+	ADOOrg      string
+	ADOProject  string
+	ADOToken    string
 }
 
 // GenerateAdminToken creates a 256-bit cryptographically secure token.
@@ -30,7 +37,7 @@ func GenerateAdminToken() (string, error) {
 	return "flume_adm_" + hex.EncodeToString(bytes), nil
 }
 
-// rewriteLoopbackForDocker replaces 127.0.0.1 / localhost with
+// RewriteLoopbackForDockerEnv replaces 127.0.0.1 / localhost with
 // host.docker.internal for Docker container accessibility.
 func RewriteLoopbackForDockerEnv(url string) string {
 	if url == "" {
@@ -41,30 +48,20 @@ func RewriteLoopbackForDockerEnv(url string) string {
 	return url
 }
 
-// GenerateEnv dynamically writes the .env topology consumed by docker-compose.
-func GenerateEnv(config EnvConfig) error {
-	log.Info("Constructing `.env` topology dynamically natively via os/fs...")
+// GenerateEnv dynamically builds the topology map consumed by docker-compose natively in-memory.
+func GenerateEnv(config EnvConfig) []string {
+	log.Debug("Constructing ecosystem telemetry environment purely via memory arrays natively...")
 
-	content := `# ------------------------------------------
-# Flume Docker Orchestrator Topology Grid
-# ------------------------------------------
-DASHBOARD_PORT=8765
-VAULT_TOKEN=flume-dev-token
-OPENBAO_TOKEN=flume-dev-token
+	var env []string
 
-# ------------------------------------------
-# LLM Inference (Ephemeral CLI Overrides)
-# ------------------------------------------
-`
 	if config.AdminToken != "" {
-		content += fmt.Sprintf("FLUME_ADMIN_TOKEN=%s\n", config.AdminToken)
+		env = append(env, "FLUME_ADMIN_TOKEN="+config.AdminToken)
 	}
 
 	if config.Provider != "" {
-		content += fmt.Sprintf("LLM_PROVIDER=%s\n", config.Provider)
+		env = append(env, "LLM_PROVIDER="+config.Provider)
 	}
 
-	// For Docker mode, rewrite loopback URLs to host.docker.internal
 	baseURL := config.BaseURL
 	ollamaURL := config.LocalOllamaBaseURL
 	if !config.IsNative {
@@ -73,27 +70,39 @@ OPENBAO_TOKEN=flume-dev-token
 	}
 
 	if baseURL != "" {
-		content += fmt.Sprintf("LLM_BASE_URL=%s\n", baseURL)
+		env = append(env, "LLM_BASE_URL="+baseURL)
 	}
 	if ollamaURL != "" {
-		content += fmt.Sprintf("LOCAL_OLLAMA_BASE_URL=%s\n", ollamaURL)
+		env = append(env, "LOCAL_OLLAMA_BASE_URL="+ollamaURL)
 	}
 	if config.Host != "" {
-		content += fmt.Sprintf("LLM_HOST=%s\n", config.Host)
+		env = append(env, "LLM_HOST="+config.Host)
 	}
 	if strings.TrimSpace(config.APIKey) != "" {
-		content += fmt.Sprintf("LLM_API_KEY=%s\n", config.APIKey)
+		env = append(env, "LLM_API_KEY="+strings.TrimSpace(config.APIKey))
 	}
 	if config.Model != "" {
-		content += fmt.Sprintf("LLM_MODEL=%s\n", config.Model)
+		env = append(env, "LLM_MODEL="+config.Model)
+	}
+	if config.ExternalElastic && config.ESUrl != "" {
+		env = append(env, "FLUME_ES_URL="+config.ESUrl)
 	}
 
-	err := os.WriteFile(".env", []byte(content), 0644)
-	if err != nil {
-		return fmt.Errorf("failed to explicitly write .env natively: %w", err)
+	if config.RepoType == "github" && config.GithubToken != "" {
+		env = append(env, "GITHUB_TOKEN="+config.GithubToken)
+	} else if config.RepoType == "ado" {
+		if config.ADOOrg != "" {
+			env = append(env, "ADO_ORGANIZATION="+config.ADOOrg)
+		}
+		if config.ADOProject != "" {
+			env = append(env, "ADO_PROJECT="+config.ADOProject)
+		}
+		if config.ADOToken != "" {
+			env = append(env, "ADO_PERSONAL_ACCESS_TOKEN="+config.ADOToken)
+		}
 	}
 
-	log.Info("Successfully serialized `.env` topology into Swarm cache.", "isolation", "Workspace isolation protects UI configurations")
-	return nil
+	log.Info("Successfully compiled telemetry footprint securely in RAM bounds.", "isolation", "Memory-only variables injected into subprocess securely")
+	return env
 }
 

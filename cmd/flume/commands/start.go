@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
@@ -86,22 +84,6 @@ var StartCmd = &cobra.Command{
 			IsNative:           NativeFlag,
 		}
 
-		existingPromptCfg := ui.PromptConfig{
-			Provider: strings.TrimSpace(os.Getenv("LLM_PROVIDER")),
-			APIKey:   strings.TrimSpace(os.Getenv("LLM_API_KEY")),
-			Host:     strings.TrimSpace(os.Getenv("LLM_HOST")),
-		}
-		if existingPromptCfg.Provider == "" && envCfg.LocalOllamaBaseURL != "" {
-			existingPromptCfg.Provider = "ollama"
-		}
-
-		if envCfg.Provider == "" {
-			envCfg.Provider = existingPromptCfg.Provider
-		}
-		if envCfg.APIKey == "" {
-			envCfg.APIKey = existingPromptCfg.APIKey
-		}
-
 		adminToken, tErr := orchestrator.GenerateAdminToken()
 		if tErr != nil {
 			log.Error("Failed to seed explicit cryptographic bounds natively", "error", tErr)
@@ -109,63 +91,57 @@ var StartCmd = &cobra.Command{
 		}
 		envCfg.AdminToken = adminToken
 
-		if orchestrator.CheckExoActive() {
-			log.Info("Exo Mac MLX Inference active globally! Bypassing LLM prompt sequences.")
-		} else if NativeFlag {
-			log.Warn("Exo undetected globally. Native orchestration bypassing structural UI credential traps natively.")
-		} else {
-			if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" {
-				log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
-				return fmt.Errorf("headless tty pseudo-hang prevented")
-			}
+		if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" {
+			log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+			return fmt.Errorf("headless tty pseudo-hang prevented")
+		}
 
-			if existingPromptCfg.Provider != "" {
-				log.Warn("Exo undetected globally. Existing .env LLM configuration detected.")
-				promptCfg, err := ui.RunInteractivePrompt(existingPromptCfg)
-				if err != nil {
-					log.Error("Interactive Wizard aborted.", "error", err)
-					return err
+		if !isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
+			log.Warn("Escalating to User Auth Layer.")
+			promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
+			if err != nil {
+				log.Error("Interactive Wizard aborted.", "error", err)
+				return err
+			}
+			envCfg.Provider = promptCfg.Provider
+			envCfg.APIKey = promptCfg.APIKey
+			envCfg.Model = promptCfg.Model
+			envCfg.ExternalElastic = promptCfg.ExternalElastic
+			envCfg.ESUrl = promptCfg.ElasticURL
+			envCfg.RepoType = promptCfg.RepoType
+			envCfg.GithubToken = promptCfg.GithubToken
+			envCfg.ADOOrg = promptCfg.ADOOrg
+			envCfg.ADOProject = promptCfg.ADOProject
+			envCfg.ADOToken = promptCfg.ADOToken
+
+			if promptCfg.Provider == "ollama" {
+				if promptCfg.Host == "" {
+					promptCfg.Host = "127.0.0.1"
 				}
-				envCfg.Provider = promptCfg.Provider
-				envCfg.APIKey = promptCfg.APIKey
-				if promptCfg.Provider == "ollama" {
-					if promptCfg.Host == "" {
-						promptCfg.Host = "127.0.0.1"
-					}
-					envCfg.Host = promptCfg.Host
-					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
-					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
-					envCfg.APIKey = ""
-				}
-			} else if envCfg.Provider == "" || (envCfg.APIKey == "" && envCfg.Provider != "ollama") {
-				log.Warn("Exo undetected globally. Escalate to User Auth Layer.")
-				promptCfg, err := ui.RunInteractivePrompt()
-				if err != nil {
-					log.Error("Interactive Wizard aborted.", "error", err)
-					return err
-				}
-				envCfg.Provider = promptCfg.Provider
-				envCfg.APIKey = promptCfg.APIKey
-				if promptCfg.Provider == "ollama" {
-					if promptCfg.Host == "" {
-						promptCfg.Host = "127.0.0.1"
-					}
-					envCfg.Host = promptCfg.Host
-					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
-					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
-					envCfg.APIKey = ""
-				}
+				envCfg.Host = promptCfg.Host
+				envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
+				envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
+				envCfg.APIKey = ""
 			}
 		}
 
-		if err := orchestrator.GenerateEnv(envCfg); err != nil {
-			log.Error("Failed to construct ecosystem environment", "error", err)
-			return err
-		}
+		generatedEnv := orchestrator.GenerateEnv(envCfg)
 
 		if NativeFlag {
 			log.Info("Executing Flume High Performance Native Subsystems.")
-			c := exec.Command("docker", "compose", "up", "-d", "--wait", "elasticsearch", "openbao", "bootstrap")
+
+			dockerArgs := []string{"compose"}
+			if !envCfg.ExternalElastic {
+				dockerArgs = append(dockerArgs, "--profile", "managed_elastic")
+			}
+			dockerArgs = append(dockerArgs, "up", "-d", "--wait")
+			if !envCfg.ExternalElastic {
+				dockerArgs = append(dockerArgs, "elasticsearch")
+			}
+			dockerArgs = append(dockerArgs, "openbao")
+
+			c := exec.Command("docker", dockerArgs...)
+			c.Env = append(os.Environ(), generatedEnv...)
 
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
@@ -176,34 +152,22 @@ var StartCmd = &cobra.Command{
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
 				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 				return err
-			} else {
-				log.Info("Waiting exclusively for OpenBao KMS cluster generation locks...")
-				bs := exec.Command("docker", "compose", "wait", "bootstrap")
-				bs.Run()
-				log.Info("Data grid bootstrapped successfully")
 			}
+
+			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			if vErr != nil {
+				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				return vErr
+			}
+			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
 
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
 
-				dashEnv := append(portEnvOverrides, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
-				if envCfg.Provider != "" {
-					dashEnv = append(dashEnv, "LLM_PROVIDER="+envCfg.Provider)
-				}
-				if envCfg.BaseURL != "" {
-					dashEnv = append(dashEnv, "LLM_BASE_URL="+envCfg.BaseURL)
-				}
-				if envCfg.LocalOllamaBaseURL != "" {
-					dashEnv = append(dashEnv, "LOCAL_OLLAMA_BASE_URL="+envCfg.LocalOllamaBaseURL)
-				}
-				if envCfg.Host != "" {
-					dashEnv = append(dashEnv, "LLM_HOST="+envCfg.Host)
-				}
-				if envCfg.APIKey != "" {
-					dashEnv = append(dashEnv, "LLM_API_KEY="+envCfg.APIKey)
-				}
-				dashEnv = append(dashEnv, "FLUME_ADMIN_TOKEN="+envCfg.AdminToken)
+				dashEnv := append(os.Environ(), portEnvOverrides...)
+				dashEnv = append(dashEnv, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
+				dashEnv = append(dashEnv, generatedEnv...)
 				dash.Env = dashEnv
 
 				dash.Stdout = os.Stdout
@@ -233,27 +197,21 @@ var StartCmd = &cobra.Command{
 			wg.Wait()
 		} else {
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
-			// Docker containers need host.docker.internal, not 127.0.0.1/localhost
-			dockerBaseURL := orchestrator.RewriteLoopbackForDockerEnv(envCfg.BaseURL)
-			dockerOllamaURL := orchestrator.RewriteLoopbackForDockerEnv(envCfg.LocalOllamaBaseURL)
-			dockerEnv := append([]string{}, portEnvOverrides...)
-			if envCfg.Provider != "" {
-				dockerEnv = append(dockerEnv, "LLM_PROVIDER="+envCfg.Provider)
+
+			dockerArgs := []string{"compose"}
+			if !envCfg.ExternalElastic {
+				dockerArgs = append(dockerArgs, "--profile", "managed_elastic")
 			}
-			if dockerBaseURL != "" {
-				dockerEnv = append(dockerEnv, "LLM_BASE_URL="+dockerBaseURL)
+			dockerArgs = append(dockerArgs, "up", "-d", "--build", "--wait")
+			if !envCfg.ExternalElastic {
+				dockerArgs = append(dockerArgs, "elasticsearch")
 			}
-			if dockerOllamaURL != "" {
-				dockerEnv = append(dockerEnv, "LOCAL_OLLAMA_BASE_URL="+dockerOllamaURL)
-			}
-			if envCfg.Host != "" {
-				dockerEnv = append(dockerEnv, "LLM_HOST="+envCfg.Host)
-			}
-			if envCfg.APIKey != "" {
-				dockerEnv = append(dockerEnv, "LLM_API_KEY="+envCfg.APIKey)
-			}
-			c := exec.Command("docker", "compose", "up", "-d", "--build", "--wait")
-			c.Env = dockerEnv
+			dockerArgs = append(dockerArgs, "openbao")
+
+			c := exec.Command("docker", dockerArgs...)
+			fullEnv := append(os.Environ(), portEnvOverrides...)
+			fullEnv = append(fullEnv, generatedEnv...)
+			c.Env = fullEnv
 
 			var outBuf, errBuf bytes.Buffer
 			c.Stdout = io.MultiWriter(os.Stdout, &outBuf)
@@ -262,7 +220,29 @@ var StartCmd = &cobra.Command{
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
-				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				return err
+			}
+
+			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			if vErr != nil {
+				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				return vErr
+			}
+			fullEnv = append(fullEnv, "BAO_SECRET_ID="+secID)
+
+			swArgs := []string{"compose"}
+			if !envCfg.ExternalElastic {
+				swArgs = append(swArgs, "--profile", "managed_elastic")
+			}
+			swArgs = append(swArgs, "up", "-d", "--build", "--wait", "dashboard", "worker")
+
+			swC := exec.Command("docker", swArgs...)
+			swC.Env = fullEnv
+			swC.Stdout = os.Stdout
+			swC.Stderr = os.Stderr
+			if err := swC.Run(); err != nil {
+				log.Error("Container topology boot failed", "error", err)
 				return err
 			}
 			log.Info("Container Swarm bootstrapped successfully in detached mode.")
@@ -272,78 +252,7 @@ var StartCmd = &cobra.Command{
 			return err
 		}
 
-		if eco.HasElastro {
-			log.Info("Synchronizing Local AST Mapping for RAG Agents natively...")
 
-			type ASTConfig struct {
-				DashboardAPIURL string
-				RetriesLimit    int
-				InitialBackoff  int
-			}
-
-			cfg := ASTConfig{
-				DashboardAPIURL: os.Getenv("FLUME_DASHBOARD_API_URL"),
-				RetriesLimit:    5,
-				InitialBackoff:  500,
-			}
-			if cfg.DashboardAPIURL == "" {
-				cfg.DashboardAPIURL = fmt.Sprintf("http://localhost:%s", dashboardPort)
-			}
-			if r, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_RETRIES")); err == nil && r > 0 {
-				cfg.RetriesLimit = r
-			}
-			if b, err := strconv.Atoi(os.Getenv("FLUME_AST_SYNC_INITIAL_BACKOFF_MS")); err == nil && b > 0 {
-				cfg.InitialBackoff = b
-			}
-
-			endpoint := fmt.Sprintf("%s/api/system/sync-ast", cfg.DashboardAPIURL)
-
-			var res *http.Response
-			var reqErr error
-
-			astSyncClient := &http.Client{
-				Timeout: 15 * time.Second,
-			}
-
-			backoff := time.Duration(cfg.InitialBackoff) * time.Millisecond
-			for retries := 1; retries <= cfg.RetriesLimit; retries++ {
-				req, err := http.NewRequestWithContext(cmd.Context(), "POST", endpoint, nil)
-				if err != nil {
-					return fmt.Errorf("failed to explicitly construct AST mapped REST request natively: %w", err)
-				}
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("X-Flume-System-Token", envCfg.AdminToken)
-
-				res, reqErr = astSyncClient.Do(req)
-				if reqErr == nil && res.StatusCode == 200 {
-					defer res.Body.Close()
-					break
-				}
-
-				if res != nil {
-					res.Body.Close()
-				}
-				if retries < cfg.RetriesLimit {
-					log.Warn("AST synchronization handshake failed, retrying...",
-						"attempt", fmt.Sprintf("%d/%d", retries, cfg.RetriesLimit),
-						"retry_in", backoff.String(),
-					)
-					time.Sleep(backoff)
-					backoff *= 2
-				}
-			}
-
-			if reqErr != nil || (res != nil && res.StatusCode != 200) {
-				statusCode := 0
-				if res != nil {
-					statusCode = res.StatusCode
-				}
-				log.Error("Failed to synchronize AST with the Flume dashboard", "error", reqErr, "http_status", statusCode)
-				return fmt.Errorf("could not connect to the Flume dashboard to sync AST after 5 attempts. Please check the dashboard container logs for errors")
-			}
-
-			log.Info("Local AST Mapping Synchronized via Elastro Graph RAG Remote Decoupling.")
-		}
 
 		return nil
 	},
