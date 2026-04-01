@@ -140,7 +140,7 @@ var StartCmd = &cobra.Command{
 			if !envCfg.ExternalElastic {
 				dockerArgs = append(dockerArgs, "elasticsearch")
 			}
-			dockerArgs = append(dockerArgs, "openbao", "bootstrap")
+			dockerArgs = append(dockerArgs, "openbao")
 
 			c := exec.Command("docker", dockerArgs...)
 			c.Env = append(os.Environ(), generatedEnv...)
@@ -154,12 +154,14 @@ var StartCmd = &cobra.Command{
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
 				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
 				return err
-			} else {
-				log.Info("Waiting exclusively for OpenBao KMS cluster generation locks...")
-				bs := exec.Command("docker", "compose", "wait", "bootstrap")
-				bs.Run()
-				log.Info("Data grid bootstrapped successfully")
 			}
+
+			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			if vErr != nil {
+				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				return vErr
+			}
+			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
 
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
@@ -203,6 +205,10 @@ var StartCmd = &cobra.Command{
 				dockerArgs = append(dockerArgs, "--profile", "managed_elastic")
 			}
 			dockerArgs = append(dockerArgs, "up", "-d", "--build", "--wait")
+			if !envCfg.ExternalElastic {
+				dockerArgs = append(dockerArgs, "elasticsearch")
+			}
+			dockerArgs = append(dockerArgs, "openbao")
 
 			c := exec.Command("docker", dockerArgs...)
 			fullEnv := append(os.Environ(), portEnvOverrides...)
@@ -216,7 +222,29 @@ var StartCmd = &cobra.Command{
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
-				log.Error("Container topology boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				return err
+			}
+
+			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			if vErr != nil {
+				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				return vErr
+			}
+			fullEnv = append(fullEnv, "BAO_SECRET_ID="+secID)
+
+			swArgs := []string{"compose"}
+			if !envCfg.ExternalElastic {
+				swArgs = append(swArgs, "--profile", "managed_elastic")
+			}
+			swArgs = append(swArgs, "up", "-d", "--build", "--wait", "dashboard", "worker")
+
+			swC := exec.Command("docker", swArgs...)
+			swC.Env = fullEnv
+			swC.Stdout = os.Stdout
+			swC.Stderr = os.Stderr
+			if err := swC.Run(); err != nil {
+				log.Error("Container topology boot failed", "error", err)
 				return err
 			}
 			log.Info("Container Swarm bootstrapped successfully in detached mode.")

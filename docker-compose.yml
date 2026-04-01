@@ -21,34 +21,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  bootstrap:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: flume-bootstrap
-    depends_on:
-      openbao:
-        condition: service_healthy
-    environment:
-      - VAULT_ADDR=http://openbao:8200
-      - UV_PROJECT_ENVIRONMENT=/opt/venv
-      - FLUME_ADMIN_TOKEN
-      - LLM_PROVIDER
-      - LLM_BASE_URL
-      - LLM_HOST
-      - LLM_API_KEY
-      - LLM_MODEL
-      - FLUME_ES_URL
-      - GITHUB_TOKEN
-      - ADO_ORGANIZATION
-      - ADO_PROJECT
-      - ADO_PERSONAL_ACCESS_TOKEN
-    volumes:
-      - .:/app
-      - openbao_data:/vault/file
-    command: ["uv", "run", "python", "/app/dev/bootstrap.py"]
-
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: flume-elasticsearch
@@ -80,8 +52,6 @@ services:
         required: false
       openbao:
         condition: service_healthy
-      bootstrap:
-        condition: service_completed_successfully
       worker:
         condition: service_healthy
     volumes:
@@ -140,8 +110,6 @@ services:
         required: false
       openbao:
         condition: service_healthy
-      bootstrap:
-        condition: service_completed_successfully
     volumes:
       - .:/app
       - ..:/workspace
