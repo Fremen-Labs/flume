@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -104,7 +105,28 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		log.Warn("==================================================================")
 	} else {
 		log.Info("Persistent OpenBao cluster detected.")
-		// We expect the user to provide keys dynamically
+		// Vault is already initialized. If it is also already unsealed we need
+		// to mint a fresh root token via the generate-root workflow, because
+		// we have no persisted token from a previous run (orphaned volume).
+		// We check health first: 200 = unsealed, 503 = sealed.
+		healthResp, hErr := client.Get(fmt.Sprintf("%s/v1/sys/health", vaultURL))
+		if hErr != nil {
+			log.Warn("Vault health check failed during orphan recovery check — cannot determine sealed state", "error", hErr)
+		} else {
+			healthResp.Body.Close()
+			if healthResp.StatusCode == 200 {
+				// Already unsealed — generate a fresh root token.
+				log.Warn("Orphaned Vault detected (unsealed, no root token). Recovering via generate-root workflow.")
+				recoveredToken, rErr := GenerateRootToken(vaultURL)
+				if rErr != nil {
+					log.Error("generate-root recovery failed. Run: flume destroy --purge && flume start", "error", rErr)
+					return "", fmt.Errorf("vault root-token recovery failed: %w", rErr)
+				}
+				keys.RootToken = recoveredToken
+				log.Info("Successfully recovered root token via generate-root workflow.")
+				return keys.RootToken, nil
+			}
+		}
 	}
 
 	// Determine sealed state natively
@@ -178,6 +200,89 @@ func doVaultRequest(method, url, token string, body interface{}) (*http.Response
 	}
 	return client.Do(req)
 }
+
+// GenerateRootToken mints a fresh root token via the Vault sys/generate-root workflow.
+// Required when the Vault is already initialized + unsealed but the original root_token
+// is lost (orphaned persistent volume scenario). Uses a one-time OTP pad for encoding.
+func GenerateRootToken(vaultURL string) (string, error) {
+	// Generate a 16-byte OTP and base64-encode it for the Vault API.
+	otpRaw := make([]byte, 16)
+	if _, err := rand.Read(otpRaw); err != nil {
+		return "", fmt.Errorf("failed to generate OTP for root token: %w", err)
+	}
+	otpB64 := base64.StdEncoding.EncodeToString(otpRaw)
+
+	// Step 1 — start the generate-root attempt
+	startResp, err := doVaultRequest("PUT", fmt.Sprintf("%s/v1/sys/generate-root/attempt", vaultURL), "",
+		map[string]interface{}{"otp": otpB64})
+	if err != nil {
+		return "", fmt.Errorf("generate-root/attempt request failed: %w", err)
+	}
+	defer startResp.Body.Close()
+	if startResp.StatusCode != 200 && startResp.StatusCode != 204 {
+		body, readErr := io.ReadAll(startResp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("generate-root/attempt failed (%d); could not read response body: %w", startResp.StatusCode, readErr)
+		}
+		return "", fmt.Errorf("generate-root/attempt failed (%d): %s", startResp.StatusCode, string(body))
+	}
+	var attemptData struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.NewDecoder(startResp.Body).Decode(&attemptData); err != nil {
+		return "", fmt.Errorf("failed to decode generate-root attempt response: %w", err)
+	}
+
+	// Step 2 — provide the unseal key (empty = already unsealed, 1-of-1 share)
+	updateResp, err := doVaultRequest("PUT", fmt.Sprintf("%s/v1/sys/generate-root/update", vaultURL), "",
+		map[string]interface{}{"key": "", "nonce": attemptData.Nonce})
+	if err != nil {
+		return "", fmt.Errorf("generate-root/update request failed: %w", err)
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode != 200 && updateResp.StatusCode != 204 {
+		body, readErr := io.ReadAll(updateResp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("generate-root/update failed (%d); could not read response body: %w", updateResp.StatusCode, readErr)
+		}
+		return "", fmt.Errorf("generate-root/update failed (%d): %s", updateResp.StatusCode, string(body))
+	}
+	var resultData struct {
+		Complete         bool   `json:"complete"`
+		EncodedRootToken string `json:"encoded_root_token"`
+	}
+	if err := json.NewDecoder(updateResp.Body).Decode(&resultData); err != nil {
+		return "", fmt.Errorf("failed to decode generate-root result: %w", err)
+	}
+	if !resultData.Complete {
+		return "", fmt.Errorf("generate-root did not complete — vault may require more unseal key shares")
+	}
+
+	// Step 3 — XOR-decode: token_bytes = base64.StdEncoding.DecodeString(encoded) XOR otp_raw
+	decodedToken, err := base64.StdEncoding.DecodeString(resultData.EncodedRootToken)
+	if err != nil {
+		// Vault sometimes returns unpadded base64; try RawStdEncoding as a fallback.
+		decodedToken, err = base64.RawStdEncoding.DecodeString(resultData.EncodedRootToken)
+		if err != nil {
+			return "", fmt.Errorf("failed to base64-decode root token: %w", err)
+		}
+	}
+	tokenBytes := make([]byte, len(decodedToken))
+	for i := range tokenBytes {
+		if i < len(otpRaw) {
+			tokenBytes[i] = decodedToken[i] ^ otpRaw[i%len(otpRaw)]
+		} else {
+			tokenBytes[i] = decodedToken[i]
+		}
+	}
+	// Root token is a UTF-8 string; trim null bytes.
+	rootToken := strings.TrimRight(string(tokenBytes), "\x00")
+	if rootToken == "" {
+		return "", fmt.Errorf("generate-root produced empty token — check vault logs")
+	}
+	return rootToken, nil
+}
+
 
 // ConfigureSecretsEngine structures the KeyVault KV topology dynamically natively.
 func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error {
