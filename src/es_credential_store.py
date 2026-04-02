@@ -89,12 +89,18 @@ def _es_headers() -> dict[str, str]:
 
 
 def _request(method: str, path: str, body: Any = None, timeout: int = 5) -> dict[str, Any] | None:
+    """Execute an ES request and return the parsed JSON body.
+
+    HEAD requests are not supported here — use _index_exists() instead.
+    Returns None on 404 or any transport/parse error.
+    """
     url = f"{_es_url()}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=_es_headers(), method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+            raw = r.read()
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
@@ -105,17 +111,42 @@ def _request(method: str, path: str, body: Any = None, timeout: int = 5) -> dict
         return None
 
 
+def _index_exists(index: str, timeout: int = 5) -> bool:
+    """Check whether an ES index exists using a HEAD request.
+
+    HEAD responses have an empty body; we only inspect the HTTP status code.
+    Returns True if 200, False if 404, and False on any other error.
+    """
+    url = f"{_es_url()}/{index}"
+    req = urllib.request.Request(url, headers=_es_headers(), method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        logger.warning(f"ES HEAD /{index} → HTTP {e.code}: {e.read().decode(errors='replace')[:200]}")
+        return False
+    except Exception as exc:
+        logger.warning(f"ES HEAD /{index} error: {exc}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Index bootstrap (idempotent — called from ensure_es_indices)
 # ---------------------------------------------------------------------------
 
 def ensure_credential_indices() -> None:
-    """Create the three credential metadata indices if they don't exist."""
+    """Create the three credential metadata indices if they don't already exist.
+
+    es_bootstrap.py also registers these indices in REQUIRED_INDICES, so they
+    may already exist before this function runs. The _index_exists() HEAD check
+    avoids the spurious 400 resource_already_exists_exception warnings.
+    """
     for index, mapping in _INDEX_MAPPINGS.items():
-        # HEAD check
-        check = _request("HEAD", f"/{index}")
-        if check is not None:
-            continue  # already exists
+        if _index_exists(index):
+            logger.debug(f"ES credential index already exists, skipping: {index}")
+            continue
         result = _request("PUT", f"/{index}", mapping)
         if result is not None:
             logger.info(f"Created ES credential index: {index}")
