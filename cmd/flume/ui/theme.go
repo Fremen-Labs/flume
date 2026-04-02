@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
 	// Neon 90s Matrix Colors
@@ -62,4 +66,66 @@ func WarningGold(str string) string {
 
 func ErrorRed(str string) string {
 	return styleError.Render("✖ " + str)
+}
+
+// StatusBadge returns a lipgloss-coloured badge for a task/worker/infra status string.
+func StatusBadge(status string) string {
+	s := strings.ToLower(status)
+	switch {
+	case s == "active" || s == "running" || s == "healthy" || s == "in_progress":
+		return lipgloss.NewStyle().Foreground(colorNeonGreen).Bold(true).Render("● " + status)
+	case s == "done" || s == "complete" || s == "merged":
+		return lipgloss.NewStyle().Foreground(colorSciFiBlue).Bold(true).Render("✔ " + status)
+	case s == "blocked" || s == "error" || s == "failed":
+		return lipgloss.NewStyle().Foreground(colorTerminalRed).Bold(true).Render("✖ " + status)
+	case s == "planned" || s == "ready":
+		return lipgloss.NewStyle().Foreground(colorHackerGold).Bold(true).Render("◆ " + status)
+	default:
+		return lipgloss.NewStyle().Foreground(colorGhostWhite).Render("· " + status)
+	}
+}
+
+// RenderTable renders a header row + data rows as a padded plain-text table.
+func RenderTable(headers []string, rows [][]string) string {
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for i := range headers {
+			if i < len(row) && len(row[i]) > widths[i] {
+				widths[i] = len(row[i])
+			}
+		}
+	}
+
+	headerStyle := lipgloss.NewStyle().Foreground(colorHackerGold).Bold(true)
+	cellStyle := lipgloss.NewStyle().Foreground(colorGhostWhite)
+	sepStyle := lipgloss.NewStyle().Foreground(colorCyberPurple)
+
+	var sb strings.Builder
+	sep := "  "
+	for _, w := range widths {
+		sep += strings.Repeat("─", w+2) + "┬"
+	}
+	sep = strings.TrimRight(sep, "┬")
+	sb.WriteString(sepStyle.Render(sep) + "\n")
+	sb.WriteString("  ")
+	for i, h := range headers {
+		sb.WriteString(headerStyle.Width(widths[i] + 2).Render(h))
+	}
+	sb.WriteString("\n" + sepStyle.Render(sep) + "\n")
+	for _, row := range rows {
+		sb.WriteString("  ")
+		for i := range headers {
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			sb.WriteString(cellStyle.Width(widths[i] + 2).Render(cell))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(sepStyle.Render(sep) + "\n")
+	return sb.String()
 }
