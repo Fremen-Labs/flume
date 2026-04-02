@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -109,7 +110,9 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		// we have no persisted token from a previous run (orphaned volume).
 		// We check health first: 200 = unsealed, 503 = sealed.
 		healthResp, hErr := client.Get(fmt.Sprintf("%s/v1/sys/health", vaultURL))
-		if hErr == nil {
+		if hErr != nil {
+			log.Warn("Vault health check failed during orphan recovery check — cannot determine sealed state", "error", hErr)
+		} else {
 			healthResp.Body.Close()
 			if healthResp.StatusCode == 200 {
 				// Already unsealed — generate a fresh root token.
@@ -207,48 +210,20 @@ func GenerateRootToken(vaultURL string) (string, error) {
 	if _, err := rand.Read(otpRaw); err != nil {
 		return "", fmt.Errorf("failed to generate OTP for root token: %w", err)
 	}
-	otpB64 := make([]byte, (len(otpRaw)*4+2)/3) // standard base64 length
-	importedB64 := func(src []byte) string {
-		// use encoding/base64 standard encoding
-		buf := make([]byte, (len(src)+2)/3*4)
-		n := 0
-		const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-		for i := 0; i < len(src); i += 3 {
-			var b0, b1, b2 byte
-			b0 = src[i]
-			if i+1 < len(src) {
-				b1 = src[i+1]
-			}
-			if i+2 < len(src) {
-				b2 = src[i+2]
-			}
-			buf[n] = enc[b0>>2]
-			buf[n+1] = enc[(b0&0x3)<<4|b1>>4]
-			if i+1 < len(src) {
-				buf[n+2] = enc[(b1&0xf)<<2|b2>>6]
-			} else {
-				buf[n+2] = '='
-			}
-			if i+2 < len(src) {
-				buf[n+3] = enc[b2&0x3f]
-			} else {
-				buf[n+3] = '='
-			}
-			n += 4
-		}
-		return string(buf)
-	}(otpRaw)
-	_ = otpB64
+	otpB64 := base64.StdEncoding.EncodeToString(otpRaw)
 
 	// Step 1 — start the generate-root attempt
 	startResp, err := doVaultRequest("PUT", fmt.Sprintf("%s/v1/sys/generate-root/attempt", vaultURL), "",
-		map[string]interface{}{"otp": importedB64})
+		map[string]interface{}{"otp": otpB64})
 	if err != nil {
 		return "", fmt.Errorf("generate-root/attempt request failed: %w", err)
 	}
 	defer startResp.Body.Close()
 	if startResp.StatusCode != 200 && startResp.StatusCode != 204 {
-		body, _ := io.ReadAll(startResp.Body)
+		body, readErr := io.ReadAll(startResp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("generate-root/attempt failed (%d); could not read response body: %w", startResp.StatusCode, readErr)
+		}
 		return "", fmt.Errorf("generate-root/attempt failed (%d): %s", startResp.StatusCode, string(body))
 	}
 	var attemptData struct {
@@ -266,12 +241,15 @@ func GenerateRootToken(vaultURL string) (string, error) {
 	}
 	defer updateResp.Body.Close()
 	if updateResp.StatusCode != 200 && updateResp.StatusCode != 204 {
-		body, _ := io.ReadAll(updateResp.Body)
+		body, readErr := io.ReadAll(updateResp.Body)
+		if readErr != nil {
+			return "", fmt.Errorf("generate-root/update failed (%d); could not read response body: %w", updateResp.StatusCode, readErr)
+		}
 		return "", fmt.Errorf("generate-root/update failed (%d): %s", updateResp.StatusCode, string(body))
 	}
 	var resultData struct {
-		Complete          bool   `json:"complete"`
-		EncodedRootToken  string `json:"encoded_root_token"`
+		Complete         bool   `json:"complete"`
+		EncodedRootToken string `json:"encoded_root_token"`
 	}
 	if err := json.NewDecoder(updateResp.Body).Decode(&resultData); err != nil {
 		return "", fmt.Errorf("failed to decode generate-root result: %w", err)
@@ -280,66 +258,29 @@ func GenerateRootToken(vaultURL string) (string, error) {
 		return "", fmt.Errorf("generate-root did not complete — vault may require more unseal key shares")
 	}
 
-	// Step 3 — XOR-decode: token_bytes = b64decode(encoded) XOR otp_raw
-	tokenBytes := make([]byte, len(otpRaw))
-	// Vault returns standard base64; decode encoded_root_token
-	encoded := resultData.EncodedRootToken
-	// pad to a multiple of 4
-	for len(encoded)%4 != 0 {
-		encoded += "="
-	}
-	decodedToken, err := decodeBase64(encoded)
+	// Step 3 — XOR-decode: token_bytes = base64.StdEncoding.DecodeString(encoded) XOR otp_raw
+	decodedToken, err := base64.StdEncoding.DecodeString(resultData.EncodedRootToken)
 	if err != nil {
-		return "", fmt.Errorf("failed to base64-decode root token: %w", err)
-	}
-	for i := range tokenBytes {
-		if i < len(decodedToken) && i < len(otpRaw) {
-			tokenBytes[i] = decodedToken[i] ^ otpRaw[i]
+		// Vault sometimes returns unpadded base64; try RawStdEncoding as a fallback.
+		decodedToken, err = base64.RawStdEncoding.DecodeString(resultData.EncodedRootToken)
+		if err != nil {
+			return "", fmt.Errorf("failed to base64-decode root token: %w", err)
 		}
 	}
-	// Root token is a UTF-8 string; trim nulls
+	tokenBytes := make([]byte, len(decodedToken))
+	for i := range tokenBytes {
+		if i < len(otpRaw) {
+			tokenBytes[i] = decodedToken[i] ^ otpRaw[i%len(otpRaw)]
+		} else {
+			tokenBytes[i] = decodedToken[i]
+		}
+	}
+	// Root token is a UTF-8 string; trim null bytes.
 	rootToken := strings.TrimRight(string(tokenBytes), "\x00")
 	if rootToken == "" {
 		return "", fmt.Errorf("generate-root produced empty token — check vault logs")
 	}
 	return rootToken, nil
-}
-
-// decodeBase64 decodes a standard-padded base64 string to bytes (stdlib-only, no new imports).
-func decodeBase64(s string) ([]byte, error) {
-	// We use encoding/base64 which is already available via the standard library.
-	// This wrapper avoids adding an explicit import block change by calling through fmt.
-	import64 := func(src string) ([]byte, error) {
-		const dec = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-		var out []byte
-		for i := 0; i < len(src); i += 4 {
-			if i+3 >= len(src) {
-				break
-			}
-			b := make([]byte, 4)
-			for j := 0; j < 4; j++ {
-				c := src[i+j]
-				if c == '=' {
-					b[j] = 0
-				} else {
-					idx := strings.IndexByte(dec, c)
-					if idx < 0 {
-						return nil, fmt.Errorf("invalid base64 char: %c", c)
-					}
-					b[j] = byte(idx)
-				}
-			}
-			out = append(out, b[0]<<2|b[1]>>4)
-			if src[i+2] != '=' {
-				out = append(out, b[1]<<4|b[2]>>2)
-			}
-			if src[i+3] != '=' {
-				out = append(out, b[2]<<6|b[3])
-			}
-		}
-		return out, nil
-	}
-	return import64(s)
 }
 
 
