@@ -128,6 +128,10 @@ func listProjects() error {
 }
 
 func showProject(projectID string) error {
+	// Validate before embedding in any API path — blocks path traversal.
+	if err := validateProjectID(projectID); err != nil {
+		return err
+	}
 	client := ui.NewFlumeClient()
 	state, err := client.Get("/api/system-state")
 	if err != nil {
@@ -167,13 +171,22 @@ func showProject(projectID string) error {
 	}
 
 	fmt.Println(ui.NeonGreen(fmt.Sprintf("  PROJECT: %s  ", sanitizeForTerminal(projectID))))
-	fields := []struct{ k, l string }{
-		{"name", "Name"}, {"repo_url", "Repo URL"}, {"default_branch", "Branch"},
-		{"created_at", "Created"}, {"updated_at", "Updated"},
+	// Each entry lists the snake_case key first (standard API), then the
+	// explicit camelCase alias. strings.ReplaceAll is intentionally avoided
+	// because it produces incorrect results (e.g. repo_url → repourl, not repoUrl).
+	fields := []struct {
+		label string
+		keys  []string
+	}{
+		{"Name", []string{"name"}},
+		{"Repo URL", []string{"repo_url", "repoUrl"}},
+		{"Branch", []string{"default_branch", "defaultBranch", "branch"}},
+		{"Created", []string{"created_at", "createdAt"}},
+		{"Updated", []string{"updated_at", "updatedAt"}},
 	}
 	for _, f := range fields {
-		if v := stringValFromKeys(project, "", f.k, strings.ReplaceAll(f.k, "_", "")); v != "" {
-			fmt.Printf("  %-16s: %s\n", f.l, sanitizeForTerminal(v))
+		if v := stringValFromKeys(project, "", f.keys...); v != "" {
+			fmt.Printf("  %-16s: %s\n", f.label, sanitizeForTerminal(v))
 		}
 	}
 
@@ -189,6 +202,9 @@ func showProject(projectID string) error {
 }
 
 func showProjectStatus(projectID string) error {
+	if err := validateProjectID(projectID); err != nil {
+		return err
+	}
 	client := ui.NewFlumeClient()
 	apiPath, err := safeAPIPath("/api/projects", projectID, "clone-status")
 	if err != nil {
@@ -214,6 +230,9 @@ func showProjectStatus(projectID string) error {
 }
 
 func showProjectBranches(projectID string) error {
+	if err := validateProjectID(projectID); err != nil {
+		return err
+	}
 	client := ui.NewFlumeClient()
 	apiPath, err := safeAPIPath("/api/repos", projectID, "branches")
 	if err != nil {
@@ -256,6 +275,10 @@ func showProjectBranches(projectID string) error {
 }
 
 func deleteProject(projectID string) error {
+	// Validate before displaying or embedding in API path.
+	if err := validateProjectID(projectID); err != nil {
+		return err
+	}
 	fmt.Println()
 	fmt.Println(ui.ErrorRed(fmt.Sprintf(
 		"⚠  This will permanently delete project '%s' and all associated data.",

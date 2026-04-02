@@ -1,8 +1,32 @@
 package commands
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 )
+
+// projectIDPattern is the strict allowlist for project identifiers.
+// Only alphanumerics, hyphens, and underscores are permitted.
+// This blocks path traversal sequences (e.g. "../", "%2F") at input level,
+// before the value ever reaches url.JoinPath or the HTTP layer.
+var projectIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// validateProjectID returns an error if projectID contains any character
+// outside the strict [a-zA-Z0-9_-] allowlist. Call this at the top of every
+// function that embeds a user-supplied ID into an API path.
+func validateProjectID(id string) error {
+	if id == "" {
+		return fmt.Errorf("project ID must not be empty")
+	}
+	if !projectIDPattern.MatchString(id) {
+		return fmt.Errorf(
+			"invalid project ID %q: only letters, digits, hyphens, and underscores are allowed",
+			sanitizeForTerminal(id),
+		)
+	}
+	return nil
+}
 
 // stringVal safely extracts a string value from a map[string]any.
 // Returns def if the key is absent or the value is not a non-empty string.
@@ -51,16 +75,14 @@ func sanitizeForTerminal(s string) string {
 	return b.String()
 }
 
-// maskSecret redacts a secret string, showing only the first 4 and last 4
-// characters. Strings shorter than 12 chars are fully redacted. This
-// prevents the original 8-char prefix leak flagged by OWASP review.
+// maskSecret redacts a secret string completely.
+// Returns "[SET]" if the secret is non-empty (confirming it is configured
+// without leaking any characters), or "—" if absent.
+// Previous implementations that exposed prefix/suffix characters were
+// flagged as an OWASP information-disclosure risk.
 func maskSecret(s string) string {
 	if s == "" {
 		return "—"
 	}
-	runes := []rune(s)
-	if len(runes) < 12 {
-		return "[REDACTED]"
-	}
-	return string(runes[:4]) + "…" + string(runes[len(runes)-4:])
+	return "[SET]"
 }
