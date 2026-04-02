@@ -18,14 +18,16 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(commands.StartCmd)
-	rootCmd.AddCommand(commands.DestroyCmd)
-	rootCmd.AddCommand(commands.DoctorCmd)
-	rootCmd.AddCommand(commands.DispatchCmd)
-	rootCmd.AddCommand(commands.StatusCmd)
-	rootCmd.AddCommand(commands.LogsCmd)
-	rootCmd.AddCommand(commands.ConfigCmd)
-	rootCmd.AddCommand(commands.ProjectsCmd)
+    rootCmd.AddCommand(commands.StartCmd)
+    rootCmd.AddCommand(commands.DestroyCmd)
+    rootCmd.AddCommand(commands.DoctorCmd)
+    rootCmd.AddCommand(commands.DispatchCmd)
+    rootCmd.AddCommand(commands.StatusCmd)
+    rootCmd.AddCommand(commands.LogsCmd)
+    rootCmd.AddCommand(commands.TasksCmd)
+    rootCmd.AddCommand(commands.WorkersCmd)
+    rootCmd.AddCommand(commands.ConfigCmd)
+    rootCmd.AddCommand(commands.ProjectsCmd)
 }
 
 func main() {
