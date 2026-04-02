@@ -22,8 +22,13 @@ func init() {
 	rootCmd.AddCommand(commands.DestroyCmd)
 	rootCmd.AddCommand(commands.DoctorCmd)
 	rootCmd.AddCommand(commands.DispatchCmd)
+<<<<<<< HEAD
 	rootCmd.AddCommand(commands.StatusCmd)
 	rootCmd.AddCommand(commands.LogsCmd)
+=======
+	rootCmd.AddCommand(commands.TasksCmd)
+	rootCmd.AddCommand(commands.WorkersCmd)
+>>>>>>> d16a8537 (feat(cli): add 'flume tasks' and 'flume workers' commands)
 }
 
 func main() {
