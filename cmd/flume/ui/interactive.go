@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 )
 
@@ -47,6 +48,17 @@ type promptModel struct {
 	cfg       *PromptConfig
 	inputs    map[int]textinput.Model
 	exoActive bool
+	errMsg    string // validation error shown inline; cleared on next keypress
+}
+
+// errStyle renders inline validation errors in a distinctive amber/red colour.
+var errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F57")).Bold(true)
+
+func renderErr(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return "\n" + errStyle.Render("⚠ "+msg) + "\n"
 }
 
 func InitialPromptModel(cfg *PromptConfig, exoActive bool) promptModel {
@@ -107,11 +119,21 @@ func (m promptModel) next(nextStep int) (tea.Model, tea.Cmd) {
 func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Clear any lingering validation error on the first new keystroke.
+		m.errMsg = ""
+
 		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyEsc {
 			return m, tea.Quit
 		}
 		if msg.Type == tea.KeyEnter {
 			val := strings.TrimSpace(m.inputs[m.step].Value())
+
+			// Validate before advancing.
+			if errMsg := validateForStep(m.step, val); errMsg != "" {
+				m.errMsg = errMsg
+				return m, textinput.Blink
+			}
+
 			switch m.step {
 			case StepExoPrompt:
 				if val == "1" || val == "y" || val == "Y" || val == "" {
@@ -209,35 +231,36 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m promptModel) View() string {
 	ti := m.inputs[m.step]
+	err := renderErr(m.errMsg)
 	switch m.step {
 	case StepExoPrompt:
-		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepProvider:
-		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
-		return NeonGreen("Enter specific LLM Model constraint (e.g. qwen, llama3.2):\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter specific LLM Model constraint (e.g. qwen, llama3.2):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaScope:
-		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaIP:
-		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepAPIKey:
-		return NeonGreen("Enter API Secret (Masked natively):\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticMenu:
-		return NeonGreen("Select Elasticsearch capability:\n") + "\n1. Use default Flume Docker instance\n2. Use an existing External Elastic instance\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Select Elasticsearch capability:\n") + "\n1. Use default Flume Docker instance\n2. Use an existing External Elastic instance\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticURL:
-		return NeonGreen("Enter External Elasticsearch HTTP routing URL:\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter External Elasticsearch HTTP routing URL:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepRepoMenu:
-		return NeonGreen("Would you like to configure remote Version Control natively in the CLI?\n") + "\n1. Yes, add Repo Credentials via CLI\n2. No, I will configure via Local GUI later\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Would you like to configure remote Version Control natively in the CLI?\n") + "\n1. Yes, add Repo Credentials via CLI\n2. No, I will configure via Local GUI later\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepRepoType:
-		return NeonGreen("Select Source Control Provider:\n") + "\n1. GitHub\n2. Azure DevOps (ADO)\n\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Select Source Control Provider:\n") + "\n1. GitHub\n2. Azure DevOps (ADO)\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepGithubToken:
-		return NeonGreen("Enter GitHub Personal Access Token:\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter GitHub Personal Access Token:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOOrg:
-		return NeonGreen("Enter Azure DevOps Organization Name:\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter Azure DevOps Organization Name:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOProject:
-		return NeonGreen("Enter Azure DevOps Project Name:\n") + "\n" + ti.View() + "\n\n(Press enter to continue)\n"
+		return NeonGreen("Enter Azure DevOps Project Name:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOToken:
-		return NeonGreen("Enter Azure DevOps Personal Access Token (Masked):\n") + "\n" + ti.View() + "\n\n(Press enter to submit)\n"
+		return NeonGreen("Enter Azure DevOps Personal Access Token (Masked):\n") + "\n" + ti.View() + err + "\n(Press enter to submit)\n"
 	}
 	return SuccessBlue("Credentials received securely.")
 }
