@@ -1,5 +1,7 @@
-# Labeled Azure DevOps credentials (PAT + org URL per row). Stored in worker-manager/ado_tokens.json.
-# The active row is mirrored to ADO_TOKEN and ADO_ORG_URL in .env / OpenBao.
+# Labeled Azure DevOps credentials (PAT + org URL per row).
+# Metadata stored in ES index 'flume-ado-tokens'.
+# PATs stored exclusively in OpenBao KV at secret/data/flume/ado_tokens/{id}.
+# Falls back to local JSON if ES is unavailable (local dev without Docker).
 
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeCredentialId": "", "credentials": []}
 
 
-def load_document(workspace_root: Path) -> dict[str, Any]:
+def _load_from_file(workspace_root: Path) -> dict[str, Any]:
     path = store_path(workspace_root)
     if not path.is_file():
         return _default_doc()
@@ -31,22 +33,46 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return _default_doc()
         data.setdefault("version", 1)
         data.setdefault("activeCredentialId", "")
-        creds = data.get("credentials")
-        if not isinstance(creds, list):
+        if not isinstance(data.get("credentials"), list):
             data["credentials"] = []
         return data
     except (OSError, json.JSONDecodeError):
         return _default_doc()
 
 
+def load_document(workspace_root: Path) -> dict[str, Any]:
+    """Load metadata from ES (preferred) with local-file fallback."""
+    try:
+        from es_credential_store import load_ado_tokens
+        doc = load_ado_tokens(_default_doc)
+        if doc and (doc.get("credentials") or doc.get("activeCredentialId")):
+            doc.setdefault("version", 1)
+            if not isinstance(doc.get("credentials"), list):
+                doc["credentials"] = []
+            return doc
+    except Exception:
+        pass
+    return _load_from_file(workspace_root)
+
+
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
-    path = store_path(workspace_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Persist metadata to ES (preferred) and keep local JSON as backup."""
     masked_doc = json.loads(json.dumps(doc))
     for tok in masked_doc.get("credentials", []):
-        if tok.get("token") and tok["token"] != MASK:
+        if tok.get("token") and tok["token"] not in ("", MASK, "***OPENBAO_DELEGATED***"):
             tok["token"] = "***OPENBAO_DELEGATED***"
-    path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    try:
+        from es_credential_store import save_ado_tokens
+        save_ado_tokens(masked_doc)
+    except Exception:
+        pass
+    try:
+        path = store_path(workspace_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
 
 
 def _strip_env_quotes(raw: str) -> str:
