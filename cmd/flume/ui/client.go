@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -54,8 +55,13 @@ func resolveDashboardURL() string {
 }
 
 // Get performs a GET request and decodes the JSON response.
+// path is joined to BaseURL using url.JoinPath to prevent traversal attacks.
 func (c *FlumeClient) Get(path string) (map[string]any, error) {
-	resp, err := c.httpClient.Get(c.BaseURL + path)
+	target, err := url.JoinPath(c.BaseURL, path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API path '%s': %w", path, err)
+	}
+	resp, err := c.httpClient.Get(target)
 	if err != nil {
 		return nil, fmt.Errorf("dashboard unreachable at %s: %w", c.BaseURL, err)
 	}
@@ -73,7 +79,11 @@ func (c *FlumeClient) Get(path string) (map[string]any, error) {
 
 // GetRaw performs a GET and returns the raw response bytes (used for logs/diffs).
 func (c *FlumeClient) GetRaw(path string) ([]byte, error) {
-	resp, err := c.httpClient.Get(c.BaseURL + path)
+	target, err := url.JoinPath(c.BaseURL, path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API path '%s': %w", path, err)
+	}
+	resp, err := c.httpClient.Get(target)
 	if err != nil {
 		return nil, fmt.Errorf("dashboard unreachable at %s: %w", c.BaseURL, err)
 	}
@@ -83,11 +93,15 @@ func (c *FlumeClient) GetRaw(path string) ([]byte, error) {
 
 // Post performs a POST with a JSON body and decodes the response.
 func (c *FlumeClient) Post(path string, body any) (map[string]any, error) {
+	target, err := url.JoinPath(c.BaseURL, path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API path '%s': %w", path, err)
+	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
-	resp, err := c.httpClient.Post(c.BaseURL+path, "application/json", bytes.NewReader(b))
+	resp, err := c.httpClient.Post(target, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("dashboard unreachable at %s: %w", c.BaseURL, err)
 	}
@@ -105,11 +119,15 @@ func (c *FlumeClient) Post(path string, body any) (map[string]any, error) {
 
 // Put performs a PUT with a JSON body and decodes the response.
 func (c *FlumeClient) Put(path string, body any) (map[string]any, error) {
+	target, err := url.JoinPath(c.BaseURL, path)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API path '%s': %w", path, err)
+	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPut, c.BaseURL+path, bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPut, target, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
