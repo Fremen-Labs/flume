@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -52,6 +54,16 @@ var projectsDeleteCmd = &cobra.Command{
 	},
 }
 
+// safeAPIPath builds a URL path safely using url.JoinPath (Go 1.19+) to
+// prevent path traversal if projectID contains sequences like "../".
+func safeAPIPath(base string, segments ...string) (string, error) {
+	p, err := url.JoinPath(base, segments...)
+	if err != nil {
+		return "", fmt.Errorf("invalid path segments %v: %w", segments, err)
+	}
+	return p, nil
+}
+
 func listProjects() error {
 	client := ui.NewFlumeClient()
 	state, err := client.Get("/api/system-state")
@@ -62,7 +74,10 @@ func listProjects() error {
 	projects := extractProjects(state)
 
 	if projectsJSON {
-		b, _ := json.MarshalIndent(projects, "", "  ")
+		b, err := json.MarshalIndent(projects, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to serialize projects as JSON: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	}
@@ -99,9 +114,9 @@ func listProjects() error {
 	headers := []string{"Project ID", "Name", "Repo URL", "Active Tasks", "Done Tasks"}
 	var rows [][]string
 	for _, p := range projects {
-		id := stringVal(p, "id", stringVal(p, "_id", "—"))
-		name := truncate(stringVal(p, "name", "—"), 30)
-		repo := truncate(stringVal(p, "repo_url", stringVal(p, "repoUrl", "—")), 45)
+		id := stringValFromKeys(p, "—", "id", "_id")
+		name := truncate(stringValFromKeys(p, "—", "name"), 30)
+		repo := truncate(stringValFromKeys(p, "—", "repo_url", "repoUrl"), 45)
 		active := fmt.Sprintf("%d", tasksByProject[id]["active"])
 		done := fmt.Sprintf("%d", tasksByProject[id]["done"])
 		rows = append(rows, []string{id, name, repo, active, done})
@@ -122,37 +137,51 @@ func showProject(projectID string) error {
 	projects := extractProjects(state)
 	var project map[string]any
 	for _, p := range projects {
-		if stringVal(p, "id", stringVal(p, "_id", "")) == projectID {
+		if stringValFromKeys(p, "", "id", "_id") == projectID {
 			project = p
 			break
 		}
 	}
 	if project == nil {
-		return fmt.Errorf("project '%s' not found", projectID)
+		return fmt.Errorf("project '%s' not found", sanitizeForTerminal(projectID))
 	}
 
-	cloneStatus, _ := client.Get("/api/projects/" + projectID + "/clone-status")
+	// Safe path construction — prevents traversal via malformed projectID.
+	clonePath, err := safeAPIPath("/api/projects", projectID, "clone-status")
+	if err != nil {
+		return err
+	}
+	cloneStatus, cloneErr := client.Get(clonePath)
+	if cloneErr != nil {
+		log.Warn("Could not fetch clone status", "project", projectID, "error", cloneErr)
+	}
 
 	if projectsJSON {
 		out := map[string]any{"project": project, "clone_status": cloneStatus}
-		b, _ := json.MarshalIndent(out, "", "  ")
+		b, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to serialize project as JSON: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	}
 
-	fmt.Println(ui.NeonGreen(fmt.Sprintf("  PROJECT: %s  ", projectID)))
+	fmt.Println(ui.NeonGreen(fmt.Sprintf("  PROJECT: %s  ", sanitizeForTerminal(projectID))))
 	fields := []struct{ k, l string }{
 		{"name", "Name"}, {"repo_url", "Repo URL"}, {"default_branch", "Branch"},
 		{"created_at", "Created"}, {"updated_at", "Updated"},
 	}
 	for _, f := range fields {
-		if v := stringVal(project, f.k, stringVal(project, strings.ReplaceAll(f.k, "_", ""), "")); v != "" {
-			fmt.Printf("  %-16s: %s\n", f.l, v)
+		if v := stringValFromKeys(project, "", f.k, strings.ReplaceAll(f.k, "_", "")); v != "" {
+			fmt.Printf("  %-16s: %s\n", f.l, sanitizeForTerminal(v))
 		}
 	}
-	cloneReady := "Unknown"
-	if cloneStatus != nil {
-		cloneReady = stringVal(cloneStatus, "status", "—")
+
+	cloneReady := "unknown"
+	if cloneErr != nil {
+		cloneReady = "api-error"
+	} else if cloneStatus != nil {
+		cloneReady = stringValFromKeys(cloneStatus, "unknown", "status")
 	}
 	fmt.Printf("  %-16s: %s\n", "Clone", ui.StatusBadge(cloneReady))
 	fmt.Println()
@@ -161,42 +190,63 @@ func showProject(projectID string) error {
 
 func showProjectStatus(projectID string) error {
 	client := ui.NewFlumeClient()
-	data, err := client.Get("/api/projects/" + projectID + "/clone-status")
+	apiPath, err := safeAPIPath("/api/projects", projectID, "clone-status")
+	if err != nil {
+		return err
+	}
+	data, err := client.Get(apiPath)
 	if err != nil {
 		return fmt.Errorf("failed to fetch project status: %w", err)
 	}
 	if projectsJSON {
-		b, _ := json.MarshalIndent(data, "", "  ")
+		b, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to serialize status as JSON: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	}
-	fmt.Println(ui.NeonGreen(fmt.Sprintf("  PROJECT STATUS: %s  ", projectID)))
+	fmt.Println(ui.NeonGreen(fmt.Sprintf("  PROJECT STATUS: %s  ", sanitizeForTerminal(projectID))))
 	for k, v := range data {
-		fmt.Printf("  %-20s: %v\n", k, v)
+		fmt.Printf("  %-20s: %v\n", sanitizeForTerminal(k), sanitizeForTerminal(fmt.Sprintf("%v", v)))
 	}
 	return nil
 }
 
 func showProjectBranches(projectID string) error {
 	client := ui.NewFlumeClient()
-	data, err := client.Get("/api/repos/" + projectID + "/branches")
+	apiPath, err := safeAPIPath("/api/repos", projectID, "branches")
+	if err != nil {
+		return err
+	}
+	data, err := client.Get(apiPath)
 	if err != nil {
 		return fmt.Errorf("failed to fetch branches: %w", err)
 	}
 	if projectsJSON {
-		b, _ := json.MarshalIndent(data, "", "  ")
+		b, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to serialize branches as JSON: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	}
-	fmt.Println(ui.NeonGreen(fmt.Sprintf("  BRANCHES: %s  ", projectID)))
-	branches, _ := data["branches"].([]any)
+	fmt.Println(ui.NeonGreen(fmt.Sprintf("  BRANCHES: %s  ", sanitizeForTerminal(projectID))))
+
+	// Explicit ok-check: distinguishes empty list from malformed API response.
+	branches, ok := data["branches"].([]any)
+	if !ok {
+		log.Warn("Unexpected branch response format from dashboard", "project", projectID)
+		fmt.Println(ui.WarningGold("  Could not parse branch list from dashboard response."))
+		return nil
+	}
 	for _, b := range branches {
 		switch bv := b.(type) {
 		case string:
-			fmt.Printf("  %s %s\n", ui.SuccessBlue("◆"), bv)
+			fmt.Printf("  %s %s\n", ui.SuccessBlue("◆"), sanitizeForTerminal(bv))
 		case map[string]any:
-			name := stringVal(bv, "name", fmt.Sprintf("%v", bv))
-			fmt.Printf("  %s %s\n", ui.SuccessBlue("◆"), name)
+			name := stringValFromKeys(bv, fmt.Sprintf("%v", bv), "name")
+			fmt.Printf("  %s %s\n", ui.SuccessBlue("◆"), sanitizeForTerminal(name))
 		}
 	}
 	if len(branches) == 0 {
@@ -206,23 +256,32 @@ func showProjectBranches(projectID string) error {
 }
 
 func deleteProject(projectID string) error {
-	// Require typing the project name to confirm.
 	fmt.Println()
-	fmt.Println(ui.ErrorRed(fmt.Sprintf("⚠  This will permanently delete project '%s' and all associated data.", projectID)))
+	fmt.Println(ui.ErrorRed(fmt.Sprintf(
+		"⚠  This will permanently delete project '%s' and all associated data.",
+		sanitizeForTerminal(projectID),
+	)))
 	fmt.Print(ui.WarningGold(fmt.Sprintf("Type the project ID to confirm (%s): ", projectID)))
+
 	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read confirmation input: %w", err)
+	}
 	if strings.TrimSpace(input) != projectID {
 		fmt.Println(ui.WarningGold("Deletion cancelled — project ID did not match."))
 		return nil
 	}
-	client := ui.NewFlumeClient()
-	result, err := client.Post("/api/projects/"+projectID+"/delete", nil)
+
+	apiPath, err := safeAPIPath("/api/projects", projectID, "delete")
 	if err != nil {
+		return err
+	}
+	client := ui.NewFlumeClient()
+	if _, err := client.Post(apiPath, nil); err != nil {
 		return fmt.Errorf("deletion failed: %w", err)
 	}
-	_ = result
-	fmt.Println(ui.SuccessBlue(fmt.Sprintf("Project '%s' deleted.", projectID)))
+	fmt.Println(ui.SuccessBlue(fmt.Sprintf("Project '%s' deleted.", sanitizeForTerminal(projectID))))
 	return nil
 }
 

@@ -22,13 +22,10 @@ func init() {
 	rootCmd.AddCommand(commands.DestroyCmd)
 	rootCmd.AddCommand(commands.DoctorCmd)
 	rootCmd.AddCommand(commands.DispatchCmd)
-<<<<<<< HEAD
 	rootCmd.AddCommand(commands.StatusCmd)
 	rootCmd.AddCommand(commands.LogsCmd)
-=======
 	rootCmd.AddCommand(commands.ConfigCmd)
 	rootCmd.AddCommand(commands.ProjectsCmd)
->>>>>>> dd8bc4f1 (feat(cli): add 'flume config' and 'flume projects' commands)
 }
 
 func main() {
