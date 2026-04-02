@@ -1,5 +1,7 @@
-# Labeled GitHub PATs (multiple). Stored in worker-manager/github_tokens.json.
-# The active token is mirrored to GH_TOKEN in OpenBao for git clone and gh CLI.
+# Labeled GitHub PATs (multiple).
+# Metadata stored in ES index 'flume-github-tokens'.
+# PATs stored exclusively in OpenBao KV at secret/data/flume/github_tokens/{id}.
+# Falls back to local JSON if ES is unavailable (local dev without Docker).
 
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeTokenId": "", "tokens": []}
 
 
-def load_document(workspace_root: Path) -> dict[str, Any]:
+def _load_from_file(workspace_root: Path) -> dict[str, Any]:
     path = tokens_path(workspace_root)
     if not path.is_file():
         return _default_doc()
@@ -30,22 +32,46 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return _default_doc()
         data.setdefault("version", 1)
         data.setdefault("activeTokenId", "")
-        tok = data.get("tokens")
-        if not isinstance(tok, list):
+        if not isinstance(data.get("tokens"), list):
             data["tokens"] = []
         return data
     except (OSError, json.JSONDecodeError):
         return _default_doc()
 
 
+def load_document(workspace_root: Path) -> dict[str, Any]:
+    """Load metadata from ES (preferred) with local-file fallback."""
+    try:
+        from es_credential_store import load_gh_tokens
+        doc = load_gh_tokens(_default_doc)
+        if doc and (doc.get("tokens") or doc.get("activeTokenId")):
+            doc.setdefault("version", 1)
+            if not isinstance(doc.get("tokens"), list):
+                doc["tokens"] = []
+            return doc
+    except Exception:
+        pass
+    return _load_from_file(workspace_root)
+
+
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
-    path = tokens_path(workspace_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Persist metadata to ES (preferred) and keep local JSON as backup."""
     masked_doc = json.loads(json.dumps(doc))
     for tok in masked_doc.get("tokens", []):
-        if tok.get("token") and tok["token"] != MASK:
+        if tok.get("token") and tok["token"] not in ("", MASK, "***OPENBAO_DELEGATED***"):
             tok["token"] = "***OPENBAO_DELEGATED***"
-    path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    try:
+        from es_credential_store import save_gh_tokens
+        save_gh_tokens(masked_doc)
+    except Exception:
+        pass
+    try:
+        path = tokens_path(workspace_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
 
 
 def _strip_env_quotes(raw: str) -> str:

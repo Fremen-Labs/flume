@@ -1,5 +1,7 @@
-# Labeled LLM API keys (multi-provider). Stored in worker-manager/llm_credentials.json
-# beside agent_models.json. Workers read this file to resolve per-agent keys.
+# Labeled LLM API keys (multi-provider).
+# Metadata stored in ES index 'flume-llm-credentials'.
+# API keys stored exclusively in OpenBao KV at secret/data/flume/llm_credentials/{id}.
+# Falls back to local JSON if ES is unavailable (local dev without Docker).
 
 from __future__ import annotations
 
@@ -54,8 +56,8 @@ def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeCredentialId": "", "defaultCredentialId": "", "credentials": []}
 
 
-@functools.lru_cache(maxsize=1)
-def load_document(workspace_root: Path) -> dict[str, Any]:
+def _load_from_file(workspace_root: Path) -> dict[str, Any]:
+    """Local JSON fallback (dev without Docker / ES unavailable)."""
     path = credentials_path(workspace_root)
     if not path.is_file():
         return _default_doc()
@@ -66,28 +68,56 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
         data.setdefault("version", 1)
         data.setdefault("activeCredentialId", "")
         data.setdefault("defaultCredentialId", "")
-        # Migrate legacy field: default is the preferred name for "fallback key" semantics.
         if not str(data.get("defaultCredentialId") or "").strip() and str(data.get("activeCredentialId") or "").strip():
             data["defaultCredentialId"] = str(data.get("activeCredentialId") or "").strip()
-        creds = data.get("credentials")
-        if not isinstance(creds, list):
+        if not isinstance(data.get("credentials"), list):
             data["credentials"] = []
         return data
     except (OSError, json.JSONDecodeError):
         return _default_doc()
 
 
+@functools.lru_cache(maxsize=1)
+def load_document(workspace_root: Path) -> dict[str, Any]:
+    """Load metadata from ES (preferred) with local-file fallback."""
+    try:
+        from es_credential_store import load_llm_credentials
+        doc = load_llm_credentials(_default_doc)
+        # If ES returned a non-trivial document, use it.
+        if doc and (doc.get("credentials") or doc.get("activeCredentialId") or doc.get("defaultCredentialId")):
+            doc.setdefault("version", 1)
+            if not str(doc.get("defaultCredentialId") or "").strip() and str(doc.get("activeCredentialId") or "").strip():
+                doc["defaultCredentialId"] = str(doc.get("activeCredentialId") or "").strip()
+            if not isinstance(doc.get("credentials"), list):
+                doc["credentials"] = []
+            return doc
+    except Exception:
+        pass
+    # Fallback: local JSON (migrates existing data on first boot with ES)
+    return _load_from_file(workspace_root)
+
+
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
-    path = credentials_path(workspace_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Mask API keys before saving to disk to prevent plaintext vulnerability
+    """Persist metadata to ES (preferred) and keep local JSON as backup."""
+    load_document.cache_clear()
+    # Mask secrets before any persistence layer
     masked_doc = json.loads(json.dumps(doc))
     for cred in masked_doc.get("credentials", []):
-        if cred.get("apiKey") and cred["apiKey"] != "***":
+        if cred.get("apiKey") and cred["apiKey"] not in ("", "***OPENBAO_DELEGATED***"):
             cred["apiKey"] = "***OPENBAO_DELEGATED***"
-            
-    path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
-    load_document.cache_clear()
+    try:
+        from es_credential_store import save_llm_credentials
+        save_llm_credentials(masked_doc)
+    except Exception:
+        pass
+    # Always write local JSON as fallback for native/dev mode
+    try:
+        path = credentials_path(workspace_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
 
 
 def _key_suffix(key: str) -> str:

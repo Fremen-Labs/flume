@@ -30,6 +30,10 @@ REQUIRED_INDICES = [
     "agent-system-cluster",
     "agent-system-workers",
     "agent-token-telemetry",
+    # Kubernetes-grade credential metadata stores (secrets in OpenBao)
+    "flume-llm-credentials",
+    "flume-ado-tokens",
+    "flume-github-tokens",
 ]
 
 INDEX_TEMPLATES = {
@@ -227,6 +231,13 @@ def ensure_es_indices():
                 logger.info(f"Successfully bootstrapped ES Index natively: {index}")
         except Exception as e:
             logger.error(f"Failed to create index {index}: {e}")
+
+    # 3. Bootstrap credential store indices with explicit mappings
+    try:
+        from es_credential_store import ensure_credential_indices
+        ensure_credential_indices()
+    except Exception as e:
+        logger.warning(f"Credential index bootstrap skipped: {e}")
 
 
 def ensure_vault_credentials():
