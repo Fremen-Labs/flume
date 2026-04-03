@@ -2777,21 +2777,56 @@ async def _clone_and_setup_project(
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # If the directory already exists and is a git repo, skip cloning.
-        if (dest_path / '.git').exists():
-            logger.info(json.dumps({
-                "event": "project_clone_skip",
-                "project_id": project_id,
-                "reason": "already_cloned",
-            }))
-            _update_project_registry_field(
-                project_id,
-                path=str(dest_path),
-                clone_status='cloned',
-                clone_error=None,
+        # ── Pre-clone directory triage ───────────────────────────────────────
+        # The /workspace bind-mount persists across `flume destroy`, so a
+        # previous failed/aborted clone can leave a partial .git directory.
+        # git refuses to clone into such a dir with:
+        #   BUG: refs/files-backend.c: initial ref transaction called with existing refs
+        #
+        # Strategy:
+        #  • Complete clone  (.git/HEAD exists AND packed-refs or refs/heads)
+        #    → skip, mark as already cloned
+        #  • Partial .git  (HEAD missing OR refs empty)
+        #    → wipe dest_path, proceed with clean clone
+        #  • Directory exists but no .git
+        #    → wipe dest_path, proceed with clean clone
+        if dest_path.exists():
+            git_dir = dest_path / '.git'
+            head_file = git_dir / 'HEAD'
+            refs_dir = git_dir / 'refs' / 'heads'
+            packed_refs = git_dir / 'packed-refs'
+            is_complete = (
+                git_dir.exists()
+                and head_file.exists()
+                and (
+                    (refs_dir.exists() and any(refs_dir.iterdir()))
+                    or packed_refs.exists()
+                )
             )
-            await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
-            return
+            if is_complete:
+                logger.info(json.dumps({
+                    "event": "project_clone_skip",
+                    "project_id": project_id,
+                    "reason": "already_cloned",
+                }))
+                _update_project_registry_field(
+                    project_id,
+                    path=str(dest_path),
+                    clone_status='cloned',
+                    clone_error=None,
+                )
+                await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
+                return
+            else:
+                # Partial or broken state — wipe and start fresh.
+                import shutil as _shutil
+                logger.warning(json.dumps({
+                    "event": "project_clone_stale_dir_removed",
+                    "project_id": project_id,
+                    "dest": str(dest_path),
+                    "reason": "partial_or_broken_git_dir",
+                }))
+                _shutil.rmtree(dest_path, ignore_errors=True)
 
         proc = await asyncio.create_subprocess_exec(
             'git', 'clone', '--', repo_url, str(dest_path),
@@ -3038,6 +3073,31 @@ def api_delete_project(project_id: str):
             "error": str(exc)[:200],
         }))
 
+    # Worktree Garbage Collection: clean up the local repository path
+    # to reclaim disk space and prevent stale clone state errors.
+    project_doc = next((p for p in registry if p.get("id") == project_id), {})
+    local_path = project_doc.get("path") or str(WORKSPACE_ROOT / project_id)
+    if local_path:
+        dest_path = Path(local_path)
+        if dest_path.exists() and dest_path.is_dir() and dest_path.parent == WORKSPACE_ROOT:
+            # We enforce `dest_path.parent == WORKSPACE_ROOT` to safely scope deletion
+            # and avoid inadvertently deleting arbitrary user files if `localPath` is used.
+            try:
+                import shutil
+                shutil.rmtree(dest_path, ignore_errors=True)
+                logger.info(json.dumps({
+                    "event": "project_worktree_pruned",
+                    "project_id": project_id,
+                    "path": str(dest_path)
+                }))
+            except Exception as e:
+                logger.error(json.dumps({
+                    "event": "project_worktree_prune_error",
+                    "project_id": project_id,
+                    "path": str(dest_path),
+                    "error": str(e)
+                }))
+
     return {"success": True, "projectId": project_id, "message": "Project removed."}
 
 @app.get("/api/tasks/{task_id}/history")
@@ -3248,16 +3308,28 @@ def api_repo_branches(project_id: str):
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
     repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+
+    cs = proj.get("clone_status", "no_repo")
+    clone_error = proj.get("clone_error")
+
+    # Do not execute ANY Git subprocesses while the project is actively cloning.
+    # Concurrent Git commands during initial ref setup can cause git clone to
+    # crash with `BUG: initial ref transaction called with existing refs` (exit -6).
+    if cs in ("cloning", "pending"):
+        return {
+            "gitAvailable": False,
+            "cloneStatus": cs,
+            "cloneError": None,
+            "branches": [],
+            "message": "Repository is being cloned in the background\u2026",
+        }
+
     if not (repo_path / ".git").exists():
         # Surface clone_status inline so the UI can distinguish between
         # 'still cloning' (start polling), 'failed' (show error), and
         # 'no_repo' (show the git-init hint). This eliminates a separate
         # /clone-status preflight round-trip in the FileExplorerModal.
-        cs = proj.get("clone_status", "no_repo")
-        clone_error = proj.get("clone_error")
-        if cs in ("cloning",):
-            message = "Repository is being cloned in the background…"
-        elif cs == "failed":
+        if cs == "failed":
             message = f"Clone failed: {clone_error or 'Unknown error'}"
         else:
             message = (
@@ -3287,30 +3359,9 @@ def api_repo_branches(project_id: str):
                 seen.add(name)
                 branches.append(name)
     except subprocess.CalledProcessError as exc:
-        # Exit 128 during an active clone: git creates .git at start but refs
-        # are not populated until the clone completes. Re-read registry and
-        # return the inline cloneStatus so the frontend keeps polling.
+        # Fallback 128 handler if git fails to read refs for some other reason
         if exc.returncode == 128:
-            registry2 = load_projects_registry()
-            proj2 = next((p for p in registry2 if p.get("id") == project_id), proj)
-            cs2 = proj2.get("clone_status", "cloning")
-            clone_error2 = proj2.get("clone_error")
-            if cs2 in ("cloning", "pending"):
-                return {
-                    "gitAvailable": False,
-                    "cloneStatus": cs2,
-                    "cloneError": None,
-                    "branches": [],
-                    "message": "Repository is being cloned in the background\u2026",
-                }
-            if cs2 == "failed":
-                return {
-                    "gitAvailable": False,
-                    "cloneStatus": "failed",
-                    "cloneError": clone_error2,
-                    "branches": [],
-                    "message": f"Clone failed: {clone_error2 or 'Unknown error'}",
-                }
+            return JSONResponse(status_code=500, content={"error": f"git branch exited 128: Repository refs may be corrupt."})
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
@@ -3331,6 +3382,11 @@ def api_repo_tree(project_id: str, branch: str = ""):
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
     repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    cs = proj.get("clone_status", "no_repo")
+
+    if cs in ("cloning", "pending"):
+        return JSONResponse(status_code=400, content={"error": "Repository is currently being cloned."})
+
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
