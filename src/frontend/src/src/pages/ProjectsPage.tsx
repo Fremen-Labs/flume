@@ -1,11 +1,11 @@
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { Search, FolderOpen, Plus, Loader2, AlertCircle } from 'lucide-react';
+import { Search, FolderOpen, Plus, Loader2, AlertCircle, Trash2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { FileExplorerModal } from '@/components/FileExplorerModal';
-import type { ApiProject } from '@/types';
+import type { ApiProject, Snapshot } from '@/types';
 import projBg1 from '@/assets/projects/proj-bg-1.jpg';
 import projBg2 from '@/assets/projects/proj-bg-2.jpg';
 import projBg3 from '@/assets/projects/proj-bg-3.jpg';
@@ -86,6 +86,7 @@ export default function ProjectsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      clearTimeout(timeoutId);
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -95,14 +96,43 @@ export default function ProjectsPage() {
         throw new Error(parts.length ? parts.join('\n\n') : 'Failed to create project');
       }
 
+      // Optimistically insert the new project into the snapshot cache so the
+      // card appears immediately without waiting for the next poll cycle.
+      if (data.project) {
+        qc.setQueryData<Snapshot>(['snapshot'], (old) => {
+          if (!old) return old;
+          return { ...old, projects: [...old.projects, data.project as ApiProject] };
+        });
+      } else {
+        // Fallback: invalidate so the next fetch picks it up.
+        qc.invalidateQueries({ queryKey: ['snapshot'] });
+      }
+
       setCreateOpen(false);
       setCreateName('');
       setCreateRepoUrl('');
-      qc.invalidateQueries({ queryKey: ['snapshot'] });
     } catch (e: unknown) {
       setCreateError(e instanceof Error ? e.message : 'Failed to create project');
     } finally {
       setCreateLoading(false);
+    }
+  }
+
+  async function deleteProject(projectId: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!window.confirm('Delete this project? This cannot be undone.')) return;
+    try {
+      // Optimistically remove the project from cache immediately.
+      qc.setQueryData<Snapshot>(['snapshot'], (old) => {
+        if (!old) return old;
+        return { ...old, projects: old.projects.filter((p) => p.id !== projectId) };
+      });
+      await fetch(`/api/projects/${encodeURIComponent(projectId)}/delete`, { method: 'POST' });
+      // Invalidate to sync any server-side state changes.
+      qc.invalidateQueries({ queryKey: ['snapshot'] });
+    } catch {
+      // On failure, re-invalidate so we re-sync the real state.
+      qc.invalidateQueries({ queryKey: ['snapshot'] });
     }
   }
 
@@ -158,6 +188,7 @@ export default function ProjectsPage() {
       {/* Project Grid */}
       {!isLoading && !error && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 relative z-10">
+        <AnimatePresence mode="popLayout">
           {filtered.map((project, i) => {
             const stats = projectStats(project.id);
             return (
@@ -165,6 +196,7 @@ export default function ProjectsPage() {
                 key={project.id}
                 initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96 }}
                 transition={{ delay: i * 0.05 }}
                 whileHover={{ y: -4, transition: { duration: 0.25 } }}
                 onClick={() => navigate(`/projects/${encodeURIComponent(project.id)}`)}
@@ -230,6 +262,13 @@ export default function ProjectsPage() {
                           <FolderOpen className="w-3 h-3" />
                           Browse
                         </button>
+                        <button
+                          onClick={e => deleteProject(project.id, e)}
+                          className="flex items-center gap-1 text-[10px] px-2.5 py-1 rounded-md bg-destructive/10 border border-destructive/20 text-destructive hover:bg-destructive/20 hover:border-destructive/40 transition-all font-medium"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Delete
+                        </button>
                       <span className="text-[10px] text-muted-foreground/50">{timeAgo(project.created_at)}</span>
                     </div>
                   </div>
@@ -237,6 +276,7 @@ export default function ProjectsPage() {
               </motion.div>
             );
           })}
+        </AnimatePresence>
 
           {/* Empty state */}
           {filtered.length === 0 && !isLoading && (

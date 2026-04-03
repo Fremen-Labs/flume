@@ -522,6 +522,15 @@ interface FileExplorerModalProps {
 
 type ModalMode = 'browse' | 'compare';
 
+type CloneStatus = 'cloning' | 'cloned' | 'failed' | 'local' | 'no_repo' | 'unknown';
+
+interface CloneStatusResponse {
+  clone_status: CloneStatus;
+  clone_error: string | null;
+  path: string | null;
+  is_git: boolean;
+}
+
 export function FileExplorerModal({ open, onOpenChange, projectName, projectId }: FileExplorerModalProps) {
   const [mode, setMode] = useState<ModalMode>('browse');
 
@@ -552,6 +561,28 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState('');
 
+  // ── Clone status polling (for remote URL projects) ──────────────────────────
+  const [cloneStatus, setCloneStatus] = useState<CloneStatus>('unknown');
+  const [cloneError, setCloneError] = useState<string | null>(null);
+  const clonePollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopClonePolling = () => {
+    if (clonePollingRef.current != null) {
+      clearInterval(clonePollingRef.current);
+      clonePollingRef.current = null;
+    }
+  };
+
+  const fetchCloneStatus = async (): Promise<CloneStatusResponse | null> => {
+    try {
+      const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/clone-status`);
+      if (!r.ok) return null;
+      return (await r.json()) as CloneStatusResponse;
+    } catch {
+      return null;
+    }
+  };
+
   // ── Fetch branches on open ───────────────────────────────────────────────────
   useEffect(() => {
     if (!open || !projectId) return;
@@ -573,12 +604,54 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           throw new Error(data.error || `Failed to load repository (${r.status})`);
         }
         if (data.gitAvailable === false) {
-          setNoGitMessage(
-            data.message ||
-              'This project is not a Git repository. Add one by creating the project with a clone URL or run git init in the project folder.',
-          );
+          // Check if it's still cloning — if so, start the polling loop.
+          const status = await fetchCloneStatus();
+          if (status?.clone_status === 'cloning') {
+            setCloneStatus('cloning');
+            setCloneError(null);
+            // Poll every 3 seconds until done.
+            clonePollingRef.current = setInterval(async () => {
+              const s = await fetchCloneStatus();
+              if (!s) return;
+              setCloneStatus(s.clone_status);
+              setCloneError(s.clone_error);
+              if (s.clone_status === 'cloned') {
+                stopClonePolling();
+                // Repo is ready — re-trigger branches fetch.
+                setBranches([]);
+                setBranch('');
+                setNoGitMessage(null);
+                setBranchesFetchError('');
+                fetch(`/api/repos/${encodeURIComponent(projectId)}/branches`)
+                  .then(r2 => r2.json())
+                  .then((d2: { default?: string; branches?: string[]; gitAvailable?: boolean; message?: string }) => {
+                    if (d2.gitAvailable === false) {
+                      setNoGitMessage(d2.message || 'Repository not available.');
+                      return;
+                    }
+                    const list = d2.branches ?? [];
+                    setBranches(list);
+                    setBranch(d2.default ?? '');
+                    const second = list.find(b => b !== (d2.default ?? ''));
+                    setCompareBranch(second ?? d2.default ?? '');
+                  })
+                  .catch(() => setBranchesFetchError('Failed to load branches after clone'));
+              } else if (s.clone_status === 'failed') {
+                stopClonePolling();
+              }
+            }, 3000);
+          } else if (status?.clone_status === 'failed') {
+            setCloneStatus('failed');
+            setCloneError(status.clone_error);
+          } else {
+            setNoGitMessage(
+              data.message ||
+                'This project is not a Git repository. Add one by creating the project with a clone URL or run git init in the project folder.',
+            );
+          }
           return;
         }
+        setCloneStatus('cloned');
         const list = data.branches ?? [];
         setBranches(list);
         setBranch(data.default ?? '');
@@ -619,11 +692,14 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
   // ── Reset on close ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!open) {
+      stopClonePolling();
       setBranches([]);
       setBranch('');
       setCompareBranch('');
       setNoGitMessage(null);
       setBranchesFetchError('');
+      setCloneStatus('unknown');
+      setCloneError(null);
       setTree([]);
       setSelectedPath('');
       setFileContent('');
@@ -831,26 +907,67 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
             </div>
           )}
 
+          {/* ── Clone progress overlay ── */}
+          {cloneStatus === 'cloning' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-5 text-center px-6">
+              <div className="relative">
+                <div className="w-16 h-16 rounded-full border-2 border-primary/20 flex items-center justify-center">
+                  <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                </div>
+                <div className="absolute inset-0 rounded-full border-2 border-primary/10 animate-ping" />
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-sm font-semibold text-foreground">Cloning repository…</p>
+                <p className="text-xs text-muted-foreground max-w-xs">
+                  The repository is being cloned in the background. The file explorer will unlock automatically when the clone completes.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/50">
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                Checking every 3 seconds
+              </div>
+            </div>
+          )}
+
+          {/* ── Clone failed overlay ── */}
+          {cloneStatus === 'failed' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center px-6">
+              <AlertCircle className="w-10 h-10 text-destructive" />
+              <div className="space-y-1.5">
+                <p className="text-sm font-semibold text-destructive">Clone Failed</p>
+                {cloneError && (
+                  <p className="text-xs text-muted-foreground font-mono max-w-md break-words bg-destructive/10 border border-destructive/20 px-3 py-2 rounded-lg text-left">
+                    {cloneError}
+                  </p>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Delete this project and create a new one, or check that the URL and your SSH keys / credentials are correct.
+              </p>
+            </div>
+          )}
+
           {/* ── Main Content ── */}
-          <div className="flex-1 overflow-hidden">
-            {/* ── Browse mode ── */}
-            {mode === 'browse' && (
-              <PanelGroup direction="horizontal" className="h-full">
-                {/* File Tree */}
-                <Panel defaultSize={22} minSize={14} maxSize={40}>
-                  <div className="h-full flex flex-col border-r border-white/8">
-                    <div className="px-2 py-2 border-b border-white/8 shrink-0">
-                      <div className="relative">
-                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50" />
-                        <input
-                          type="text"
-                          placeholder="Search files…"
-                          value={search}
-                          onChange={e => setSearch(e.target.value)}
-                          className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md bg-white/5 border border-white/8 text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary/40 transition-colors"
-                        />
+          {(cloneStatus !== 'cloning' && cloneStatus !== 'failed') && (
+            <div className="flex-1 overflow-hidden">
+              {/* ── Browse mode ── */}
+              {mode === 'browse' && (
+                <PanelGroup direction="horizontal" className="h-full">
+                  {/* File Tree */}
+                  <Panel defaultSize={22} minSize={14} maxSize={40}>
+                    <div className="h-full flex flex-col border-r border-white/8">
+                      <div className="px-2 py-2 border-b border-white/8 shrink-0">
+                        <div className="relative">
+                          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/50" />
+                          <input
+                            type="text"
+                            placeholder="Search files…"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                            className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md bg-white/5 border border-white/8 text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary/40 transition-colors"
+                          />
+                        </div>
                       </div>
-                    </div>
 
                     <div className="flex-1 overflow-y-auto py-1 scrollbar-thin">
                       {treeLoading && (
@@ -998,6 +1115,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
               <DiffViewer result={diffResult} loading={diffLoading} error={diffError} />
             )}
           </div>
+          )}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
