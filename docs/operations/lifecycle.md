@@ -20,15 +20,12 @@ cd flume
 go build -o flume cmd/flume/main.go
 sudo cp ./flume /usr/local/bin/flume
 
-# 3. Define the Environment Matrix
-cp .env.example .env
-
-# 4. Boot the Ecosystem
-flume start 
+# 3. Boot the Ecosystem
+flume start
 ```
 
 > [!NOTE]
-> During a cold boot, Flume dynamically spawns highly secure Unseal Keys and Root Tokens natively for the OpenBao KMS instance. These keys are violently and automatically injected into your local `.env`. Ensure your `.env` is never committed to Git.
+> During a cold boot, Flume automatically provisions the OpenBao KMS instance and stores Unseal Keys and Root Tokens in OpenBao itself. All LLM provider settings and secrets are configured via **Settings → LLM** in the dashboard after first boot — no manual `.env` editing is required.
 
 ## 2. Update & Synchronization (Day 2)
 
@@ -54,4 +51,4 @@ flume destroy
 > [!CAUTION]
 > The `flume destroy` command completely obliterates all Docker bounds (`docker compose down -v`), violently cleansing cached OpenBao and Elasticsearch volumes. Any state not backed up will be permanently lost.
 
-**Persistence Guarantee**: The `flume destroy` execution strictly preserves your local `./.env` mapping, your `projects.json` arrays, and your Dashboard UI layout parameters locally on your hard drive. Future cold boots will perfectly adopt these configurations.
+**Persistence Guarantee**: The `flume destroy` command preserves the `.env` bootstrap file (infrastructure connection strings such as `ES_API_KEY` and `OPENBAO_ADDR`). All LLM configuration, API keys, and agent settings are stored in Elasticsearch and OpenBao — they survive `flume destroy` only if you have snapshot/backup policies configured.

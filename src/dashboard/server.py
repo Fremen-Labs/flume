@@ -2031,9 +2031,9 @@ def load_snapshot():
 
 # ─── Agent process control ────────────────────────────────────────────────────
 
-WORKER_MANAGER_SCRIPT = _SRC_ROOT / 'worker-manager' / 'manager.py'
-WORKER_HANDLERS_SCRIPT = _SRC_ROOT / 'worker-manager' / 'worker_handlers.py'
-WORKER_ENV_FILE = _SRC_ROOT / 'memory' / 'es' / '.env.local'
+# AP-7 resolved: WORKER_ENV_FILE (.env.local) removed — workers receive LLM config exclusively
+# via hydrate_secrets_from_openbao() + sync_llm_env_from_workspace() (OpenBao is the
+# single source of truth for all secrets). No competing local file read on startup.
 
 
 def _find_worker_pids() -> dict:
@@ -2137,14 +2137,10 @@ def agents_start() -> dict:
     pids = _find_worker_pids()
     started = []
 
-    # Build env from the worker env file
+    # AP-7: .env.local env overlay removed — workers receive secrets exclusively
+    # from OpenBao (via hydrate_secrets_from_openbao) and the inherited process env
+    # already populated by apply_runtime_config() at dashboard startup.
     env = dict(os.environ)
-    if WORKER_ENV_FILE.exists():
-        for line in WORKER_ENV_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                k, _, v = line.partition('=')
-                env[k.strip()] = v.strip()
 
     # AP-6: log files removed — worker stderr goes to subprocess.DEVNULL (stdout/stderr only, 12-factor)
     manager_err = subprocess.DEVNULL
