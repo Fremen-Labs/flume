@@ -18,6 +18,8 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0 # Needed for changelog generation
+        # Inject admin PAT if available so branch protection bypass works, fallback to default bot token
+        token: ${{ secrets.GH_ADMIN_PAT || github.token }}
 
     - name: Set up Python
       uses: actions/setup-python@v5

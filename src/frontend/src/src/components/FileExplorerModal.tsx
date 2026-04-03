@@ -584,6 +584,43 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
   };
 
   // ── Fetch branches on open ───────────────────────────────────────────────────
+  // The branches endpoint now returns cloneStatus inline when gitAvailable=false,
+  // so we can start the polling loop immediately without a separate /clone-status
+  // preflight round-trip (closes the Browse Code empty-state race condition).
+  const _startClonePolling = useCallback(() => {
+    if (clonePollingRef.current != null) return; // Already polling
+    clonePollingRef.current = setInterval(async () => {
+      const s = await fetchCloneStatus();
+      if (!s) return;
+      setCloneStatus(s.clone_status);
+      setCloneError(s.clone_error);
+      if (s.clone_status === 'cloned') {
+        stopClonePolling();
+        setBranches([]);
+        setBranch('');
+        setNoGitMessage(null);
+        setBranchesFetchError('');
+        fetch(`/api/repos/${encodeURIComponent(projectId)}/branches`)
+          .then(r2 => r2.json())
+          .then((d2: { default?: string; branches?: string[]; gitAvailable?: boolean; message?: string }) => {
+            if (d2.gitAvailable === false) {
+              setNoGitMessage(d2.message || 'Repository not available.');
+              return;
+            }
+            const list = d2.branches ?? [];
+            setBranches(list);
+            setBranch(d2.default ?? '');
+            const second = list.find(b => b !== (d2.default ?? ''));
+            setCompareBranch(second ?? d2.default ?? '');
+          })
+          .catch(() => setBranchesFetchError('Failed to load branches after clone'));
+      } else if (s.clone_status === 'failed') {
+        stopClonePolling();
+      }
+    }, 3000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   useEffect(() => {
     if (!open || !projectId) return;
     setBranches([]);
@@ -599,50 +636,39 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           gitAvailable?: boolean;
           message?: string;
           error?: string;
+          /** Inline clone state — set by server when gitAvailable=false */
+          cloneStatus?: string;
+          cloneError?: string | null;
         };
         if (!r.ok) {
           throw new Error(data.error || `Failed to load repository (${r.status})`);
         }
         if (data.gitAvailable === false) {
-          // Check if it's still cloning — if so, start the polling loop.
-          const status = await fetchCloneStatus();
-          if (status?.clone_status === 'cloning') {
+          // Server now embeds clone state inline — no extra request needed.
+          const cs = data.cloneStatus;
+          if (cs === 'cloning') {
             setCloneStatus('cloning');
             setCloneError(null);
-            // Poll every 3 seconds until done.
-            clonePollingRef.current = setInterval(async () => {
-              const s = await fetchCloneStatus();
-              if (!s) return;
-              setCloneStatus(s.clone_status);
-              setCloneError(s.clone_error);
-              if (s.clone_status === 'cloned') {
-                stopClonePolling();
-                // Repo is ready — re-trigger branches fetch.
-                setBranches([]);
-                setBranch('');
-                setNoGitMessage(null);
-                setBranchesFetchError('');
-                fetch(`/api/repos/${encodeURIComponent(projectId)}/branches`)
-                  .then(r2 => r2.json())
-                  .then((d2: { default?: string; branches?: string[]; gitAvailable?: boolean; message?: string }) => {
-                    if (d2.gitAvailable === false) {
-                      setNoGitMessage(d2.message || 'Repository not available.');
-                      return;
-                    }
-                    const list = d2.branches ?? [];
-                    setBranches(list);
-                    setBranch(d2.default ?? '');
-                    const second = list.find(b => b !== (d2.default ?? ''));
-                    setCompareBranch(second ?? d2.default ?? '');
-                  })
-                  .catch(() => setBranchesFetchError('Failed to load branches after clone'));
-              } else if (s.clone_status === 'failed') {
-                stopClonePolling();
-              }
-            }, 3000);
-          } else if (status?.clone_status === 'failed') {
+            _startClonePolling();
+          } else if (cs === 'failed') {
             setCloneStatus('failed');
-            setCloneError(status.clone_error);
+            setCloneError(data.cloneError ?? null);
+          } else if (!cs) {
+            // Older server without inline state — fall back to preflight call.
+            const status = await fetchCloneStatus();
+            if (status?.clone_status === 'cloning') {
+              setCloneStatus('cloning');
+              setCloneError(null);
+              _startClonePolling();
+            } else if (status?.clone_status === 'failed') {
+              setCloneStatus('failed');
+              setCloneError(status.clone_error);
+            } else {
+              setNoGitMessage(
+                data.message ||
+                  'This project is not a Git repository. Add one by creating the project with a clone URL or run git init in the project folder.',
+              );
+            }
           } else {
             setNoGitMessage(
               data.message ||
@@ -661,7 +687,8 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
       .catch((e: unknown) => {
         setBranchesFetchError(e instanceof Error ? e.message : 'Failed to load branches');
       });
-  }, [open, projectId]);
+  }, [open, projectId, _startClonePolling]);
+
 
   // ── Load tree when branch changes (browse mode) ──────────────────────────────
   useEffect(() => {
