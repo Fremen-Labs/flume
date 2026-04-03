@@ -2850,7 +2850,13 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
     # ── Embed credentials — OpenBao-first, no env-file dependency ───────────
     # PATs are stored in OpenBao KV (secret/data/flume/ado_tokens/{id}) and
     # retrieved via the ado/github token stores. The raw URL is never logged.
-    clone_url = repo_url  # URL passed to git clone — may have creds embedded
+    #
+    # ALWAYS strip userinfo (username@) from the URL before passing to git.
+    # If no PAT is found, git receives a clean https://host/repo URL and fails
+    # immediately with a 128 auth error. Without this, git sees the username
+    # portion, tries to prompt for a password interactively, and dies with
+    # "No such device or address" inside the non-TTY container environment.
+    clone_url = strip_credentials(repo_url) if _is_remote_url(repo_url) else repo_url
     if _is_remote_url(repo_url):
         repo_type = detect_repo_type(repo_url)
         pat: str = ""
@@ -2859,15 +2865,15 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                 raw_pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
                 # Reject the ES placeholder — the real token lives in OpenBao KV.
                 # If OpenBao is unavailable the placeholder leaks through; treat
-                # it as "no credentials" so git clone fails fast with an auth
-                # error rather than hanging on a bogus token.
+                # it as "no credentials" so git clone fails fast with a clean
+                # auth error rather than using a bogus token.
                 if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
                     pat = raw_pat
                 elif raw_pat:
                     logger.warning(json.dumps({
                         "event": "ado_pat_placeholder_detected",
                         "project_id": new_id,
-                        "hint": "OpenBao KV lookup for FLUME_ADO_{id} returned placeholder. Check OpenBao connectivity and that the ADO credential was saved while OpenBao was reachable.",
+                        "hint": "OpenBao KV lookup for FLUME_ADO_{id} returned placeholder. Re-save your ADO credential in Settings → Repositories while Flume is fully running.",
                     }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
@@ -2884,7 +2890,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     logger.warning(json.dumps({
                         "event": "gh_pat_placeholder_detected",
                         "project_id": new_id,
-                        "hint": "OpenBao KV lookup returned placeholder. Check OpenBao connectivity.",
+                        "hint": "OpenBao KV lookup returned placeholder. Re-save your GitHub credential in Settings → Repositories.",
                     }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
@@ -2893,7 +2899,8 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     "error": str(_cred_err)[:200],
                 }))
         if pat:
-            clone_url = _rewrite_url(strip_credentials(repo_url), pat)
+            # Embed PAT into the already-stripped URL.
+            clone_url = _rewrite_url(clone_url, pat)
             logger.info(json.dumps({
                 "event": "project_clone_credentials_embedded",
                 "project_id": new_id,
