@@ -215,6 +215,24 @@ export default function SettingsPage() {
   const [restartInfo, setRestartInfo] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
 
+  // Must be declared before any early return to satisfy React's Rules of Hooks.
+  const [userPerspective, setUserPerspective] = useState<string>(() => {
+    try {
+      return localStorage.getItem('fremen-user-perspective') ?? 'standard';
+    } catch {
+      return 'standard';
+    }
+  });
+
+  const onPerspectiveChange = (v: string) => {
+    setUserPerspective(v);
+    try {
+      localStorage.setItem('fremen-user-perspective', v);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const saveMutation = useMutation({
     mutationFn: saveLlmSettings,
     onSuccess: (data) => {
@@ -522,23 +540,6 @@ export default function SettingsPage() {
       </div>
     );
   }
-
-  const [userPerspective, setUserPerspective] = useState<string>(() => {
-    try {
-      return localStorage.getItem('fremen-user-perspective') ?? 'standard';
-    } catch {
-      return 'standard';
-    }
-  });
-
-  const onPerspectiveChange = (v: string) => {
-    setUserPerspective(v);
-    try {
-      localStorage.setItem('fremen-user-perspective', v);
-    } catch {
-      /* ignore */
-    }
-  };
 
   return (
     <div className="p-6 lg:p-8 max-w-[800px] mx-auto space-y-8">

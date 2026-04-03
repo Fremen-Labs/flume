@@ -2689,115 +2689,110 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
         })
         return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
-# ---------------------------------------------------------------------------
-# Project clone helpers
-# ---------------------------------------------------------------------------
+def _is_remote_url(url: str) -> bool:
+    """Return True when `url` looks like an HTTPS or SSH git URL."""
+    if not url:
+        return False
+    lower = url.strip().lower()
+    return (
+        lower.startswith('https://')
+        or lower.startswith('http://')
+        or lower.startswith('git@')
+        or lower.startswith('ssh://')
+        or lower.startswith('git://')
+    )
 
-def _clone_project_sync(project_id: str, repo_url: str, repo_type: str, project_name: str) -> None:
+
+def _update_project_registry_field(project_id: str, **fields) -> None:
+    """Thread-safe update of one or more fields on a project registry entry."""
+    registry = load_projects_registry()
+    for p in registry:
+        if p.get('id') == project_id:
+            p.update(fields)
+            break
+    save_projects_registry(registry)
+
+
+async def _clone_and_setup_project(
+    http_client: httpx.AsyncClient,
+    project_id: str,
+    project_name: str,
+    repo_url: str,
+    dest_path: Path,
+) -> None:
     """
-    Clone a remote repository into /workspace/repos/<sanitized_name>.
-    Updates the flume-projects ES document with localPath + cloneStatus.
-    Runs in a background thread (spawned from the FastAPI BackgroundTasks queue).
+    Background task: clone a remote git repository into dest_path, then
+    update the projects registry with the result and kick off AST ingestion.
     """
-    from utils.git_credentials import embed_credentials, strip_credentials  # noqa
-
-    safe_name = re.sub(r"[^\w\-]", "_", project_name).strip("_") or project_id
-    dest = WORKSPACE_ROOT / "repos" / safe_name
-
-    # Mark cloning in progress
-    _upsert_project({"id": project_id, "cloneStatus": "cloning"})
+    logger.info(json.dumps({
+        "event": "project_clone_start",
+        "project_id": project_id,
+        "repo_url": repo_url,
+        "dest": str(dest_path),
+    }))
 
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # If a previous partial clone exists, remove it
-        if dest.exists() and not (dest / ".git").exists():
-            import shutil
-            shutil.rmtree(dest, ignore_errors=True)
-
-        if dest.exists() and (dest / ".git").exists():
-            logger.info({"event": "clone_already_exists", "project": project_id, "path": str(dest)})
-        else:
-            auth_url = embed_credentials(repo_url, repo_type)
-
-            # Build env for the clone subprocess.
-            # For SSH remotes, use GIT_SSH_COMMAND if already set by container startup
-            # (which writes known_hosts to /tmp/flume_ssh and sets the env var).
-            # If not set (e.g. native/local mode), build it from the host key directly.
-            clone_env = os.environ.copy()
-            if repo_type == "ssh" and not clone_env.get("GIT_SSH_COMMAND"):
-                # Resolve key: prefer /tmp/flume_ssh copies (writable), fall back to /root/.ssh
-                ssh_key = ""
-                for candidate in (
-                    "/tmp/flume_ssh/id_rsa",
-                    "/tmp/flume_ssh/id_ed25519",
-                    os.path.expanduser("~/.ssh/id_rsa"),
-                    os.path.expanduser("~/.ssh/id_ed25519"),
-                ):
-                    if os.path.exists(candidate):
-                        ssh_key = candidate
-                        break
-                known_hosts = (
-                    "/tmp/flume_ssh/known_hosts"
-                    if os.path.exists("/tmp/flume_ssh/known_hosts")
-                    else os.path.expanduser("~/.ssh/known_hosts")
-                )
-                key_part = f"-i {ssh_key} " if ssh_key else ""
-                clone_env["GIT_SSH_COMMAND"] = (
-                    f"ssh {key_part}"
-                    f"-o UserKnownHostsFile={known_hosts} "
-                    "-o StrictHostKeyChecking=accept-new "
-                    "-o BatchMode=yes "
-                    "-o ConnectTimeout=15"
-                )
-
-            result = subprocess.run(
-                ["git", "clone", "--depth=1", auth_url, str(dest)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=clone_env,
+        # If the directory already exists and is a git repo, skip cloning.
+        if (dest_path / '.git').exists():
+            logger.info(json.dumps({
+                "event": "project_clone_skip",
+                "project_id": project_id,
+                "reason": "already_cloned",
+            }))
+            _update_project_registry_field(
+                project_id,
+                path=str(dest_path),
+                clone_status='cloned',
+                clone_error=None,
             )
-            if result.returncode != 0:
-                err = (result.stderr or result.stdout or "").strip()[:500]
-                clean_err = strip_credentials(err)
-                if repo_type == "ssh" and any(k in clean_err for k in ("Permission denied", "Could not read", "Host key")):
-                    clean_err += (
-                        "\n\nSSH clone failed. Ensure your SSH private key (~/.ssh/id_rsa or "
-                        "~/.ssh/id_ed25519) is present on the host and its public key is registered "
-                        "with your git provider. Override the SSH directory with FLUME_SSH_DIR."
-                    )
-                _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": clean_err})
-                logger.error({"event": "clone_failed", "project": project_id, "error": clean_err})
-                return
+            await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
+            return
 
-        local_path = str(dest)
-        _upsert_project({
-            "id": project_id,
-            "localPath": local_path,
-            "cloneStatus": "ready",
-            "cloneError": None,
-        })
-        logger.info({"event": "clone_success", "project": project_id, "path": local_path})
-
-        # Trigger AST ingest now that we have a real local path
-        # Run synchronously here (already in a background thread)
-        import asyncio
-        loop = asyncio.new_event_loop()
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'clone', '--', repo_url, str(dest_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            async def _run():
-                async with httpx.AsyncClient() as client:
-                    await _deterministic_ast_ingest(client, local_path, project_id, project_name)
-            loop.run_until_complete(_run())
-        finally:
-            loop.close()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError('git clone timed out after 300 seconds')
 
-    except subprocess.TimeoutExpired:
-        _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": "git clone timed out after 120s"})
-        logger.error({"event": "clone_timeout", "project": project_id})
-    except Exception as e:
-        _upsert_project({"id": project_id, "cloneStatus": "failed", "cloneError": str(e)[:500]})
-        logger.error({"event": "clone_error", "project": project_id, "error": str(e)})
+        if proc.returncode != 0:
+            err_msg = stderr.decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f'git clone exited {proc.returncode}: {err_msg[:400]}')
+
+        logger.info(json.dumps({
+            "event": "project_clone_success",
+            "project_id": project_id,
+            "dest": str(dest_path),
+        }))
+
+        _update_project_registry_field(
+            project_id,
+            path=str(dest_path),
+            clone_status='cloned',
+            clone_error=None,
+        )
+
+        # Best-effort AST ingestion after a successful clone.
+        await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
+
+    except Exception as exc:
+        err_str = str(exc)[:500]
+        logger.error(json.dumps({
+            "event": "project_clone_failure",
+            "project_id": project_id,
+            "error": err_str,
+        }))
+        _update_project_registry_field(
+            project_id,
+            clone_status='failed',
+            clone_error=err_str,
+        )
 
 
 @app.post("/api/projects")
@@ -2808,62 +2803,81 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
     if not name:
         return JSONResponse(status_code=400, content={"error": "Project name is required."})
 
-    new_id = f"proj-{uuid.uuid4().hex[:8]}"
     repo_url = (payload.get("repoUrl") or "").strip()
-    repo_type = detect_repo_type(repo_url)
+    local_path_raw = (payload.get("localPath") or "").strip()
+
+    new_id = f"proj-{uuid.uuid4().hex[:8]}"
+
+    # ── Determine where this project lives on disk ───────────────────────────
+    if _is_remote_url(repo_url):
+        # Will be cloned into WORKSPACE_ROOT/{new_id}
+        dest_path = WORKSPACE_ROOT / new_id
+        clone_status = 'cloning'
+        resolved_path = str(dest_path)
+    elif local_path_raw:
+        # User pointed at an existing directory on the local filesystem.
+        dest_path = Path(local_path_raw).expanduser().resolve()
+        clone_status = 'local'
+        resolved_path = str(dest_path)
+    else:
+        # No URL / path — just a named project with no repo yet.
+        dest_path = WORKSPACE_ROOT / new_id
+        clone_status = 'no_repo'
+        resolved_path = str(dest_path)
 
     entry = {
         "id": new_id,
         "name": name,
         "repoUrl": repo_url,
-        "repoType": repo_type,
-        "cloneStatus": "local" if repo_type == "local" else "pending",
-        "localPath": repo_url if repo_type == "local" else None,
-        "cloneError": None,
+        "path": resolved_path,
+        "clone_status": clone_status,
+        "clone_error": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
         "gitflow": {"autoPrOnApprove": True, "defaultBranch": None},
     }
 
-    _upsert_project(entry)
+    registry = load_projects_registry()
+    registry.append(entry)
+    save_projects_registry(registry)
 
-    if repo_type == "local":
-        # Local path — verify it exists, then run AST ingest directly
-        local_path = repo_url
-        http_client = request.app.state.http_client
-        background_tasks.add_task(_deterministic_ast_ingest, http_client, local_path, new_id, name)
-    else:
-        # Remote URI — clone asynchronously, AST ingest runs after clone completes
+    http_client = request.app.state.http_client
+
+    if _is_remote_url(repo_url):
+        # Clone in the background — client can poll /api/projects/{id}/clone-status
         background_tasks.add_task(
-            lambda: __import__("threading").Thread(
-                target=_clone_project_sync,
-                args=(new_id, repo_url, repo_type, name),
-                daemon=True,
-            ).start()
+            _clone_and_setup_project,
+            http_client, new_id, name, repo_url, dest_path,
+        )
+    elif local_path_raw and dest_path.is_dir():
+        # Local path already exists — just trigger AST ingestion.
+        background_tasks.add_task(
+            _deterministic_ast_ingest, http_client, resolved_path, new_id, name,
         )
 
-    return {"success": True, "projectId": new_id, "message": "Project registered. Clone initiated in background."}
-
-@app.post("/api/projects/{project_id}/delete")
-def api_delete_project(project_id: str):
-    _delete_project_from_es(project_id)
-    return {"success": True, "message": "Project removed"}
-
+    return {"success": True, "projectId": new_id, "project": entry, "message": "Project created."}
 
 @app.get("/api/projects/{project_id}/clone-status")
 def api_project_clone_status(project_id: str):
-    """Poll endpoint so the UI can track clone progress."""
-    try:
-        res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{project_id}")
-        src = res.get("_source") or {}
-        return {
-            "cloneStatus": src.get("cloneStatus", "unknown"),
-            "localPath": src.get("localPath"),
-            "cloneError": src.get("cloneError"),
-        }
-    except Exception as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    """Lightweight polling endpoint — returns the clone_status of a project."""
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get('id') == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
+    return {
+        'projectId': project_id,
+        'clone_status': proj.get('clone_status', 'unknown'),
+        'clone_error': proj.get('clone_error'),
+        'path': proj.get('path'),
+        'is_git': (Path(proj.get('path', '')) / '.git').exists() if proj.get('path') else False,
+    }
 
+
+@app.post("/api/projects/{project_id}/delete")
+def api_delete_project(project_id: str):
+    registry = load_projects_registry()
+    filtered = [p for p in registry if p.get("id") != project_id]
+    save_projects_registry(filtered)
+    return {"success": True, "projectId": project_id, "message": "Project removed."}
 
 @app.get("/api/tasks/{task_id}/history")
 def api_task_history(task_id: str):
@@ -3060,11 +3074,233 @@ async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(ge
         raise HTTPException(status_code=500, detail={'error': error_message, 'correlation_id': correlation_id})
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
-    return []
+    """Return git branches for a project. Looks up the project in the registry
+    and reads branches from its local git repo (cloned or initialised)."""
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get("id") == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
-@app.post("/api/repos/{project_id}/branches/delete")
-def api_repo_branches_delete(project_id: str, payload: dict):
-    return {"success": True}
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    if not (repo_path / ".git").exists():
+        # Not a git repo — return a friendly flag so the UI shows the right message.
+        return {
+            "gitAvailable": False,
+            "branches": [],
+            "message": (
+                "This project is not a Git repository. "
+                "Add one by creating the project with a clone URL or run \"git init\" in the project folder."
+            ),
+        }
+
+    try:
+        raw = subprocess.check_output(
+            ["git", "-C", str(repo_path), "branch", "-a", "--format=%(refname:short)"],
+            stderr=subprocess.DEVNULL, timeout=10,
+        ).decode(errors="replace")
+        all_branches = [b.strip() for b in raw.splitlines() if b.strip()]
+        # De-duplicate remote/local branches and strip "origin/" prefix
+        seen: set = set()
+        branches: list = []
+        for b in all_branches:
+            name = b.removeprefix("origin/") if b.startswith("origin/") else b
+            if name and name != "HEAD" and name not in seen:
+                seen.add(name)
+                branches.append(name)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
+
+    # Resolve default branch
+    default = resolve_default_branch(
+        repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
+    )
+    return {"gitAvailable": True, "branches": branches, "default": default}
+
+
+@app.get("/api/repos/{project_id}/tree")
+def api_repo_tree(project_id: str, branch: str = ""):
+    """Return a flat list of all git-tracked files/dirs for a given branch."""
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get("id") == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    if not (repo_path / ".git").exists():
+        return JSONResponse(status_code=400, content={"error": "Not a git repository"})
+
+    if not branch:
+        branch = resolve_default_branch(
+            repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
+        )
+
+    try:
+        raw = subprocess.check_output(
+            ["git", "-C", str(repo_path), "ls-tree", "-r", "--long", "--full-tree", branch],
+            stderr=subprocess.DEVNULL, timeout=30,
+        ).decode(errors="replace")
+    except subprocess.CalledProcessError as exc:
+        return JSONResponse(status_code=400, content={"error": f"Could not read tree for branch '{branch}': {exc}"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"git ls-tree failed: {exc}"})
+
+    entries = []
+    for line in raw.splitlines():
+        # Format: <mode> <type> <object>\t<size>\t<file>
+        # e.g.   100644 blob abc123\t  456\tsrc/foo.py
+        if not line.strip():
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        meta, size_and_path = parts[0], parts[1] if len(parts) == 2 else parts[1]
+        meta_parts = meta.split()
+        if len(meta_parts) < 3:
+            continue
+        obj_type = meta_parts[1]  # "blob" or "tree"
+        # size is the second tab-separated token only for ls-tree --long
+        if len(parts) == 3:
+            size = parts[1].strip()
+            file_path = parts[2].strip()
+        else:
+            size = "-"
+            file_path = parts[1].strip()
+        entries.append({"path": file_path, "type": "blob" if obj_type == "blob" else "tree", "size": size})
+
+    # Also include intermediate directory entries inferred from paths
+    dirs_seen: set = set()
+    dir_entries = []
+    for e in entries:
+        parts_path = e["path"].split("/")
+        for depth in range(1, len(parts_path)):
+            dir_path = "/".join(parts_path[:depth])
+            if dir_path not in dirs_seen:
+                dirs_seen.add(dir_path)
+                dir_entries.append({"path": dir_path, "type": "tree", "size": "-"})
+
+    return {"branch": branch, "entries": entries + dir_entries}
+
+
+@app.get("/api/repos/{project_id}/file")
+def api_repo_file(project_id: str, path: str = "", branch: str = ""):
+    """Return the content of a single file from the git tree."""
+    if not path:
+        return JSONResponse(status_code=400, content={"error": "path is required"})
+
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get("id") == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    if not (repo_path / ".git").exists():
+        return JSONResponse(status_code=400, content={"error": "Not a git repository"})
+
+    if not branch:
+        branch = resolve_default_branch(
+            repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
+        )
+
+    # Sanitise path — prevent directory traversal
+    clean_path = path.lstrip("/")
+    if ".." in clean_path.split("/"):
+        return JSONResponse(status_code=400, content={"error": "Invalid path"})
+
+    try:
+        content_bytes = subprocess.check_output(
+            ["git", "-C", str(repo_path), "show", f"{branch}:{clean_path}"],
+            stderr=subprocess.DEVNULL, timeout=15,
+        )
+    except subprocess.CalledProcessError:
+        return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"git show failed: {exc}"})
+
+    # Detect binary by sniffing for null bytes in the first 8KB
+    sample = content_bytes[:8192]
+    is_binary = b"\x00" in sample
+    if is_binary:
+        return {"binary": True, "content": None, "size": len(content_bytes)}
+
+    return {
+        "binary": False,
+        "content": content_bytes.decode("utf-8", errors="replace"),
+        "size": len(content_bytes),
+    }
+
+
+@app.get("/api/repos/{project_id}/diff")
+def api_repo_diff(project_id: str, base: str = "", head: str = ""):
+    """Return a unified diff between two branches for a project."""
+    if not base or not head:
+        return JSONResponse(status_code=400, content={"error": "base and head branch parameters are required"})
+
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get("id") == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
+
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    if not (repo_path / ".git").exists():
+        return JSONResponse(status_code=400, content={"error": "Not a git repository"})
+
+    if base == head:
+        return {"base": base, "head": head, "files": [], "diff": "", "truncated": False, "identical": True}
+
+    MAX_DIFF_LINES = 3000
+    ref = f"{base}...{head}"
+
+    # Best-effort fetch
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "origin", "--quiet"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+    files = []
+    try:
+        stat_raw = subprocess.check_output(
+            ["git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref],
+            stderr=subprocess.DEVNULL, timeout=15,
+        ).decode(errors="replace")
+        for line in stat_raw.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) != 2:
+                continue
+            path_part = parts[0].strip()
+            change_part = parts[1].strip()
+            if not path_part or path_part.startswith("changed"):
+                continue
+            ins = sum(1 for c in change_part if c == "+")
+            dels = sum(1 for c in change_part if c == "-")
+            files.append({"path": path_part, "insertions": ins, "deletions": dels, "status": "modified"})
+    except Exception:
+        pass
+
+    diff_text = ""
+    truncated = False
+    try:
+        raw_diff = subprocess.check_output(
+            ["git", "-C", str(repo_path), "diff", ref],
+            stderr=subprocess.DEVNULL, timeout=30,
+        ).decode(errors="replace")
+        diff_lines = raw_diff.splitlines()
+        if len(diff_lines) > MAX_DIFF_LINES:
+            diff_text = "\n".join(diff_lines[:MAX_DIFF_LINES])
+            truncated = True
+        else:
+            diff_text = raw_diff
+    except Exception:
+        pass
+
+    identical = not diff_text.strip() and not files
+    return {
+        "base": base, "head": head,
+        "files": files, "diff": diff_text,
+        "truncated": truncated, "identical": identical,
+    }
 
 @app.get("/api/codex-app-server/status")
 def api_codex_status():
@@ -3087,7 +3323,7 @@ def api_settings_llm_update(payload: dict):
     ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
-        return {"success": True, "message": "Saved"}
+        return {"ok": True, "restartRequired": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.put("/api/settings/llm/credentials")
