@@ -18,6 +18,14 @@
 
 The Flume V3 ecosystem is managed entirely by a singular, high-performance Go CLI (`flume`). This executable provides a pristine, zero-dependency interface to your terminal while cleanly orchestrating a containerized matrix (Elasticsearch, OpenBao, Python Workers) protecting your absolute host OS entirely.
 
+### ✨ V3.2 Feature Highlights
+- **10+ Native CLI Mappings:** Deeply configure, execute RAG tasks, monitor statuses, and pull container logs directly through the `flume` terminal executable securely.
+- **Remote Git Integration:** The Dashboard natively clones any remote `https://` or `ssh://` repository asynchronously without breaking boundaries.
+- **Mission Control Kill Switch:** Immediate Docker Swarm termination routes explicitly block LLM budget-bleed spirals securely.
+- **Exo Auto-Discovery:** Instant localized integration bridging into decentralized Macbook GPU grids locally.
+- **Kubernetes-Grade State Storage:** Elastic & OpenBao mounts natively mapped avoiding brittle orchestration faults. 
+- **The ReleaseFlow Matrix:** Full CI/CD pipelines deploying multi-architecture binaries and analyzing CVEs natively on merge.
+
 ## ⚡ Quick Start (Time-to-Value)
 
 > **Docker Desktop or OrbStack is mandatory.** The Go CLI only orchestrates containers—zero host pollution.

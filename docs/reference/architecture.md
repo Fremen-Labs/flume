@@ -20,12 +20,11 @@ The Go orchestrator effectively eliminates bash script brittleness. It is mathem
 
 Inside the Docker Network Bridge operates the execution backend natively communicating across internal IPs cleanly isolated from your browser.
 
+## Persistence Paradigm & Kubernetes-Grade Storage
+
+The architecture guarantees resilient, cloud-native storage patterns even when running natively on a local host.
+
 - **Elasticsearch (State DB & AST RAG)**: Flume does not use PostgreSQL. Instead, all projects, prompts, user configuration hashes, worker memory nodes, and Elastro RAG graphs natively map deeply into scalable Elastic indexes locally. 
 - **OpenBao (KMS Layer)**: The orchestration matrix never stores API keys in plaintext anywhere but your absolute execution bounds.
-- **Python Workers & Dashboard**: The FastAPI server manages the UI `localhost:8765`, utilizing strictly containerized Python instances.
-
-## Persistence Paradigm
-
-Because the execution block is entirely Dockerized, volumes are completely destructible. 
-
-However, your `projects.json` structure, the generated AST node map caches, and your original `.env` map explicitly persist on your **local machine disk space**. 
+- **Kubernetes-Grade State Storage**: Resolving the brittle orchestration of the past, both Elasticsearch and OpenBao are now natively backed by robust, idempotent local persistent volumes. The `OPENBAO_TOKEN` and root initialization maps securely mount directly into local nodes, ensuring that Unseal Keys naturally persist and auto-recover organically across hard system `reboot` and `docker compose down` teardowns.
+- **Python Workers & Dashboard**: The FastAPI server manages the UI `localhost:8765`, utilizing strictly containerized Python instances targeting the host workspace strictly securely. 
