@@ -731,4 +731,15 @@
     transform: translateY(-4px);
     box-shadow: 0 20px 40px var(--glass-card-shadow);
   }
+
+  /* ─── PROGRESS PULSE (clone indicator) ─── */
+  @keyframes progressPulse {
+    0%, 100% { width: 40%; opacity: 0.7; }
+    50% { width: 75%; opacity: 1; }
+  }
+
+  /* ─── TRANSITION ALL GLOW ─── */
+  .transition-all-glow {
+    transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease, opacity 0.3s ease;
+  }
 }

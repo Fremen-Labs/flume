@@ -522,7 +522,7 @@ interface FileExplorerModalProps {
 
 type ModalMode = 'browse' | 'compare';
 
-type CloneStatus = 'cloning' | 'cloned' | 'failed' | 'local' | 'no_repo' | 'unknown';
+type CloneStatus = 'cloning' | 'pending' | 'cloned' | 'failed' | 'local' | 'no_repo' | 'unknown';
 
 interface CloneStatusResponse {
   clone_status: CloneStatus;
@@ -646,7 +646,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
         if (data.gitAvailable === false) {
           // Server now embeds clone state inline — no extra request needed.
           const cs = data.cloneStatus;
-          if (cs === 'cloning') {
+          if (cs === 'cloning' || cs === 'pending') {
             setCloneStatus('cloning');
             setCloneError(null);
             _startClonePolling();
@@ -656,7 +656,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           } else if (!cs) {
             // Older server without inline state — fall back to preflight call.
             const status = await fetchCloneStatus();
-            if (status?.clone_status === 'cloning') {
+            if (status?.clone_status === 'cloning' || status?.clone_status === 'pending') {
               setCloneStatus('cloning');
               setCloneError(null);
               _startClonePolling();
@@ -935,7 +935,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           )}
 
           {/* ── Clone progress overlay ── */}
-          {cloneStatus === 'cloning' && (
+          {(cloneStatus === 'cloning') && (
             <div className="flex-1 flex flex-col items-center justify-center gap-5 text-center px-6">
               <div className="relative">
                 <div className="w-16 h-16 rounded-full border-2 border-primary/20 flex items-center justify-center">
