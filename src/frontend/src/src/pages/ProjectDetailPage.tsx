@@ -5,7 +5,7 @@ import {
   ArrowLeft, ChevronRight, ChevronDown, FolderOpen,
   GitBranch, GitCommit, GitPullRequest, Loader2, AlertCircle,
   ExternalLink, Play, Square, RefreshCw, Plus, Unlink,
-  CheckSquare, Trash2, Archive, X as XIcon,
+  CheckSquare, Trash2, Archive, X as XIcon, Sparkles, Code2,
 } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useAgentStatus, useAgentControls } from '@/hooks/useAgentStatus';
@@ -628,9 +628,9 @@ export default function ProjectDetailPage() {
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
         <button
           onClick={() => navigate('/projects')}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground mb-4 transition-colors"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground mb-4 transition-colors group"
         >
-          <ArrowLeft className="w-3.5 h-3.5" /> Back to Projects
+          <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" /> Back to Projects
         </button>
 
         <div className="glass-card p-5">
@@ -639,43 +639,48 @@ export default function ProjectDetailPage() {
               {/* Title row */}
               <div className="flex items-center gap-3 flex-wrap mb-1">
                 <h1 className="text-xl font-bold tracking-tight text-foreground">{project!.name}</h1>
-                <button
-                  onClick={() => setExplorerOpen(true)}
-                  className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-lg bg-sky-500/15 border border-sky-500/30 text-sky-400 hover:bg-sky-500/25 hover:border-sky-500/50 transition-all font-medium"
-                >
-                  <FolderOpen className="w-3.5 h-3.5" />
-                  Browse Code
-                </button>
               </div>
 
               {/* Git info */}
               <GitInfoStrip projectId={projectId} />
 
               {project!.repoUrl && (
-                <p className="text-[10px] text-muted-foreground/40 mt-1 truncate">{project!.repoUrl}</p>
+                <p className="text-[10px] text-muted-foreground/40 mt-1.5 font-mono truncate">
+                  {project!.repoUrl.replace(/^https?:\/\/[^@]*@/, 'https://')}
+                </p>
               )}
             </div>
 
-            {/* Right side: agent controls + intake button */}
+            {/* Right side: actions */}
             <div className="flex flex-col items-end gap-3 shrink-0">
               <AgentControls />
-              <button
-                onClick={() => setIntakeOpen(true)}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary/15 border border-primary/20 text-primary text-sm font-medium hover:bg-primary/25 transition-all"
-              >
-                <Plus className="w-4 h-4" />
-                New Work
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setExplorerOpen(true)}
+                  className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-lg bg-sky-500/10 border border-sky-500/20 text-sky-400 hover:bg-sky-500/20 hover:border-sky-500/40 transition-all font-medium"
+                >
+                  <Code2 className="w-3.5 h-3.5" />
+                  Browse Code
+                </button>
+                <LocalBranchesDialog projectId={projectId} currentBranch={currentBranch} />
+                <button
+                  onClick={() => setIntakeOpen(true)}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-md shadow-primary/20"
+                >
+                  <Plus className="w-4 h-4" />
+                  New Work
+                </button>
+              </div>
               <button
                 onClick={() => {
                   setDeleteProjectError(null);
                   setConfirmDeleteProject(true);
                 }}
                 disabled={deletingProject}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-destructive/15 border border-destructive/20 text-destructive text-sm font-medium hover:bg-destructive/25 transition-all disabled:opacity-50"
+                className="flex items-center gap-1.5 text-[10px] px-2.5 py-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all disabled:opacity-50 border border-transparent hover:border-destructive/20"
                 title="Delete the entire project (repo directory + related ES records)"
               >
-                <Trash2 className="w-4 h-4" />
+                <Trash2 className="w-3 h-3" />
                 Delete Project
               </button>
             </div>
@@ -693,7 +698,7 @@ export default function ProjectDetailPage() {
             </DialogDescription>
           </DialogHeader>
           {deleteProjectError && (
-            <div className="mt-3 text-[12px] text-destructive">
+            <div className="mt-3 text-[12px] text-destructive p-2 bg-destructive/5 rounded border border-destructive/20">
               {deleteProjectError}
             </div>
           )}
@@ -708,33 +713,30 @@ export default function ProjectDetailPage() {
             <button
               onClick={() => deleteProject()}
               disabled={deletingProject}
-              className="px-3 py-2 rounded-lg bg-destructive/20 border border-destructive/30 text-destructive text-sm font-medium hover:bg-destructive/25 transition-colors disabled:opacity-50"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-destructive/20 border border-destructive/30 text-destructive text-sm font-medium hover:bg-destructive/25 transition-colors disabled:opacity-50"
             >
-              {deletingProject ? 'Deleting...' : 'Confirm Delete'}
+              {deletingProject && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {deletingProject ? 'Deleting…' : 'Confirm Delete'}
             </button>
           </div>
         </DialogContent>
       </Dialog>
 
       {/* ── Stats ── */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         {[
-          { label: 'Running', value: running, cls: 'text-primary' },
-          { label: 'Planned', value: planned, cls: 'text-muted-foreground' },
-          { label: 'Done', value: done, cls: 'text-success' },
-          { label: 'Blocked', value: blocked, cls: 'text-destructive' },
-          { label: 'Agents', value: activeAgents, cls: 'text-foreground' },
+          { label: 'Running', value: running, cls: 'text-primary', pulse: running > 0 },
+          { label: 'Planned', value: planned, cls: 'text-sky-400' },
+          { label: 'Done', value: done, cls: 'text-emerald-400' },
+          { label: 'Blocked', value: blocked, cls: blocked > 0 ? 'text-destructive' : 'text-muted-foreground/40' },
+          { label: 'Agents', value: activeAgents, cls: activeAgents > 0 ? 'text-amber-400' : 'text-muted-foreground/40' },
         ].map(s => (
-          <div key={s.label} className="glass-card p-4 text-center">
-            <div className={`text-xl font-bold ${s.cls}`}>{s.value}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">{s.label}</div>
+          <div key={s.label} className="glass-card p-4 text-center relative overflow-hidden">
+            {s.pulse && <div className="absolute inset-0 bg-primary/5 animate-pulse" />}
+            <div className={`text-2xl font-bold tabular-nums relative ${s.cls}`}>{s.value}</div>
+            <div className="text-[10px] text-muted-foreground/60 mt-0.5 uppercase tracking-wide relative">{s.label}</div>
           </div>
         ))}
-      </div>
-
-      {/* ── Branch management ── */}
-      <div className="flex items-center justify-end">
-        <LocalBranchesDialog projectId={projectId} currentBranch={currentBranch} />
       </div>
 
       {/* ── Work hierarchy + task detail ── */}
@@ -766,15 +768,31 @@ export default function ProjectDetailPage() {
             </div>
           </div>
           {projectTasks.length === 0 ? (
-            <div className="glass-card p-10 text-center">
-              <Unlink className="w-8 h-8 mx-auto mb-3 opacity-20" />
-              <p className="text-sm text-muted-foreground mb-3">No tasks yet for this project.</p>
-              <button
-                onClick={() => setIntakeOpen(true)}
-                className="flex items-center gap-1.5 mx-auto text-xs px-4 py-2 rounded-lg bg-primary/15 border border-primary/20 text-primary hover:bg-primary/25 transition-all"
-              >
-                <Plus className="w-3.5 h-3.5" /> Plan New Work
-              </button>
+            <div className="glass-card p-10 text-center relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-sky-500/5 pointer-events-none" />
+              <div className="relative">
+                <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
+                  <Sparkles className="w-7 h-7 text-primary/60" />
+                </div>
+                <h3 className="text-sm font-semibold text-foreground mb-1.5">Ready for work</h3>
+                <p className="text-xs text-muted-foreground max-w-xs mx-auto mb-5">
+                  Describe what you want built — Flume will break it into a structured hierarchy of epics, features, and tasks for AI agents to deliver.
+                </p>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => setIntakeOpen(true)}
+                    className="flex items-center gap-1.5 text-xs px-4 py-2 rounded-lg bg-primary text-primary-foreground font-semibold hover:bg-primary/90 transition-all shadow-md shadow-primary/20"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Plan New Work
+                  </button>
+                  <button
+                    onClick={() => setExplorerOpen(true)}
+                    className="flex items-center gap-1.5 text-xs px-4 py-2 rounded-lg bg-sky-500/10 border border-sky-500/20 text-sky-400 hover:bg-sky-500/20 transition-all font-medium"
+                  >
+                    <Code2 className="w-3.5 h-3.5" /> Browse Code
+                  </button>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="space-y-2">
