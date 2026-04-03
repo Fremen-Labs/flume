@@ -3009,8 +3009,35 @@ def api_project_clone_status(project_id: str):
 @app.post("/api/projects/{project_id}/delete")
 def api_delete_project(project_id: str):
     registry = load_projects_registry()
-    filtered = [p for p in registry if p.get("id") != project_id]
-    save_projects_registry(filtered)
+    project_found = any(p.get("id") == project_id for p in registry)
+
+    if not project_found:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Project '{project_id}' not found"},
+        )
+
+    # Hard-delete the document from ES with ?refresh=wait_for so the next
+    # snapshot poll no longer returns it.  The old code only called
+    # save_projects_registry(filtered) which upserts surviving docs but never
+    # issues a DELETE, leaving the removed project in the index and causing
+    # it to reappear on the very next /api/snapshot call.
+    try:
+        _es_projects_request(
+            f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
+            method="DELETE",
+        )
+        logger.info(json.dumps({
+            "event": "project_deleted",
+            "project_id": project_id,
+        }))
+    except Exception as exc:
+        logger.warning(json.dumps({
+            "event": "project_delete_es_error",
+            "project_id": project_id,
+            "error": str(exc)[:200],
+        }))
+
     return {"success": True, "projectId": project_id, "message": "Project removed."}
 
 @app.get("/api/tasks/{task_id}/history")
