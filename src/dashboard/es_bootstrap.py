@@ -20,6 +20,7 @@ REQUIRED_INDICES = [
     "flume-tasks",
     "flume-workers",
     "flume-counters",  # AP-1: replaces sequence_counters.json — atomic monotonic IDs
+    "flume-config",   # AP-8: replaces agent_models.json — per-role LLM model overrides
     "agent-task-records",
     "agent-security-audits",
     "agent-checkpoints",

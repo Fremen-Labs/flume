@@ -149,17 +149,9 @@ def _call_ollama(
                 val = val.strip('`').replace('json\n', '', 1).strip()
             return json.loads(val)
         except json.JSONDecodeError as de:
-            from pathlib import Path
-            Path('workspace/logs/gemini_payload.txt').write_text(content + "\n\n", encoding='utf-8')
+            logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
             raise de
     except Exception as e:
-        import traceback
-        import sys
-        try:
-            with open("/tmp/flume_trap.log", "a") as f:
-                f.write(f"LLM TRAP:\n{traceback.format_exc()}\n")
-        except:
-            pass
         logger.error(f"LLM Execution Trap: {e}", exc_info=True)
         raise e
 

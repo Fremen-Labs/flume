@@ -35,7 +35,11 @@ try:
 except ImportError:
     pass
 
+# AP-8: AGENT_MODELS_FILE (local disk) replaced by ES flume-config document.
+# Kept as an optional file-based fallback during rollout so existing
+# agent_models.json files are still honoured until explicitly migrated.
 AGENT_MODELS_FILE = resolve_safe_workspace() / 'worker-manager' / 'agent_models.json'
+AGENT_MODELS_ES_ID = 'agent-models'  # document ID in flume-config index
 
 ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -65,18 +69,11 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# AP-6: file_path logger arg removed — get_logger writes to stdout only.
 import logging
 from utils.logger import get_logger
+_manager_logger = get_logger('worker-manager')
 
-try:
-    _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
-    from utils.workspace import resolve_safe_workspace
-    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
-    _log_dir.mkdir(parents=True, exist_ok=True)
-    _manager_logger = get_logger('worker-manager', file_path=str(_log_dir / f'manager_{NODE_ID}.log'))
-except Exception as e:
-    _manager_logger = get_logger('worker-manager')
-    _manager_logger.error(f"Failed to provision JSON Rotating File Handler on manager node: {e}")
 
 def log(msg, **kwargs):
     if kwargs:
@@ -116,12 +113,33 @@ def start_health_server():
 
 
 def load_agent_role_defs():
-    """Merge per-role overrides from agent_models.json with LLM_* / EXECUTION_HOST env."""
+    """Merge per-role overrides from the ES flume-config document (AP-8) or
+    the legacy agent_models.json file with LLM_* / EXECUTION_HOST env."""
     default_model = (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
     default_host = (os.environ.get('EXECUTION_HOST') or 'localhost').strip() or 'localhost'
     default_prov = os.environ.get('LLM_PROVIDER', 'ollama').strip().lower()
     cfg = {}
-    if AGENT_MODELS_FILE.is_file():
+    # 1. Try ES flume-config first (K8s-native, replica-safe)
+    try:
+        es_url = ES_URL
+        api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'ApiKey {api_key}'
+        req = urllib.request.Request(
+            f'{es_url}/flume-config/_doc/{AGENT_MODELS_ES_ID}',
+            headers=headers, method='GET',
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
+            raw = resp.read().decode()
+            doc = json.loads(raw) if raw else {}
+            src = doc.get('_source') or {}
+            if src.get('roles'):
+                cfg = src['roles']
+    except Exception:
+        pass  # fall through to file-based fallback
+    # 2. File-based fallback (dev / migration period)
+    if not cfg and AGENT_MODELS_FILE.is_file():
         try:
             data = json.loads(AGENT_MODELS_FILE.read_text(encoding='utf-8'))
             cfg = (data.get('roles') or {}) if isinstance(data, dict) else {}
@@ -648,8 +666,8 @@ def sync_worker_processes(state):
         if proc is None or proc.poll() is not None:
             active_worker_processes[name] = subprocess.Popen(
                 [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=open(f'workspace/logs/worker_stderr_{name}.log', 'a'),
-                stderr=subprocess.STDOUT
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
             )
             log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
 def main():

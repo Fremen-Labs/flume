@@ -421,14 +421,9 @@ def _sync_llm_runtime_env():
 
 
 def _planner_debug_log(event: str, **fields):
-    try:
-        path = WORKSPACE_ROOT / 'planner-debug.log'
-        row = {'ts': _utcnow_iso(), 'event': event, **fields}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('a', encoding='utf-8') as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + '\n')
-    except Exception:
-        pass
+    # AP-6: planner-debug.log removed — structured debug output goes to stdout now.
+    # Filter to DEBUG level so these are silent in default INFO deployments.
+    logger.debug(json.dumps({'event': event, **fields}, ensure_ascii=False))
 
 
 def _planner_runtime_config() -> dict:
@@ -2151,17 +2146,10 @@ def agents_start() -> dict:
                 k, _, v = line.partition('=')
                 env[k.strip()] = v.strip()
 
-    try:
-        log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
-        log_dir = Path(log_dir_env).resolve() if log_dir_env else WORKSPACE_ROOT / 'logs'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        manager_err = open(log_dir / 'manager_stderr.log', 'a')
-        handlers_err = open(log_dir / 'handlers_stderr.log', 'a')
-    except PermissionError as e:
-        logger.error(json.dumps({"event": "log_directory_creation_failure", "error": str(e), "status": "fallback"}))
-        manager_err = subprocess.DEVNULL
-        handlers_err = subprocess.DEVNULL
-    
+    # AP-6: log files removed — worker stderr goes to subprocess.DEVNULL (stdout/stderr only, 12-factor)
+    manager_err = subprocess.DEVNULL
+    handlers_err = subprocess.DEVNULL
+
     python_bin = sys.executable
 
     if not pids['manager']:
@@ -2184,11 +2172,6 @@ def agents_start() -> dict:
             start_new_session=True,
         )
         started.append({'role': 'handlers', 'pid': proc.pid})
-
-    if manager_err is not subprocess.DEVNULL:
-        manager_err.close()
-    if handlers_err is not subprocess.DEVNULL:
-        handlers_err.close()
 
     return {'ok': True, 'started': started, 'already_running': not started}
 

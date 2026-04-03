@@ -36,7 +36,7 @@ FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
 REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
 PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
-PROJECTS_REGISTRY = _WS / 'projects.json'
+# AP-3 cleanup: PROJECTS_REGISTRY (projects.json) removed — gitflow config read from ES flume-projects index.
 
 ctx = None
 if not ES_VERIFY_TLS:
@@ -49,17 +49,10 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# AP-6: file_path logger arg removed — get_logger writes to stdout only.
 from utils.logger import get_logger
+_handlers_logger = get_logger('worker-handlers')
 
-try:
-    _log_dir_env = os.environ.get('FLUME_LOG_DIR', '').strip()
-    from utils.workspace import resolve_safe_workspace
-    _log_dir = Path(_log_dir_env).resolve() if _log_dir_env else resolve_safe_workspace() / 'logs'
-    _log_dir.mkdir(parents=True, exist_ok=True)
-    _handlers_logger = get_logger('worker-handlers', file_path=str(_log_dir / f'worker_handlers_{NODE_ID}.log'))
-except Exception as e:
-    _handlers_logger = get_logger('worker-handlers')
-    _handlers_logger.error(f"Failed to provision JSON Rotating File Handler on handlers node: {e}")
 
 def log(msg, **kwargs):
     if kwargs:
@@ -301,22 +294,16 @@ def resolve_default_branch(repo_path, override=None):
 
 
 def load_project_gitflow(repo_id):
-    """Load gitflow config for a project."""
-    if not repo_id or not PROJECTS_REGISTRY.exists():
-        return {'autoPrOnApprove': True, 'defaultBranch': None}
+    """Load gitflow config for a project from the ES flume-projects index."""
+    default = {'autoPrOnApprove': True, 'defaultBranch': None}
+    if not repo_id:
+        return default
     try:
-        raw = json.loads(PROJECTS_REGISTRY.read_text())
-        entries = raw.get('projects') if isinstance(raw, dict) else raw
-        if not isinstance(entries, list):
-            return {'autoPrOnApprove': True, 'defaultBranch': None}
-        for p in entries:
-            if not isinstance(p, dict):
-                continue
-            if p.get('id') == repo_id:
-                return p.get('gitflow') or {'autoPrOnApprove': True, 'defaultBranch': None}
+        res = _es_projects_request_worker(f"/flume-projects/_doc/{repo_id}")
+        src = res.get('_source') or {}
+        return src.get('gitflow') or default
     except Exception:
-        pass
-    return {'autoPrOnApprove': True, 'defaultBranch': None}
+        return default
 
 
 def create_pr_for_task(task, reviewer_model):
