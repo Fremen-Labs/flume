@@ -2863,17 +2863,13 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         if repo_type == "ado":
             try:
                 raw_pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
-                # Reject the ES placeholder — the real token lives in OpenBao KV.
-                # If OpenBao is unavailable the placeholder leaks through; treat
-                # it as "no credentials" so git clone fails fast with a clean
-                # auth error rather than using a bogus token.
                 if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
                     pat = raw_pat
                 elif raw_pat:
                     logger.warning(json.dumps({
                         "event": "ado_pat_placeholder_detected",
                         "project_id": new_id,
-                        "hint": "OpenBao KV lookup for FLUME_ADO_{id} returned placeholder. Re-save your ADO credential in Settings → Repositories while Flume is fully running.",
+                        "hint": "OpenBao KV lookup returned placeholder. Falling back to ADO_PERSONAL_ACCESS_TOKEN env var.",
                     }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
@@ -2881,6 +2877,21 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     "project_id": new_id,
                     "error": str(_cred_err)[:200],
                 }))
+            # ── Env-var fallback (set by flume start / docker-compose) ──────────
+            # OpenBao is the canonical source, but on a fresh --purge the KV is
+            # empty. ADO_PERSONAL_ACCESS_TOKEN / ADO_TOKEN are passed into the
+            # container via docker-compose and provide a reliable bootstrap path.
+            if not pat:
+                pat = (
+                    os.environ.get("ADO_PERSONAL_ACCESS_TOKEN", "").strip()
+                    or os.environ.get("ADO_TOKEN", "").strip()
+                )
+                if pat:
+                    logger.info(json.dumps({
+                        "event": "ado_pat_from_env",
+                        "project_id": new_id,
+                        "hint": "PAT sourced from ADO_PERSONAL_ACCESS_TOKEN env var (OpenBao fallback).",
+                    }))
         elif repo_type == "github":
             try:
                 raw_pat = github_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
@@ -2890,7 +2901,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     logger.warning(json.dumps({
                         "event": "gh_pat_placeholder_detected",
                         "project_id": new_id,
-                        "hint": "OpenBao KV lookup returned placeholder. Re-save your GitHub credential in Settings → Repositories.",
+                        "hint": "OpenBao KV lookup returned placeholder. Falling back to GITHUB_TOKEN env var.",
                     }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
@@ -2898,6 +2909,15 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     "project_id": new_id,
                     "error": str(_cred_err)[:200],
                 }))
+            # ── Env-var fallback ─────────────────────────────────────────────────
+            if not pat:
+                pat = os.environ.get("GITHUB_TOKEN", "").strip()
+                if pat:
+                    logger.info(json.dumps({
+                        "event": "gh_pat_from_env",
+                        "project_id": new_id,
+                        "hint": "PAT sourced from GITHUB_TOKEN env var (OpenBao fallback).",
+                    }))
         if pat:
             # Embed PAT into the already-stripped URL.
             clone_url = _rewrite_url(clone_url, pat)
