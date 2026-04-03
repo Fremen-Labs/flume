@@ -2677,10 +2677,16 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
                         "hint": "elastro>=0.2.0 is now in pyproject.toml — rebuild the Docker image to enable AST ingestion.",
                     }))
                     return
+            # Pass ES connection env vars so elastro targets the cluster
+            # instead of defaulting to localhost:9200 inside the container.
+            elastro_env = os.environ.copy()
+            elastro_env.setdefault("ELASTICSEARCH_URL", os.environ.get("ES_URL", "http://elasticsearch:9200"))
+            elastro_env.setdefault("ELASTICSEARCH_API_KEY", os.environ.get("ES_API_KEY", ""))
             proc = await asyncio.create_subprocess_exec(
                 str(elastro_bin), "rag", "ingest", local_path, "-i", elastro_index,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=elastro_env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
             if proc.returncode != 0:
@@ -3253,6 +3259,32 @@ def api_repo_branches(project_id: str):
             if name and name != "HEAD" and name not in seen:
                 seen.add(name)
                 branches.append(name)
+    except subprocess.CalledProcessError as exc:
+        # Exit 128 during an active clone: git creates .git at start but refs
+        # are not populated until the clone completes. Re-read registry and
+        # return the inline cloneStatus so the frontend keeps polling.
+        if exc.returncode == 128:
+            registry2 = load_projects_registry()
+            proj2 = next((p for p in registry2 if p.get("id") == project_id), proj)
+            cs2 = proj2.get("clone_status", "cloning")
+            clone_error2 = proj2.get("clone_error")
+            if cs2 in ("cloning", "pending"):
+                return {
+                    "gitAvailable": False,
+                    "cloneStatus": cs2,
+                    "cloneError": None,
+                    "branches": [],
+                    "message": "Repository is being cloned in the background\u2026",
+                }
+            if cs2 == "failed":
+                return {
+                    "gitAvailable": False,
+                    "cloneStatus": "failed",
+                    "cloneError": clone_error2,
+                    "branches": [],
+                    "message": f"Clone failed: {clone_error2 or 'Unknown error'}",
+                }
+        return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
