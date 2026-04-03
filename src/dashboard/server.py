@@ -279,6 +279,28 @@ def _upsert_project(entry: dict):
     )
 
 
+def _update_project_registry_field(project_id: str, **fields) -> None:
+    """Atomic field-level update on a single project document in ES.
+
+    Uses ?refresh=wait_for so the clone_status change is visible to the
+    /clone-status polling endpoint on the very next request — prevents the
+    UI being stuck on 'cloning' when the clone has already failed or succeeded.
+    """
+    registry = load_projects_registry()
+    for p in registry:
+        if p.get('id') == project_id:
+            p.update(fields)
+            # Write back only the updated document with immediate consistency.
+            p["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _es_projects_request(
+                f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
+                p,
+                method="PUT",
+            )
+            return
+    logger.warning(json.dumps({"event": "update_field_project_not_found", "project_id": project_id}))
+
+
 def _delete_project_from_es(project_id: str):
     """Delete a project document from ES."""
     try:
@@ -2708,14 +2730,6 @@ def _is_remote_url(url: str) -> bool:
     )
 
 
-def _update_project_registry_field(project_id: str, **fields) -> None:
-    """Thread-safe update of one or more fields on a project registry entry."""
-    registry = load_projects_registry()
-    for p in registry:
-        if p.get('id') == project_id:
-            p.update(fields)
-            break
-    save_projects_registry(registry)
 
 
 async def _clone_and_setup_project(
@@ -2842,7 +2856,19 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         pat: str = ""
         if repo_type == "ado":
             try:
-                pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+                raw_pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+                # Reject the ES placeholder — the real token lives in OpenBao KV.
+                # If OpenBao is unavailable the placeholder leaks through; treat
+                # it as "no credentials" so git clone fails fast with an auth
+                # error rather than hanging on a bogus token.
+                if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
+                    pat = raw_pat
+                elif raw_pat:
+                    logger.warning(json.dumps({
+                        "event": "ado_pat_placeholder_detected",
+                        "project_id": new_id,
+                        "hint": "OpenBao KV lookup for FLUME_ADO_{id} returned placeholder. Check OpenBao connectivity and that the ADO credential was saved while OpenBao was reachable.",
+                    }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
                     "event": "ado_pat_fetch_error",
@@ -2851,7 +2877,15 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                 }))
         elif repo_type == "github":
             try:
-                pat = github_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+                raw_pat = github_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+                if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
+                    pat = raw_pat
+                elif raw_pat:
+                    logger.warning(json.dumps({
+                        "event": "gh_pat_placeholder_detected",
+                        "project_id": new_id,
+                        "hint": "OpenBao KV lookup returned placeholder. Check OpenBao connectivity.",
+                    }))
             except Exception as _cred_err:
                 logger.warning(json.dumps({
                     "event": "gh_pat_fetch_error",
@@ -2884,9 +2918,9 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         "gitflow": {"autoPrOnApprove": True, "defaultBranch": None},
     }
 
-    registry = load_projects_registry()
-    registry.append(entry)
-    save_projects_registry(registry)
+    # Single consistent write with ?refresh=wait_for — prevents the name
+    # disappearing on the next snapshot poll and eliminates the ~5s delay.
+    _upsert_project(entry)
 
     http_client = request.app.state.http_client
 
