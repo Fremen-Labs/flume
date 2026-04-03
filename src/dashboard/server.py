@@ -265,10 +265,15 @@ def save_projects_registry(registry: list):
 
 
 def _upsert_project(entry: dict):
-    """Upsert a single project document to ES."""
+    """Upsert a single project document to ES.
+
+    Uses ?refresh=wait_for so the document is immediately visible to searches
+    (prevents the optimistic cache insert being overwritten by a stale poll
+    before ES finishes indexing — fixes the 'project name disappears' bug).
+    """
     entry["updated_at"] = datetime.now(timezone.utc).isoformat()
     _es_projects_request(
-        f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
+        f"/{PROJECTS_INDEX}/_doc/{entry['id']}?refresh=wait_for",
         entry,
         method="PUT",
     )
@@ -2797,7 +2802,9 @@ async def _clone_and_setup_project(
 
 @app.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
-    from utils.git_credentials import detect_repo_type, embed_credentials  # noqa
+    from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url  # noqa
+    import ado_tokens_store
+    import github_tokens_store
 
     name = (payload.get("name") or "").strip()
     if not name:
@@ -2810,7 +2817,8 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
 
     # ── Determine where this project lives on disk ───────────────────────────
     if _is_remote_url(repo_url):
-        # Will be cloned into WORKSPACE_ROOT/{new_id}
+        # Will be cloned into WORKSPACE_ROOT/<new_id> — shared volume, immediately
+        # visible to all worker nodes without any additional coordination.
         dest_path = WORKSPACE_ROOT / new_id
         clone_status = 'cloning'
         resolved_path = str(dest_path)
@@ -2825,10 +2833,50 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         clone_status = 'no_repo'
         resolved_path = str(dest_path)
 
+    # ── Embed credentials — OpenBao-first, no env-file dependency ───────────
+    # PATs are stored in OpenBao KV (secret/data/flume/ado_tokens/{id}) and
+    # retrieved via the ado/github token stores. The raw URL is never logged.
+    clone_url = repo_url  # URL passed to git clone — may have creds embedded
+    if _is_remote_url(repo_url):
+        repo_type = detect_repo_type(repo_url)
+        pat: str = ""
+        if repo_type == "ado":
+            try:
+                pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+            except Exception as _cred_err:
+                logger.warning(json.dumps({
+                    "event": "ado_pat_fetch_error",
+                    "project_id": new_id,
+                    "error": str(_cred_err)[:200],
+                }))
+        elif repo_type == "github":
+            try:
+                pat = github_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
+            except Exception as _cred_err:
+                logger.warning(json.dumps({
+                    "event": "gh_pat_fetch_error",
+                    "project_id": new_id,
+                    "error": str(_cred_err)[:200],
+                }))
+        if pat:
+            clone_url = _rewrite_url(strip_credentials(repo_url), pat)
+            logger.info(json.dumps({
+                "event": "project_clone_credentials_embedded",
+                "project_id": new_id,
+                "repo_type": repo_type,
+            }))
+        else:
+            logger.warning(json.dumps({
+                "event": "project_clone_no_credentials",
+                "project_id": new_id,
+                "repo_type": repo_type,
+                "hint": "Add credentials via Settings → Repositories before cloning private repos.",
+            }))
+
     entry = {
         "id": new_id,
         "name": name,
-        "repoUrl": repo_url,
+        "repoUrl": repo_url,   # Store original URL (no embedded PAT) in registry
         "path": resolved_path,
         "clone_status": clone_status,
         "clone_error": None,
@@ -2843,10 +2891,11 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
     http_client = request.app.state.http_client
 
     if _is_remote_url(repo_url):
-        # Clone in the background — client can poll /api/projects/{id}/clone-status
+        # Clone in the background — workers consume from the shared /workspace volume.
+        # clone_url has the PAT embedded (if available); stored repo_url does not.
         background_tasks.add_task(
             _clone_and_setup_project,
-            http_client, new_id, name, repo_url, dest_path,
+            http_client, new_id, name, clone_url, dest_path,
         )
     elif local_path_raw and dest_path.is_dir():
         # Local path already exists — just trigger AST ingestion.
@@ -3075,7 +3124,12 @@ async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(ge
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
     """Return git branches for a project. Looks up the project in the registry
-    and reads branches from its local git repo (cloned or initialised)."""
+    and reads branches from its local git repo (cloned or initialised).
+
+    When the repo is not yet available (still cloning or clone failed), the
+    response includes `cloneStatus` so the frontend can start the polling loop
+    without an extra round-trip to /clone-status.
+    """
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get("id") == project_id), None)
     if not proj:
@@ -3083,14 +3137,27 @@ def api_repo_branches(project_id: str):
 
     repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
     if not (repo_path / ".git").exists():
-        # Not a git repo — return a friendly flag so the UI shows the right message.
+        # Surface clone_status inline so the UI can distinguish between
+        # 'still cloning' (start polling), 'failed' (show error), and
+        # 'no_repo' (show the git-init hint). This eliminates a separate
+        # /clone-status preflight round-trip in the FileExplorerModal.
+        cs = proj.get("clone_status", "no_repo")
+        clone_error = proj.get("clone_error")
+        if cs in ("cloning",):
+            message = "Repository is being cloned in the background…"
+        elif cs == "failed":
+            message = f"Clone failed: {clone_error or 'Unknown error'}"
+        else:
+            message = (
+                "This project is not a Git repository. "
+                'Add one by creating the project with a clone URL or run "git init" in the project folder.'
+            )
         return {
             "gitAvailable": False,
+            "cloneStatus": cs,
+            "cloneError": clone_error,
             "branches": [],
-            "message": (
-                "This project is not a Git repository. "
-                "Add one by creating the project with a clone URL or run \"git init\" in the project folder."
-            ),
+            "message": message,
         }
 
     try:
