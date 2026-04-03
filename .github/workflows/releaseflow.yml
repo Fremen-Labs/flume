@@ -87,8 +87,20 @@ jobs:
         # Scan for vulnerabilities
         rflow scan directory --manifest manifests/release-manifest.yaml
         
-        # Generate Release Notes via AI
-        rflow notes generate --version $VERSION --out-external release-notes.md --ai
+        # Generate Release Notes via AI with retries and fallback
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        until rflow notes generate --version $VERSION --out-external release-notes.md --ai; do
+            RETRY_COUNT=$((RETRY_COUNT+1))
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+                echo "Failed to generate AI release notes after $MAX_RETRIES attempts (likely API timeout)."
+                echo "Falling back to standard non-AI release notes."
+                rflow notes generate --version $VERSION --out-external release-notes.md
+                break
+            fi
+            echo "AI generation timeout or error. Retrying in 10 seconds (Attempt $RETRY_COUNT/$MAX_RETRIES)..."
+            sleep 10
+        done
         
     - name: Sync Version
       run: |
