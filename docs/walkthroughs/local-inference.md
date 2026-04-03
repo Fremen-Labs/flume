@@ -10,28 +10,21 @@ Because the Flume ecosystem strictly containerizes its Python AI Workers inside 
 
 To route out to your Mac/Linux bare-metal machine where Exo or Ollama is running, you must configure the LLM endpoints using the `host.docker.internal` DNS bridge.
 
-### Editing `.env`
+### Configuring via the Settings UI
 
-Locate your `./.env` (copied from `.env.example` during installation). 
+All LLM configuration is managed through the **Settings → LLM** panel in the Flume dashboard. No manual file editing is required.
 
-Since both Exo and Ollama conveniently utilize OpenAI-compatible REST shapes, you will configure Flume to think it's talking to OpenAI natively while intercepting the base URLs.
+1. Open the dashboard and navigate to **Settings → LLM**.
+2. Select **Provider**: `Ollama` for local inference or `OpenAI-compatible (custom)` for Exo.
+3. Set the **Route Type** to **Network** and enter `host.docker.internal` as the host with the appropriate port:
+   - **Exo (MLX cluster):** port `52415`
+   - **Ollama:** port `11434`
+4. Set your **Model** (e.g. `qwen2.5-coder`, `llama3.2`, `mixtral`).
+5. Click **Save Settings**.
 
-```bash
-# Set provider exactly to 'openai' so the client shapes the requests correctly
-LLM_PROVIDER=openai
+Flume persists all settings to OpenBao (Vault) and syncs them to worker processes automatically on save — no restart required.
 
-# Optional: Set the local model name (e.g. 'llama3.1', 'mixtral', 'qwen2.5-coder')
-LLM_MODEL=qwen2.5-coder
-
-# Exo Configuration (Host Network Bridge mapping to MLX API)
-LOCAL_EXO_BASE_URL=http://host.docker.internal:52415/v1
-
-# OR: Ollama Configuration (Host mapping to standard API)
-# LOCAL_EXO_BASE_URL=http://host.docker.internal:11434/v1
-```
-
-> [!WARNING]
-> Do NOT set `LOCAL_EXO_BASE_URL=http://127.0.0.1:11434`. Your workers will violently crash with `ConnectionRefused` because they will be probing their own isolated Docker container for an LLM that isn't there!
+Since both Exo and Ollama implement OpenAI-compatible REST endpoints, selecting `OpenAI-compatible (custom)` and pointing the base URL to `http://host.docker.internal:<port>/v1` works for either runtime.
 
 ## 2. Booting the Orchestration
 

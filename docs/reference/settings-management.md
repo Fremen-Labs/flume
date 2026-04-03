@@ -11,8 +11,8 @@ The most explicit requirement for Flume agent intelligence is your connection bl
 - **The "Local Network" Bridge**: When assigning custom OpenWeights parameters, toggle the Route Type to **Network** and manually define your bridge (e.g. `host.docker.internal`). 
 - **OAuth Codex Support**: If you subscribe to ChatGPT endpoints securely, Flume natively detects local `codex app-server` tunnels on port `64132`. This allows zero-API-key execution via `npx @openai/codex app-server`.
 
-> [!WARNING]
-> Storing API Keys safely natively writes payloads to `worker-manager/llm_credentials.json` internally protected by OpenBao encryption blocks. Ensure the Vault is booted!
+> [!NOTE]
+> LLM settings (provider, model, API key) are saved to **OpenBao (Vault)** and synced to all worker processes automatically. No manual `.env` file editing is required. The `.env` file is for infrastructure-level bootstrap config only (Elasticsearch and OpenBao connection details).
 
 ## 2. Repo Credentials (Pats)
 For Flume's autonomous Git Workers to clone, diff, and PR natively, you must inject tokens cleanly. 
