@@ -19,6 +19,7 @@ REQUIRED_INDICES = [
     "flume-projects",
     "flume-tasks",
     "flume-workers",
+    "flume-counters",  # AP-1: replaces sequence_counters.json — atomic monotonic IDs
     "agent-task-records",
     "agent-security-audits",
     "agent-checkpoints",
@@ -183,13 +184,32 @@ PROJECTS_MAPPING = {
     }
 }
 
+# AP-1 — flume-counters: one document per prefix (e.g. 'task', 'epic'), field `value`
+# holds the highest-ever-allocated sequence number. Updated via an atomic ES
+# Painless script (ctx._source.value = Math.max(ctx._source.value, params.v))
+# so concurrent dashboard replicas never produce duplicate IDs.
+COUNTERS_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "prefix":     {"type": "keyword"},
+            "value":      {"type": "long"},
+            "updated_at": {"type": "date"},
+        }
+    },
+}
+
 # Per-index explicit mappings used during initial creation.
 # Only applied when the index does not already exist.
 EXPLICIT_INDEX_MAPPINGS = {
-    "flume-projects":      PROJECTS_MAPPING,
-    "agent-task-records": TASK_RECORDS_MAPPING,
+    "flume-projects":       PROJECTS_MAPPING,
+    "agent-task-records":   TASK_RECORDS_MAPPING,
     "agent-token-telemetry": TOKEN_TELEMETRY_MAPPING,
     "agent-security-audits": SECURITY_AUDIT_MAPPING,
+    "flume-counters":       COUNTERS_MAPPING,
 }
 
 def ensure_es_indices():
