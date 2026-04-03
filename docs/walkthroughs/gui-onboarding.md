@@ -23,9 +23,10 @@ The Flume UI manages distinct "Projects", each bound to an explicitly declared r
 
 1. **Click "New Project"** in the top-left repository switcher.
 2. **Name Your Project**: Assign a highly recognizable name (e.g., *Frontend Registration Flow*). This determines how Flume uniquely isolates the Elastic indexing variables.
-3. **Declare the Path (`repoUrl`)**: Flume requires the **absolute path** to your code natively, or a relative path mapped strictly inside the bound `./workspace` block.
-    > *For Example*: `/workspace/fremenlabs/speed-read-trainer`
-4. **Save**: Upon hitting save, Flume will silently spawn background tasks invoking the **Elastro RAG Grapher** natively. You won't see a loading bar, but the system is indexing your `import/export` AST dependencies natively behind the scenes!
+3. **Declare the Path (`repoUrl`)**: Flume now supports both localized absolute paths AND remote Git URLs natively:
+    - **Local Path**: Provide the absolute host path to your code natively, or a relative path mapped strictly inside the bound `./workspace` block (e.g., `/workspace/fremenlabs/speed-read-trainer`).
+    - **Remote Git URL**: Paste an `https://` or `git@github.com:...` URL. Flume's backend uses a flat-file registry pattern (`load_projects_registry`) to automatically dispatch an asynchronous background task (`_clone_and_setup_project`) to pull the repository directly into your local workspace securely.
+4. **Save & Clone**: Upon hitting save, Flume seamlessly connects to the registry. If you provided a remote URI, a **"Cloning..."** UI indicator will dynamically track the background worker's checkout progress. Afterward, background tasks invoke the **Elastro RAG Grapher** natively to index your `import/export` AST dependencies behind the scenes!
 
 ---
 

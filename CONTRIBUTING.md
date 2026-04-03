@@ -24,6 +24,7 @@ The Flume system runs via FastAPI Python architecture cleanly executing via Uvic
 ### 4. Submitting the PR (The Upload)
 1. Ensure your telemetry array compiles strictly (`go build -o flume cmd/flume/main.go`).
 2. Run `flume doctor` verifying 0 ecosystem regressions locally.
-3. Submit explicit GitHub Pull Requests routing the data natively.
+3. Submit your Pull Request. Our **Automated PR Gate** dynamically parallel-compiles your Go matrix across macOS (Intel/Silicon), Linux, and Windows to verify architectural parity natively before review.
+4. **The ReleaseFlow Matrix**: Upon merge into `main`, the ecosystem automatically synthesizes an SBOM, mathematically evaluates CVE vulnerabilities natively via Trivy, AI-generates semantic release notes from your commit hashes, and deploys cross-compiled production binaries asynchronously via GitHub Releases.
 
 *End of Transmission.*
