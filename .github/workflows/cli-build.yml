@@ -1,0 +1,74 @@
+name: CLI Build Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches:
+      - main
+    paths:
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    name: Build CLI — ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: flume-linux-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: flume-darwin-arm64
+          - goos: darwin
+            goarch: amd64
+            artifact: flume-darwin-amd64
+          - goos: windows
+            goarch: amd64
+            artifact: flume-windows-amd64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./cmd/...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags="-s -w" \
+            -o dist/${{ matrix.artifact }} \
+            ./cmd/flume/main.go
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 7
