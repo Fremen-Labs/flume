@@ -21,6 +21,7 @@ dependencies = [
     "opensearch-py>=2.3.0",
     "tenacity>=8.3.0",
     "ruff",
+    "elastro>=0.2.0",
 ]
 
 [project.optional-dependencies]

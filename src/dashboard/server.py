@@ -2660,8 +2660,25 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
         if not exists:
             logger.info({"event": "ast_ingest_start", "repo": local_path, "project": project_name})
             elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+            # Use the venv binary directly — avoids uv run re-installing elastro
+            # on every call and works reliably inside the non-interactive container.
+            elastro_bin = Path("/opt/venv/bin/elastro")
+            if not elastro_bin.exists():
+                import shutil
+                resolved = shutil.which("elastro")
+                if resolved:
+                    elastro_bin = Path(resolved)
+                else:
+                    logger.warning(json.dumps({
+                        "event": "ast_ingest_skipped",
+                        "repo": local_path,
+                        "project": project_name,
+                        "reason": "elastro_not_installed",
+                        "hint": "elastro>=0.2.0 is now in pyproject.toml — rebuild the Docker image to enable AST ingestion.",
+                    }))
+                    return
             proc = await asyncio.create_subprocess_exec(
-                "uv", "run", "elastro", "rag", "ingest", local_path, "-i", elastro_index,
+                str(elastro_bin), "rag", "ingest", local_path, "-i", elastro_index,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -2669,6 +2686,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             if proc.returncode != 0:
                 raise subprocess.CalledProcessError(proc.returncode, "elastro", stdout, stderr)
             logger.info({"event": "ast_ingest_success", "repo": local_path, "project": project_name})
+
         else:
             logger.info({"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"})
 
