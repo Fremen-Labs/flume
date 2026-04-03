@@ -72,16 +72,17 @@ from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 WORKSPACE_ROOT = resolve_safe_workspace()
 from config import AppConfig, get_settings
 
-WORKER_STATE = WORKSPACE_ROOT / 'worker_state.json'
-SESSIONS_DIR = WORKSPACE_ROOT / 'plan-sessions'
-PROJECTS_REGISTRY = WORKSPACE_ROOT / 'projects.json'
+# AP-2 resolved: WORKER_STATE removed — worker lifecycle state belongs in ES (flume-workers index).
+# AP-9 resolved: SESSIONS_DIR removed — plan sessions already fully migrated to agent-plan-sessions ES index.
+# AP-3 resolved: PROJECTS_REGISTRY removed — projects.json migration is complete; sentinel logic deleted.
 
 LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434')
 LLM_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
 
-# Persists the highest-ever-allocated sequence number for each id prefix so
-# that deleted ES records can never cause an id to be recycled.
-SEQUENCE_COUNTERS_FILE = WORKSPACE_ROOT / 'sequence_counters.json'
+# AP-1: Sequence counters are now stored atomically in the ES `flume-counters` index.
+# One document per prefix (e.g. 'task', 'epic'); field `value` = highest allocated N.
+# See es_counter_increment() and es_counter_hwm() below.
+COUNTERS_INDEX = 'flume-counters'
 
 ctx = None
 if not ES_VERIFY_TLS:
@@ -104,52 +105,73 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
     return entry
 
 
-def load_sequence_counters() -> dict:
-    """Return the persisted high-water-mark counters, e.g. {'task': 12, 'epic': 3}."""
-    if SEQUENCE_COUNTERS_FILE.exists():
-        try:
-            return json.loads(SEQUENCE_COUNTERS_FILE.read_text())
-        except Exception:
-            pass
-    return {}
+def es_counter_hwm(prefix: str) -> int:
+    """
+    Return the stored high-water-mark for *prefix* from the ES flume-counters index.
+    Returns 0 if the document does not yet exist or ES is unreachable.
+    """
+    try:
+        res = _es_counter_request(f'/{COUNTERS_INDEX}/_doc/{prefix}')
+        return int(res.get('_source', {}).get('value', 0))
+    except Exception:
+        return 0
 
 
-def save_sequence_counters(counters: dict):
-    """Atomically persist the high-water-mark counters."""
-    SEQUENCE_COUNTERS_FILE.write_text(json.dumps(counters, indent=2))
+def es_counter_set_hwm(prefix: str, value: int) -> None:
+    """
+    Atomically raise the stored counter for *prefix* to *value* if it is higher.
+    Uses a Painless script so concurrent dashboard replicas are safe.
+    """
+    if value <= 0:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    body = {
+        'scripted_upsert': True,
+        'script': {
+            'source': (
+                'if (ctx._source.containsKey("value")) {'
+                '  ctx._source.value = Math.max(ctx._source.value, (long)params.v);'
+                '} else {'
+                '  ctx._source.value = (long)params.v;'
+                '}'
+                ' ctx._source.updated_at = params.ts;'
+                ' ctx._source.prefix = params.pfx;'
+            ),
+            'lang': 'painless',
+            'params': {'v': value, 'ts': now, 'pfx': prefix},
+        },
+        'upsert': {'prefix': prefix, 'value': value, 'updated_at': now},
+    }
+    try:
+        _es_counter_request(f'/{COUNTERS_INDEX}/_update/{prefix}', body=body, method='POST')
+    except Exception as exc:
+        logger.warning(json.dumps({
+            'event': 'es_counter_set_hwm_failed',
+            'prefix': prefix,
+            'value': value,
+            'error': str(exc),
+        }))
 
 
-def update_sequence_counter(prefix: str, value: int):
-    """Raise the stored counter for `prefix` to `value` if it is higher."""
-    counters = load_sequence_counters()
-    if value > counters.get(prefix, 0):
-        counters[prefix] = value
-        save_sequence_counters(counters)
+def _es_counter_request(path: str, body=None, method: str = 'GET') -> dict:
+    """Thin HTTP helper scoped to the flume-counters ES index."""
+    headers = {'Content-Type': 'application/json'}
+    api_key = os.environ.get('ES_API_KEY', '')
+    if api_key:
+        headers['Authorization'] = f'ApiKey {api_key}'
+    data = json.dumps(body).encode() if body is not None else None
+    if data and method == 'GET':
+        method = 'POST'
+    req = urllib.request.Request(f'{ES_URL}{path}', data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}
+        raise
 
-
-def load_projects_registry() -> list:
-    """Return the list of registered projects. Seeds with Project-Site-IQ if missing."""
-    if not PROJECTS_REGISTRY.exists():
-        PROJECTS_REGISTRY.write_text(json.dumps({"projects": []}, indent=2))
-        return []
-
-    raw = json.loads(PROJECTS_REGISTRY.read_text())
-    # Accept both legacy formats:
-    # - list: [{...}, {...}]
-    # - dict: {"projects": [{...}, {...}]}
-    if isinstance(raw, dict):
-        entries = raw.get('projects') or []
-    else:
-        entries = raw
-
-    if not isinstance(entries, list):
-        return []
-
-    out = []
-    for e in entries:
-        if isinstance(e, dict):
-            out.append(_ensure_gitflow_defaults(e))
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -177,58 +199,6 @@ def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
         if e.code == 404:
             return {}
         raise
-
-
-def _migrate_legacy_projects_json():
-    """
-    One-time migration: if projects.json exists and has content, write each
-    entry to the ES flume-projects index then rename the file to .migrated
-    so this only runs once.
-    """
-    if not PROJECTS_REGISTRY.exists():
-        return
-    migrated_path = PROJECTS_REGISTRY.with_suffix(".json.migrated")
-    if migrated_path.exists():
-        return  # Already migrated
-    try:
-        raw = json.loads(PROJECTS_REGISTRY.read_text())
-        entries = raw.get("projects", []) if isinstance(raw, dict) else raw
-        if not isinstance(entries, list):
-            return
-        for entry in entries:
-            if not isinstance(entry, dict) or not entry.get("id"):
-                continue
-            entry = _ensure_gitflow_defaults(entry)
-            # Detect local path vs remote URL and set cloneStatus
-            from utils.git_credentials import detect_repo_type  # noqa
-            repo_url = entry.get("repoUrl", "")
-            repo_type = detect_repo_type(repo_url)
-            if "cloneStatus" not in entry:
-                if repo_type == "local":
-                    local_path = entry.get("path") or repo_url
-                    entry["localPath"] = local_path
-                    entry["cloneStatus"] = "local"
-                else:
-                    # Check if a clone already landed in WORKSPACE_ROOT
-                    import urllib.parse as _up
-                    basename = os.path.basename(_up.urlparse(repo_url).path).replace(".git", "")
-                    candidate = WORKSPACE_ROOT / "repos" / basename
-                    if candidate.exists() and (candidate / ".git").exists():
-                        entry["localPath"] = str(candidate)
-                        entry["cloneStatus"] = "ready"
-                    else:
-                        entry["cloneStatus"] = "pending"
-            entry["repoType"] = repo_type
-            entry.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
-            _es_projects_request(
-                f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
-                entry,
-                method="PUT",
-            )
-        PROJECTS_REGISTRY.rename(migrated_path)
-        logger.info({"event": "projects_migration", "count": len(entries), "status": "success"})
-    except Exception as e:
-        logger.warning({"event": "projects_migration_error", "error": str(e)})
 
 
 def load_projects_registry() -> list:
@@ -959,7 +929,7 @@ def get_next_id_sequence(prefix: str) -> int:
 
     This guarantees monotonic, never-recycled IDs even when records are hard-deleted.
     """
-    max_n = load_sequence_counters().get(prefix, 0)
+    max_n = es_counter_hwm(prefix)
     try:
         hits = es_search('agent-task-records', {
             'size': 10000,
@@ -1105,15 +1075,11 @@ def commit_plan(repo: str, plan: dict):
                     docs.append(task_doc)
                     prev_task_id = task_id
 
-    # Persist high-water marks so deleted records never cause id recycling.
+    # Persist high-water marks atomically in ES so deleted records never cause id recycling.
     # epic_seq/feat_seq/story_seq/task_seq have already been incremented once
     # beyond the last allocated value, so subtract 1 to get the actual max used.
-    counters = load_sequence_counters()
     for prefix, seq in (('epic', epic_seq), ('feat', feat_seq), ('story', story_seq), ('task', task_seq)):
-        last_used = seq - 1
-        if last_used > counters.get(prefix, 0):
-            counters[prefix] = last_used
-    save_sequence_counters(counters)
+        es_counter_set_hwm(prefix, seq - 1)
 
     results = []
     for d in docs:
@@ -2357,7 +2323,6 @@ async def lifespan(app: FastAPI):
         resolve_safe_workspace()
         
         WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         logger.info(json.dumps({
             "event": "workspace_initialized",
             "path": str(WORKSPACE_ROOT),
@@ -2373,8 +2338,7 @@ async def lifespan(app: FastAPI):
         }))
         raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
-    # Run one-time migration: move projects.json → ES (no-op if already done)
-    _migrate_legacy_projects_json()
+    # AP-3 resolved: _migrate_legacy_projects_json() removed — migration is complete.
 
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
