@@ -581,23 +581,48 @@ def _parse_github_owner_repo(repo_url: str) -> tuple[str, str] | None:
 def _parse_ado_components(repo_url: str) -> tuple[str, str, str] | None:
     """
     Extract (org, project, repo) from an Azure DevOps URL.
-    Handles both dev.azure.com and <org>.visualstudio.com formats.
+
+    Handles all common ADO HTTPS clone URL formats:
+      • https://dev.azure.com/<org>/<project>/_git/<repo>
+      • https://<user>@dev.azure.com/<org>/<project>/_git/<repo>   ← PAT clone URL
+      • https://<org>.visualstudio.com/<project>/_git/<repo>
+      • https://<org>.visualstudio.com/DefaultCollection/<project>/_git/<repo>
     """
     import re
-    # https://dev.azure.com/<org>/<project>/_git/<repo>
+
+    url = repo_url.strip()
+
+    # Normalise: strip trailing .git and trailing slash
+    url = re.sub(r"\.git$", "", url).rstrip("/")
+
+    # Strip embedded username/PAT before the host: https://user@host → https://host
+    # This covers: https://mentat-automation@dev.azure.com/...
+    url = re.sub(r"(https?://)([^@]+@)", r"\1", url)
+
+    # Pattern 1: https://dev.azure.com/<org>/<project>/_git/<repo>
     m = re.match(
         r"https?://dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/?]+)",
-        repo_url.strip(),
+        url,
     )
     if m:
         return m.group(1), m.group(2), m.group(3)
-    # https://<org>.visualstudio.com/<project>/_git/<repo>
+
+    # Pattern 2: https://<org>.visualstudio.com/DefaultCollection/<project>/_git/<repo>
+    m = re.match(
+        r"https?://([^.]+)\.visualstudio\.com/DefaultCollection/([^/]+)/_git/([^/?]+)",
+        url,
+    )
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+
+    # Pattern 3: https://<org>.visualstudio.com/<project>/_git/<repo>
     m = re.match(
         r"https?://([^.]+)\.visualstudio\.com/([^/]+)/_git/([^/?]+)",
-        repo_url.strip(),
+        url,
     )
     if m:
         return m.group(1), m.group(2), m.group(3)
+
     return None
 
 
