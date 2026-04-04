@@ -2707,8 +2707,12 @@ async def _clone_and_setup_project(
     dest_path: Path,
 ) -> None:
     """
-    Background task: clone a remote git repository into dest_path, then
-    update the projects registry with the result and kick off AST ingestion.
+    Background task: clone a remote git repository into dest_path, run AST
+    ingestion, then DELETE the local clone and mark clone_status='indexed'.
+
+    AP-4B: After this function completes the project has no persistent local
+    clone — all browse/diff/branch data is served via the GitHostClient REST
+    API. The local path is only needed for the AST ingest run.
     """
     logger.info(json.dumps({
         "event": "project_clone_start",
@@ -2728,7 +2732,7 @@ async def _clone_and_setup_project(
         #
         # Strategy:
         #  • Complete clone  (.git/HEAD exists AND packed-refs or refs/heads)
-        #    → skip, mark as already cloned
+        #    → skip git clone, proceed directly to AST ingestion
         #  • Partial .git  (HEAD missing OR refs empty)
         #    → wipe dest_path, proceed with clean clone
         #  • Directory exists but no .git
@@ -2750,16 +2754,9 @@ async def _clone_and_setup_project(
                 logger.info(json.dumps({
                     "event": "project_clone_skip",
                     "project_id": project_id,
-                    "reason": "already_cloned",
+                    "reason": "already_cloned_ast_ingest_only",
                 }))
-                _update_project_registry_field(
-                    project_id,
-                    path=str(dest_path),
-                    clone_status='cloned',
-                    clone_error=None,
-                )
-                await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
-                return
+                # Fall through to AST ingestion below
             else:
                 # Partial or broken state — wipe and start fresh.
                 import shutil as _shutil
@@ -2771,36 +2768,55 @@ async def _clone_and_setup_project(
                 }))
                 _shutil.rmtree(dest_path, ignore_errors=True)
 
-        proc = await asyncio.create_subprocess_exec(
-            'git', 'clone', '--', repo_url, str(dest_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        if not dest_path.exists():
+            proc = await asyncio.create_subprocess_exec(
+                'git', 'clone', '--', repo_url, str(dest_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise RuntimeError('git clone timed out after 300 seconds')
+
+            if proc.returncode != 0:
+                err_msg = stderr.decode('utf-8', errors='replace').strip()
+                raise RuntimeError(f'git clone exited {proc.returncode}: {err_msg[:400]}')
+
+            logger.info(json.dumps({
+                "event": "project_clone_success",
+                "project_id": project_id,
+                "dest": str(dest_path),
+            }))
+
+        # ── AST ingestion (inline — local clone available at this point) ─────
+        _update_project_registry_field(
+            project_id,
+            path=str(dest_path),
+            clone_status='indexing',
+            clone_error=None,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError('git clone timed out after 300 seconds')
+        await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
 
-        if proc.returncode != 0:
-            err_msg = stderr.decode('utf-8', errors='replace').strip()
-            raise RuntimeError(f'git clone exited {proc.returncode}: {err_msg[:400]}')
-
+        # ── AP-4B: Delete local clone after ingestion ─────────────────────────
+        # The local clone is no longer needed — browse/diff/branch data is
+        # served via the GitHostClient REST API henceforth.
+        import shutil as _shutil2
+        _shutil2.rmtree(dest_path, ignore_errors=True)
         logger.info(json.dumps({
-            "event": "project_clone_success",
+            "event": "project_clone_deleted_post_ingest",
             "project_id": project_id,
             "dest": str(dest_path),
+            "reason": "AP-4B: ephemeral clone — local path not retained after AST ingest",
         }))
 
         _update_project_registry_field(
             project_id,
-            path=str(dest_path),
-            clone_status='cloned',
+            path=None,           # No persistent local path retained
+            clone_status='indexed',
             clone_error=None,
         )
-
-        # Best-effort AST ingestion after a successful clone.
-        await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
 
     except Exception as exc:
         err_str = str(exc)[:500]
@@ -3016,30 +3032,21 @@ def api_delete_project(project_id: str):
             "error": str(exc)[:200],
         }))
 
-    # Worktree Garbage Collection: clean up the local repository path
-    # to reclaim disk space and prevent stale clone state errors.
+    # AP-4B: Only clean up a persisted local path for 'local' clone_status projects.
+    # Remote repos (clone_status='indexed') have no persistent local path to remove.
     project_doc = next((p for p in registry if p.get("id") == project_id), {})
-    local_path = project_doc.get("path") or str(WORKSPACE_ROOT / project_id)
-    if local_path:
+    local_path = project_doc.get("path")
+    clone_status = project_doc.get("clone_status", "")
+    if local_path and clone_status == "local":
         dest_path = Path(local_path)
-        if dest_path.exists() and dest_path.is_dir() and dest_path.parent == WORKSPACE_ROOT:
-            # We enforce `dest_path.parent == WORKSPACE_ROOT` to safely scope deletion
-            # and avoid inadvertently deleting arbitrary user files if `localPath` is used.
-            try:
-                import shutil
-                shutil.rmtree(dest_path, ignore_errors=True)
-                logger.info(json.dumps({
-                    "event": "project_worktree_pruned",
-                    "project_id": project_id,
-                    "path": str(dest_path)
-                }))
-            except Exception as e:
-                logger.error(json.dumps({
-                    "event": "project_worktree_prune_error",
-                    "project_id": project_id,
-                    "path": str(dest_path),
-                    "error": str(e)
-                }))
+        # Best-effort removal of local repo dir — only for user-supplied local paths.
+        # We don't auto-delete arbitrary user directories; just log the note.
+        logger.info(json.dumps({
+            "event": "project_local_path_note",
+            "project_id": project_id,
+            "path": str(dest_path),
+            "note": "Local path not auto-deleted (user-managed). Remove manually if desired.",
+        }))
 
     return {"success": True, "projectId": project_id, "message": "Project removed."}
 
@@ -3051,8 +3058,11 @@ def api_task_history(task_id: str):
 def api_task_diff(task_id: str):
     """
     Return the git diff for the branch associated with a task.
-    Compares the task branch against origin/<default_branch>.
+    AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
+    Compares task branch against the repo's default branch.
     """
+    from utils.git_host_client import get_git_client, GitHostError  # noqa
+
     try:
         es_id, task = find_task_doc_by_logical_id(task_id)
         if not task:
@@ -3062,24 +3072,45 @@ def api_task_diff(task_id: str):
         if not branch:
             return {"diff": "", "error": "No branch recorded for this task"}
 
-        # Resolve local repo path from the flume-projects index
         repo_id = task.get("repo")
-        local_path = None
+        proj = {}
         if repo_id:
             try:
                 proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
                 proj = proj_res.get("_source") or {}
-                local_path = proj.get("localPath") or task.get("worktree")
             except Exception:
-                local_path = task.get("worktree")
+                pass
 
-        if not local_path or not Path(local_path).exists():
-            return {"diff": "", "error": "Repository not cloned locally yet"}
+        clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
+        repo_url = proj.get("repoUrl") or ""
 
-        # Determine default branch for comparison base
+        # ── Remote repo: GitHostClient REST API ──────────────────────────────
+        if clone_status in ("indexed", "cloned") and _is_remote_url(repo_url):
+            try:
+                client = get_git_client(proj)
+                base = (
+                    proj.get("gitflow", {}).get("defaultBranch")
+                    or client.get_default_branch()
+                )
+                result = client.get_diff(base=base, head=branch)
+                return {
+                    "diff": result.get("diff", ""),
+                    "branch": branch,
+                    "base": base,
+                    "files": result.get("files", []),
+                    "truncated": result.get("truncated", False),
+                }
+            except GitHostError as e:
+                return {"diff": "", "error": str(e)[:300]}
+
+        # ── Local repo: git subprocess (clone_status='local') ────────────────
+        local_path_str = proj.get("path") or task.get("worktree")
+        if not local_path_str or not Path(local_path_str).exists():
+            return {"diff": "", "error": "Repository not available locally; configure a PAT to enable API-based diff."}
+
         try:
             ref_out = subprocess.run(
-                ["git", "-C", local_path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+                ["git", "-C", local_path_str, "symbolic-ref", "refs/remotes/origin/HEAD"],
                 capture_output=True, text=True, timeout=5,
             )
             base = ref_out.stdout.strip().split("/")[-1] if ref_out.returncode == 0 else "main"
@@ -3087,11 +3118,10 @@ def api_task_diff(task_id: str):
             base = "main"
 
         diff_out = subprocess.run(
-            ["git", "-C", local_path, "diff", f"origin/{base}...{branch}"],
+            ["git", "-C", local_path_str, "diff", f"origin/{base}...{branch}"],
             capture_output=True, text=True, timeout=15,
         )
         diff_text = diff_out.stdout if diff_out.returncode == 0 else ""
-        # Cap diff size to prevent huge payloads
         if len(diff_text) > 80_000:
             diff_text = diff_text[:80_000] + "\n\n... [diff truncated at 80k chars] ..."
         return {"diff": diff_text, "branch": branch, "base": f"origin/{base}"}
@@ -3101,6 +3131,38 @@ def api_task_diff(task_id: str):
 
 @app.get("/api/tasks/{task_id}/commits")
 def api_task_commits(task_id: str):
+    from utils.git_host_client import get_git_client, GitHostError  # noqa
+
+    try:
+        _, task = find_task_doc_by_logical_id(task_id)
+        if not task:
+            return []
+
+        branch = task.get("branch")
+        repo_id = task.get("repo")
+        proj = {}
+        if repo_id:
+            try:
+                proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
+                proj = proj_res.get("_source") or {}
+            except Exception:
+                pass
+
+        clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
+        repo_url = proj.get("repoUrl") or ""
+
+        if branch and clone_status in ("indexed", "cloned") and _is_remote_url(repo_url):
+            try:
+                client = get_git_client(proj)
+                base = (
+                    proj.get("gitflow", {}).get("defaultBranch")
+                    or client.get_default_branch()
+                )
+                return client.get_commits(branch=branch, base=base)
+            except GitHostError:
+                pass
+    except Exception:
+        pass
     return []
 
 @app.post("/api/tasks/{task_id}/transition")
@@ -3238,27 +3300,30 @@ async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(ge
         raise HTTPException(status_code=500, detail={'error': error_message, 'correlation_id': correlation_id})
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
-    """Return git branches for a project. Looks up the project in the registry
-    and reads branches from its local git repo (cloned or initialised).
-
-    When the repo is not yet available (still cloning or clone failed), the
-    response includes `cloneStatus` so the frontend can start the polling loop
-    without an extra round-trip to /clone-status.
     """
+    Return git branches for a project.
+
+    AP-4B: For remote repos (clone_status in ['indexed', 'cloned']) this calls
+    the GitHostClient REST API and requires no local clone.
+    For locally-mounted repos (clone_status='local') the original git subprocess
+    path is used.
+
+    When the repo is not yet available (still cloning/indexing), the response
+    includes `cloneStatus` so the frontend can start the polling loop without
+    an extra round-trip to /clone-status.
+    """
+    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostError  # noqa
+
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get("id") == project_id), None)
     if not proj:
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
-
     cs = proj.get("clone_status", "no_repo")
     clone_error = proj.get("clone_error")
 
-    # Do not execute ANY Git subprocesses while the project is actively cloning.
-    # Concurrent Git commands during initial ref setup can cause git clone to
-    # crash with `BUG: initial ref transaction called with existing refs` (exit -6).
-    if cs in ("cloning", "pending"):
+    # In-flight states: clone/ingest still running — send polling hint to UI
+    if cs in ("cloning", "indexing", "pending"):
         return {
             "gitAvailable": False,
             "cloneStatus": cs,
@@ -3267,11 +3332,29 @@ def api_repo_branches(project_id: str):
             "message": "Repository is being cloned in the background\u2026",
         }
 
+    # ── Remote repo path: use GitHostClient REST API (no local clone required) ──
+    repo_url = proj.get("repoUrl") or ""
+    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+        try:
+            client = get_git_client(proj)
+            branches = client.get_branches()
+            default  = client.get_default_branch()
+            return {"gitAvailable": True, "branches": branches, "default": default}
+        except GitHostAuthError as e:
+            return JSONResponse(status_code=401, content={
+                "gitAvailable": False,
+                "error": "No credentials configured. Add a PAT in Settings \u2192 Repositories.",
+                "detail": str(e)[:200],
+            })
+        except GitHostError as e:
+            return JSONResponse(status_code=500, content={"error": str(e)[:300]})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)[:300]})
+
+    # ── Local repo path: original git subprocess (clone_status='local') ─────────
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+
     if not (repo_path / ".git").exists():
-        # Surface clone_status inline so the UI can distinguish between
-        # 'still cloning' (start polling), 'failed' (show error), and
-        # 'no_repo' (show the git-init hint). This eliminates a separate
-        # /clone-status preflight round-trip in the FileExplorerModal.
         if cs == "failed":
             message = f"Clone failed: {clone_error or 'Unknown error'}"
         else:
@@ -3293,7 +3376,6 @@ def api_repo_branches(project_id: str):
             stderr=subprocess.DEVNULL, timeout=10,
         ).decode(errors="replace")
         all_branches = [b.strip() for b in raw.splitlines() if b.strip()]
-        # De-duplicate remote/local branches and strip "origin/" prefix
         seen: set = set()
         branches: list = []
         for b in all_branches:
@@ -3302,14 +3384,12 @@ def api_repo_branches(project_id: str):
                 seen.add(name)
                 branches.append(name)
     except subprocess.CalledProcessError as exc:
-        # Fallback 128 handler if git fails to read refs for some other reason
         if exc.returncode == 128:
-            return JSONResponse(status_code=500, content={"error": f"git branch exited 128: Repository refs may be corrupt."})
+            return JSONResponse(status_code=500, content={"error": "git branch exited 128: Repository refs may be corrupt."})
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
-    # Resolve default branch
     default = resolve_default_branch(
         repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
     )
@@ -3318,18 +3398,41 @@ def api_repo_branches(project_id: str):
 
 @app.get("/api/repos/{project_id}/tree")
 def api_repo_tree(project_id: str, branch: str = ""):
-    """Return a flat list of all git-tracked files/dirs for a given branch."""
+    """
+    Return a flat list of all git-tracked files/dirs for a given branch.
+    AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
+    """
+    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostError  # noqa
+
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get("id") == project_id), None)
     if not proj:
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
     cs = proj.get("clone_status", "no_repo")
+    repo_url = proj.get("repoUrl") or ""
 
-    if cs in ("cloning", "pending"):
+    if cs in ("cloning", "indexing", "pending"):
         return JSONResponse(status_code=400, content={"error": "Repository is currently being cloned."})
 
+    # ── Remote repo: GitHostClient REST API ──────────────────────────────────
+    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+        try:
+            client = get_git_client(proj)
+            if not branch:
+                branch = client.get_default_branch()
+            entries = client.get_tree(branch=branch)
+            return {"branch": branch, "entries": entries}
+        except GitHostAuthError as e:
+            return JSONResponse(status_code=401, content={
+                "error": "No credentials — add a PAT in Settings \u2192 Repositories.",
+                "detail": str(e)[:200],
+            })
+        except GitHostError as e:
+            return JSONResponse(status_code=500, content={"error": str(e)[:300]})
+
+    # ── Local repo: git subprocess ────────────────────────────────────────────
+    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
@@ -3350,8 +3453,6 @@ def api_repo_tree(project_id: str, branch: str = ""):
 
     entries = []
     for line in raw.splitlines():
-        # Format: <mode> <type> <object>\t<size>\t<file>
-        # e.g.   100644 blob abc123\t  456\tsrc/foo.py
         if not line.strip():
             continue
         parts = line.split("\t", 2)
@@ -3361,8 +3462,7 @@ def api_repo_tree(project_id: str, branch: str = ""):
         meta_parts = meta.split()
         if len(meta_parts) < 3:
             continue
-        obj_type = meta_parts[1]  # "blob" or "tree"
-        # size is the second tab-separated token only for ls-tree --long
+        obj_type = meta_parts[1]
         if len(parts) == 3:
             size = parts[1].strip()
             file_path = parts[2].strip()
@@ -3371,7 +3471,6 @@ def api_repo_tree(project_id: str, branch: str = ""):
             file_path = parts[1].strip()
         entries.append({"path": file_path, "type": "blob" if obj_type == "blob" else "tree", "size": size})
 
-    # Also include intermediate directory entries inferred from paths
     dirs_seen: set = set()
     dir_entries = []
     for e in entries:
@@ -3387,7 +3486,12 @@ def api_repo_tree(project_id: str, branch: str = ""):
 
 @app.get("/api/repos/{project_id}/file")
 def api_repo_file(project_id: str, path: str = "", branch: str = ""):
-    """Return the content of a single file from the git tree."""
+    """
+    Return the content of a single file from the git tree.
+    AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
+    """
+    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostNotFoundError, GitHostError  # noqa
+
     if not path:
         return JSONResponse(status_code=400, content={"error": "path is required"})
 
@@ -3396,6 +3500,33 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     if not proj:
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
+    cs = proj.get("clone_status", "no_repo")
+    repo_url = proj.get("repoUrl") or ""
+
+    # Sanitise path — prevent directory traversal
+    clean_path = path.lstrip("/")
+    if ".." in clean_path.split("/"):
+        return JSONResponse(status_code=400, content={"error": "Invalid path"})
+
+    # ── Remote repo: GitHostClient REST API ──────────────────────────────────
+    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+        try:
+            client = get_git_client(proj)
+            if not branch:
+                branch = client.get_default_branch()
+            content_bytes = client.get_file(clean_path, branch=branch)
+            return _make_file_response(content_bytes, clean_path)
+        except GitHostAuthError as e:
+            return JSONResponse(status_code=401, content={
+                "error": "No credentials — add a PAT in Settings \u2192 Repositories.",
+                "detail": str(e)[:200],
+            })
+        except GitHostNotFoundError:
+            return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
+        except GitHostError as e:
+            return JSONResponse(status_code=500, content={"error": str(e)[:300]})
+
+    # ── Local repo: git subprocess ────────────────────────────────────────────
     repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
@@ -3404,11 +3535,6 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
         branch = resolve_default_branch(
             repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
         )
-
-    # Sanitise path — prevent directory traversal
-    clean_path = path.lstrip("/")
-    if ".." in clean_path.split("/"):
-        return JSONResponse(status_code=400, content={"error": "Invalid path"})
 
     try:
         content_bytes = subprocess.check_output(
@@ -3426,6 +3552,19 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     if is_binary:
         return {"binary": True, "content": None, "size": len(content_bytes)}
 
+    return {
+        "binary": False,
+        "content": content_bytes.decode("utf-8", errors="replace"),
+        "size": len(content_bytes),
+    }
+
+
+def _make_file_response(content_bytes: bytes, path: str) -> dict:
+    """Shared file response formatter for both git subprocess and GitHostClient paths."""
+    sample = content_bytes[:8192]
+    is_binary = b"\x00" in sample
+    if is_binary:
+        return {"binary": True, "content": None, "size": len(content_bytes)}
     return {
         "binary": False,
         "content": content_bytes.decode("utf-8", errors="replace"),
