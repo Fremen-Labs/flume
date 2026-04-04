@@ -123,34 +123,18 @@ func confirmPurge() bool {
 	return response == "yes" || response == "y"
 }
 
-// runWorkspaceCleanup removes local git worktrees, state files, and .env artifacts.
+// runWorkspaceCleanup removes state files and environment artifacts.
+//
+// AP-5C (K8s Readiness): Git worktree cleanup has been removed.
+// Workers now use ephemeral shallow clones in /tmp which are self-cleaning.
+// The .flume/agents/ directory and 'git worktree prune' are no longer needed.
 func runWorkspaceCleanup() {
-	fmt.Println(ui.CyberGradient("Pruning native OS-level parallel Git Worktrees and environment locks..."))
+	fmt.Println(ui.CyberGradient("Cleaning environment locks and state files..."))
 
 	// 1. Wipe out dynamically generated `.env` topology to avoid conflicts
 	os.Remove(".env")
 
-	// 2. Erase physical worktree directories
-	os.RemoveAll(".flume/agents")
-
-	// 3. Purge orphaned git worktree metadata natively
-	pruneCmd := exec.Command("git", "worktree", "prune")
-	pruneCmd.Run()
-
-	// 4. Force delete residual logical branches mapped to agents
-	out, err := exec.Command("git", "branch", "--list", "agent-worker-*").Output()
-	if err == nil {
-		branches := strings.Split(string(out), "\n")
-		for _, b := range branches {
-			b = strings.TrimSpace(b)
-			b = strings.TrimPrefix(b, "* ")
-			if b != "" {
-				exec.Command("git", "branch", "-D", b).Run()
-			}
-		}
-	}
-
-	// 5. Wipe LLM Credentials Split-Brain Native Caches
+	// 2. Wipe LLM Credentials Split-Brain Native Caches
 	homeDir, _ := os.UserHomeDir()
 	os.RemoveAll(homeDir + "/.flume/workspace/worker-manager")
 	os.RemoveAll(homeDir + "/.flume/workspace/worker_state.json")

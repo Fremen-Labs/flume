@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -164,88 +166,286 @@ def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> di
 
 def load_project_repo_path(repo_id):
     """
-    Resolve the local filesystem path for a registered project.
-    Queries the flume-projects ES index (primary) and falls back to
-    WORKSPACE_ROOT/repos/<name> or WORKSPACE_ROOT/<name> for
-    clone-in-progress or legacy entries.
+    AP-4B / AP-5C: Legacy helper — now only used for 'local' clone_status projects
+    (user-provided filesystem paths). Remote repos use ephemeral clones via
+    ensure_task_branch(); this function returns None for them.
+
+    Queries the flume-projects ES index. Returns a Path only when clone_status is
+    'local' and the directory actually exists on disk.
     """
     if not repo_id:
         return None
     try:
-        res = _es_projects_request_worker(f"/flume-projects/_doc/{repo_id}")
-        src = res.get("_source") or {}
-        clone_status = src.get("cloneStatus", "")
-        local_path = src.get("localPath")
+        src = _get_project_source(repo_id)
+        if not src:
+            return None
+
+        clone_status = src.get("clone_status") or src.get("cloneStatus") or ""
 
         if clone_status == "cloning":
             log(f"load_project_repo_path: repo={repo_id} is still cloning — worker should re-queue")
             return None
 
-        if local_path and Path(local_path).exists():
-            return Path(local_path)
+        # For 'local' projects, the user supplied a local path; honour it.
+        if clone_status == "local":
+            local_path = src.get("path") or src.get("localPath")
+            if local_path and Path(local_path).exists():
+                return Path(local_path)
 
-        # Fallback: check workspace/repos/<name> and workspace/<name>
-        name = src.get("name", "")
-        for candidate_dir in (
-            Path(_WS.parent) / "repos" / name,
-            Path(_WS.parent) / name,
-        ):
-            if name and candidate_dir.exists() and (candidate_dir / ".git").exists():
-                log(f"load_project_repo_path: using fallback path {candidate_dir} for repo={repo_id}")
-                return candidate_dir
-
-        log(f"load_project_repo_path: no local path found for repo={repo_id} (cloneStatus={clone_status})")
+        # Remote repos (indexed/cloned) no longer retain a persistent local path.
+        # Workers use ensure_task_branch() to get an ephemeral clone instead.
         return None
     except Exception as e:
         log(f"load_project_repo_path: ES lookup failed for repo={repo_id}: {e}")
         return None
 
 
-def ensure_task_branch(task):
-    """Create/switch to a per-task branch for implementer work and return branch name/path using Native Git Worktrees."""
-    task_id = task.get('id') or 'task'
-    repo_id = task.get('repo')
-    repo_path = load_project_repo_path(repo_id)
-    if not repo_path or not (repo_path / '.git').exists():
-        return None, None
+def _get_project_source(repo_id: str) -> dict:
+    """
+    Fetch the flume-projects ES document source for a repo ID.
+    Returns {} on missing or error.
+    """
+    if not repo_id:
+        return {}
+    try:
+        res = _es_projects_request_worker(f"/flume-projects/_doc/{repo_id}")
+        return res.get("_source") or {}
+    except Exception as e:
+        log(f"_get_project_source: ES lookup failed for repo={repo_id}: {e}")
+        return {}
+
+
+def _build_auth_clone_url(repo_url: str, repo_id: str) -> str:
+    """
+    Build a credential-embedded clone URL for a remote repository.
+
+    Credential resolution priority (same as api_create_project in server.py):
+      1. OpenBao KV via ado_tokens_store / github_tokens_store
+      2. ADO_TOKEN / ADO_PERSONAL_ACCESS_TOKEN env vars
+      3. GH_TOKEN / GITHUB_TOKEN env vars
+
+    Returns the authenticated URL, or the original URL when no PAT is available
+    (git will fail with auth error, which is the correct behaviour).
+    """
+    from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url  # noqa
+    if not repo_url:
+        return ""
+    repo_type = detect_repo_type(repo_url)
+    clean_url = strip_credentials(repo_url)
+
+    pat = ""
+    ws = None
+    try:
+        from utils.workspace import resolve_safe_workspace  # noqa
+        ws = resolve_safe_workspace()
+    except Exception:
+        pass
+
+    if repo_type == "ado":
+        if ws:
+            try:
+                import ado_tokens_store  # noqa
+                raw = ado_tokens_store.get_active_token_plain(ws)
+                if raw and "OPENBAO_DELEGATED" not in raw:
+                    pat = raw
+            except Exception:
+                pass
+        if not pat:
+            pat = (
+                os.environ.get("ADO_TOKEN", "").strip()
+                or os.environ.get("ADO_PERSONAL_ACCESS_TOKEN", "").strip()
+            )
+    elif repo_type == "github":
+        if ws:
+            try:
+                import github_tokens_store  # noqa
+                raw = github_tokens_store.get_active_token_plain(ws)
+                if raw and "OPENBAO_DELEGATED" not in raw:
+                    pat = raw
+            except Exception:
+                pass
+        if not pat:
+            pat = (
+                os.environ.get("GH_TOKEN", "").strip()
+                or os.environ.get("GITHUB_TOKEN", "").strip()
+            )
+
+    if pat:
+        return _rewrite_url(clean_url, pat)
+    return clean_url
+
+
+def _configure_git_identity(repo_path: Path) -> None:
+    """Set a bot git identity if not already configured (required in containers)."""
+    for cfg_key, cfg_val in [
+        ("user.email", "ai-bot@flume.local"),
+        ("user.name",  "Flume AI Bot"),
+    ]:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "config", cfg_key],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            subprocess.run(
+                ["git", "-C", str(repo_path), "config", cfg_key, cfg_val],
+                capture_output=True,
+            )
+
+
+def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
+    """
+    AP-5C: Ephemeral shallow clone — K8s-native task isolation.
+
+    Replaces the previous git-worktree approach with a per-task tempdir clone.
+    Each call produces an independent working copy that:
+      - Lives in /tmp/flume-<task_id>-*/  (ephemeral, pod-scoped)
+      - Contains NO .git/worktrees/ metadata shared with other pods
+      - Is deleted after the task completes via teardown_task_clone()
+
+    For 'local' clone_status projects the previous local-path behaviour is
+    preserved for developer ergonomics (no ephemeral clone for local repos).
+
+    Returns (branch_name, worktree_path) or (None, None) on failure.
+    """
+    task_id  = task.get('id') or 'task'
+    repo_id  = task.get('repo')
 
     item_type = (task.get('item_type') or '').lower()
-    prefix = 'bugfix' if item_type == 'bug' or task_id.startswith('bug-') else 'feature'
-    parent_id = (task.get('parent_id') or '').lower()
-    branch_key = task_id
-    if item_type == 'task' and parent_id.startswith('story-'):
-        branch_key = parent_id
+    prefix    = 'bugfix' if (item_type == 'bug' or task_id.startswith('bug-')) else 'feature'
+    branch    = f"{prefix}/{task_id}"
 
-    safe_task_id = ''.join(ch if ch.isalnum() or ch in ('-', '_', '/') else '-' for ch in branch_key).strip('-')
-    # Branch is always keyed on the TASK ID, never the story/parent ID.
-    # Using the parent story ID caused concurrent siblings to fight over the
-    # same worktree branch, producing git error 128 ('already used by worktree').
-    branch = f"{prefix}/{task_id}"
-    
-    # OS native topology: Mount sandboxes adjacent to original repo avoiding concurrent collisions
-    worktree_mgr_path = repo_path.parent / f"{repo_path.name}-worktrees"
-    worktree_path = worktree_mgr_path / task_id
-    
+    # ── Local repo path: retain legacy worktree-free behaviour ──────────────
+    # For locally-mounted repos (clone_status='local') we still check out a
+    # branch directly in the repo without creating worktrees.
+    src = _get_project_source(repo_id) or {}
+    clone_status = src.get("clone_status") or src.get("cloneStatus") or ""
+
+    if clone_status == "local":
+        local_path_str = src.get("path") or src.get("localPath")
+        if local_path_str and Path(local_path_str).exists():
+            repo_path = Path(local_path_str)
+            if (repo_path / ".git").exists():
+                try:
+                    proc = subprocess.run(
+                        ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet",
+                         f"refs/heads/{branch}"],
+                        capture_output=True,
+                    )
+                    if proc.returncode == 0:
+                        subprocess.run(
+                            ["git", "-C", str(repo_path), "checkout", branch],
+                            check=True, capture_output=True,
+                        )
+                    else:
+                        subprocess.run(
+                            ["git", "-C", str(repo_path), "checkout", "-b", branch],
+                            check=True, capture_output=True,
+                        )
+                    return branch, str(repo_path)
+                except Exception as e:
+                    log(f"ensure_task_branch: local checkout failed task={task_id}: {e}")
+                    return None, str(repo_path)
+        log(f"ensure_task_branch: local repo path missing for repo={repo_id}")
+        return None, None
+
+    # ── Remote repo: ephemeral shallow clone ─────────────────────────────────
+    repo_url = src.get("repoUrl") or src.get("repo_url") or ""
+    if not repo_url:
+        log(f"ensure_task_branch: no repoUrl for repo={repo_id}; cannot clone")
+        return None, None
+
+    auth_url = _build_auth_clone_url(repo_url, repo_id)
+
+    # Configurable clone depth: shallow is fast; 50 commits is enough for
+    # git log on the feature branch when checking _branch_has_new_commits.
+    clone_depth = int(os.environ.get("FLUME_CLONE_DEPTH", "50"))
+
+    tmp = Path(tempfile.mkdtemp(prefix=f"flume-{task_id}-"))
     try:
-        if not worktree_mgr_path.exists():
-            os.makedirs(worktree_mgr_path, exist_ok=True)
-            
-        if worktree_path.exists() and (worktree_path / '.git').exists():
-            return branch, str(worktree_path)
+        log(f"ensure_task_branch: cloning repo={repo_id} depth={clone_depth} into {tmp}")
+        subprocess.run(
+            [
+                "git", "clone",
+                f"--depth={clone_depth}",
+                "--no-tags",
+                "--single-branch",
+                "--",
+                auth_url,
+                str(tmp),
+            ],
+            check=True, capture_output=True, timeout=300,
+        )
+        _configure_git_identity(tmp)
 
-        # Check if the branch exists locally across the swarm
-        proc = subprocess.run(['git', '-C', str(repo_path), 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}'])
-        branch_exists = (proc.returncode == 0)
-        
-        if branch_exists:
-            subprocess.run(['git', '-C', str(repo_path), 'worktree', 'add', str(worktree_path), branch], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Expand history slightly so _branch_has_new_commits() can compare
+        # against origin/<default> without "fatal: unrelated histories"
+        try:
+            subprocess.run(
+                ["git", "-C", str(tmp), "fetch", "--depth=50", "origin"],
+                capture_output=True, timeout=60,
+            )
+        except Exception:
+            pass  # best-effort shallow unshallow
+
+        # Check whether the task branch already exists remotely (crash recovery)
+        remote_branch_check = subprocess.run(
+            ["git", "-C", str(tmp), "ls-remote", "--heads", "origin", branch],
+            capture_output=True, text=True, timeout=20,
+        )
+        remote_exists = bool(remote_branch_check.stdout.strip())
+
+        if remote_exists:
+            # Previous run pushed commits; check out the existing branch
+            subprocess.run(
+                ["git", "-C", str(tmp), "fetch", "origin", branch],
+                check=True, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "-C", str(tmp), "checkout", "-b", branch, f"origin/{branch}"],
+                check=True, capture_output=True,
+            )
+            log(f"ensure_task_branch: resumed existing remote branch={branch} for task={task_id}")
         else:
-            subprocess.run(['git', '-C', str(repo_path), 'worktree', 'add', str(worktree_path), '-b', branch], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-        return branch, str(worktree_path)
+            subprocess.run(
+                ["git", "-C", str(tmp), "checkout", "-b", branch],
+                check=True, capture_output=True,
+            )
+            log(f"ensure_task_branch: created new branch={branch} for task={task_id}")
+
+        return branch, str(tmp)
+
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace")[:300] if e.stderr else str(e)
+        log(f"ensure_task_branch: clone failed task={task_id}: {stderr}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None
     except Exception as e:
-        log(f"worktree setup failed for task={task_id}: {e}")
-        return None, str(repo_path)
+        log(f"ensure_task_branch: unexpected error task={task_id}: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None, None
+
+
+def teardown_task_clone(worktree_path: str | None) -> None:
+    """
+    AP-5C: Remove the ephemeral clone directory created by ensure_task_branch.
+    Called in the finally block of handle_implementer_worker() after all git
+    operations (commit, push, PR) are complete.
+
+    Safe to call with None or a path that no longer exists.
+    Does NOT remove local repo paths (clone_status='local').
+    """
+    if not worktree_path:
+        return
+    p = Path(worktree_path)
+    # Only auto-delete paths that look like our temp dirs to avoid accidents
+    if not str(p).startswith(tempfile.gettempdir()):
+        return
+    if p.exists():
+        try:
+            shutil.rmtree(p)
+            log(f"teardown_task_clone: removed ephemeral clone at {p}")
+        except Exception as e:
+            log(f"teardown_task_clone: failed to remove {p}: {e}")
 
 
 def get_latest_commit_sha(repo_path):
@@ -308,61 +508,88 @@ def load_project_gitflow(repo_id):
 
 def create_pr_for_task(task, reviewer_model):
     """
-    Create a GitHub PR using `gh pr create`.
-    Writes a provenance note and returns (pr_url, pr_number, error).
+    Create a pull request via the GitHostClient REST API (AP-4B: no local clone required).
+    Falls back to `gh pr create` for local repos or when the API client is unavailable.
+    Returns (pr_url, pr_number, error).
     """
     task_id = task.get('id', 'unknown')
-    branch = task.get('branch')
+    branch  = task.get('branch')
     if not branch:
         log(f"create_pr: no branch on task={task_id}, skipping")
         return None, None, 'no_branch'
 
     repo_id = task.get('repo')
+    src     = _get_project_source(repo_id) or {}
+    gitflow = src.get('gitflow') or {'autoPrOnApprove': True, 'defaultBranch': None}
+
+    title = task.get('title') or f"Task {task_id}"
+    ac    = task.get('acceptance_criteria') or []
+    ac_lines   = '\n'.join(f'- {c}' for c in ac) if ac else '_None recorded_'
+    commit_sha  = task.get('commit_sha') or ''
+    sha_line    = f'\n\n**Commit:** `{commit_sha}`' if commit_sha else ''
+
+    clone_status = src.get('clone_status') or src.get('cloneStatus') or ''
+
+    # ── Path A: remote repo → use GitHostClient REST API ────────────────────
+    # This path requires no local clone and works from any pod.
+    if clone_status not in ('local',):
+        try:
+            from utils.git_host_client import get_git_client, GitHostError  # noqa
+            client = get_git_client(src)
+            target_branch = gitflow.get('defaultBranch') or client.get_default_branch()
+
+            body = (
+                f"## {title}\n\n"
+                f"**Task ID:** `{task_id}`\n"
+                f"**Repo:** `{repo_id}`\n"
+                f"**Branch:** `{branch}` → `{target_branch}`\n"
+                f"**Model:** `{reviewer_model}`\n"
+                f"{sha_line}\n\n"
+                f"### Acceptance Criteria\n{ac_lines}\n\n"
+                f"_Auto-generated by Flume agent workflow._"
+            )
+            result = client.create_pull_request(
+                title=title, body=body, head=branch, base=target_branch,
+            )
+            pr_url    = result.get('pr_url', '')
+            pr_number = result.get('pr_number')
+            log(f"create_pr: REST API PR created task={task_id} -> {pr_url}")
+            return pr_url, pr_number, None
+        except Exception as e:
+            log(f"create_pr: REST API attempt failed task={task_id}: {e}; falling back to gh CLI")
+
+    # ── Path B: local repo or API fallback → use gh CLI ─────────────────────
     repo_path = load_project_repo_path(repo_id)
     if not repo_path or not (repo_path / '.git').exists():
-        log(f"create_pr: repo path not found or not a git repo for task={task_id}")
+        log(f"create_pr: no local repo path available for task={task_id}")
         return None, None, 'no_repo'
 
-    gitflow = load_project_gitflow(repo_id)
-    target_branch = resolve_default_branch(str(repo_path), override=gitflow.get('defaultBranch'))
+    target_branch = resolve_default_branch(
+        str(repo_path), override=gitflow.get('defaultBranch'),
+    )
 
-    # Idempotency: if a PR already exists for this head branch, reuse it
-    # instead of creating duplicates.
+    # Idempotency: reuse existing open PR
     try:
         list_res = subprocess.run(
-            ['gh', 'pr', 'list',
-             '--head', branch,
-             '--base', target_branch,
-             '--state', 'open',
-             '--json', 'url,number',
-             '--limit', '1'],
-            capture_output=True,
-            text=True,
-            timeout=20,
+            ['gh', 'pr', 'list', '--head', branch, '--base', target_branch,
+             '--state', 'open', '--json', 'url,number', '--limit', '1'],
+            capture_output=True, text=True, timeout=20,
         )
         if list_res.returncode == 0 and list_res.stdout.strip():
-            import json
             arr = json.loads(list_res.stdout)
             if arr:
-                existing = arr[0]
-                return existing.get('url'), existing.get('number'), None
+                return arr[0].get('url'), arr[0].get('number'), None
     except Exception:
         pass
 
-    title = task.get('title') or f"Task {task_id}"
-    ac = task.get('acceptance_criteria') or []
-    ac_lines = '\n'.join(f'- {c}' for c in ac) if ac else '_None recorded_'
-    commit_sha = task.get('commit_sha') or ''
-    sha_line = f'\n\n**Commit:** `{commit_sha}`' if commit_sha else ''
     body = (
         f"## {title}\n\n"
         f"**Task ID:** `{task_id}`\n"
-        f"**Repo:** `{repo_id}`\n"
         f"**Branch:** `{branch}` → `{target_branch}`\n"
         f"**Model:** `{reviewer_model}`\n"
         f"{sha_line}\n\n"
         f"### Acceptance Criteria\n{ac_lines}\n\n"
-        f"_Auto-generated by OpenClaw agent workflow._"
+        f"_Auto-generated by Flume agent workflow._"
     )
 
     gh_check = subprocess.run(['which', 'gh'], capture_output=True, text=True)
@@ -386,13 +613,13 @@ def create_pr_for_task(task, reviewer_model):
         log(f"create_pr: gh pr create failed for task={task_id}: {err}")
         return None, None, err
 
-    pr_url = result.stdout.strip()
+    pr_url    = result.stdout.strip()
     pr_number = None
     url_parts = pr_url.rstrip('/').split('/')
     if url_parts and url_parts[-1].isdigit():
         pr_number = int(url_parts[-1])
 
-    log(f"create_pr: PR created for task={task_id} -> {pr_url}")
+    log(f"create_pr: PR created task={task_id} -> {pr_url}")
     return pr_url, pr_number, None
 
 
@@ -995,6 +1222,9 @@ def handle_implementer_worker(task, es_id):
         log(f"implementer: task={task_id} exception: {e}")
         return False
     finally:
+        # AP-5C: Always clean up the ephemeral clone so /tmp doesn't grow unbounded.
+        # teardown_task_clone() is a no-op for local repos and non-tmp paths.
+        teardown_task_clone(worktree_path)
         if not released:
             try:
                 _, cur = fetch_task_doc(task_id)
