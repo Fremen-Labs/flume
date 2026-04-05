@@ -309,24 +309,43 @@ def provider_catalog_for_workspace(workspace_root: Path) -> list[dict[str, Any]]
 
     return catalog
 
-# ─── .env load/save ────────────────────────────────────────────────────────────
+# ─── Cluster-native config storage (AP-10) ────────────────────────────
+#
+# All LLM settings are now stored in Elasticsearch (non-sensitive) and OpenBao
+# (secrets).  The .env file is bootstrap-only: ES_URL, ES_API_KEY, OPENBAO_ADDR.
+# No LLM settings or repo tokens are written to .env at runtime.
 
+# Keys written to flume-llm-config (ES) — non-sensitive
+_ES_LLM_CONFIG_KEYS = frozenset({
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BASE_URL",
+    "LLM_ROUTE_TYPE",
+})
 
-def _env_file_path(workspace_root: Path) -> Path:
-    """
-    File we mutate on Settings save.
+# Keys that must only live in OpenBao (secrets)
+_OPENBAO_SENSITIVE_KEYS = frozenset({
+    "LLM_API_KEY",
+    "OPENAI_OAUTH_STATE_FILE",
+    "OPENAI_OAUTH_STATE_JSON",
+    "OPENAI_OAUTH_TOKEN_URL",
+})
 
-    load_env_pairs merges workspace .env then repo-root .env with **parent winning** on duplicate
-    keys. Writing only workspace/.env would leave repo-root LLM_* (e.g. llama3.2) overriding saves.
-    """
-    wr = workspace_root.resolve()
-    parent_env = wr.parent / ".env"
-    if parent_env.is_file():
-        return parent_env
-    return wr / ".env"
+# Bootstrap-only keys — stay in .env, never overwritten at runtime by Settings
+_BOOTSTRAP_ONLY_KEYS = frozenset({
+    "ES_URL",
+    "ES_API_KEY",
+    "ES_VERIFY_TLS",
+    "OPENBAO_ADDR",
+    "OPENBAO_TOKEN",
+    "OPENBAO_MOUNT",
+    "OPENBAO_PATH",
+    "OPENBAO_TOKEN_FILE",
+})
 
 
 def _parse_env_lines(text: str) -> dict[str, str]:
+    """Parse a .env file into a key/value dict (bootstrap config only)."""
     out: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
@@ -337,8 +356,12 @@ def _parse_env_lines(text: str) -> dict[str, str]:
     return out
 
 
-def load_env_pairs(workspace_root: Path) -> dict[str, str]:
-    """Load workspace .env then repo-root .env (repo root wins for duplicate keys)."""
+def _load_bootstrap_env(workspace_root: Path) -> dict[str, str]:
+    """Load BOOTSTRAP-ONLY keys from .env files (ES_URL, OPENBAO_ADDR, etc.).
+
+    The .env file is no longer the source of truth for LLM settings or tokens.
+    This function reads it only for cluster-connection bootstrap parameters.
+    """
     out: dict[str, str] = {}
     wr = workspace_root.resolve()
     for base in (wr, wr.parent):
@@ -349,6 +372,14 @@ def load_env_pairs(workspace_root: Path) -> dict[str, str]:
             except OSError:
                 pass
     return out
+
+
+# Keep load_env_pairs as a thin alias so existing callers that only need
+# bootstrap config (OpenBao connection, ES URL) don't break.
+def load_env_pairs(workspace_root: Path) -> dict[str, str]:
+    """Return bootstrap .env keys (ES_URL, OPENBAO_ADDR, etc.). LLM settings
+    are no longer stored in .env — use load_effective_pairs() for those."""
+    return _load_bootstrap_env(workspace_root)
 
 
 def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
@@ -369,12 +400,12 @@ def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
 
 
 def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
-    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
+    pairs = _merge_openbao_connection_from_env(_load_bootstrap_env(workspace_root))
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
     token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
     if not addr or not token:
         return False, pairs
-    
+
     # Natively resolve 'openbao' hostname to '127.0.0.1' if running outside Docker
     if "openbao" in addr:
         import urllib.request
@@ -384,7 +415,7 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
             pairs["OPENBAO_ADDR"] = addr
         except Exception:
             pass
-            
+
     return True, pairs
 
 
@@ -410,7 +441,6 @@ def _openbao_env(pairs: dict[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
     token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
-    # Keep compatibility with both OpenBao/Hashi-style env names.
     env["BAO_ADDR"] = addr
     env["BAO_TOKEN"] = token
     env["VAULT_ADDR"] = addr
@@ -428,7 +458,6 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
         addr = pairs["OPENBAO_ADDR"].rstrip("/")
         token = pairs["OPENBAO_TOKEN"]
         secret_url = f"{addr}/v1/{_openbao_secret_ref(pairs)}"
-        
         req = urllib.request.Request(secret_url, headers={"X-Vault-Token": token})
         with urllib.request.urlopen(req, timeout=5) as r:
             payload = json.loads(r.read())
@@ -452,15 +481,13 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
             if k == "LLM_API_KEY" and not str(v or "").strip() and oauth_path_set:
                 continue
             merged[k] = v
-            
         addr = pairs["OPENBAO_ADDR"].rstrip("/")
         token = pairs["OPENBAO_TOKEN"]
         secret_url = f"{addr}/v1/{_openbao_secret_ref(pairs)}"
-        
         payload = json.dumps({"data": merged}).encode("utf-8")
         req = urllib.request.Request(
-            secret_url, 
-            data=payload, 
+            secret_url,
+            data=payload,
             headers={"X-Vault-Token": token, "Content-Type": "application/json"},
             method="POST"
         )
@@ -470,8 +497,7 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
         return False
 
 
-# Do not let a stale interactive shell (or old exports) override .env / OpenBao for LLM.
-# Worker processes are often started from a login shell that still has LLM_PROVIDER=ollama, etc.
+# Do not let a stale interactive shell override ES/OpenBao values for LLM.
 _SKIP_PROCESS_OVERLAY_FOR_LLM = frozenset(
     {
         "LLM_PROVIDER",
@@ -483,24 +509,27 @@ _SKIP_PROCESS_OVERLAY_FOR_LLM = frozenset(
     }
 )
 
-# Repo tokens from .env / OpenBao must not be overridden by a stale GH_TOKEN in the shell
-# or systemd environment left over from an old session.
 _REPO_CREDS_FROM_FILE_FIRST = frozenset({"GH_TOKEN", "ADO_TOKEN", "ADO_ORG_URL"})
 _LOCAL_PROVIDER_ROUTE_KEYS = frozenset({"LOCAL_OLLAMA_BASE_URL", "LOCAL_EXO_BASE_URL"})
 
 
 def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     """
-    Load settings: .env (optional), selected process env keys, then live OpenBao KV.
-    Values from OpenBao override earlier sources.
+    AP-10: Cluster-native config resolution order (highest → lowest priority):
+      1. OpenBao KV  — sensitive secrets (LLM_API_KEY, OAuth tokens)
+      2. ES flume-llm-config  — non-sensitive LLM settings (provider/model/baseUrl)
+      3. Process env  — non-LLM keys (ES_URL, EXECUTION_HOST, etc.)
+      4. Bootstrap .env  — cluster-connection keys only (fallback / cold-start)
 
-    LLM-related keys are taken from .env + OpenBao only (not from inherited process env),
-    so worker manager/handlers match Settings even when the parent shell has old exports.
+    LLM keys are never read from process env to avoid stale shell exports
+    overriding cluster-stored values.
     """
-    pairs = _merge_openbao_connection_from_env(load_env_pairs(workspace_root))
+    # Start with bootstrap keys from .env (lowest priority)
+    pairs = _merge_openbao_connection_from_env(_load_bootstrap_env(workspace_root))
+
+    # Layer in non-LLM process env keys (e.g. ES_URL, EXECUTION_HOST)
     try:
         from flume_secrets import FLUME_ENV_KEYS
-
         for key in FLUME_ENV_KEYS:
             if key in _SKIP_PROCESS_OVERLAY_FOR_LLM:
                 continue
@@ -514,82 +543,119 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     except ImportError:
         pass
 
-    # Containerized clean installs often export provider-local routes (e.g. LOCAL_OLLAMA_BASE_URL)
-    # while WORKSPACE_ROOT points at /workspace and the editable repo/.env lives elsewhere (/app/.env).
-    # Overlay these explicit process env vars so Settings can discover remote local-model endpoints.
     for key in _LOCAL_PROVIDER_ROUTE_KEYS:
         v = os.environ.get(key, "").strip()
         if v:
             pairs[key] = v
 
+    # ES flume-llm-config: non-sensitive LLM settings (overrides bootstrap .env)
+    # Use importlib to avoid the stale sys.modules cache that may hold the pre-AP-10
+    # version of es_credential_store (which did not have load_llm_config).
+    try:
+        import importlib as _il
+        import sys as _sys
+        _store_path = str(Path(__file__).resolve().parent.parent)
+        if _store_path not in _sys.path:
+            _sys.path.insert(0, _store_path)
+        _esc = _il.import_module("es_credential_store")
+        # If the cached module lacks load_llm_config, force a fresh load
+        if not hasattr(_esc, "load_llm_config"):
+            _spec = _il.util.spec_from_file_location(
+                "es_credential_store",
+                Path(_store_path) / "es_credential_store.py",
+            )
+            _esc = _il.util.module_from_spec(_spec)  # type: ignore[arg-type]
+            _spec.loader.exec_module(_esc)  # type: ignore[union-attr]
+            _sys.modules["es_credential_store"] = _esc
+        es_config: dict[str, str] = _esc.load_llm_config()
+        for k, v in es_config.items():
+            if v and str(v).strip():
+                pairs[k] = str(v).strip()
+    except Exception as _e:
+        logger.debug(f"AP-10: ES LLM config read skipped in load_effective_pairs: {_e}")
+
+
+    # OpenBao: secrets (highest priority — overrides everything)
     bao_vals = _openbao_get_all(workspace_root)
     for key, val in bao_vals.items():
         if val is not None and str(val).strip():
             pairs[str(key)] = str(val).strip()
+
     return pairs
 
 
-def save_env_key(workspace_root: Path, key: str, value: str, *, create: bool = True) -> None:
-    path = _env_file_path(workspace_root)
-    lines = path.read_text().splitlines() if path.exists() else []
-    key_eq = key + "="
-    found = False
-    new_lines = []
-    for line in lines:
-        if line.strip().startswith(key_eq) or line.strip().split("=")[0].strip() == key:
-            new_lines.append(f"{key}={value}")
-            found = True
-        else:
-            new_lines.append(line)
-    if not found:
-        new_lines.append(f"{key}={value}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(new_lines) + "\n")
-
-
 def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
-    sensitive_updates = {k: v for k, v in updates.items() if k in SENSITIVE_KEYS}
-    non_sensitive_updates = {k: v for k, v in updates.items() if k not in SENSITIVE_KEYS}
+    """AP-10: Cluster-native settings write path.
 
-    # When OpenBao is enabled, load_effective_pairs applies KV *after* .env and process env,
-    # so KV wins for every key present. We must merge the full settings payload into KV
-    # (not only SENSITIVE_KEYS); otherwise LLM_MODEL / LLM_PROVIDER / OAuth paths saved to
-    # .env are ignored on the next request and stale values (e.g. llama3.2) reappear.
-    ob_enabled, _ = _openbao_enabled(workspace_root)
-    if ob_enabled and updates:
-        if _openbao_put_many(workspace_root, updates):
-            for k in sensitive_updates.keys():
-                non_sensitive_updates[k] = ""
+    Routing:
+      • LLM non-sensitive config (provider, model, baseUrl)  → ES flume-llm-config
+      • Sensitive secrets (API key, OAuth tokens)            → OpenBao KV
+      • Bootstrap keys (ES_URL, OPENBAO_ADDR, etc.)         → .env only (never LLM keys)
 
-    elif sensitive_updates and _openbao_put_many(workspace_root, sensitive_updates):
-        for k in sensitive_updates.keys():
-            non_sensitive_updates[k] = ""
+    The .env file is NEVER written with LLM or token keys at runtime.
+    """
+    if not updates:
+        return
 
-    path = _env_file_path(workspace_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Preserve order and comments by reading, then rewriting
-    lines = path.read_text().splitlines() if path.exists() else []
-    seen = set()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            new_lines.append(line)
-            continue
-        if "=" in stripped:
-            k = stripped.split("=")[0].strip()
-            if k in non_sensitive_updates:
-                new_lines.append(f"{k}={non_sensitive_updates[k]}")
-                seen.add(k)
+    # Guard: reject any attempt to write LLM or secret keys to .env
+    _MUST_NOT_GO_TO_ENV = _ES_LLM_CONFIG_KEYS | _OPENBAO_SENSITIVE_KEYS
+
+    # 1. Write non-sensitive LLM config to ES
+    es_updates = {k: v for k, v in updates.items() if k in _ES_LLM_CONFIG_KEYS}
+    if es_updates:
+        try:
+            from es_credential_store import save_llm_config, load_llm_config
+            existing = load_llm_config()
+            existing.update(es_updates)
+            saved = save_llm_config(existing)
+            if saved:
+                # Hot-reload the dashboard process env so subsequent GET reads are consistent
+                for k, v in es_updates.items():
+                    if v is not None:
+                        os.environ[k] = str(v)
+            else:
+                logger.warning("AP-10: Failed to write LLM config to ES flume-llm-config")
+        except Exception as e:
+            logger.warning(f"AP-10: ES LLM config write failed: {e}")
+
+    # 2. Write sensitive keys to OpenBao
+    sensitive_updates = {k: v for k, v in updates.items() if k in _OPENBAO_SENSITIVE_KEYS}
+    if sensitive_updates:
+        if not _openbao_put_many(workspace_root, sensitive_updates):
+            # OpenBao unavailable — log but do not fall back to .env for secrets
+            logger.warning(
+                "AP-10: OpenBao unavailable; sensitive LLM keys NOT persisted. "
+                "Configure OPENBAO_ADDR/OPENBAO_TOKEN or restart with OpenBao running."
+            )
+
+    # 3. Bootstrap keys only — write to .env (ES_URL, OPENBAO_ADDR, etc.)
+    bootstrap_updates = {k: v for k, v in updates.items()
+                         if k in _BOOTSTRAP_ONLY_KEYS and k not in _MUST_NOT_GO_TO_ENV}
+    if bootstrap_updates:
+        # Find the .env file (parent dir wins over workspace subdir)
+        wr = workspace_root.resolve()
+        env_path = wr.parent / ".env" if (wr.parent / ".env").is_file() else wr / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        seen: set[str] = set()
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                new_lines.append(line)
                 continue
-        new_lines.append(line)
-    for k, v in non_sensitive_updates.items():
-        if k not in seen:
-            new_lines.append(f"{k}={v}")
-    path.write_text("\n".join(new_lines) + "\n")
+            if "=" in stripped:
+                k = stripped.split("=")[0].strip()
+                if k in bootstrap_updates:
+                    new_lines.append(f"{k}={bootstrap_updates[k]}")
+                    seen.add(k)
+                    continue
+            new_lines.append(line)
+        for k, v in bootstrap_updates.items():
+            if k not in seen:
+                new_lines.append(f"{k}={v}")
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
-
-# ─── Route config → LLM_BASE_URL ──────────────────────────────────────────────
 
 
 def build_base_url(

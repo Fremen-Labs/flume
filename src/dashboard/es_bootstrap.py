@@ -21,6 +21,7 @@ REQUIRED_INDICES = [
     "flume-workers",
     "flume-counters",  # AP-1: replaces sequence_counters.json — atomic monotonic IDs
     "flume-config",   # AP-8: replaces agent_models.json — per-role LLM model overrides
+    "flume-llm-config",  # AP-10: non-sensitive LLM settings (provider/model/baseUrl) — replaces .env writes
     "agent-task-records",
     "agent-security-audits",
     "agent-checkpoints",
@@ -205,8 +206,24 @@ COUNTERS_MAPPING = {
 
 # Per-index explicit mappings used during initial creation.
 # Only applied when the index does not already exist.
+LLM_CONFIG_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "LLM_PROVIDER":   {"type": "keyword"},
+            "LLM_MODEL":      {"type": "keyword"},
+            "LLM_BASE_URL":   {"type": "keyword"},
+            "LLM_ROUTE_TYPE": {"type": "keyword"},
+        }
+    },
+}
+
 EXPLICIT_INDEX_MAPPINGS = {
     "flume-projects":       PROJECTS_MAPPING,
+    "flume-llm-config":     LLM_CONFIG_MAPPING,
     "agent-task-records":   TASK_RECORDS_MAPPING,
     "agent-token-telemetry": TOKEN_TELEMETRY_MAPPING,
     "agent-security-audits": SECURITY_AUDIT_MAPPING,

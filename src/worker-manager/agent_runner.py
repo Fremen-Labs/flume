@@ -28,8 +28,20 @@ AGENTS_ROOT = BASE / 'agents'
 
 
 def _current_llm_model() -> str:
-    """Read from env each call so worker_handlers' periodic apply_runtime_config() takes effect."""
-    return (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
+    """AP-10: Read from ES (flume-llm-config) first, fall back to process env.
+
+    This allows the model to be changed in the Settings UI and take effect
+    on the next agent iteration without requiring a container restart.
+    """
+    try:
+        import sys
+        _src = str(__import__('pathlib').Path(__file__).resolve().parent.parent)
+        if _src not in sys.path:
+            sys.path.insert(0, _src)
+        from workspace_llm_env import get_active_llm_model
+        return get_active_llm_model()
+    except Exception:
+        return (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
 
 
 @dataclass

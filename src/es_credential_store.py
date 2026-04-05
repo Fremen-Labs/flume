@@ -1,14 +1,12 @@
 """
 Kubernetes-grade Elasticsearch backend for credential metadata storage.
 
-Replaces the local JSON file stores for llm_credentials, ado_tokens, and
-github_tokens. Only non-secret fields are persisted here. API keys and tokens
-are delegated entirely to OpenBao KV (via the existing _openbao_put_many /
-_openbao_get_all machinery in llm_settings.py).
+Replaces the local JSON file stores for llm_credentials, ado_tokens,
+github_tokens, AND the .env file for LLM provider/model/base_url config.
 
 Architecture:
-  - Metadata  → ES index  (provider, label, baseUrl, isActive, etc.)
-  - Secrets   → OpenBao KV at secret/data/flume/{store}/{id}
+  - Non-sensitive config  → ES index  (provider, model, baseUrl, label, etc.)
+  - Secrets               → OpenBao KV at secret/data/flume/{store}/{id}
 
 Callers continue to use the same load_document / save_document interface as
 before; this module transparently provides the ES-backed implementation.
@@ -29,20 +27,32 @@ logger = get_logger("es_credential_store")
 # ---------------------------------------------------------------------------
 # Index names
 # ---------------------------------------------------------------------------
+INDEX_LLM_CONFIG      = "flume-llm-config"       # AP-10: non-sensitive LLM settings (provider/model/baseUrl)
 INDEX_LLM_CREDENTIALS = "flume-llm-credentials"
 INDEX_ADO_TOKENS       = "flume-ado-tokens"
 INDEX_GH_TOKENS        = "flume-github-tokens"
 
 # Mapping for each index  (no apiKey / token fields — secrets stay in Vault)
 _INDEX_MAPPINGS: dict[str, dict] = {
+    INDEX_LLM_CONFIG: {
+        "mappings": {
+            "properties": {
+                # Non-sensitive runtime LLM configuration — no secrets stored here
+                "LLM_PROVIDER":  {"type": "keyword"},
+                "LLM_MODEL":     {"type": "keyword"},
+                "LLM_BASE_URL":  {"type": "keyword"},
+                "LLM_ROUTE_TYPE":{"type": "keyword"},
+            }
+        }
+    },
     INDEX_LLM_CREDENTIALS: {
         "mappings": {
             "properties": {
-                "store_key":          {"type": "keyword"},   # "llm_credentials"
+                "store_key":          {"type": "keyword"},
                 "version":            {"type": "integer"},
                 "activeCredentialId": {"type": "keyword"},
                 "defaultCredentialId":{"type": "keyword"},
-                "credentials":        {"type": "object", "enabled": False},  # nested list stored as JSON blob
+                "credentials":        {"type": "object", "enabled": False},
             }
         }
     },
@@ -202,6 +212,36 @@ def save_to_es(index: str, doc: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Store-specific helpers (public API used by the store modules)
 # ---------------------------------------------------------------------------
+
+# ── LLM non-sensitive config (AP-10) ─────────────────────────────────────
+
+def load_llm_config() -> dict[str, str]:
+    """Load non-sensitive LLM settings (provider, model, baseUrl) from ES.
+
+    Returns a plain {str: str} dict; callers get an empty dict on any failure
+    (graceful degradation to .env / OpenBao fallback in load_effective_pairs).
+    """
+    result = _request("GET", f"/{INDEX_LLM_CONFIG}/_doc/{_DOC_ID}")
+    if result and result.get("found"):
+        src = result.get("_source", {})
+        if isinstance(src, dict):
+            return {str(k): str(v) for k, v in src.items() if v is not None}
+    return {}
+
+
+def save_llm_config(config: dict[str, str]) -> bool:
+    """Persist non-sensitive LLM settings to ES.
+
+    Only stores safe keys (LLM_PROVIDER, LLM_MODEL, LLM_BASE_URL, LLM_ROUTE_TYPE).
+    Returns True on success.
+    """
+    SAFE_KEYS = frozenset({"LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_ROUTE_TYPE"})
+    doc = {k: str(v) for k, v in config.items() if k in SAFE_KEYS and v is not None}
+    result = _request("PUT", f"/{INDEX_LLM_CONFIG}/_doc/{_DOC_ID}", doc)
+    return result is not None
+
+
+# ── Credential stores ─────────────────────────────────────────────────────
 
 def load_llm_credentials(default_factory: Any) -> dict[str, Any]:
     return load_from_es(INDEX_LLM_CREDENTIALS, default_factory)
