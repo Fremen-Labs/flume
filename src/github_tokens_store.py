@@ -55,7 +55,7 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
 
 
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
-    """Persist metadata to ES (preferred) and keep local JSON as backup."""
+    """Persist metadata to ES. Secrets (PAT) stay in OpenBao."""
     masked_doc = json.loads(json.dumps(doc))
     for tok in masked_doc.get("tokens", []):
         if tok.get("token") and tok["token"] not in ("", MASK, "***OPENBAO_DELEGATED***"):
@@ -65,12 +65,7 @@ def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
         save_gh_tokens(masked_doc)
     except Exception:
         pass
-    try:
-        path = tokens_path(workspace_root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
+
 
 
 
@@ -107,15 +102,10 @@ def ensure_migrated_from_env(workspace_root: Path) -> None:
 
 
 def _sync_active_to_env(workspace_root: Path) -> None:
-    from llm_settings import _openbao_enabled, _update_env_keys
-
-    enabled, _ = _openbao_enabled(workspace_root)
-    if not enabled:
-        raise RuntimeError(
-            "OpenBao is required for GH_TOKEN storage. Configure OPENBAO_ADDR/OPENBAO_TOKEN first."
-        )
-    plain = get_active_token_plain(workspace_root)
-    _update_env_keys(workspace_root, {ENV_GH_TOKEN: plain})
+    # AP-10: GitHub tokens are no longer written to .env at runtime.
+    # Workers read the active token directly from ES (flume-github-tokens) + OpenBao
+    # via get_active_token_plain(). This function is intentionally a no-op.
+    pass
 
 
 def get_active_token_id(workspace_root: Path) -> str:

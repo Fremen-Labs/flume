@@ -1,9 +1,9 @@
 """
-Keep worker processes aligned with dashboard LLM settings.
+AP-10: Keep worker processes aligned with cluster-native LLM settings.
 
-The dashboard resolves LLM_* via llm_settings.load_effective_pairs (.env + process + OpenBao).
-Worker manager/handlers only ran flume_secrets.apply_runtime_config at startup, which can miss
-the same merge order or leave stale os.environ. We re-sync the keys that affect agent routing.
+The dashboard now stores LLM_* config in Elasticsearch (flume-llm-config) and
+OpenBao (secrets). Workers use get_active_llm_model() to read the current model
+directly from ES rather than relying on os.environ baked in at container start.
 """
 
 from __future__ import annotations
@@ -18,6 +18,23 @@ if str(_BS_WS) not in sys.path:
 
 from utils.logger import get_logger
 logger = get_logger("workspace_llm_env")
+
+
+def get_active_llm_model(default: str = "llama3.2") -> str:
+    """AP-10: Return the current LLM model from ES (flume-llm-config), falling back
+    to the process-env value baked in at container start.
+
+    This allows hot-reloading the model without a container restart.
+    """
+    try:
+        from es_credential_store import load_llm_config
+        config = load_llm_config()
+        model = (config.get("LLM_MODEL") or "").strip()
+        if model:
+            return model
+    except Exception:
+        pass
+    return (os.environ.get("LLM_MODEL") or default).strip() or default
 
 # Hosted APIs — model id "llama3.2" is the Ollama default and is invalid here; use Settings model.
 _CLOUD_LLM_PROVIDER_IDS = frozenset({"openai", "anthropic", "gemini", "xai", "mistral", "cohere"})

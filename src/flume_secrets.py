@@ -86,14 +86,44 @@ def load_elastic_config() -> dict[str, Any]:
 
 settings = FlumeSettings(**load_elastic_config())
 
+# AP-10: LLM settings are owned by ES (flume-llm-config) and OpenBao.
+# These keys must NOT be applied from FlumeSettings (which reads stale docker-compose env).
+_CLUSTER_OWNED_KEYS = frozenset({
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "OPENAI_OAUTH_STATE_FILE",
+    "OPENAI_OAUTH_STATE_JSON",
+    "OPENAI_OAUTH_TOKEN_URL",
+})
+
 def apply_runtime_config(workspace_root: Path | None = None) -> None:
-    """Invoked globally by Flume daemon servers applying deterministic limits."""
+    """Apply FlumeSettings to os.environ, skipping LLM keys (those come from ES/OpenBao)."""
     for key, value in settings.model_dump().items():
+        if key in _CLUSTER_OWNED_KEYS:
+            # LLM config is cluster-native: skip FlumeSettings values which may be stale
+            # docker-compose injection. ES (flume-llm-config) overlay happens below.
+            continue
         if value is not None and str(value).strip():
             os.environ[key] = str(value)
 
+    # After base config, overlay LLM settings from ES (source of truth)
+    try:
+        _src = str(Path(__file__).resolve().parent)
+        if _src not in sys.path:
+            sys.path.insert(0, _src)
+        import es_credential_store as _esc
+        _es_config = _esc.load_llm_config()
+        for _k, _v in _es_config.items():
+            if _v and str(_v).strip():
+                os.environ[_k] = str(_v).strip()
+    except Exception:
+        pass  # Graceful degradation: keep docker-compose values if ES is unreachable
+
+
 def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
-    """Stub mapping bounding legacy calls safely inside server.py."""
+    """AP-10: No-op stub. .env is bootstrap-only; LLM keys come from ES/OpenBao."""
     pass
 
 def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, str] | None:

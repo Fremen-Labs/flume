@@ -16,6 +16,18 @@ from pathlib import Path
 
 NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
 
+# AP-10: Import ES-native model reader
+try:
+    import sys as _sys
+    _wm_src = str(__import__('pathlib').Path(__file__).resolve().parent.parent)
+    if _wm_src not in _sys.path:
+        _sys.path.insert(0, _wm_src)
+    from workspace_llm_env import get_active_llm_model as _get_active_llm_model
+except Exception:
+    def _get_active_llm_model(default: str = 'llama3.2') -> str:  # type: ignore[misc]
+        return (os.environ.get('LLM_MODEL') or default).strip() or default
+
+
 _WS = Path(__file__).resolve().parent.parent
 if str(_WS) not in sys.path:
     sys.path.insert(0, str(_WS))
@@ -1070,7 +1082,8 @@ def handle_implementer_worker(task, es_id):
 
     try:
         result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress)
-        implementer_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
+        implementer_model = task.get('preferred_model') or _get_active_llm_model()
+
 
         if result.metadata.get('source') == 'llm_no_response':
             _implementer_handle_llm_failure(es_id, task, task_id)
@@ -1258,7 +1271,8 @@ def handle_tester_worker(task, es_id):
         return True
 
     result = run_tester(task)
-    tester_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
+    tester_model = task.get('preferred_model') or _get_active_llm_model()
+
     if result.action == 'fail':
         bugs = result.bugs or [{
             'title': f"Bug follow-up for {task.get('title', task.get('id'))}",
@@ -1328,7 +1342,8 @@ def handle_reviewer_worker(task, es_id):
         return True
 
     result = run_reviewer(task)
-    reviewer_model = task.get('preferred_model') or os.environ.get('LLM_MODEL', 'llama3.2')
+    reviewer_model = task.get('preferred_model') or _get_active_llm_model()
+
     verdict = result.verdict or 'approved'
     task_id = task.get('id')
     write_doc(REVIEW_INDEX, {
