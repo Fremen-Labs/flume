@@ -27,7 +27,11 @@ def resolve_safe_workspace() -> Path:
         raise WorkspaceInitializationError(f"CRITICAL: Path Traversal boundary violation. Targeted static system vector: {target}")
         
     if not str(target).startswith(str(Path.home().resolve())) and not str(target).startswith(str(Path.cwd().resolve())):
-         if str(target) != "/workspace":
+         # AP-15: /local-repos is the container-internal mount point for local-path
+         # projects (replaced /workspace as the bind-mount target). Both are
+         # allowed as they are controlled Docker volume paths, not host traversals.
+         if str(target) not in ("/workspace", "/local-repos"):
              raise WorkspaceInitializationError(f"CRITICAL: Target {target} escapes both the user home bounds and execution context bounds. To prevent file-system read/write traversals, restrict FLUME_WORKSPACE to localized directories.")
+
 
     return target
