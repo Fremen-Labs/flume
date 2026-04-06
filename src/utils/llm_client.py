@@ -98,14 +98,103 @@ import time
 
 # Model name fragments that indicate a built-in reasoning/thinking mode.
 # For these models Ollama will spend unbounded token budget on <think>...</think>
-# blocks before emitting any visible content unless we pass `think=False`.
+# blocks before emitting any visible content unless suppressed.
 _THINKING_MODEL_FRAGMENTS = ('gemma3', 'gemma4', 'qwq', 'deepseek-r1', 'marco-o1')
+
+# System message injected for thinking models when the caller has NOT opted in
+# to the reasoning phase.  Acts as a prompt-level guard independently of any
+# Ollama API `think` flag — works on Ollama versions that predate that option.
+_NO_THINK_SYSTEM_MSG = (
+    'IMPORTANT: Do NOT output any <think>...</think> reasoning blocks. '
+    'Respond directly with your answer only — no chain-of-thought, no reasoning '
+    'trace, no internal monologue. Begin your response immediately.'
+)
 
 
 def _is_thinking_model(model: str) -> bool:
     """Return True when *model* is a known reasoning/thinking Ollama model."""
     m = (model or '').lower().replace(':', '-').replace(' ', '-')
     return any(frag in m for frag in _THINKING_MODEL_FRAGMENTS)
+
+
+def _inject_no_think_system(messages: list) -> list:
+    """Prepend or augment a system message to suppress chain-of-thought output."""
+    msgs = list(messages)
+    if msgs and msgs[0].get('role') == 'system':
+        msgs[0] = {**msgs[0], 'content': msgs[0]['content'] + '\n\n' + _NO_THINK_SYSTEM_MSG}
+    else:
+        msgs.insert(0, {'role': 'system', 'content': _NO_THINK_SYSTEM_MSG})
+    return msgs
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove any <think>...</think> blocks that leaked into the final content."""
+    import re
+    return re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE).strip()
+
+
+def _ollama_stream_strip_think(url: str, payload: dict, timeout: int) -> str:
+    """Stream an Ollama NDJSON response, discarding <think>...</think> blocks.
+
+    Ollama 0.x versions (pre-0.6.5) ignore the API-level `think=False` option.
+    Streaming allows us to:
+      1. Keep the HTTP connection alive — no N-minute blocking timeout waiting
+         for a single huge non-streamed response.
+      2. Actively discard <think> tokens in real time so they don't appear
+         in the returned content.
+      3. Start accumulating visible content the instant thinking ends.
+    """
+    import io
+    headers = {'Content-Type': 'application/json'}
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method='POST',
+    )
+    visible_parts: list = []
+    in_think = False
+    think_buf = ''
+
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw_line in io.TextIOWrapper(resp, encoding='utf-8'):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                chunk = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            token = chunk.get('message', {}).get('content', '')
+            if not token:
+                continue
+
+            # State-machine to strip <think>...</think> spans that may cross
+            # multiple token boundaries.
+            combined = think_buf + token
+            think_buf = ''
+            while combined:
+                if in_think:
+                    end = combined.find('</think>')
+                    if end == -1:
+                        # Entire combined is still inside <think>, keep buffering
+                        think_buf = combined
+                        combined = ''
+                    else:
+                        in_think = False
+                        combined = combined[end + len('</think>'):]
+                else:
+                    start = combined.find('<think>')
+                    if start == -1:
+                        visible_parts.append(combined)
+                        combined = ''
+                    else:
+                        visible_parts.append(combined[:start])
+                        in_think = True
+                        combined = combined[start + len('<think>'):]
+
+    return ''.join(visible_parts).strip()
+
 
 
 def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
@@ -153,6 +242,7 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
 # ---------------------------------------------------------------------------
 
 def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None, timeout=120, ollama_think=False):
+    base_url = _ollama_base_url(base_url_override=base_url_override)
     options: dict = {
         'temperature': temperature,
         'num_predict': max_tokens,
@@ -160,13 +250,36 @@ def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=Non
         # aren't silently truncated, which confuses thinking models.
         'num_ctx': int(os.environ.get('FLUME_OLLAMA_NUM_CTX', '8192')),
     }
-    # Disable the internal thinking/reasoning phase on known thinking models
-    # unless the caller explicitly opts in.  Without this, gemma3/gemma4/qwq
-    # can spend 120-300 s on <think> tokens before returning any content.
-    if _is_thinking_model(model) and not ollama_think:
+    suppress_think = _is_thinking_model(model) and not ollama_think
+    if suppress_think:
+        # API-level flag: honoured by Ollama >= 0.6.5. Older versions ignore it
+        # silently — the streaming fallback below handles those.
         options['think'] = False
+        # Prompt-level guard: works on ALL Ollama versions regardless of API
+        # support. Prepend a system message that explicitly forbids <think> output.
+        messages = _inject_no_think_system(messages)
+
+    if suppress_think:
+        # Use streaming + real-time think-block stripping.
+        # Older Ollama versions (< 0.6.5) ignore think=False in the API payload,
+        # causing the model to spend 2-5 minutes on chain-of-thought before
+        # emitting visible content.  With streaming we:
+        #   • Stay connected — no timeout waiting for a huge non-streamed blob
+        #   • Strip <think>...</think> spans as tokens arrive
+        #   • Return visible content immediately after the thinking phase ends
+        return _ollama_stream_strip_think(
+            f'{base_url}/api/chat',
+            {
+                'model': model,
+                'messages': messages,
+                'stream': True,
+                'options': options,
+            },
+            timeout=timeout,
+        )
+
     data = _post(
-        f'{_ollama_base_url(base_url_override=base_url_override)}/api/chat',
+        f'{base_url}/api/chat',
         {
             'model': model,
             'messages': messages,
@@ -184,8 +297,10 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url
         'num_predict': max_tokens,
         'num_ctx': int(os.environ.get('FLUME_OLLAMA_NUM_CTX', '8192')),
     }
-    if _is_thinking_model(model) and not ollama_think:
+    suppress_think = _is_thinking_model(model) and not ollama_think
+    if suppress_think:
         options['think'] = False
+        messages = _inject_no_think_system(messages)
     return _post(
         f'{_ollama_base_url(base_url_override=base_url_override)}/api/chat',
         {
