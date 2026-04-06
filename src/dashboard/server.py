@@ -2936,20 +2936,45 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     "project_id": new_id,
                     "error": str(_cred_err)[:200],
                 }))
-            # ── Env-var fallback (set by flume start / docker-compose) ──────────
-            # OpenBao is the canonical source, but on a fresh --purge the KV is
-            # empty. ADO_PERSONAL_ACCESS_TOKEN / ADO_TOKEN are passed into the
-            # container via docker-compose and provide a reliable bootstrap path.
+            # ── OpenBao direct KV fallback (ADO_TOKEN written by flume start) ───
+            # On a fresh start the UI credential registry (flume-ado-tokens) is
+            # empty, but 'flume start' writes ADO_TOKEN to secret/data/flume/keys.
+            # Read it directly so project cloning works immediately after start
+            # without requiring the user to also add credentials via Settings.
+            _DELEGATED = "OPENBAO_DELEGATED"
             if not pat:
-                pat = (
+                try:
+                    from llm_settings import _openbao_get_all  # noqa: PLC0415
+                    _bao_vals = _openbao_get_all(WORKSPACE_ROOT)
+                    _bao_ado = str(_bao_vals.get("ADO_TOKEN") or "").strip()
+                    if _bao_ado and _DELEGATED not in _bao_ado:
+                        pat = _bao_ado
+                        logger.info(json.dumps({
+                            "event": "ado_pat_from_openbao_direct",
+                            "project_id": new_id,
+                            "hint": "PAT sourced from OpenBao ADO_TOKEN key (flume start provisioning).",
+                        }))
+                except Exception:
+                    pass
+            # ── Env-var fallback (for local dev environments without OpenBao) ────
+            # Guard: never use the OPENBAO_DELEGATED sentinel as an actual PAT.
+            if not pat:
+                _env_pat = (
                     os.environ.get("ADO_PERSONAL_ACCESS_TOKEN", "").strip()
                     or os.environ.get("ADO_TOKEN", "").strip()
                 )
-                if pat:
+                if _env_pat and _DELEGATED not in _env_pat:
+                    pat = _env_pat
                     logger.info(json.dumps({
                         "event": "ado_pat_from_env",
                         "project_id": new_id,
                         "hint": "PAT sourced from ADO_PERSONAL_ACCESS_TOKEN env var (OpenBao fallback).",
+                    }))
+                elif _env_pat:
+                    logger.warning(json.dumps({
+                        "event": "ado_pat_sentinel_in_env",
+                        "project_id": new_id,
+                        "hint": "ADO_TOKEN env var contains OPENBAO_DELEGATED sentinel — OpenBao not yet seeded. Re-add the project after flume start completes vault provisioning.",
                     }))
         elif repo_type == "github":
             try:
@@ -2969,13 +2994,21 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                     "error": str(_cred_err)[:200],
                 }))
             # ── Env-var fallback ─────────────────────────────────────────────────
+            _DELEGATED = "OPENBAO_DELEGATED"
             if not pat:
-                pat = os.environ.get("GITHUB_TOKEN", "").strip()
-                if pat:
+                _env_pat = os.environ.get("GITHUB_TOKEN", "").strip()
+                if _env_pat and _DELEGATED not in _env_pat:
+                    pat = _env_pat
                     logger.info(json.dumps({
                         "event": "gh_pat_from_env",
                         "project_id": new_id,
                         "hint": "PAT sourced from GITHUB_TOKEN env var (OpenBao fallback).",
+                    }))
+                elif _env_pat:
+                    logger.warning(json.dumps({
+                        "event": "gh_pat_sentinel_in_env",
+                        "project_id": new_id,
+                        "hint": "GITHUB_TOKEN env var contains OPENBAO_DELEGATED sentinel — OpenBao not yet seeded.",
                     }))
         if pat:
             # Embed PAT into the already-stripped URL.
