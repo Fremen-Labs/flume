@@ -92,6 +92,22 @@ def _base_url(provider=None, base_url_override=None):
 
 import time
 
+# ---------------------------------------------------------------------------
+# Thinking-model helpers
+# ---------------------------------------------------------------------------
+
+# Model name fragments that indicate a built-in reasoning/thinking mode.
+# For these models Ollama will spend unbounded token budget on <think>...</think>
+# blocks before emitting any visible content unless we pass `think=False`.
+_THINKING_MODEL_FRAGMENTS = ('gemma3', 'gemma4', 'qwq', 'deepseek-r1', 'marco-o1')
+
+
+def _is_thinking_model(model: str) -> bool:
+    """Return True when *model* is a known reasoning/thinking Ollama model."""
+    m = (model or '').lower().replace(':', '-').replace(' ', '-')
+    return any(frag in m for frag in _THINKING_MODEL_FRAGMENTS)
+
+
 def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
     headers = {'Content-Type': 'application/json'}
     if extra_headers:
@@ -136,21 +152,40 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
 # Ollama
 # ---------------------------------------------------------------------------
 
-def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None, timeout=120):
+def _ollama_chat(messages, model, temperature, max_tokens, base_url_override=None, timeout=120, ollama_think=False):
+    options: dict = {
+        'temperature': temperature,
+        'num_predict': max_tokens,
+        # Increase context window from Ollama's 2048 default so large prompts
+        # aren't silently truncated, which confuses thinking models.
+        'num_ctx': int(os.environ.get('FLUME_OLLAMA_NUM_CTX', '8192')),
+    }
+    # Disable the internal thinking/reasoning phase on known thinking models
+    # unless the caller explicitly opts in.  Without this, gemma3/gemma4/qwq
+    # can spend 120-300 s on <think> tokens before returning any content.
+    if _is_thinking_model(model) and not ollama_think:
+        options['think'] = False
     data = _post(
         f'{_ollama_base_url(base_url_override=base_url_override)}/api/chat',
         {
             'model': model,
             'messages': messages,
             'stream': False,
-            'options': {'temperature': temperature, 'num_predict': max_tokens},
+            'options': options,
         },
         timeout=timeout,
     )
     return data.get('message', {}).get('content', '')
 
 
-def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url_override=None):
+def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url_override=None, ollama_think=False):
+    options: dict = {
+        'temperature': temperature,
+        'num_predict': max_tokens,
+        'num_ctx': int(os.environ.get('FLUME_OLLAMA_NUM_CTX', '8192')),
+    }
+    if _is_thinking_model(model) and not ollama_think:
+        options['think'] = False
     return _post(
         f'{_ollama_base_url(base_url_override=base_url_override)}/api/chat',
         {
@@ -158,7 +193,7 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url
             'messages': messages,
             'tools': tools,
             'stream': False,
-            'options': {'temperature': temperature, 'num_predict': max_tokens},
+            'options': options,
         },
         timeout=180,
     )
@@ -311,14 +346,18 @@ def _anthropic_chat_tools(messages, tools, model, temperature, max_tokens):
 # Public API
 # ---------------------------------------------------------------------------
 
-def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None, base_url_override=None, timeout_seconds=120, return_usage=False):
+def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_override=None, base_url_override=None, timeout_seconds=120, return_usage=False, ollama_think=False):
     """Call the configured LLM and return the assistant's text response.
 
     Args:
-        messages:    List of {role, content} dicts in OpenAI format.
-        model:       Model name override; falls back to LLM_MODEL env var.
-        temperature: Sampling temperature (0.0–1.0).
-        max_tokens:  Maximum tokens to generate.
+        messages:     List of {role, content} dicts in OpenAI format.
+        model:        Model name override; falls back to LLM_MODEL env var.
+        temperature:  Sampling temperature (0.0–1.0).
+        max_tokens:   Maximum tokens to generate.
+        ollama_think: If True, allow Ollama thinking-model reasoning phase.
+                      Defaults to False (disabled) so gemma/qwq/deepseek-r1
+                      don't silently spend 2+ minutes on <think> tokens.
+                      Set FLUME_OLLAMA_THINK=1 env var to enable globally.
 
     Returns:
         str: The assistant's text response.
@@ -327,8 +366,10 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_ove
     m = model or _default_model()
     if p == 'gemini':
         m = _normalize_gemini_model(m)
+    # Honour FLUME_OLLAMA_THINK env override (allows per-deployment opt-in).
+    effective_think = ollama_think or os.environ.get('FLUME_OLLAMA_THINK', '').strip() in ('1', 'true', 'yes')
     if p == 'ollama':
-        content = _ollama_chat(messages, m, temperature, max_tokens, base_url_override, timeout=timeout_seconds)
+        content = _ollama_chat(messages, m, temperature, max_tokens, base_url_override, timeout=timeout_seconds, ollama_think=effective_think)
     elif p == 'anthropic':
         content = _anthropic_chat(messages, m, temperature, max_tokens)
     else:
@@ -338,15 +379,17 @@ def chat(messages, model=None, *, temperature=0.3, max_tokens=8192, provider_ove
     return content
 
 
-def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None, base_url_override=None):
+def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=4096, provider_override=None, base_url_override=None, ollama_think=False):
     """Call the configured LLM with tool definitions.
 
     Args:
-        messages:    List of {role, content} dicts in OpenAI format.
-        tools:       List of tool definitions in OpenAI function-calling format.
-        model:       Model name override; falls back to LLM_MODEL env var.
-        temperature: Sampling temperature.
-        max_tokens:  Maximum tokens to generate.
+        messages:     List of {role, content} dicts in OpenAI format.
+        tools:        List of tool definitions in OpenAI function-calling format.
+        model:        Model name override; falls back to LLM_MODEL env var.
+        temperature:  Sampling temperature.
+        max_tokens:   Maximum tokens to generate.
+        ollama_think: If True, allow Ollama thinking-model reasoning phase.
+                      Defaults to False so tool-call loops don't stall.
 
     Returns:
         dict: Ollama-compatible response dict:
@@ -362,8 +405,9 @@ def chat_with_tools(messages, tools, model=None, *, temperature=0.2, max_tokens=
     m = model or _default_model()
     if p == 'gemini':
         m = _normalize_gemini_model(m)
+    effective_think = ollama_think or os.environ.get('FLUME_OLLAMA_THINK', '').strip() in ('1', 'true', 'yes')
     if p == 'ollama':
-        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, base_url_override)
+        return _ollama_chat_tools(messages, tools, m, temperature, max_tokens, base_url_override, ollama_think=effective_think)
     elif p == 'anthropic':
         return _anthropic_chat_tools(messages, tools, m, temperature, max_tokens)
     else:
