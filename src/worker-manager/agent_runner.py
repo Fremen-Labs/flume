@@ -1005,14 +1005,20 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
     response = _call_ollama(
         system_prompt,
         {
-            'instruction': 'Return JSON: {"verdict":"approved|changes_requested|blocked","summary":"..."}',
+            'instruction': 'Return JSON: {"verdict":"approved|changes_requested","summary":"..."}',
             'task': task,
         },
         model=task.get('preferred_model') or _current_llm_model(),
         task=task,
     )
     if response and isinstance(response, dict):
-        verdict = response.get('verdict', 'approved')
+        raw_verdict = response.get('verdict', 'approved')
+        # Normalise: only 'approved' and 'changes_requested' are valid.
+        # Any other value (e.g. 'blocked' hallucinated by the LLM) is treated
+        # as 'changes_requested' so the task re-queues rather than blocking.
+        if raw_verdict not in ('approved', 'changes_requested'):
+            raw_verdict = 'changes_requested'
+        verdict = raw_verdict
         return AgentResult(
             action='review_complete',
             verdict=verdict,

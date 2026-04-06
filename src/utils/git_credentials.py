@@ -129,15 +129,55 @@ def _has_credentials(url: str) -> bool:
 
 
 def _resolve_token(repo_type: str) -> str:
-    """Return the PAT for a given provider type from environment variables."""
-    if repo_type == "github":
-        return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    """
+    Resolve the PAT for a git provider.
+
+    Priority (mirrors _build_auth_clone_url in worker_handlers.py):
+      1. OpenBao KV via ado_tokens_store / github_tokens_store
+         (primary — this is where flume start stores the real PAT)
+      2. Environment variable fallback for dev / non-container environments
+
+    The sentinel value "OPENBAO_DELEGATED" is explicitly ignored — it means
+    "go read from Vault" and must never be embedded into a git URL.
+    """
+    _DELEGATED = "OPENBAO_DELEGATED"
+
     if repo_type == "ado":
-        return (
-            os.environ.get("ADO_TOKEN")
-            or os.environ.get("ADO_PERSONAL_ACCESS_TOKEN")
-            or ""
+        # 1. OpenBao KV (same path the clone uses successfully)
+        try:
+            from utils.workspace import resolve_safe_workspace  # noqa: PLC0415
+            import ado_tokens_store  # noqa: PLC0415
+            ws = resolve_safe_workspace()
+            raw = ado_tokens_store.get_active_token_plain(ws)
+            if raw and _DELEGATED not in raw:
+                return raw
+        except Exception:
+            pass
+        # 2. Env var fallback
+        token = (
+            os.environ.get("ADO_TOKEN", "")
+            or os.environ.get("ADO_PERSONAL_ACCESS_TOKEN", "")
         )
+        return "" if _DELEGATED in token else token
+
+    if repo_type == "github":
+        # 1. OpenBao KV
+        try:
+            from utils.workspace import resolve_safe_workspace  # noqa: PLC0415
+            import github_tokens_store  # noqa: PLC0415
+            ws = resolve_safe_workspace()
+            raw = github_tokens_store.get_active_token_plain(ws)
+            if raw and _DELEGATED not in raw:
+                return raw
+        except Exception:
+            pass
+        # 2. Env var fallback
+        token = (
+            os.environ.get("GH_TOKEN", "")
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
+        return "" if _DELEGATED in token else token
+
     return ""
 
 

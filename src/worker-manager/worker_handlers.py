@@ -955,11 +955,20 @@ def task_requires_code(task: dict) -> bool:
     We use it to avoid marking code-changing tasks as "done" when the agent
     only did analysis/context and didn't actually edit the repo.
     """
-    # The `objective` field is sometimes inherited from the parent story and
-    # can be too generic (e.g., "Update footer text..."), so we key off the
-    # *title* which is specific to whether this is a replace/modify vs verify/test
-    # step.
-    text = f"{task.get('title', '')}".lower()
+    # Non-code overrides evaluated first — if the task is explicitly analytical,
+    # documentation-oriented, or exploratory, it must NOT be re-queued just
+    # because its title contains a code-sounding verb (e.g. "Research and update").
+    non_code_overrides = [
+        'document', 'documentation', 'research', 'investigate', 'analyze', 'analyse',
+        'explore', 'plan ', 'design', 'discuss', 'assess', 'report', 'summarize',
+        'summarise', 'audit', 'verify', 'validate', 'review ', 'test '
+    ]
+    # Key off both title AND objective for better signal (title alone is sometimes
+    # too generic when inherited from a parent story).
+    full_text = f"{task.get('title', '')} {task.get('objective', '')}".lower()
+    if any(t in full_text for t in non_code_overrides):
+        return False
+
     # Code-edit / content-edit verbs. Keep this list conservative to avoid
     # flagging pure validation tasks ("verify"/"validate"/"test").
     # Documentation tasks use verbs like "reorganize", "convert", "restructure",
@@ -971,7 +980,7 @@ def task_requires_code(task: dict) -> bool:
         'migrate', 'rewrite', 'move ', 'rename', 'refactor', 'format', 'reformat',
         'correct', 'fix ', 'patch', 'delete', 'insert', 'append',
     ]
-    return any(t in text for t in code_triggers)
+    return any(t in full_text for t in code_triggers)
 
 
 def _implementer_clear_claim_fields() -> dict:
@@ -1054,6 +1063,30 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
 def handle_implementer_worker(task, es_id):
     # Guarantee absolute node isolation immediately via Worktree Sandboxing
     branch, worktree_path = ensure_task_branch(task)
+
+    # Early-exit re-queue when the clone fails for a remote repo.
+    # Without this guard the agent runs against an empty/missing worktree,
+    # produces no changes, and the task later blocks in the tester/reviewer
+    # no-commit gate.
+    if branch is None and task.get('repo'):
+        src = _get_project_source(task.get('repo')) or {}
+        clone_status = src.get('clone_status') or src.get('cloneStatus') or ''
+        if clone_status != 'local':  # only applies to remote repos
+            append_agent_note(
+                es_id,
+                'Re-queued: git clone failed. Verify the ADO/GH token on the Security page and '
+                'that the repository URL is accessible from the worker container.',
+            )
+            update_task_doc(es_id, {
+                'status': 'ready',
+                'owner': 'implementer',
+                'assigned_agent_role': 'implementer',
+                'needs_human': False,
+                **_implementer_clear_claim_fields(),
+            })
+            log(f"implementer: task={task.get('id')} clone failed — re-queued")
+            return True
+
     repo_path = worktree_path or str(load_project_repo_path(task.get('repo')))
 
     # Clear any stale notes from previous runs, then write live progress to ES
@@ -1134,16 +1167,44 @@ def handle_implementer_worker(task, es_id):
                     commit_message = existing_msg
 
             # If the agent *should* have written code (has_changes=True) but we couldn't
-            # record it (commit_sha == ''), don't mark the task done.
+            # record it (commit_sha == ''), the push to remote failed.
+            # Apply a retry cap: re-queue for transient failures, block with reason
+            # surfaced to the Work Queue card only after 4 consecutive failures.
             if has_changes and not commit_sha:
-                update_task_doc(es_id, {
-                    'status': 'blocked',
-                    'needs_human': True,
-                    'owner': 'implementer',
-                    'assigned_agent_role': 'implementer',
-                    **_implementer_clear_claim_fields(),
-                })
-                log(f"implementer: task={task_id} has changes but commit failed; blocking for human attention")
+                _MAX_PUSH_FAILURES = int(os.environ.get('FLUME_MAX_PUSH_FAILURES', '3'))
+                prev_push_failures = int(task.get('push_failure_count', 0))
+                next_push_failures = prev_push_failures + 1
+
+                if next_push_failures > _MAX_PUSH_FAILURES:
+                    append_agent_note(
+                        es_id,
+                        f'Blocked: git push failed {next_push_failures} consecutive times (cap={_MAX_PUSH_FAILURES}). '
+                        'The most common cause is an expired or incorrect ADO/GH token. '
+                        'Check the Security page → Vault connection, then reset this task to **ready** to retry.',
+                    )
+                    update_task_doc(es_id, {
+                        'status': 'blocked',
+                        'needs_human': True,
+                        'owner': 'implementer',
+                        'assigned_agent_role': 'implementer',
+                        'push_failure_count': next_push_failures,
+                        **_implementer_clear_claim_fields(),
+                    })
+                    log(f"implementer: task={task_id} push failed {next_push_failures} times — blocking for human attention")
+                else:
+                    append_agent_note(
+                        es_id,
+                        f'Re-queued: git push to remote failed (attempt {next_push_failures}/{_MAX_PUSH_FAILURES}). '
+                        'Branch was committed locally. Will retry automatically.',
+                    )
+                    update_task_doc(es_id, {
+                        'status': 'ready',
+                        'owner': 'implementer',
+                        'assigned_agent_role': 'implementer',
+                        'push_failure_count': next_push_failures,
+                        **_implementer_clear_claim_fields(),
+                    })
+                    log(f"implementer: task={task_id} push failed — re-queued (attempt {next_push_failures}/{_MAX_PUSH_FAILURES})")
                 released = True
                 return True
 
@@ -1453,8 +1514,42 @@ def handle_reviewer_worker(task, es_id):
         })
         log(f"reviewer requested changes for task={task_id}")
         return True
-    update_task_doc(es_id, {'status': 'blocked', 'needs_human': True, 'owner': 'reviewer'})
-    log(f"reviewer blocked task={task_id}")
+
+    # Unknown verdict (e.g. hallucinated value not caught by agent_runner normalisation).
+    # Re-queue to the reviewer for another attempt, rather than permanently blocking.
+    # If the reviewer has already looped too many times, escalate to human.
+    _REVIEWER_BLOCK_CAP = int(os.environ.get('FLUME_REVIEWER_BLOCK_CAP', '3'))
+    prev_blocks = int(task.get('reviewer_block_count', 0))
+    next_blocks = prev_blocks + 1
+
+    if next_blocks >= _REVIEWER_BLOCK_CAP:
+        append_agent_note(
+            es_id,
+            f'Blocked: reviewer returned an unresolvable verdict {next_blocks} times '
+            f'(cap={_REVIEWER_BLOCK_CAP}, FLUME_REVIEWER_BLOCK_CAP). '
+            'Manually review and reset this task to **ready** or **done** after inspection.',
+        )
+        update_task_doc(es_id, {
+            'status': 'blocked',
+            'needs_human': True,
+            'owner': 'reviewer',
+            'reviewer_block_count': next_blocks,
+        })
+        log(f"reviewer blocked task={task_id} after {next_blocks} unresolvable verdict attempts")
+    else:
+        append_agent_note(
+            es_id,
+            f'Re-queuing to reviewer: unexpected verdict returned (attempt {next_blocks}/{_REVIEWER_BLOCK_CAP}). '
+            'The reviewer will attempt to reach a valid conclusion.',
+        )
+        update_task_doc(es_id, {
+            'status': 'review',
+            'owner': 'reviewer',
+            'assigned_agent_role': 'reviewer',
+            'reviewer_block_count': next_blocks,
+            **_implementer_clear_claim_fields(),
+        })
+        log(f"reviewer: unresolvable verdict for task={task_id} — re-queued to reviewer (attempt {next_blocks})")
     return True
 
 
