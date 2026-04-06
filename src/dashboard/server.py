@@ -2333,7 +2333,12 @@ async def lifespan(app: FastAPI):
         # Re-run validation natively inside the event loop in case env vars were mutated post-import
         resolve_safe_workspace()
         
-        WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+        # AP-15: WORKSPACE_ROOT may be a read-only bind-mount (/local-repos:ro).
+        # Only attempt mkdir when the directory doesn't already exist.
+        # For remote-only deployments the mount target is /dev/null (a file, not
+        # a dir), so we skip mkdir entirely and let ES be the source of truth.
+        if not WORKSPACE_ROOT.exists():
+            WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
         logger.info(json.dumps({
             "event": "workspace_initialized",
             "path": str(WORKSPACE_ROOT),
@@ -2348,6 +2353,7 @@ async def lifespan(app: FastAPI):
             "status": "fatal"
         }))
         raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
+
 
     # AP-3 resolved: _migrate_legacy_projects_json() removed — migration is complete.
 
