@@ -123,11 +123,33 @@ func confirmPurge() bool {
 	return response == "yes" || response == "y"
 }
 
+// resolveWorkspaceRoot returns the Flume workspace root path.
+//
+// Resolution order:
+//  1. FLUME_WORKSPACE env var (set by docker-compose / flume start)
+//  2. Parent of the current working directory — matches the ..:/workspace
+//     docker-compose bind-mount topology used in single-box deployments.
+func resolveWorkspaceRoot() string {
+	if ws := strings.TrimSpace(os.Getenv("FLUME_WORKSPACE")); ws != "" {
+		return ws
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(cwd)
+}
+
 // runWorkspaceCleanup removes state files and environment artifacts.
 //
 // AP-5C (K8s Readiness): Git worktree cleanup has been removed.
 // Workers now use ephemeral shallow clones in /tmp which are self-cleaning.
 // The .flume/agents/ directory and 'git worktree prune' are no longer needed.
+//
+// AP-13 (K8s Readiness): Sweep pre-AP-era filesystem anti-pattern artifacts
+// that survive across destroy cycles via the ..:/workspace bind mount.
+// These directories/files are no longer written by current code but accumulate
+// on the host if not explicitly removed.
 func runWorkspaceCleanup() {
 	fmt.Println(ui.CyberGradient("Cleaning environment locks and state files..."))
 
@@ -138,6 +160,50 @@ func runWorkspaceCleanup() {
 	homeDir, _ := os.UserHomeDir()
 	os.RemoveAll(homeDir + "/.flume/workspace/worker-manager")
 	os.RemoveAll(homeDir + "/.flume/workspace/worker_state.json")
+
+	// 3. AP-13: Sweep stale workspace-root filesystem anti-pattern artifacts.
+	//    These were written by pre-AP-1 through pre-AP-9 code and are no longer
+	//    produced by the running system, but persist across destroy cycles.
+	ws := resolveWorkspaceRoot()
+	staleArtifacts := []string{
+		"logs",                   // AP-6: replaced by stdout
+		"plan-sessions",          // AP-9: replaced by agent-plan-sessions ES index
+		"repos",                  // legacy git cache — superseded by GitHostClient
+		"worker-manager",         // AP-2: vestigial state directory
+		"sequence_counters.json", // AP-1: replaced by flume-counters ES index
+		"worker_state.json",      // AP-2: replaced by ES
+		"planner-debug.log",      // AP-6: replaced by stdout
+		"elastro.log",            // stale elastro library log
+	}
+	for _, name := range staleArtifacts {
+		target := filepath.Join(ws, name)
+		if info, err := os.Stat(target); err == nil {
+			if err := os.RemoveAll(target); err == nil {
+				_ = info // suppress unused warning
+				fmt.Println(ui.SuccessBlue("  Purged stale artifact: " + target))
+			} else {
+				fmt.Println(ui.WarningGold("  Could not remove " + target + ": " + err.Error()))
+			}
+		}
+	}
+
+	// 4. AP-13: Sweep orphaned proj-* registration clone directories.
+	//    AP-11 routes new registration clones to /tmp, but any proj-* dirs from
+	//    pre-AP-11 container runs are stranded on the workspace bind-mount.
+	//    ES (flume-projects index) is the source of truth for project data.
+	entries, err := os.ReadDir(ws)
+	if err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "proj-") && e.IsDir() {
+				target := filepath.Join(ws, e.Name())
+				if err := os.RemoveAll(target); err == nil {
+					fmt.Println(ui.SuccessBlue("  Purged orphaned clone: " + target))
+				} else {
+					fmt.Println(ui.WarningGold("  Could not remove " + target + ": " + err.Error()))
+				}
+			}
+		}
+	}
 }
 
 func init() {
@@ -146,3 +212,4 @@ func init() {
 		"Hard-delete ALL Flume Docker images in addition to containers/volumes (prompts for confirmation)",
 	)
 }
+
