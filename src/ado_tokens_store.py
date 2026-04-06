@@ -1,13 +1,12 @@
 # Labeled Azure DevOps credentials (PAT + org URL per row).
 # Metadata stored in ES index 'flume-ado-tokens'.
 # PATs stored exclusively in OpenBao KV at secret/data/flume/ado_tokens/{id}.
-# Falls back to local JSON if ES is unavailable (local dev without Docker).
+# AP-14: Local JSON fallback removed — ES is the sole metadata store.
 
 from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 from typing import Any, Optional
 
 MASK = "***"
@@ -15,33 +14,17 @@ ENV_ADO_TOKEN = "ADO_TOKEN"
 ENV_ADO_ORG_URL = "ADO_ORG_URL"
 
 
-def store_path(workspace_root: Path) -> Path:
-    return workspace_root / "worker-manager" / "ado_tokens.json"
-
-
 def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeCredentialId": "", "credentials": []}
 
 
-def _load_from_file(workspace_root: Path) -> dict[str, Any]:
-    path = store_path(workspace_root)
-    if not path.is_file():
-        return _default_doc()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return _default_doc()
-        data.setdefault("version", 1)
-        data.setdefault("activeCredentialId", "")
-        if not isinstance(data.get("credentials"), list):
-            data["credentials"] = []
-        return data
-    except (OSError, json.JSONDecodeError):
-        return _default_doc()
 
+def load_document(workspace_root=None) -> dict[str, Any]:
+    """Load metadata from ES. Returns empty default doc if ES is unavailable.
 
-def load_document(workspace_root: Path) -> dict[str, Any]:
-    """Load metadata from ES (preferred) with local-file fallback."""
+    AP-14: The workspace_root parameter is retained for call-site compatibility
+    but is intentionally unused — all credential metadata lives in Elasticsearch.
+    """
     try:
         from es_credential_store import load_ado_tokens
         doc = load_ado_tokens(_default_doc)
@@ -52,7 +35,7 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return doc
     except Exception:
         pass
-    return _load_from_file(workspace_root)
+    return _default_doc()
 
 
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
