@@ -86,20 +86,25 @@ This is a hard reset that requires explicit confirmation.`,
 					fmt.Println(ui.SuccessBlue(fmt.Sprintf("Removed image: %s", img)))
 				}
 			}
-
-			// Also remove dangling build cache layers associated with flume
-			pruneCache := exec.Command("docker", "builder", "prune", "-f", "--filter", "label=com.docker.compose.project=flume")
-			pruneCache.Stdout = os.Stdout
-			pruneCache.Stderr = os.Stderr
-			pruneCache.Run() // best-effort
-
 			fmt.Println(ui.SuccessBlue("All Flume Docker images purged."))
 		}
+
+		// Always prune the full builder cache on every destroy (purge or not).
+		// The old label-filtered prune missed most intermediate build layers
+		// because they don't carry the compose project label. Accumulated cache
+		// from repeated destroy/rebuild cycles filled the Docker VM disk (29.9GB
+		// observed), causing Elasticsearch to fail on /tmp writes at startup.
+		fmt.Println(ui.CyberGradient("Pruning Docker builder cache..."))
+		pruneCache := exec.Command("docker", "builder", "prune", "-f")
+		pruneCache.Stdout = os.Stdout
+		pruneCache.Stderr = os.Stderr
+		pruneCache.Run() // best-effort
 
 		runWorkspaceCleanup()
 		fmt.Println(ui.SuccessBlue("Ecosystem Scuttled natively!"))
 	},
 }
+
 
 // confirmPurge renders a branded danger prompt and reads y/yes to confirm.
 func confirmPurge() bool {
