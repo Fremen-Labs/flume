@@ -1,7 +1,7 @@
 # Labeled GitHub PATs (multiple).
 # Metadata stored in ES index 'flume-github-tokens'.
 # PATs stored exclusively in OpenBao KV at secret/data/flume/github_tokens/{id}.
-# Falls back to local JSON if ES is unavailable (local dev without Docker).
+# AP-14: Local JSON fallback removed — ES is the sole metadata store.
 
 from __future__ import annotations
 
@@ -14,33 +14,17 @@ MASK = "***"
 ENV_GH_TOKEN = "GH_TOKEN"
 
 
-def tokens_path(workspace_root: Path) -> Path:
-    return workspace_root / "worker-manager" / "github_tokens.json"
-
-
 def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeTokenId": "", "tokens": []}
 
 
-def _load_from_file(workspace_root: Path) -> dict[str, Any]:
-    path = tokens_path(workspace_root)
-    if not path.is_file():
-        return _default_doc()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return _default_doc()
-        data.setdefault("version", 1)
-        data.setdefault("activeTokenId", "")
-        if not isinstance(data.get("tokens"), list):
-            data["tokens"] = []
-        return data
-    except (OSError, json.JSONDecodeError):
-        return _default_doc()
 
+def load_document(workspace_root=None) -> dict[str, Any]:
+    """Load metadata from ES. Returns empty default doc if ES is unavailable.
 
-def load_document(workspace_root: Path) -> dict[str, Any]:
-    """Load metadata from ES (preferred) with local-file fallback."""
+    AP-14: The workspace_root parameter is retained for call-site compatibility
+    but is intentionally unused — all token metadata lives in Elasticsearch.
+    """
     try:
         from es_credential_store import load_gh_tokens
         doc = load_gh_tokens(_default_doc)
@@ -51,7 +35,7 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return doc
     except Exception:
         pass
-    return _load_from_file(workspace_root)
+    return _default_doc()
 
 
 def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:

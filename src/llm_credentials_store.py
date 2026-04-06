@@ -1,14 +1,13 @@
 # Labeled LLM API keys (multi-provider).
 # Metadata stored in ES index 'flume-llm-credentials'.
 # API keys stored exclusively in OpenBao KV at secret/data/flume/llm_credentials/{id}.
-# Falls back to local JSON if ES is unavailable (local dev without Docker).
+# AP-14: Local JSON fallback removed — ES is the sole metadata store.
 
 from __future__ import annotations
 
 import json
 import os
 import uuid
-import functools
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,6 +48,7 @@ def resolve_credential_label(workspace_root: Path, cred_id: str) -> str:
 
 
 def credentials_path(workspace_root: Path) -> Path:
+    # AP-14: Retained for legacy call-site compatibility only — no longer read/written.
     return workspace_root / "worker-manager" / "llm_credentials.json"
 
 
@@ -56,34 +56,15 @@ def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeCredentialId": "", "defaultCredentialId": "", "credentials": []}
 
 
-def _load_from_file(workspace_root: Path) -> dict[str, Any]:
-    """Local JSON fallback (dev without Docker / ES unavailable)."""
-    path = credentials_path(workspace_root)
-    if not path.is_file():
-        return _default_doc()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return _default_doc()
-        data.setdefault("version", 1)
-        data.setdefault("activeCredentialId", "")
-        data.setdefault("defaultCredentialId", "")
-        if not str(data.get("defaultCredentialId") or "").strip() and str(data.get("activeCredentialId") or "").strip():
-            data["defaultCredentialId"] = str(data.get("activeCredentialId") or "").strip()
-        if not isinstance(data.get("credentials"), list):
-            data["credentials"] = []
-        return data
-    except (OSError, json.JSONDecodeError):
-        return _default_doc()
+def load_document(workspace_root=None) -> dict[str, Any]:
+    """Load metadata from ES. Returns empty default doc if ES is unavailable.
 
-
-@functools.lru_cache(maxsize=1)
-def load_document(workspace_root: Path) -> dict[str, Any]:
-    """Load metadata from ES (preferred) with local-file fallback."""
+    AP-14: The workspace_root parameter is retained for call-site compatibility
+    but is intentionally unused — all credential metadata lives in Elasticsearch.
+    """
     try:
         from es_credential_store import load_llm_credentials
         doc = load_llm_credentials(_default_doc)
-        # If ES returned a non-trivial document, use it.
         if doc and (doc.get("credentials") or doc.get("activeCredentialId") or doc.get("defaultCredentialId")):
             doc.setdefault("version", 1)
             if not str(doc.get("defaultCredentialId") or "").strip() and str(doc.get("activeCredentialId") or "").strip():
@@ -93,14 +74,18 @@ def load_document(workspace_root: Path) -> dict[str, Any]:
             return doc
     except Exception:
         pass
-    # Fallback: local JSON (migrates existing data on first boot with ES)
-    return _load_from_file(workspace_root)
+    return _default_doc()
 
 
-def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
-    """Persist metadata to ES (preferred) and keep local JSON as backup."""
-    load_document.cache_clear()
-    # Mask secrets before any persistence layer
+def save_document(workspace_root=None, doc: dict[str, Any] = None) -> None:
+    """Persist metadata to ES. Secret API keys stay in OpenBao.
+
+    AP-14: Local JSON backup removed — ES is the sole metadata store.
+    workspace_root is retained for call-site back-compat but intentionally unused.
+    """
+    if doc is None:
+        doc = _default_doc()
+    # Mask secrets before persistence
     masked_doc = json.loads(json.dumps(doc))
     for cred in masked_doc.get("credentials", []):
         if cred.get("apiKey") and cred["apiKey"] not in ("", "***OPENBAO_DELEGATED***"):
@@ -108,13 +93,6 @@ def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
     try:
         from es_credential_store import save_llm_credentials
         save_llm_credentials(masked_doc)
-    except Exception:
-        pass
-    # Always write local JSON as fallback for native/dev mode
-    try:
-        path = credentials_path(workspace_root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(masked_doc, indent=2) + "\n", encoding="utf-8")
     except Exception:
         pass
 

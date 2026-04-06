@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1122,7 +1123,14 @@ def delete_task_branches(ids: list, repo: str) -> list:
         if not proj:
             continue
 
-        repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
+        # AP-12: Only local-path projects have a persistent repo on disk.
+        # Remote/indexed projects have no local clone — skip git branch ops.
+        local_path = proj.get('path') or ''
+        if not local_path or proj.get('clone_status') not in ('local',):
+            if not local_path:
+                logger.debug(json.dumps({'event': 'ap12_skip_non_local_branch_delete', 'repo_id': repo_id, 'clone_status': proj.get('clone_status')}))
+            continue
+        repo_path = Path(local_path)
         if not (repo_path / '.git').exists():
             continue
 
@@ -1196,7 +1204,11 @@ def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
         if not proj:
             return {'ok': False, 'error': f'Project "{repo_id}" not found'}
 
-        repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
+        # AP-12: Explicit local-only guard — no silent workspace fallback.
+        local_path = proj.get('path') or ''
+        if not local_path or proj.get('clone_status') not in ('local',):
+            return {'ok': False, 'error': 'Branch deletion is only supported for locally-mounted repos. Remote repos use GitHostClient.'}
+        repo_path = Path(local_path)
         if not (repo_path / '.git').exists():
             return {'ok': False, 'error': 'Repo is not a git repository'}
 
@@ -1737,7 +1749,11 @@ def create_task_pr(task_id: str) -> dict:
     if not proj:
         return {'ok': False, 'error': f'Project "{repo_id}" not found in registry'}
 
-    repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
+    # AP-12: Explicit local-only guard — remote/indexed repos use GitHostClient.
+    local_path = proj.get('path') or ''
+    if not local_path or proj.get('clone_status') not in ('local',):
+        return {'ok': False, 'error': 'PR creation via local git is only supported for locally-mounted repos. Remote repos use GitHostClient.'}
+    repo_path = Path(local_path)
     if not (repo_path / '.git').exists():
         return {'ok': False, 'error': 'Repo path is not a git repository'}
 
@@ -1824,7 +1840,11 @@ def _git_task_context(task_id: str):
     proj = next((p for p in registry if p['id'] == repo_id), None)
     if not proj:
         return task, None, branch, None, {'error': f'Project "{repo_id}" not found', 'branch': branch}
-    repo_path = Path(proj.get('path') or str(WORKSPACE_ROOT / repo_id))
+    # AP-12: Explicit local-only guard — no silent workspace fallback.
+    local_path = proj.get('path') or ''
+    if not local_path or proj.get('clone_status') not in ('local',):
+        return task, None, branch, None, {'error': 'Git task context requires a locally-mounted repo (clone_status=local).', 'branch': branch}
+    repo_path = Path(local_path)
     if not (repo_path / '.git').exists():
         return task, None, branch, None, {'error': 'Repo is not a git repository', 'branch': branch}
     target_branch = task.get('target_branch') or resolve_default_branch(
@@ -1971,11 +1991,23 @@ def task_commits(task_id: str) -> dict:
 
 
 def load_repos():
+    """Return git_repo_info for locally-mounted projects only.
+
+    AP-12: Remote/indexed projects have no persistent local clone — they are
+    served via GitHostClient REST API. Silently falling back to a workspace
+    path for non-local projects was masking "missing clone" bugs and creating
+    spurious filesystem activity on the bind-mount.
+    """
     registry = load_projects_registry()
     repos = []
     for p in registry:
-        path = Path(p.get('path') or str(WORKSPACE_ROOT / p['id']))
-        repos.append(git_repo_info(p['id'], path))
+        local_path = p.get('path') or ''
+        cs = p.get('clone_status') or ''
+        if not local_path or cs not in ('local',):
+            # Remote/indexed/no_repo projects don't have a local clone.
+            # They appear in the dashboard via ES data only.
+            continue
+        repos.append(git_repo_info(p['id'], Path(local_path)))
     return repos
 
 
@@ -2849,11 +2881,14 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
 
     # ── Determine where this project lives on disk ───────────────────────────
     if _is_remote_url(repo_url):
-        # Will be cloned into WORKSPACE_ROOT/<new_id> — shared volume, immediately
-        # visible to all worker nodes without any additional coordination.
-        dest_path = WORKSPACE_ROOT / new_id
+        # AP-11: Use an ephemeral /tmp directory for the registration clone.
+        # _clone_and_setup_project() already deletes the clone after AST
+        # ingestion (AP-4B). Writing to WORKSPACE_ROOT was an anti-pattern
+        # that created persistent proj-* directories on the host bind-mount.
+        # /tmp is pod-local, never persisted, and auto-cleaned by the OS.
+        dest_path = Path(tempfile.mkdtemp(prefix=f"flume-reg-{new_id}-"))
         clone_status = 'cloning'
-        resolved_path = str(dest_path)
+        resolved_path = None  # AP-11: no persistent path — ES is source of truth
     elif local_path_raw:
         # User pointed at an existing directory on the local filesystem.
         dest_path = Path(local_path_raw).expanduser().resolve()
@@ -2861,9 +2896,9 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         resolved_path = str(dest_path)
     else:
         # No URL / path — just a named project with no repo yet.
-        dest_path = WORKSPACE_ROOT / new_id
+        dest_path = None
         clone_status = 'no_repo'
-        resolved_path = str(dest_path)
+        resolved_path = None
 
     # ── Embed credentials — OpenBao-first, no env-file dependency ───────────
     # PATs are stored in OpenBao KV (secret/data/flume/ado_tokens/{id}) and
@@ -3352,7 +3387,11 @@ def api_repo_branches(project_id: str):
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
 
     # ── Local repo path: original git subprocess (clone_status='local') ─────────
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    # AP-12: Explicit guard — no silent WORKSPACE_ROOT fallback for non-local projects.
+    _local_path = proj.get("path") or ''
+    if not _local_path:
+        return JSONResponse(status_code=400, content={"error": "No local repo path available. This project has no local clone."})
+    repo_path = Path(_local_path)
 
     if not (repo_path / ".git").exists():
         if cs == "failed":
@@ -3432,7 +3471,11 @@ def api_repo_tree(project_id: str, branch: str = ""):
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
 
     # ── Local repo: git subprocess ────────────────────────────────────────────
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    # AP-12: Explicit guard — no silent WORKSPACE_ROOT fallback.
+    _local_path = proj.get("path") or ''
+    if not _local_path:
+        return JSONResponse(status_code=400, content={"error": "No local repo path. This project has no local clone."})
+    repo_path = Path(_local_path)
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
@@ -3527,7 +3570,11 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
 
     # ── Local repo: git subprocess ────────────────────────────────────────────
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    # AP-12: Explicit guard — no silent WORKSPACE_ROOT fallback.
+    _local_path = proj.get("path") or ''
+    if not _local_path:
+        return JSONResponse(status_code=400, content={"error": "No local repo path. This project has no local clone."})
+    repo_path = Path(_local_path)
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
@@ -3583,7 +3630,11 @@ def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     if not proj:
         return JSONResponse(status_code=404, content={"error": f"Project '{project_id}' not found"})
 
-    repo_path = Path(proj.get("path") or str(WORKSPACE_ROOT / project_id))
+    # AP-12: Explicit guard — no silent WORKSPACE_ROOT fallback.
+    _local_path = proj.get("path") or ''
+    if not _local_path:
+        return JSONResponse(status_code=400, content={"error": "No local repo path. Diff requires a locally-mounted repo."})
+    repo_path = Path(_local_path)
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 

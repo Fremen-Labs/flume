@@ -56,7 +56,11 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
-      - ..:/workspace
+      # AP-15: Replaced ..:/workspace (exposed entire host parent dir) with a
+      # scoped read-only mount for local-path projects only.
+      # Set FLUME_LOCAL_REPOS_PATH to the directory containing your local repos.
+      # Remote/indexed projects need no mount — AP-11 routes clones to /tmp.
+      - ${FLUME_LOCAL_REPOS_PATH:-/dev/null}:/local-repos:ro
       # Mount host SSH keys read-only so the dashboard can clone SSH remotes.
       # The container user runs as root; adjust source path if using a non-root host user.
       - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
@@ -68,7 +72,7 @@ services:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
-      - FLUME_WORKSPACE=/workspace
+      - FLUME_WORKSPACE=/local-repos
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - FLUME_AUTO_START_WORKERS=${FLUME_AUTO_START_WORKERS:-1}
@@ -132,7 +136,8 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
-      - ..:/workspace
+      # AP-15: Scoped read-only mount for local-path projects only (replaces ..:/workspace).
+      - ${FLUME_LOCAL_REPOS_PATH:-/dev/null}:/local-repos:ro
       # Mount host SSH keys read-only so workers can clone/push SSH remotes.
       - ${FLUME_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     extra_hosts:
@@ -141,7 +146,7 @@ services:
       - FLUME_CONFIG=/app/config.toml
       - PYTHONPATH=/app/src
       - UV_PROJECT_ENVIRONMENT=/opt/venv
-      - FLUME_WORKSPACE=/workspace
+      - FLUME_WORKSPACE=/local-repos
       - LOCAL_EXO_BASE_URL=${LOCAL_EXO_BASE_URL:-http://host.docker.internal:52415/v1}
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - VAULT_ROLE_ID=flume-client-role
