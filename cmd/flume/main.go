@@ -28,6 +28,7 @@ func init() {
     rootCmd.AddCommand(commands.WorkersCmd)
     rootCmd.AddCommand(commands.ConfigCmd)
     rootCmd.AddCommand(commands.ProjectsCmd)
+    rootCmd.AddCommand(commands.UpgradeCmd)
 }
 
 func main() {

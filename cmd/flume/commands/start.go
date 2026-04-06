@@ -21,6 +21,7 @@ import (
 var (
 	ProviderFlag string
 	NativeFlag   bool
+	WorkersFlag  string
 )
 
 func isHeadlessEnv(getenv func(string) string, getstat func() (os.FileInfo, error)) bool {
@@ -161,6 +162,12 @@ var StartCmd = &cobra.Command{
 			}
 			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
 
+			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
+				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
+			} else {
+				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
+			}
+
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
 				dash := exec.Command("uv", "run", "src/dashboard/server.py")
@@ -231,6 +238,12 @@ var StartCmd = &cobra.Command{
 			}
 			fullEnv = append(fullEnv, "BAO_SECRET_ID="+secID)
 
+			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
+				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
+			} else {
+				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
+			}
+
 			swArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
 				swArgs = append(swArgs, "--profile", "managed_elastic")
@@ -261,4 +274,5 @@ var StartCmd = &cobra.Command{
 func init() {
 	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", "Explicitly declare LLM Provider (openai, ollama, exo)")
 	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native High-Performance Git Worktrees")
+	StartCmd.Flags().StringVar(&WorkersFlag, "workers", "", `Number of workers: "2" (default), "4", "auto" (detect from hardware)`)
 }

@@ -22,7 +22,14 @@ REQUIRED_INDICES = [
     "flume-counters",  # AP-1: replaces sequence_counters.json — atomic monotonic IDs
     "flume-config",   # AP-8: replaces agent_models.json — per-role LLM model overrides
     "flume-llm-config",  # AP-10: non-sensitive LLM settings (provider/model/baseUrl) — replaces .env writes
+    "flume-settings",    # system-level runtime config (read by flume_secrets.py)
+    "flume-telemetry",   # worker-manager heartbeat telemetry
     "agent-task-records",
+    "agent-review-records",      # code-review lifecycle events
+    "agent-failure-records",     # task failure records
+    "agent-provenance-records",  # task provenance / audit trail
+    "agent-handoff-records",     # worker handoff lifecycle events
+    "agent-memory-entries",      # agent semantic memory entries
     "agent-security-audits",
     "agent-checkpoints",
     "flume-elastro-graph",
@@ -221,13 +228,44 @@ LLM_CONFIG_MAPPING = {
     },
 }
 
+
+# Shared mapping for lifecycle-event indices that were previously auto-created by
+# Elasticsearch with dynamic mapping.  Explicit types ensure:
+#   - created_at / updated_at are indexed as `date` (enables sort + range queries)
+#   - status / repo / task_id are `keyword` (enables term queries + aggregations)
+EVENT_RECORD_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+    },
+    "mappings": {
+        "properties": {
+            "task_id":    {"type": "keyword"},
+            "repo":       {"type": "keyword"},
+            "status":     {"type": "keyword"},
+            "worker":     {"type": "keyword"},
+            "created_at": {"type": "date"},
+            "updated_at": {"type": "date"},
+            "message":    {"type": "text"},
+        }
+    },
+}
+
 EXPLICIT_INDEX_MAPPINGS = {
-    "flume-projects":       PROJECTS_MAPPING,
-    "flume-llm-config":     LLM_CONFIG_MAPPING,
-    "agent-task-records":   TASK_RECORDS_MAPPING,
-    "agent-token-telemetry": TOKEN_TELEMETRY_MAPPING,
-    "agent-security-audits": SECURITY_AUDIT_MAPPING,
-    "flume-counters":       COUNTERS_MAPPING,
+    "flume-projects":           PROJECTS_MAPPING,
+    "flume-llm-config":         LLM_CONFIG_MAPPING,
+    "flume-counters":           COUNTERS_MAPPING,
+    "agent-task-records":       TASK_RECORDS_MAPPING,
+    "agent-token-telemetry":    TOKEN_TELEMETRY_MAPPING,
+    "agent-security-audits":    SECURITY_AUDIT_MAPPING,
+    # Lifecycle-event indices — shared explicit mapping
+    "agent-review-records":     EVENT_RECORD_MAPPING,
+    "agent-failure-records":    EVENT_RECORD_MAPPING,
+    "agent-provenance-records": EVENT_RECORD_MAPPING,
+    "agent-handoff-records":    EVENT_RECORD_MAPPING,
+    "agent-memory-entries":     EVENT_RECORD_MAPPING,
+    "flume-settings":           EVENT_RECORD_MAPPING,
+    "flume-telemetry":          EVENT_RECORD_MAPPING,
 }
 
 def ensure_es_indices():
