@@ -88,8 +88,11 @@ services:
       # Ollama thinking-model controls (see utils/llm_client.py)
       # FLUME_OLLAMA_THINK=1  → enable chain-of-thought for gemma/qwq (default: disabled)
       # FLUME_OLLAMA_NUM_CTX  → override Ollama context window (default: 8192)
+      # FLUME_PLANNER_MODEL   → use a faster model for planning (e.g. qwen2.5-coder:7b)
+      #                         while agents use the main LLM_MODEL for code tasks
       - FLUME_OLLAMA_THINK
       - FLUME_OLLAMA_NUM_CTX
+      - FLUME_PLANNER_MODEL
       - FLUME_ES_URL
       - GITHUB_TOKEN
       - ADO_ORGANIZATION

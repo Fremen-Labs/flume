@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 import traceback
 from fastapi import BackgroundTasks
+from concurrent.futures import ThreadPoolExecutor
 
 # Flume Bootstrap Logic
 # Flume Bootstrap Logic
@@ -432,6 +433,12 @@ def _planner_runtime_config() -> dict:
     pairs = load_effective_pairs(WORKSPACE_ROOT)
     provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
     model = (pairs.get('LLM_MODEL') or os.environ.get('LLM_MODEL') or LLM_MODEL).strip()
+    # FLUME_PLANNER_MODEL lets operators use a lighter/faster model for planning
+    # independently of the agent model (e.g. qwen2.5-coder:7b for planning speed
+    # while gemma4:26b handles code implementation).
+    planner_model_override = os.environ.get('FLUME_PLANNER_MODEL', '').strip()
+    if planner_model_override:
+        model = planner_model_override
     if provider == 'ollama':
         base_url = resolve_effective_ollama_base_url(pairs).strip()
     else:
@@ -651,6 +658,7 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         provider_override=cfg.get('provider'),
         base_url_override=cfg.get('baseUrl'),
         timeout_seconds=timeout_seconds,
+        ollama_think=False,
     )
 
 def _strip_json_blocks(text: str) -> str:
@@ -1990,7 +1998,7 @@ def task_commits(task_id: str) -> dict:
     }
 
 
-def load_repos():
+def load_repos(registry=None):
     """Return git_repo_info for locally-mounted projects only.
 
     AP-12: Remote/indexed projects have no persistent local clone — they are
@@ -1998,7 +2006,7 @@ def load_repos():
     path for non-local projects was masking "missing clone" bugs and creating
     spurious filesystem activity on the bind-mount.
     """
-    registry = load_projects_registry()
+    registry = registry if registry is not None else load_projects_registry()
     repos = []
     for p in registry:
         local_path = p.get('path') or ''
@@ -2011,54 +2019,81 @@ def load_repos():
     return repos
 
 
+_SNAPSHOT_CACHE_DATA = None
+_SNAPSHOT_CACHE_TIME = 0.0
+
 def load_snapshot():
+    global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
+    now = time.time()
+    if _SNAPSHOT_CACHE_DATA and (now - _SNAPSHOT_CACHE_TIME) < 2.0:
+        return _SNAPSHOT_CACHE_DATA
+
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         pass
-    tasks = es_search('agent-task-records', {
-        'size': 300,
-        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-        'query': {
-            'bool': {
-                'must': [{'match_all': {}}],
-                'must_not': [{'term': {'status': 'archived'}}],
-            }
-        },
-    }).get('hits', {}).get('hits', [])
-    reviews = es_search('agent-review-records', {
-        'size': 100,
-        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-        'query': {'match_all': {}}
-    }).get('hits', {}).get('hits', [])
-    failures = es_search('agent-failure-records', {
-        'size': 100,
-        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-        'query': {'match_all': {}}
-    }).get('hits', {}).get('hits', [])
-    provenance = es_search('agent-provenance-records', {
-        'size': 100,
-        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-        'query': {'match_all': {}}
-    }).get('hits', {}).get('hits', [])
-    elastro_savings = 0
-    try:
-        agg_res = es_search('agent-token-telemetry', {
-            'size': 0,
-            'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
-        })
-        elastro_savings = int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
-    except Exception:
-        pass
 
-    return {
-        'workers': load_workers(),
-        'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks],
-        'reviews': [{'_id': h.get('_id'), **h.get('_source', {})} for h in reviews],
-        'failures': [{'_id': h.get('_id'), **h.get('_source', {})} for h in failures],
-        'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance],
-        'repos': load_repos(),
-        'projects': load_projects_registry(),
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        f_tasks = pool.submit(lambda: es_search('agent-task-records', {
+            'size': 300,
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {
+                'bool': {
+                    'must': [{'match_all': {}}],
+                    'must_not': [{'term': {'status': 'archived'}}],
+                }
+            },
+        }))
+        f_reviews = pool.submit(lambda: es_search('agent-review-records', {
+            'size': 100,
+            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {'match_all': {}}
+        }))
+        f_failures = pool.submit(lambda: es_search('agent-failure-records', {
+            'size': 100,
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {'match_all': {}}
+        }))
+        f_provenance = pool.submit(lambda: es_search('agent-provenance-records', {
+            'size': 100,
+            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {'match_all': {}}
+        }))
+        def fetch_savings():
+            try:
+                agg_res = es_search('agent-token-telemetry', {
+                    'size': 0,
+                    'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
+                })
+                return int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
+            except Exception:
+                return 0
+        f_savings = pool.submit(fetch_savings)
+        f_workers = pool.submit(load_workers)
+        f_projects = pool.submit(load_projects_registry)
+
+        tasks_res = f_tasks.result().get('hits', {}).get('hits', [])
+        reviews_res = f_reviews.result().get('hits', {}).get('hits', [])
+        failures_res = f_failures.result().get('hits', {}).get('hits', [])
+        provenance_res = f_provenance.result().get('hits', {}).get('hits', [])
+        elastro_savings = f_savings.result()
+        workers_res = f_workers.result()
+        projects_res = f_projects.result()
+
+    repos_res = load_repos(registry=projects_res)
+
+    result = {
+        'workers': workers_res,
+        'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks_res],
+        'reviews': [{'_id': h.get('_id'), **h.get('_source', {})} for h in reviews_res],
+        'failures': [{'_id': h.get('_id'), **h.get('_source', {})} for h in failures_res],
+        'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance_res],
+        'repos': repos_res,
+        'projects': projects_res,
         'elastro_savings': elastro_savings,
     }
+    
+    _SNAPSHOT_CACHE_DATA = result
+    _SNAPSHOT_CACHE_TIME = now
+    return result
 
 
 # ─── Agent process control ────────────────────────────────────────────────────
