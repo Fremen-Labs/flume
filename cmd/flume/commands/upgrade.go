@@ -105,7 +105,7 @@ Worker count options:
 		// ── Phase 6: Re-provision AppRole (OpenBao KV data preserved) ─────────
 		fmt.Print(ui.WarningGold("  Re-provisioning AppRole credentials... "))
 		vaultPort := "8200"
-		secretID, vaultErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
 		if vaultErr != nil {
 			return fmt.Errorf("vault provisioning failed: %w", vaultErr)
 		}
@@ -117,6 +117,7 @@ Worker count options:
 		generatedEnv := orchestrator.GenerateEnv(envCfg)
 		fullEnv := append(os.Environ(), generatedEnv...)
 		fullEnv = append(fullEnv, "BAO_SECRET_ID="+secretID)
+		fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
 
 		upServices := orchestrator.BuildWorkerServiceNames(workerCount)
 		upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait"}, upServices...)
@@ -223,11 +224,12 @@ func runStartSequence(envCfg orchestrator.EnvConfig, workersFlag string) error {
 		return fmt.Errorf("data grid boot failed: %w", err)
 	}
 
-	secretID, vErr := orchestrator.DeployVaultTopology("8200", envCfg)
+	secretID, rootToken, vErr := orchestrator.DeployVaultTopology("8200", envCfg)
 	if vErr != nil {
 		return vErr
 	}
 	fullEnv = append(fullEnv, "BAO_SECRET_ID="+secretID)
+	fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
 
 	workerCount := orchestrator.ResolveWorkerCount(workersFlag)
 	upServices := orchestrator.BuildWorkerServiceNames(workerCount)

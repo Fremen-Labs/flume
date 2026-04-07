@@ -155,12 +155,13 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
 			}
 			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
+			generatedEnv = append(generatedEnv, "OPENBAO_TOKEN="+rootToken)
 
 			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
 				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
@@ -231,12 +232,16 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
 			}
 			fullEnv = append(fullEnv, "BAO_SECRET_ID="+secID)
+			// Inject the root token so containers can authenticate to OpenBao.
+			// docker-compose.yml uses ${OPENBAO_TOKEN} — this must be in the
+			// subprocess env for the variable substitution to resolve correctly.
+			fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
 
 			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
 				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)

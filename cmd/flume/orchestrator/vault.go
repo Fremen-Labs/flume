@@ -537,26 +537,28 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 }
 
 // DeployVaultTopology sequences the Native HTTP Client bootstrap without containerizing natively.
-func DeployVaultTopology(vaultPort string, envCfg EnvConfig) (string, error) {
+func DeployVaultTopology(vaultPort string, envCfg EnvConfig) (string, string, error) {
 	vaultURL := fmt.Sprintf("http://localhost:%s", vaultPort)
 
 	if err := AwaitOpenBao(vaultURL); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	rootToken, err := InitializeAndUnseal(vaultURL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if err := ConfigureSecretsEngine(vaultURL, rootToken, envCfg); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	secretID, err := ProvisionAppRole(vaultURL, rootToken)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	return secretID, nil
+	// Return both the AppRole secret ID (for workers) and the root token
+	// (so start.go can inject OPENBAO_TOKEN into the container environment).
+	return secretID, rootToken, nil
 }
