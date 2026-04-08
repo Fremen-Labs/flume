@@ -31,7 +31,9 @@ BOLD   = "\033[1m"
 TEST_REPO_URL = "https://github.com/octocat/Hello-World.git"
 
 def ok(msg):  print(f"  {GREEN}✓{RESET} {msg}")
-def fail(msg): print(f"  {RED}✗{RESET} {msg}"); sys.exit(1)
+def fail(msg):
+    print(f"  {RED}✗{RESET} {msg}")
+    sys.exit(1)
 def info(msg): print(f"  {YELLOW}→{RESET} {msg}")
 
 def request(method, url, payload=None, timeout=15):

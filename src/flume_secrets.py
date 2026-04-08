@@ -1,6 +1,5 @@
 import os
 import json
-import logging
 import urllib.request
 import urllib.error
 import sys
@@ -12,7 +11,7 @@ _BS_WS = Path(__file__).resolve().parent
 if str(_BS_WS) not in sys.path:
     sys.path.insert(0, str(_BS_WS))
 
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: E402
 logger = get_logger("flume_secrets")
 
 class FlumeSettings(BaseSettings):
@@ -70,9 +69,12 @@ def load_elastic_config() -> dict[str, Any]:
         with urllib.request.urlopen(req, timeout=1.5) as r:
             res = json.loads(r.read())
             doc = res.get("_source", {})
-            if "es_url" in doc: data["ES_URL"] = doc["es_url"]
-            if "es_api_key" in doc and doc["es_api_key"] != "***": data["ES_API_KEY"] = doc["es_api_key"]
-            if "openbao_url" in doc: data["OPENBAO_ADDR"] = doc["openbao_url"]
+            if "es_url" in doc:
+                data["ES_URL"] = doc["es_url"]
+            if "es_api_key" in doc and doc["es_api_key"] != "***":
+                data["ES_API_KEY"] = doc["es_api_key"]
+            if "openbao_url" in doc:
+                data["OPENBAO_ADDR"] = doc["openbao_url"]
     except Exception as e:
         logger.warning(f"Failed to bootstrap configuration natively from Elasticsearch: {e}")
 

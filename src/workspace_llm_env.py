@@ -16,7 +16,7 @@ _BS_WS = Path(__file__).resolve().parent
 if str(_BS_WS) not in sys.path:
     sys.path.insert(0, str(_BS_WS))
 
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: E402
 logger = get_logger("workspace_llm_env")
 
 

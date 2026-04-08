@@ -26,7 +26,7 @@ import llm_credentials_store as lcs  # noqa: E402
 apply_runtime_config(_WS)
 
 BASE = _WS / 'worker-manager'
-from utils.workspace import resolve_safe_workspace
+from utils.workspace import resolve_safe_workspace  # noqa: E402
 try:
     from dashboard.llm_settings import load_effective_pairs
     for _k, _v in load_effective_pairs(resolve_safe_workspace()).items():
@@ -70,8 +70,7 @@ def now_iso():
 
 
 # AP-6: file_path logger arg removed — get_logger writes to stdout only.
-import logging
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
@@ -212,7 +211,6 @@ def build_workers():
 
 def es_request(path, body=None, method='GET'):
     es_key_val = os.environ.get("ES_API_KEY", "")
-    es_url_val = os.environ.get("ES_URL", "http://elasticsearch:9200").rstrip("/")
     headers = {'Authorization': f'ApiKey {es_key_val}'}
     data = None
     if body is not None:
@@ -227,7 +225,6 @@ def es_request(path, body=None, method='GET'):
         return json.loads(raw) if raw else {}
 
 
-import random
 
 def ready_items_for_role(role):
     """Query-only: return candidate tasks for a role without claiming them."""
@@ -402,7 +399,6 @@ def try_atomic_claim(
             method='POST',
         )
         updated = res.get('updated', 0)
-        noops = res.get('noops', 0)
         if updated != 1:
             # 0 updated: either no ready tasks or lost a benign race — both are fine
             return None
@@ -571,7 +567,7 @@ def cycle():
         clust = es_request('/agent-system-cluster/_doc/config', method='GET')
         if clust and clust.get('_source', {}).get('status') == 'paused':
             is_paused = True
-    except Exception as e:
+    except Exception:
         pass
 
     sync_llm_env_from_workspace(_WS)

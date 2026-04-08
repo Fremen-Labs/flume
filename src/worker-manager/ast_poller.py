@@ -1,13 +1,10 @@
 import time
 import os
 import subprocess
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 from opensearchpy import OpenSearch
 from utils.workspace import resolve_safe_workspace
 
-import sys
 from utils.logger import get_logger
 
 logger = get_logger("ast-poller")

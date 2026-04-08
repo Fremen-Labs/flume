@@ -36,10 +36,10 @@ from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
-from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester
+from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402
 
 BASE = _WS / 'worker-manager'
-from utils.workspace import resolve_safe_workspace
+from utils.workspace import resolve_safe_workspace  # noqa: E402
 
 ES_URL = os.environ.get('ES_URL', 'http://127.0.0.1:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
@@ -64,7 +64,7 @@ def now_iso():
 
 
 # AP-6: file_path logger arg removed — get_logger writes to stdout only.
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: E402
 _handlers_logger = get_logger('worker-handlers')
 
 
@@ -159,18 +159,17 @@ def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> di
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"
-    import ssl as _ssl, urllib.request as _ureq, urllib.error as _uerr
     _ctx = None
-    if os.environ.get('ES_VERIFY_TLS', 'false').lower() != 'true':
-        _ctx = _ssl.create_default_context()
+    if not ES_VERIFY_TLS:
+        _ctx = ssl.create_default_context()
         _ctx.check_hostname = False
-        _ctx.verify_mode = _ssl.CERT_NONE
-    req = _ureq.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+        _ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
     try:
-        with _ureq.urlopen(req, context=_ctx) as resp:
+        with urllib.request.urlopen(req, context=_ctx) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw else {}
-    except _uerr.HTTPError as e:
+    except urllib.error.HTTPError as e:
         if e.code == 404:
             return {}
         raise
