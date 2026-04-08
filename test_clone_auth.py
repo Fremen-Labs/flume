@@ -1,5 +1,4 @@
 import sys
-import os
 from pathlib import Path
 
 _WS = Path("/app")

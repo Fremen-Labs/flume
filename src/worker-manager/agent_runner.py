@@ -1,18 +1,20 @@
-from utils.logger import get_logger
-logger = get_logger(__name__)
 #!/usr/bin/env python3
+import importlib.util
 import json
 import os
 import subprocess
 import sys
-import urllib.request
-import urllib.parse
-import urllib.error
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-import importlib.util
+
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 HERE = Path(__file__).resolve().parent
 BASE = HERE.parent
@@ -80,7 +82,8 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         hdrs = {'Content-Type': 'application/json'}
-        if es_key: hdrs['Authorization'] = f'ApiKey {es_key}'
+        if es_key:
+            hdrs['Authorization'] = f'ApiKey {es_key}'
         req = urllib.request.Request(f"{es_url}/agent-token-telemetry/_doc", data=json.dumps(doc).encode(), headers=hdrs, method='POST')
         with urllib.request.urlopen(req, timeout=2, context=ctx):
             pass
@@ -521,7 +524,7 @@ def _exec_memory_write(args: dict) -> str:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=5):
             logger.info({
                 "event": "memory_write",
                 "status": "success",
@@ -671,7 +674,7 @@ def _call_ollama_tools(
 ) -> Optional[dict]:
     try:
         llm_client = _load_llm_client()
-        kw = _task_llm_kw(task)
+        _task_llm_kw(task)  # resolve creds into env side-effects
         res = llm_client.chat_with_tools(
             messages,
             tools,

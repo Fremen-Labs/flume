@@ -1,6 +1,5 @@
 import os
 import json
-import logging
 import urllib.request
 import urllib.error
 import time
@@ -12,7 +11,7 @@ _BS_WS = Path(__file__).resolve().parent.parent
 if str(_BS_WS) not in sys.path:
     sys.path.insert(0, str(_BS_WS))
 
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: E402
 logger = get_logger("es_bootstrap")
 
 REQUIRED_INDICES = [
@@ -347,7 +346,7 @@ def ensure_vault_credentials():
     for attempt in range(40):
         try:
             req_sys = urllib.request.Request(f"{vault_url}/v1/sys/health")
-            with urllib.request.urlopen(req_sys, timeout=2) as r:
+            with urllib.request.urlopen(req_sys, timeout=2):
                 pass
         except Exception as e:
             logger.info(f"Vault not ready ({e}), waiting...")
@@ -361,7 +360,7 @@ def ensure_vault_credentials():
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req_write, timeout=5) as r:
+            with urllib.request.urlopen(req_write, timeout=5):
                 logger.info("Successfully provisioned ES_API_KEY to OpenBao natively!")
                 return
         except urllib.error.HTTPError as e:

@@ -1,4 +1,4 @@
-import sys, os, json
+import sys
 from pathlib import Path
 sys.path.insert(0, "/app")
 sys.path.insert(0, "/app/src")
@@ -11,7 +11,7 @@ try:
     print("Testing chat_with_tools...")
     res = llm_client.chat_with_tools(messages, tools, model="gemma4:26b")
     print("Success:", res)
-except Exception as e:
+except Exception:
     import traceback
     print("Exception!")
     traceback.print_exc()

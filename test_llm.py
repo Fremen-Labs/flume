@@ -1,6 +1,4 @@
 import sys
-import os
-import json
 from pathlib import Path
 
 _WS = Path("/app")
@@ -21,7 +19,7 @@ try:
     res = llm_client.chat(messages, model="gemma4:26b", temperature=0.2, max_tokens=100, ollama_think=False)
     print("Success:")
     print(res)
-except Exception as e:
+except Exception:
     import traceback
     print("Failed:")
     traceback.print_exc()
