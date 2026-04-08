@@ -41,6 +41,38 @@ services:
       timeout: 5s
       retries: 5
 
+  gateway:
+    build:
+      context: .
+      dockerfile: src/gateway/Dockerfile
+    container_name: flume-gateway
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        required: false
+      openbao:
+        condition: service_healthy
+    ports:
+      - "${GATEWAY_PORT:-8090}:8090"
+    extra_hosts:
+      - "${LOCAL_LLM_HOST:-host.docker.internal}:host-gateway"
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN}
+      - OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - FLUME_GATEWAY_LOG_LEVEL=${FLUME_GATEWAY_LOG_LEVEL:-info}
+      - FLUME_OLLAMA_NUM_CTX
+      - LLM_PROVIDER
+      - LLM_BASE_URL
+      - LLM_API_KEY
+      - LLM_MODEL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   dashboard:
     build:
       context: .
@@ -51,6 +83,8 @@ services:
         condition: service_healthy
         required: false
       openbao:
+        condition: service_healthy
+      gateway:
         condition: service_healthy
       worker:
         condition: service_healthy
@@ -98,6 +132,7 @@ services:
       - ADO_ORGANIZATION
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
+      - FLUME_GATEWAY_URL=http://gateway:8090
     command:
       - /bin/bash
       - -c
@@ -137,6 +172,8 @@ services:
         required: false
       openbao:
         condition: service_healthy
+      gateway:
+        condition: service_healthy
     volumes:
       - .:/app
       # AP-15: Scoped read-only mount for local-path projects only (replaces ..:/workspace).
@@ -169,6 +206,7 @@ services:
       - ADO_ORGANIZATION
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
+      - FLUME_GATEWAY_URL=http://gateway:8090
     command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated

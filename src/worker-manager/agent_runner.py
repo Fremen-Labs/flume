@@ -151,6 +151,7 @@ def _call_ollama(
             temperature=0.2,
             max_tokens=8192,
             return_usage=True,
+            ollama_think=False,
             **kw,
         )
         _emit_usage(task, usage)
@@ -677,6 +678,7 @@ def _call_ollama_tools(
             model=model,
             temperature=0.2,
             max_tokens=4096,
+            ollama_think=False,
         )
         _emit_usage(task, {'total_tokens': 0})
         return res
