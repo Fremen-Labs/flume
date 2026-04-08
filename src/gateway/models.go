@@ -52,6 +52,7 @@ type ResponseMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Thoughts  string     `json:"thoughts,omitempty"`
 }
 
 // ToolCall represents a single function invocation from the model.

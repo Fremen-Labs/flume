@@ -3238,6 +3238,13 @@ def api_task_diff(task_id: str):
         logger.warning({"event": "task_diff_error", "task_id": task_id, "error": str(e)})
         return {"diff": "", "error": str(e)}
 
+@app.get("/api/tasks/{task_id}/thoughts")
+def api_task_thoughts(task_id: str):
+    _, source = find_task_doc_by_logical_id(task_id)
+    if not source:
+        return {"thoughts": []}
+    return {"thoughts": source.get("execution_thoughts", [])}
+
 @app.get("/api/tasks/{task_id}/commits")
 def api_task_commits(task_id: str):
     from utils.git_host_client import get_git_client, GitHostError  # noqa

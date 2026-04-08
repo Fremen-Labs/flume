@@ -681,7 +681,7 @@ def _call_ollama_tools(
             model=model,
             temperature=0.2,
             max_tokens=4096,
-            ollama_think=False,
+            ollama_think=True,
         )
         _emit_usage(task, {'total_tokens': 0})
         return res
@@ -777,6 +777,7 @@ def run_implementer(
     task: dict[str, Any],
     repo_path: Optional[str] = None,
     on_progress: Optional[Any] = None,
+    on_thought: Optional[Any] = None,
 ) -> AgentResult:
     system_prompt = _load_system_prompt('implementer')
     model = task.get('preferred_model') or _current_llm_model()
@@ -785,6 +786,13 @@ def run_implementer(
         if on_progress:
             try:
                 on_progress(note)
+            except Exception:
+                pass
+
+    def _thought(note: str) -> None:
+        if on_thought:
+            try:
+                on_thought(note)
             except Exception:
                 pass
 
@@ -883,6 +891,13 @@ def run_implementer(
 
         message = raw.get('message', {})
         tool_calls = message.get('tool_calls') or []
+        thoughts = message.get('thoughts') or ''
+        content = message.get('content') or ''
+
+        if thoughts:
+            _thought(thoughts)
+        elif content and tool_calls:
+            _thought(content)
 
         # Normalize tool call shape (OpenAI requires type + id on follow-up turns)
         norm_calls = []
@@ -1055,8 +1070,11 @@ def _get_cluster_topology() -> dict[str, Any]:
         return {'available_implementers': 1, 'target_models': ['unknown']}
 
 def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
+    logger.info("run_pm_dispatcher: started. getting system prompt.")
     system_prompt = _load_system_prompt('pm-dispatcher')
+    logger.info("run_pm_dispatcher: getting cluster topology.")
     topology = _get_cluster_topology()
+    logger.info(f"run_pm_dispatcher: got cluster topology {topology}. Checking codex app server.")
     
     instruction = (
         f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"
@@ -1074,6 +1092,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     )
     
     if _task_uses_codex_app_server(task):
+        logger.info("run_pm_dispatcher: Using codex app server. calling _run_codex_json_task.")
         prompt = (
             f"SYSTEM PROMPT:\n{system_prompt}\n\n{instruction}\n\n"
             'Return explicitly mapped JSON per the schema.\n'
@@ -1085,7 +1104,9 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             model=(task or {}).get('preferred_model') or _current_llm_model(),
             cwd=str(BASE),
         )
+        logger.info("run_pm_dispatcher: finished _run_codex_json_task.")
     else:
+        logger.info("run_pm_dispatcher: calling _call_ollama.")
         response = _call_ollama(
             system_prompt,
             {
@@ -1095,6 +1116,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             model=(task or {}).get('preferred_model') or _current_llm_model(),
             task=task,
         )
+        logger.info("run_pm_dispatcher: finished _call_ollama.")
     if response and isinstance(response, dict):
         return AgentResult(
             action=response.get('action', 'compute_ready'),

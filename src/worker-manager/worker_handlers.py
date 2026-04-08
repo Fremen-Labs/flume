@@ -150,6 +150,27 @@ def append_agent_note(es_id: str, note: str) -> None:
         pass
 
 
+def append_execution_thought(es_id: str, thought: str) -> None:
+    """Append a live thought to the task's execution_thoughts field (capped at 500 entries)."""
+    try:
+        ts = now_iso()
+        es_request(f'/{TASK_INDEX}/_update/{es_id}', {
+            'script': {
+                'source': (
+                    'if (ctx._source.execution_thoughts == null) { ctx._source.execution_thoughts = []; }'
+                    'ctx._source.execution_thoughts.add(params.entry);'
+                    'if (ctx._source.execution_thoughts.length > 500) { ctx._source.execution_thoughts.remove(0); }'
+                    'ctx._source.updated_at = params.touch;'
+                    'ctx._source.last_update = params.touch;'
+                ),
+                'lang': 'painless',
+                'params': {'entry': {'ts': ts, 'thought': thought}, 'touch': ts},
+            }
+        }, method='POST')
+    except Exception as e:
+        log(f"[worker_handlers] append_execution_thought error: {e}")
+
+
 def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
     """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
     headers = {"Content-Type": "application/json"}
@@ -1090,7 +1111,7 @@ def handle_implementer_worker(task, es_id):
 
     # Clear any stale notes from previous runs, then write live progress to ES
     try:
-        es_request(f'/{TASK_INDEX}/_update/{es_id}', {'doc': {'agent_log': []}}, method='POST')
+        es_request(f'/{TASK_INDEX}/_update/{es_id}', {'doc': {'agent_log': [], 'execution_thoughts': []}}, method='POST')
     except Exception:
         pass
 
@@ -1106,6 +1127,11 @@ def handle_implementer_worker(task, es_id):
 
     def _on_progress(note: str) -> None:
         append_agent_note(es_id, note)
+        append_execution_thought(es_id, f"*[System]* {note}")
+
+    def _on_thought(thought: str) -> None:
+        if thought:
+            append_execution_thought(es_id, thought)
 
     # Hint to the agent and enforce worker-side gating.
     task['requires_code'] = task_requires_code(task)
@@ -1113,7 +1139,7 @@ def handle_implementer_worker(task, es_id):
     released = False
 
     try:
-        result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress)
+        result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress, on_thought=_on_thought)
         implementer_model = task.get('preferred_model') or _get_active_llm_model()
 
 
@@ -1652,7 +1678,9 @@ def main():
                                 pass
                     except Exception:
                         pass
+                    log(f"Executing run_worker for {worker.get('name')} targeting task={worker.get('current_task_id')}")
                     run_worker(worker)
+                    log(f"Completed run_worker for {worker.get('name')}")
             time.sleep(POLL_SECONDS)
         except Exception as e:
             log(f'handler loop error: {e}')

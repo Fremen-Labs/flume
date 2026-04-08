@@ -101,6 +101,13 @@ TASK_RECORDS_MAPPING = {
                     "note": {"type": "text"},
                 }
             },
+            "execution_thoughts":          {
+                "type": "nested",
+                "properties": {
+                    "ts":      {"type": "date"},
+                    "thought": {"type": "text"},
+                }
+            },
             # Taxonomy / routing
             "item_type":                   {"type": "keyword"},
             "repo":                        {"type": "keyword"},

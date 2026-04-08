@@ -662,8 +662,8 @@ def sync_worker_processes(state):
         if proc is None or proc.poll() is not None:
             active_worker_processes[name] = subprocess.Popen(
                 [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
             )
             log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
 def main():
