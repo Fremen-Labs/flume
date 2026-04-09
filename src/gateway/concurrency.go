@@ -31,9 +31,9 @@ import (
 
 // OllamaSemaphore controls concurrent access to the Ollama inference engine.
 type OllamaSemaphore struct {
-	sem     chan struct{}
+	sem      chan struct{}
 	maxSlots int
-	mu      sync.RWMutex
+	mu       sync.RWMutex
 }
 
 // NewOllamaSemaphore creates a semaphore with the given max concurrency.

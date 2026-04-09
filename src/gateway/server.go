@@ -19,10 +19,10 @@ import (
 
 // Server is the gateway HTTP server.
 type Server struct {
-	router      *ProviderRouter
-	config      *Config
-	mux         *http.ServeMux
-	ollamaSem   *OllamaSemaphore
+	router    *ProviderRouter
+	config    *Config
+	mux       *http.ServeMux
+	ollamaSem *OllamaSemaphore
 }
 
 // NewServer creates a fully wired gateway server.
@@ -141,7 +141,15 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 		defer s.ollamaSem.Release()
 	}
 
-	resp, err := s.router.Route(ctx, &req, true)
+	var resp *ChatResponse
+	var err error
+
+	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+		resp, err = s.ExecuteEnsemble(ctx, &req)
+	} else {
+		resp, err = s.router.Route(ctx, &req, true)
+	}
+
 	if err != nil {
 		log.Error("tool-call failed",
 			slog.String("error", err.Error()),

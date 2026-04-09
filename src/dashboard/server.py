@@ -2704,6 +2704,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             resolved_api_key = ES_API_KEY or os.environ.get("ES_API_KEY", "")
             # Elastro native env vars (elastro/config/defaults.py reads ELASTIC_URL)
             elastro_env["ELASTIC_URL"] = resolved_es_url
+            elastro_env["ELASTIC_ELASTICSEARCH_HOSTS"] = resolved_es_url
             # Also set the decomposed host/port/protocol for full compatibility
             from urllib.parse import urlparse
             _parsed = urlparse(resolved_es_url)

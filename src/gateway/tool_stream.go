@@ -33,7 +33,7 @@ type ollamaStreamChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done  bool `json:"done"`
+	Done  bool   `json:"done"`
 	Error string `json:"error,omitempty"`
 }
 

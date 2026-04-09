@@ -163,8 +163,8 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 		}
 		return &ChatResponse{
 			Message: ResponseMessage{
-				Role:    "assistant",
-				Content: content,
+				Role:     "assistant",
+				Content:  content,
 				Thoughts: thoughts,
 			},
 		}, nil

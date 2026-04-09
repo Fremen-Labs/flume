@@ -149,11 +149,11 @@ func InjectNoThinkSystem(messages []Message) []Message {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	ProviderOllama          = "ollama"
-	ProviderOpenAI          = "openai"
-	ProviderOpenAICompat    = "openai_compatible"
-	ProviderAnthropic       = "anthropic"
-	ProviderGemini          = "gemini"
+	ProviderOllama       = "ollama"
+	ProviderOpenAI       = "openai"
+	ProviderOpenAICompat = "openai_compatible"
+	ProviderAnthropic    = "anthropic"
+	ProviderGemini       = "gemini"
 )
 
 // ProviderBaseURLs are the default API base URLs for managed providers.
