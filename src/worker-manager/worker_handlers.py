@@ -427,13 +427,16 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
         remote_exists = bool(remote_branch_check.stdout.strip())
 
         if remote_exists:
-            # Previous run pushed commits; check out the existing branch
+            # Previous run pushed commits; fetch the branch with enough depth
+            # so its tip commit is available (--single-branch clone only has main).
             subprocess.run(
-                ["git", "-C", str(tmp), "fetch", "origin", branch],
+                ["git", "-C", str(tmp), "fetch", f"--depth={clone_depth}", "origin", branch],
                 check=True, capture_output=True, timeout=60,
             )
+            # Use FETCH_HEAD — guaranteed to point to the fetched branch tip.
+            # origin/{branch} may not resolve because --single-branch limits remote tracking.
             subprocess.run(
-                ["git", "-C", str(tmp), "checkout", "-b", branch, f"origin/{branch}"],
+                ["git", "-C", str(tmp), "checkout", "-b", branch, "FETCH_HEAD"],
                 check=True, capture_output=True,
             )
             log(f"ensure_task_branch: resumed existing remote branch={branch} for task={task_id}")
@@ -809,7 +812,7 @@ def handle_pm_dispatcher_worker(task):
         append_execution_thought(es_id, f"*[PM Dispatcher]* Analyzing task: **{task.get('title', task_id)}**")
 
     # Intelligent Task Scope & PM Hallucination Boundaries
-    active_model = task.get('preferred_model', 'gpt-4o').lower()
+    active_model = str(task.get('preferred_model') or _get_active_llm_model()).lower()
     if 'gpt-4' in active_model or 'claude-3-opus' in active_model:
         # High capacity models: chunk into component-level epics
         task['chunking_strategy'] = 'epic_component_level'
@@ -1110,11 +1113,12 @@ def handle_implementer_worker(task, es_id):
         src = _get_project_source(task.get('repo')) or {}
         clone_status = src.get('clone_status') or src.get('cloneStatus') or ''
         if clone_status != 'local':  # only applies to remote repos
-            append_agent_note(
-                es_id,
+            _clone_fail_msg = (
                 'Re-queued: git clone failed. Verify the ADO/GH token on the Security page and '
-                'that the repository URL is accessible from the worker container.',
+                'that the repository URL is accessible from the worker container.'
             )
+            append_agent_note(es_id, _clone_fail_msg)
+            append_execution_thought(es_id, f"*[System]* \u274c {_clone_fail_msg}")
             update_task_doc(es_id, {
                 'status': 'ready',
                 'owner': 'implementer',

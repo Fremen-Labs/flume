@@ -75,6 +75,11 @@ def load_elastic_config() -> dict[str, Any]:
                 data["ES_API_KEY"] = doc["es_api_key"]
             if "openbao_url" in doc:
                 data["OPENBAO_ADDR"] = doc["openbao_url"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            logger.debug("flume-settings not found, using environment defaults")
+        else:
+            logger.warning(f"Failed to bootstrap configuration natively from Elasticsearch: HTTP Error {e.code}")
     except Exception as e:
         logger.warning(f"Failed to bootstrap configuration natively from Elasticsearch: {e}")
 
@@ -240,9 +245,13 @@ def hydrate_secrets_from_openbao() -> None:
         return
 
     # Apply ALL keys from OpenBao KV to os.environ — this makes OpenBao the
-    # single source of truth for LLM config, eliminating .env file dependency.
+    # single source of truth for SECRETS, eliminating .env file dependency.
+    # Non-sensitive LLM settings MUST NOT be applied here to ensure ES remains the source of truth.
     hydrated_keys = []
+    _es_keys = frozenset({"LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_ROUTE_TYPE"})
     for key, value in data.items():
+        if key in _es_keys:
+            continue
         if value is not None and str(value).strip():
             os.environ[key] = str(value).strip()
             hydrated_keys.append(key)

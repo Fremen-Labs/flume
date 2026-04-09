@@ -376,21 +376,76 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
     query = args.get('query', '')
     target_path = _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
     try:
-        cmd = f'elastro rag query "{query}"'
-        result = subprocess.run(cmd, shell=True, cwd=str(target_path), capture_output=True, timeout=60, text=True)
-        output = result.stdout + result.stderr
-        
-        total_bytes = 0
-        for r, ds, fs in os.walk(target_path):
-            if any(ign in r for ign in ['.git', 'node_modules', '__pycache__', '.venv', 'venv']):
-                continue
-            for fw in fs:
-                total_bytes += (Path(r) / fw).stat().st_size
-        
-        mod_bytes = len(output.encode('utf-8'))
-        savings = max(0, (total_bytes - mod_bytes) // 4)
-        
-        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
+        es_api_key = os.environ.get('ES_API_KEY', '')
+        headers = {'Content-Type': 'application/json'}
+        if es_api_key:
+            headers['Authorization'] = f'ApiKey {es_api_key}'
+
+        # Schema: file_path, content, functions_defined, functions_called, chunk_name, chunk_type, extension, repo_name
+        query_payload = {
+            "query": {
+                "multi_match": {
+                    "query": query,
+                    "fields": [
+                        "content",
+                        "functions_defined^3",
+                        "functions_called^2",
+                        "file_path^2",
+                        "chunk_name^3",
+                        "repo_name",
+                    ]
+                }
+            },
+            "size": 12,
+            "_source": ["file_path", "content", "functions_defined", "functions_called", "chunk_type", "chunk_name", "extension", "repo_name"],
+        }
+
+        elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+
+        req = urllib.request.Request(
+            f"{es_url}/{elastro_index}/_search",
+            data=json.dumps(query_payload).encode(),
+            headers=headers,
+            method='POST'
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+                hits = data.get('hits', {}).get('hits', [])
+                if not hits:
+                    output = f"AST Search: No matching nodes found for '{query}' in index '{elastro_index}'. Try a broader search term or fall back to list_directory + grep."
+                    savings = 0
+                else:
+                    output_chunks = []
+                    for h in hits:
+                        src = h.get('_source', {})
+                        fp = src.get('file_path', 'unknown')
+                        chunk_type = src.get('chunk_type', 'file')
+                        chunk_name = src.get('chunk_name', 'module')
+                        ext = src.get('extension', '')
+                        fns_defined = src.get('functions_defined', [])
+                        fns_called = src.get('functions_called', [])
+                        content = src.get('content', '')[:800]
+
+                        entry = f"── {fp} ({chunk_type}: {chunk_name}) [{ext}]"
+                        if fns_defined:
+                            entry += f"\n  Defines: {', '.join(fns_defined[:10])}"
+                        if fns_called:
+                            entry += f"\n  Calls: {', '.join(fns_called[:10])}"
+                        entry += f"\n  Content:\n{content}"
+                        output_chunks.append(entry)
+                    output = f"AST Search Results ({len(hits)} hits):\n\n" + "\n\n".join(output_chunks)
+                    # Estimate tokens saved: AST cache returns targeted results vs reading entire files.
+                    # Token estimate: output bytes / 4 (standard ~4 bytes/token approximation).
+                    savings = len(output.encode('utf-8')) // 4
+        except urllib.error.HTTPError as he:
+            if he.code == 404:
+                return f"AST Search Failed: Index '{elastro_index}' not found. The codebase AST has not been ingested yet. Please fall back to manual recursive file search via list_directory and grep."
+            return f"AST Search HTTP Error: {he.code} {he.reason}"
+
+        # Submit agent telemetry metric
         if es_url:
             doc = {
                 'worker_name': 'implementer',

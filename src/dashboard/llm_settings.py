@@ -578,6 +578,8 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     # OpenBao: secrets (highest priority — overrides everything)
     bao_vals = _openbao_get_all(workspace_root)
     for key, val in bao_vals.items():
+        if key in _ES_LLM_CONFIG_KEYS:
+            continue
         if val is not None and str(val).strip():
             pairs[str(key)] = str(val).strip()
 

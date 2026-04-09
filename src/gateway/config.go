@@ -220,7 +220,8 @@ func (c *Config) ShouldThink(req *ChatRequest) bool {
 func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 	body, err := c.esGet(ctx, "/flume-llm-config/_doc/singleton")
 	if err != nil {
-		log.Warn("failed to load flume-llm-config", slog.String("error", err.Error()))
+		// Index may not exist yet or singleton not written — that's fine, falls back to .env
+		log.Debug("flume-llm-config not found, using global defaults", slog.String("error", err.Error()))
 		return
 	}
 	src, ok := extractSource(body)
@@ -293,7 +294,8 @@ func (c *Config) loadAgentModels(ctx context.Context, log *slog.Logger) {
 func (c *Config) loadCredentials(ctx context.Context, log *slog.Logger) {
 	body, err := c.esGet(ctx, "/flume-llm-credentials/_doc/singleton")
 	if err != nil {
-		log.Warn("failed to load flume-llm-credentials", slog.String("error", err.Error()))
+		// Index may not exist yet or singleton not written — that's fine, falls back to local/OpenBao
+		log.Debug("flume-llm-credentials not found, using global defaults", slog.String("error", err.Error()))
 		return
 	}
 	src, ok := extractSource(body)

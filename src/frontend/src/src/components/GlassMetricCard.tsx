@@ -7,7 +7,7 @@ interface GlassMetricCardProps {
   value: string | number;
   subtitle?: string;
   icon?: LucideIcon;
-  trend?: { value: number; label: string };
+  trend?: { value: number; label: string; suffix?: string };
   glow?: boolean;
   className?: string;
   children?: ReactNode;
@@ -35,7 +35,7 @@ export function GlassMetricCard({ title, value, subtitle, icon: Icon, trend, glo
       {trend && (
         <div className="flex items-center gap-1 mt-2 relative z-10">
           <span className={`text-xs font-medium ${trend.value >= 0 ? 'text-success' : 'text-destructive'}`}>
-            {trend.value >= 0 ? '+' : ''}{trend.value}%
+            {trend.value >= 0 ? '+' : ''}{trend.value}{trend.suffix ?? '%'}
           </span>
           <span className="text-xs text-muted-foreground">{trend.label}</span>
         </div>
