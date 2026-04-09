@@ -33,7 +33,7 @@ type ollamaStreamChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done  bool `json:"done"`
+	Done  bool   `json:"done"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -146,19 +146,20 @@ func StreamOllamaToolCall(
 			Role:      "assistant",
 			Content:   mill.Visible(),
 			ToolCalls: toolCalls,
+			Thoughts:  mill.Thoughts(),
 		},
 	}, nil
 }
 
 // StreamOllamaChat sends a plain chat request to Ollama using stream:true
-// and strips think blocks, returning the visible content.
+// and strips think blocks, returning the visible content and thoughts.
 func StreamOllamaChat(
 	ctx context.Context,
 	baseURL string,
 	messages []Message,
 	model string,
 	options map[string]interface{},
-) (string, error) {
+) (string, string, error) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "ollama_chat_stream")()
 
@@ -171,26 +172,26 @@ func StreamOllamaChat(
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal payload: %w", err)
+		return "", "", fmt.Errorf("marshal payload: %w", err)
 	}
 
 	url := strings.TrimRight(baseURL, "/") + "/api/chat"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return "", "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ollama request: %w", err)
+		return "", "", fmt.Errorf("ollama request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(errBody))
+		return "", "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	mill := NewThinkMill()
@@ -212,7 +213,7 @@ func StreamOllamaChat(
 		chunkCount++
 
 		if chunk.Error != "" {
-			return "", fmt.Errorf("ollama error: %s", chunk.Error)
+			return "", "", fmt.Errorf("ollama error: %s", chunk.Error)
 		}
 
 		if chunk.Message.Content != "" {
@@ -225,13 +226,14 @@ func StreamOllamaChat(
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("stream read: %w", err)
+		return "", "", fmt.Errorf("stream read: %w", err)
 	}
 
 	log.Debug("ollama chat stream completed",
 		slog.Int("chunks", chunkCount),
 		slog.Int("visible_chars", len(mill.Visible())),
+		slog.Int("thought_chars", len(mill.Thoughts())),
 	)
 
-	return mill.Visible(), nil
+	return mill.Visible(), mill.Thoughts(), nil
 }

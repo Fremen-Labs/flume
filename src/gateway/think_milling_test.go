@@ -18,6 +18,9 @@ func TestThinkMillStripsBlock(t *testing.T) {
 	if m.Visible() != "The answer is 42." {
 		t.Errorf("expected 'The answer is 42.', got %q", m.Visible())
 	}
+	if m.Thoughts() != "internal reasoning" {
+		t.Errorf("expected 'internal reasoning', got %q", m.Thoughts())
+	}
 }
 
 func TestThinkMillMultiChunk(t *testing.T) {

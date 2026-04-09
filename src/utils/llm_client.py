@@ -135,7 +135,33 @@ def chat(
             if return_usage:
                 return content, resp.get('usage', {})
             return content
-        except Exception:
+        except Exception as e:
+            import logging
+            leg = _legacy()
+            p = provider_override or leg._provider()
+            m = model or leg._default_model()
+            b = base_url_override or leg._base_url(p, base_url_override)
+            
+            logger = logging.getLogger("llm_client")
+            try:
+                from utils.llm_client_fallback import resolve_fallback_model
+                fallback = resolve_fallback_model(p, m, b)
+            except ImportError:
+                fallback = None
+
+            if fallback:
+                logger.warning(f"Gateway chat request failed for model '{m}': {e}. Intelligently downgrading to '{fallback}'.")
+                try:
+                    payload['model'] = fallback
+                    resp = _post_gateway('/v1/chat', payload, timeout=timeout_seconds)
+                    content = resp.get('message', {}).get('content', '')
+                    if return_usage:
+                        return content, resp.get('usage', {})
+                    return content
+                except Exception as e2:
+                    logger.warning(f"Gateway fallback chat request also failed: {e2}. Proceeding to legacy client.")
+            else:
+                logger.warning(f"Gateway chat request failed: {e}. No fallback resolved. Proceeding to legacy client.")
             pass  # Fall through to legacy
 
     # Fallback to direct provider calls
@@ -199,7 +225,29 @@ def chat_with_tools(
                 'agent_role': agent_role,
             }
             return _post_gateway('/v1/chat/tools', payload, timeout=180)
-        except Exception:
+        except Exception as e:
+            import logging
+            leg = _legacy()
+            p = provider_override or leg._provider()
+            m = model or leg._default_model()
+            b = base_url_override or leg._base_url(p, base_url_override)
+            
+            logger = logging.getLogger("llm_client")
+            try:
+                from utils.llm_client_fallback import resolve_fallback_model
+                fallback = resolve_fallback_model(p, m, b)
+            except ImportError:
+                fallback = None
+
+            if fallback:
+                logger.warning(f"Gateway chat_with_tools request failed for model '{m}': {e}. Intelligently downgrading to '{fallback}'.")
+                try:
+                    payload['model'] = fallback
+                    return _post_gateway('/v1/chat/tools', payload, timeout=180)
+                except Exception as e2:
+                    logger.warning(f"Gateway fallback chat_with_tools request also failed: {e2}. Proceeding to legacy client.")
+            else:
+                logger.warning(f"Gateway chat_with_tools request failed: {e}. No fallback resolved. Proceeding to legacy client.")
             pass  # Fall through to legacy
 
     leg = _legacy()

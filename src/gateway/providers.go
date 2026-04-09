@@ -157,14 +157,15 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 
 	if suppressThink {
 		// Use streaming + think milling for thinking models
-		content, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+		content, thoughts, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
 		if err != nil {
 			return nil, err
 		}
 		return &ChatResponse{
 			Message: ResponseMessage{
-				Role:    "assistant",
-				Content: content,
+				Role:     "assistant",
+				Content:  content,
+				Thoughts: thoughts,
 			},
 		}, nil
 	}

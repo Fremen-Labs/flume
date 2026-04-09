@@ -33,6 +33,11 @@ type Config struct {
 	DefaultModel    string
 	DefaultBaseURL  string
 
+	// Ensemble configuration (from flume-llm-config)
+	EnsembleEnabled       bool
+	EnsembleSize          int
+	FrontierFallbackModel string
+
 	// Per-role model overrides (from flume-agent-models)
 	AgentModels map[string]AgentModelConfig
 
@@ -230,6 +235,19 @@ func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 	}
 	if v, ok := src["LLM_BASE_URL"].(string); ok && v != "" {
 		c.DefaultBaseURL = strings.TrimSpace(v)
+	}
+	if enabled, ok := src["ENSEMBLE_ENABLED"].(bool); ok {
+		c.EnsembleEnabled = enabled
+	}
+	if sizeRaw, ok := src["ENSEMBLE_SIZE"].(float64); ok {
+		c.EnsembleSize = int(sizeRaw)
+	} else {
+		c.EnsembleSize = 2 // default
+	}
+	if fallback, ok := src["FRONTIER_FALLBACK_MODEL"].(string); ok && fallback != "" {
+		c.FrontierFallbackModel = strings.TrimSpace(fallback)
+	} else if c.FrontierFallbackModel == "" {
+		c.FrontierFallbackModel = "gpt-4o"
 	}
 }
 

@@ -209,12 +209,37 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
     )
     
     last_err = None
+    swapped_fallback = False
+    
     for attempt in range(max_retries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             last_err = e
+            
+            if e.code in [400, 404] and not swapped_fallback and isinstance(payload, dict) and payload.get('model'):
+                import logging
+                logger = logging.getLogger("llm_client_legacy")
+                try:
+                    from utils.llm_client_fallback import resolve_fallback_model
+                    prov = "unknown"
+                    if "openai.com" in url: prov = "openai"
+                    elif "anthropic.com" in url: prov = "anthropic"
+                    elif "generativelanguage" in url: prov = "gemini"
+                    elif "/api/" in url or ":11434" in url: prov = "ollama"
+                    
+                    b_url = url.split('/api')[0] if prov == "ollama" else ""
+                    fallback = resolve_fallback_model(prov, payload['model'], b_url)
+                    if fallback:
+                        logger.warning(f"Legacy Client: HTTP {e.code} for model '{payload['model']}'. Intelligently downgrading to '{fallback}'.")
+                        payload['model'] = fallback
+                        req.data = json.dumps(payload).encode()
+                        swapped_fallback = True
+                        continue
+                except ImportError:
+                    pass
+
             if e.code in [429, 500, 502, 503, 504]:
                 time.sleep(2 ** attempt)
                 continue
@@ -229,7 +254,31 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
                 detail += f' (model={model})'
             raise RuntimeError(detail) from e
         except urllib.error.URLError as e:
+            import logging
+            logger = logging.getLogger("llm_client_legacy")
+            logger.warning(f"URLError connecting to LLM provider (attempt {attempt + 1}/{max_retries}): {e}. Retrying after {2 ** attempt}s...")
             last_err = e
+            
+            if not swapped_fallback and isinstance(payload, dict) and payload.get('model'):
+                try:
+                    from utils.llm_client_fallback import resolve_fallback_model
+                    prov = "unknown"
+                    if "openai.com" in url: prov = "openai"
+                    elif "anthropic.com" in url: prov = "anthropic"
+                    elif "generativelanguage" in url: prov = "gemini"
+                    elif "/api/" in url or ":11434" in url: prov = "ollama"
+                    
+                    b_url = url.split('/api')[0] if prov == "ollama" else ""
+                    fallback = resolve_fallback_model(prov, payload['model'], b_url)
+                    if fallback:
+                        logger.warning(f"Legacy Client: URLError for model '{payload['model']}'. Intelligently downgrading to '{fallback}'.")
+                        payload['model'] = fallback
+                        req.data = json.dumps(payload).encode()
+                        swapped_fallback = True
+                        continue
+                except ImportError:
+                    pass
+                    
             time.sleep(2 ** attempt)
             continue
             

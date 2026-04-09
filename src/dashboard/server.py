@@ -2661,7 +2661,7 @@ async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: 
         return False, str(e)
 
 
-async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: str, project_id: str, project_name: str):
+async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: str, project_id: str, project_name: str) -> bool:
     try:
         # Sanitize remote Git URLs into guaranteed physical volume paths via basename isolation
         local_path = repo_path
@@ -2695,9 +2695,27 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
                     return
             # Pass ES connection env vars so elastro targets the cluster
             # instead of defaulting to localhost:9200 inside the container.
+            # Elastro reads ELASTIC_URL / ELASTIC_HOST (see elastro/config/defaults.py)
+            # and auth via ELASTIC_ELASTICSEARCH_AUTH_API_KEY (see elastro/config/loader.py).
+            # Source these from the same ES_URL / ES_API_KEY that OpenBao hydrated
+            # into os.environ at startup — matching the clone process secret path.
             elastro_env = os.environ.copy()
-            elastro_env.setdefault("ELASTICSEARCH_URL", os.environ.get("ES_URL", "http://elasticsearch:9200"))
-            elastro_env.setdefault("ELASTICSEARCH_API_KEY", os.environ.get("ES_API_KEY", ""))
+            resolved_es_url = ES_URL or os.environ.get("ES_URL", "http://elasticsearch:9200")
+            resolved_api_key = ES_API_KEY or os.environ.get("ES_API_KEY", "")
+            # Elastro native env vars (elastro/config/defaults.py reads ELASTIC_URL)
+            elastro_env["ELASTIC_URL"] = resolved_es_url
+            elastro_env["ELASTIC_ELASTICSEARCH_HOSTS"] = resolved_es_url
+            # Also set the decomposed host/port/protocol for full compatibility
+            from urllib.parse import urlparse
+            _parsed = urlparse(resolved_es_url)
+            elastro_env["ELASTIC_HOST"] = _parsed.hostname or "elasticsearch"
+            elastro_env["ELASTIC_PORT"] = str(_parsed.port or 9200)
+            elastro_env["ELASTIC_PROTOCOL"] = _parsed.scheme or "http"
+            # Auth: elastro config loader reads ELASTIC_ELASTICSEARCH_AUTH_API_KEY
+            if resolved_api_key:
+                elastro_env["ELASTIC_ELASTICSEARCH_AUTH_API_KEY"] = resolved_api_key
+                elastro_env["ELASTIC_ELASTICSEARCH_AUTH_TYPE"] = "api_key"
+            logger.info({"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)})
             proc = await asyncio.create_subprocess_exec(
                 str(elastro_bin), "rag", "ingest", local_path, "-i", elastro_index,
                 stdout=asyncio.subprocess.PIPE,
@@ -2708,9 +2726,11 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             if proc.returncode != 0:
                 raise subprocess.CalledProcessError(proc.returncode, "elastro", stdout, stderr)
             logger.info({"event": "ast_ingest_success", "repo": local_path, "project": project_name})
+            return True
 
         else:
             logger.info({"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"})
+            return True
 
     except subprocess.CalledProcessError as e:
         logger.error({
@@ -2720,8 +2740,10 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
             "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
         })
+        return False
     except Exception as e:
         logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
+        return False
 
 @app.post("/api/system/sync-ast")
 async def api_system_sync_ast(request: Request, x_flume_system_token: str = Header(None), settings: AppConfig = Depends(get_settings)):
@@ -2870,7 +2892,7 @@ async def _clone_and_setup_project(
             clone_status='indexing',
             clone_error=None,
         )
-        await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
+        ast_ok = await _deterministic_ast_ingest(http_client, str(dest_path), project_id, project_name)
 
         # ── AP-4B: Delete local clone after ingestion ─────────────────────────
         # The local clone is no longer needed — browse/diff/branch data is
@@ -2887,8 +2909,9 @@ async def _clone_and_setup_project(
         _update_project_registry_field(
             project_id,
             path=None,           # No persistent local path retained
-            clone_status='indexed',
-            clone_error=None,
+            clone_status='indexed' if ast_ok else 'ast_failed',
+            clone_error=None if ast_ok else 'AST ingestion failed — check dashboard logs',
+            ast_indexed=ast_ok,  # Workers check this at task-claim time
         )
 
     except Exception as exc:
@@ -3237,6 +3260,13 @@ def api_task_diff(task_id: str):
     except Exception as e:
         logger.warning({"event": "task_diff_error", "task_id": task_id, "error": str(e)})
         return {"diff": "", "error": str(e)}
+
+@app.get("/api/tasks/{task_id}/thoughts")
+def api_task_thoughts(task_id: str):
+    _, source = find_task_doc_by_logical_id(task_id)
+    if not source:
+        return {"thoughts": []}
+    return {"thoughts": source.get("execution_thoughts", [])}
 
 @app.get("/api/tasks/{task_id}/commits")
 def api_task_commits(task_id: str):

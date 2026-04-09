@@ -22,6 +22,7 @@ type ThinkMill struct {
 	inThink  bool
 	buf      bytes.Buffer // partial tag accumulator
 	visible  bytes.Buffer // accumulated visible content
+	thoughts bytes.Buffer // accumulated thoughts content
 }
 
 // NewThinkMill creates a new ThinkMill.
@@ -63,14 +64,19 @@ func (m *ThinkMill) Process(chunk []byte) []byte {
 				for i := 1; i < len(thinkClose) && i <= len(combined); i++ {
 					if bytes.HasSuffix(combined, thinkClose[:i]) {
 						m.buf.Write(combined[len(combined)-i:])
+						m.thoughts.Write(combined[:len(combined)-i])
 						combined = combined[:len(combined)-i]
 						break
 					}
 				}
-				// Everything else is inside <think>, discard
+				// Everything else is inside <think>, capture it
+				if len(combined) > 0 {
+					m.thoughts.Write(combined)
+				}
 				combined = nil
 			} else {
 				m.inThink = false
+				m.thoughts.Write(combined[:idx])
 				combined = combined[idx+len(thinkClose):]
 			}
 		} else {
@@ -109,9 +115,15 @@ func (m *ThinkMill) Visible() string {
 	return strings.TrimSpace(m.visible.String())
 }
 
+// Thoughts returns all accumulated thought content.
+func (m *ThinkMill) Thoughts() string {
+	return strings.TrimSpace(m.thoughts.String())
+}
+
 // Reset clears the mill state for reuse.
 func (m *ThinkMill) Reset() {
 	m.inThink = false
 	m.buf.Reset()
 	m.visible.Reset()
+	m.thoughts.Reset()
 }
