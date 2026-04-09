@@ -1,6 +1,6 @@
 module github.com/Fremen-Labs/flume
 
-go 1.25.0
+go 1.24.2
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/log v1.0.0
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.8.0
 )
 
 require (
