@@ -612,7 +612,7 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
             return json.dumps({"status": "error", "message": "Empty command provided."})
             
         executable = cmd_list[0]
-        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node'}
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find'}
         
         if executable not in allow_list:
             logger.warning({
@@ -832,8 +832,8 @@ def run_implementer(
             metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
         )
 
-    if task.get('ast_synced'):
-        system_prompt += "\n\nCRITICAL CONTEXT: An Elastro AST index is present natively. You MUST use the `elastro_query_ast` tool to search for node graphs, struct layouts, or function names BEFORE writing ANY files."
+    # AST is always available — projects are cloned and AST-indexed before work begins.
+    system_prompt += "\n\nCRITICAL CONTEXT: An Elastro AST index is available. You MUST use the `elastro_query_ast` tool to search for function names, component paths, or code structures BEFORE listing directories or reading files. This is dramatically faster than directory traversal. You may also use `grep` or `find` via `run_shell` for targeted file searches."
 
     messages: list[dict] = [
         {'role': 'system', 'content': system_prompt},
@@ -867,11 +867,10 @@ def run_implementer(
 
     _progress('Agent started — analysing task…')
 
-    for _iteration in range(25):
+    for _iteration in range(15):
         _progress(f'Thinking… (step {_iteration + 1})')
         dynamic_tools = _IMPLEMENTER_TOOLS.copy()
-        if task.get('ast_synced'):
-            dynamic_tools.append(_ELASTRO_QUERY_TOOL)
+        dynamic_tools.append(_ELASTRO_QUERY_TOOL)
             
         raw = _call_ollama_tools(messages, dynamic_tools, model, task=task)
         if not raw:

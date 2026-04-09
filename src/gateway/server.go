@@ -19,18 +19,23 @@ import (
 
 // Server is the gateway HTTP server.
 type Server struct {
-	router *ProviderRouter
-	config *Config
-	mux    *http.ServeMux
+	router      *ProviderRouter
+	config      *Config
+	mux         *http.ServeMux
+	ollamaSem   *OllamaSemaphore
 }
 
 // NewServer creates a fully wired gateway server.
 func NewServer(config *Config, secrets *SecretStore) *Server {
 	router := NewProviderRouter(config, secrets)
+	// Detect Ollama capacity and create adaptive semaphore
+	ollamaURL := config.GetOllamaBaseURL()
+	maxConcurrent := DetectOllamaCapacity(ollamaURL)
 	s := &Server{
-		router: router,
-		config: config,
-		mux:    http.NewServeMux(),
+		router:    router,
+		config:    config,
+		mux:       http.NewServeMux(),
+		ollamaSem: NewOllamaSemaphore(maxConcurrent),
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -120,6 +125,22 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 		slog.Int("tools", len(req.Tools)),
 	)
 
+	// Acquire Ollama concurrency slot (blocks until available)
+	// This prevents invisible queue buildup in Ollama's serial inference engine.
+	model, provider, _ := s.config.ResolveModel(&req)
+	if provider == ProviderOllama {
+		log.Info("awaiting ollama slot",
+			slog.Int("active", s.ollamaSem.ActiveSlots()),
+			slog.Int("max", s.ollamaSem.MaxSlots()),
+			slog.String("model", model),
+		)
+		if !s.ollamaSem.Acquire(ctx) {
+			s.writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for ollama slot", requestID)
+			return
+		}
+		defer s.ollamaSem.Release()
+	}
+
 	resp, err := s.router.Route(ctx, &req, true)
 	if err != nil {
 		log.Error("tool-call failed",
@@ -129,6 +150,9 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
 		return
 	}
+
+	// Apply guardrails: deduplicate, filter invalid tool calls
+	SanitizeToolResponse(resp)
 
 	log.Info("tool-call completed",
 		slog.Int("content_len", len(resp.Message.Content)),
