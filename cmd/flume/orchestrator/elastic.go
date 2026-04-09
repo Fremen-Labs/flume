@@ -151,3 +151,52 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 
 	return nil
 }
+
+// SeedLLMConfig writes non-sensitive LLM settings to the flume-llm-config ES index.
+// This is the canonical bootstrap path: CLI collects provider/model/baseUrl from the
+// interactive prompt and writes them to ES so the dashboard reads them correctly on
+// first load — no GUI save required. The Settings page can then update the same
+// document at runtime to switch models without a restart.
+func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
+	// Fetch existing document to avoid overwriting fields not supplied in this run.
+	existBody, status, _ := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "GET", nil)
+
+	existing := map[string]interface{}{}
+	if status == 200 && existBody != nil {
+		var doc map[string]interface{}
+		if err := json.Unmarshal(existBody, &doc); err == nil {
+			if src, ok := doc["_source"].(map[string]interface{}); ok {
+				existing = src
+			}
+		}
+	}
+
+	// Only overwrite fields the user explicitly provided in this CLI run.
+	provider := cfg.Provider
+	if provider == "" {
+		provider = "ollama"
+	}
+	if provider != "" {
+		existing["LLM_PROVIDER"] = provider
+	}
+	if cfg.Model != "" {
+		existing["LLM_MODEL"] = cfg.Model
+	}
+
+	// Prefer the Docker-rewritten base URL for container access; fall back to host value.
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = cfg.LocalOllamaBaseURL
+	}
+	if baseURL != "" {
+		existing["LLM_BASE_URL"] = baseURL
+	}
+
+	_, _, err := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
+	if err != nil {
+		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to seed flume-llm-config", "error", err)
+		return err
+	}
+	log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config", "provider", provider, "model", cfg.Model)
+	return nil
+}

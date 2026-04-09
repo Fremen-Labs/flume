@@ -96,26 +96,26 @@ async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
   return data;
 }
 
-async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boolean; restartRequired: boolean }> {
+async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boolean }> {
   const res = await fetch('/api/settings/llm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
-  return data as { ok: boolean; restartRequired: boolean };
+  return data as { ok: boolean };
 }
 
-async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean; restartRequired?: boolean }> {
+async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean }> {
   const res = await fetch('/api/settings/llm/credentials', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-  return data as { ok: boolean; restartRequired?: boolean };
+  return data as { ok: boolean };
 }
 
 async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
@@ -124,15 +124,15 @@ async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse
   return res.json();
 }
 
-async function refreshOAuth(): Promise<{ ok: boolean; message?: string; restartRequired?: boolean }> {
+async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch('/api/settings/llm/oauth/refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
-  const data = await parseJsonBody<{ ok?: boolean; message?: string; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; message?: string; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Refresh failed: ${res.status}`);
-  return data as { ok: boolean; message?: string; restartRequired?: boolean };
+  return data as { ok: boolean; message?: string };
 }
 
 async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
@@ -1693,7 +1693,7 @@ export default function SettingsPage() {
                     Save System Config
                   </Button>
                   {sysSaveError && <span className="text-sm text-destructive">{sysSaveError}</span>}
-                  {sysSaveSuccess && <span className="text-sm text-green-600">Saved System Config. Restart dashboard and workers to apply.</span>}
+                  {sysSaveSuccess && <span className="text-sm text-green-600">System config saved.</span>}
                 </div>
               </div>
             </AccordionContent>

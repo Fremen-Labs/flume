@@ -341,30 +341,15 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 	// 2. Resolve KV payload
 	esKey, _ := GenerateESAPIKey()
 
-	llmProvider := envCfg.Provider
-	if llmProvider == "" {
-		llmProvider = "ollama"
-	}
-	llmModel := envCfg.Model
-	if llmModel == "" {
-		llmModel = "llama3.2"
-	}
-
-	llmBaseURL := envCfg.BaseURL
-	if llmBaseURL == "" {
-		llmBaseURL = "http://host.docker.internal:11434"
-	}
-
 	adoOrgUrl := ""
 	if envCfg.ADOOrg != "" && envCfg.ADOProject != "" {
 		adoOrgUrl = fmt.Sprintf("https://dev.azure.com/%s/%s", envCfg.ADOOrg, envCfg.ADOProject)
 	}
 
+	// OpenBao holds ONLY actual secrets — LLM config (model/provider/baseUrl) is non-sensitive
+	// and is written to ES flume-llm-config by SeedLLMConfig during startup.
 	kvPayload := map[string]string{
-		"ES_API_KEY":   esKey,
-		"LLM_PROVIDER": llmProvider,
-		"LLM_MODEL":    llmModel,
-		"LLM_BASE_URL": llmBaseURL,
+		"ES_API_KEY": esKey,
 	}
 
 	// Explicit bindings properly stripped natively
@@ -399,27 +384,13 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 					}
 				}
 
-				// Apply overrides dynamically for Flume CLI explicitly
+				// Apply overrides: ES_API_KEY always overwrites; all other secrets
+				// (ADO_TOKEN, GH_TOKEN, LLM_API_KEY) only written if explicitly provided.
 				for k, v := range kvPayload {
 					if k == "ES_API_KEY" {
-						combined[k] = v // Always overwrite
-					} else if k == "LLM_PROVIDER" || k == "LLM_MODEL" || k == "LLM_BASE_URL" {
-						explicitOverride := false
-						if k == "LLM_PROVIDER" && envCfg.Provider != "" {
-							explicitOverride = true
-						} else if k == "LLM_MODEL" && envCfg.Model != "" {
-							explicitOverride = true
-						} else if k == "LLM_BASE_URL" && (envCfg.BaseURL != "" || envCfg.LocalOllamaBaseURL != "" || envCfg.Host != "") {
-							explicitOverride = true
-						}
-
-						if explicitOverride {
-							combined[k] = v
-						} else if _, exists := combined[k]; !exists {
-							combined[k] = v
-						}
+						combined[k] = v // Always rotate the generated key
 					} else {
-						// Any other key in kvPayload (GH_TOKEN, ADO_TOKEN, API keys) is ONLY there because it was explicitly provided by the user in this run.
+						// Any other key is only present because the user explicitly provided it in this run.
 						combined[k] = v
 					}
 				}

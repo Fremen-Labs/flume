@@ -1,4 +1,11 @@
 {
   "version": 1,
-  "roles": {}
+  "roles": {
+    "implementer": {
+      "credentialId": "__settings_default__",
+      "provider": "ollama",
+      "model": "qwen2.5-coder:7b",
+      "executionHost": "127.0.0.1"
+    }
+  }
 }
