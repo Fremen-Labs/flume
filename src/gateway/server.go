@@ -30,7 +30,10 @@ type Server struct {
 	// globalSem is a provider-agnostic gate applied before JSON decode.
 	// It prevents floods of non-Ollama requests from overwhelming the gateway
 	// before any per-provider semaphore has a chance to protect anything.
-	globalSem chan struct{}
+	globalSem  chan struct{}
+	// frontierQ gates concurrent cloud LLM escalation calls from the ensemble
+	// to prevent rate-limit cascades and unexpected cost spikes.
+	frontierQ  *FrontierQueue
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -55,8 +58,9 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		router:    router,
 		config:    config,
 		mux:       http.NewServeMux(),
-		ollamaSem: NewOllamaSemaphore(maxConcurrent),
-		globalSem: make(chan struct{}, globalMaxConcurrent()),
+		ollamaSem:  NewOllamaSemaphore(maxConcurrent),
+		globalSem:  make(chan struct{}, globalMaxConcurrent()),
+		frontierQ:  NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -252,10 +256,20 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	s.writeJSON(w, http.StatusOK, map[string]string{
+	metrics := map[string]interface{}{
 		"status":  "ok",
 		"service": "flume-gateway",
-	})
+		"ollama": map[string]int{
+			"active_slots": s.ollamaSem.ActiveSlots(),
+			"max_slots":    s.ollamaSem.MaxSlots(),
+		},
+		"frontier": s.frontierQ.HealthMetrics(),
+		"global": map[string]int{
+			"active": len(s.globalSem),
+			"max":    cap(s.globalSem),
+		},
+	}
+	s.writeJSON(w, http.StatusOK, metrics)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
