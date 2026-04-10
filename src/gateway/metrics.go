@@ -165,38 +165,6 @@ func (g *gaugeVec) snapshot() map[string]float64 {
 	return snap
 }
 
-// ─── Rolling success rate tracker ────────────────────────────────────────────
-
-// rollingRate tracks success/total over a cumulative period for gauge output.
-type rollingRate struct {
-	mu       sync.Mutex
-	success  uint64
-	total    uint64
-	// We use simple monotonic counters; the gauge value is success/total.
-}
-
-func (r *rollingRate) RecordSuccess() {
-	r.mu.Lock()
-	r.success++
-	r.total++
-	r.mu.Unlock()
-}
-
-func (r *rollingRate) RecordFailure() {
-	r.mu.Lock()
-	r.total++
-	r.mu.Unlock()
-}
-
-func (r *rollingRate) Rate() float64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.total == 0 {
-		return 1.0 // no data yet = assume healthy
-	}
-	return float64(r.success) / float64(r.total)
-}
-
 // ─── Metrics registry (singleton) ────────────────────────────────────────────
 
 // Metrics is the global metrics registry for the Flume Gateway.
@@ -204,7 +172,7 @@ var Metrics = &metricsRegistry{
 	EnsembleRequests:     newCounterVec(),
 	EnsembleScores:       newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
 	EscalationTotal:      &simpleCounter{},
-	LocalSuccessRate:     &rollingRate{},
+	LocalRequests:        newCounterVec(),
 	VRAMPressureEvents:   &simpleCounter{},
 	RequestDuration:      newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
 	ActiveModels:         newGaugeVec(),
@@ -220,8 +188,8 @@ type metricsRegistry struct {
 	// flume_escalation_total — frontier fallback count
 	EscalationTotal *simpleCounter
 
-	// flume_local_success_rate — derived gauge
-	LocalSuccessRate *rollingRate
+	// flume_local_requests_total{status} — raw success/failure counts
+	LocalRequests *counterVec
 
 	// flume_vram_pressure_events_total
 	VRAMPressureEvents *simpleCounter
@@ -244,9 +212,9 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 	m.RequestDuration.Observe(labels, duration.Seconds())
 
 	if success {
-		m.LocalSuccessRate.RecordSuccess()
+		m.LocalRequests.Inc(`status="success"`)
 	} else {
-		m.LocalSuccessRate.RecordFailure()
+		m.LocalRequests.Inc(`status="failure"`)
 	}
 
 	Log().Debug("metrics: request recorded",
@@ -254,7 +222,6 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 		slog.String("provider", provider),
 		slog.Bool("success", success),
 		slog.Float64("duration_s", duration.Seconds()),
-		slog.Float64("success_rate", m.LocalSuccessRate.Rate()),
 	)
 }
 
@@ -341,12 +308,16 @@ func HandleMetrics() http.HandlerFunc {
 		buf = strconv.AppendUint(buf, Metrics.EscalationTotal.get(), 10)
 		buf = append(buf, '\n')
 
-		// ── flume_local_success_rate ───────────────────────────────────
-		buf = append(buf, "# HELP flume_local_success_rate Ratio of successful local LLM requests (0.0 to 1.0).\n"...)
-		buf = append(buf, "# TYPE flume_local_success_rate gauge\n"...)
-		buf = append(buf, "flume_local_success_rate "...)
-		buf = strconv.AppendFloat(buf, Metrics.LocalSuccessRate.Rate(), 'f', 6, 64)
-		buf = append(buf, '\n')
+		// ── flume_local_requests_total ─────────────────────────────────
+		buf = append(buf, "# HELP flume_local_requests_total Total number of local LLM requests by success status.\n"...)
+		buf = append(buf, "# TYPE flume_local_requests_total counter\n"...)
+		for reqLabels, count := range Metrics.LocalRequests.snapshot() {
+			buf = append(buf, "flume_local_requests_total{"...)
+			buf = append(buf, reqLabels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendUint(buf, count, 10)
+			buf = append(buf, '\n')
+		}
 
 		// ── flume_vram_pressure_events_total ───────────────────────────
 		buf = append(buf, "# HELP flume_vram_pressure_events_total Total VRAM pressure events causing ensemble degradation.\n"...)

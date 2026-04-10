@@ -12,6 +12,23 @@ import (
 // Unit tests for the Prometheus metrics exporter.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// setupTestMetrics replaces the global Metrics singleton with a clean instance
+// for test isolation, and returns a cleanup function to be deferred.
+func setupTestMetrics() (*metricsRegistry, func()) {
+	old := Metrics
+	clean := &metricsRegistry{
+		EnsembleRequests:   newCounterVec(),
+		EnsembleScores:     newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
+		EscalationTotal:    &simpleCounter{},
+		LocalRequests:      newCounterVec(),
+		VRAMPressureEvents: &simpleCounter{},
+		RequestDuration:    newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
+		ActiveModels:       newGaugeVec(),
+	}
+	Metrics = clean
+	return clean, func() { Metrics = old }
+}
+
 func TestMetrics_Counter(t *testing.T) {
 	c := newCounterVec()
 	c.Inc(`model="qwen",task_type="chat"`)
@@ -71,38 +88,9 @@ func TestMetrics_Gauge(t *testing.T) {
 	}
 }
 
-func TestMetrics_RollingRate(t *testing.T) {
-	r := &rollingRate{}
-
-	// No data = 1.0 (healthy assumption)
-	if r.Rate() != 1.0 {
-		t.Errorf("empty rate = %f, want 1.0", r.Rate())
-	}
-
-	r.RecordSuccess()
-	r.RecordSuccess()
-	r.RecordFailure()
-
-	rate := r.Rate()
-	expected := 2.0 / 3.0
-	if rate < expected-0.01 || rate > expected+0.01 {
-		t.Errorf("rate = %f, want ~%f", rate, expected)
-	}
-}
-
 func TestMetrics_RecordRequest(t *testing.T) {
-	// Reset metrics for test isolation
-	old := Metrics
-	Metrics = &metricsRegistry{
-		EnsembleRequests:   newCounterVec(),
-		EnsembleScores:     newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
-		EscalationTotal:    &simpleCounter{},
-		LocalSuccessRate:   &rollingRate{},
-		VRAMPressureEvents: &simpleCounter{},
-		RequestDuration:    newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
-		ActiveModels:       newGaugeVec(),
-	}
-	defer func() { Metrics = old }()
+	_, cleanup := setupTestMetrics()
+	defer cleanup()
 
 	Metrics.RecordRequest("ollama", true, 500*time.Millisecond)
 	Metrics.RecordRequest("ollama", false, 1*time.Second)
@@ -114,26 +102,19 @@ func TestMetrics_RecordRequest(t *testing.T) {
 		t.Errorf("duration label sets = %d, want 3", len(snap))
 	}
 
-	// Check success rate
-	rate := Metrics.LocalSuccessRate.Rate()
-	expected := 2.0 / 3.0
-	if rate < expected-0.01 || rate > expected+0.01 {
-		t.Errorf("success rate = %f, want ~%f", rate, expected)
+	// Check success/failure counters
+	reqSnap := Metrics.LocalRequests.snapshot()
+	if reqSnap[`status="success"`] != 2 {
+		t.Errorf("success requests = %d, want 2", reqSnap[`status="success"`])
+	}
+	if reqSnap[`status="failure"`] != 1 {
+		t.Errorf("failure requests = %d, want 1", reqSnap[`status="failure"`])
 	}
 }
 
 func TestMetrics_RecordEnsemble(t *testing.T) {
-	old := Metrics
-	Metrics = &metricsRegistry{
-		EnsembleRequests:   newCounterVec(),
-		EnsembleScores:     newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
-		EscalationTotal:    &simpleCounter{},
-		LocalSuccessRate:   &rollingRate{},
-		VRAMPressureEvents: &simpleCounter{},
-		RequestDuration:    newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0}),
-		ActiveModels:       newGaugeVec(),
-	}
-	defer func() { Metrics = old }()
+	_, cleanup := setupTestMetrics()
+	defer cleanup()
 
 	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 85)
 	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 72)
@@ -155,18 +136,8 @@ func TestMetrics_RecordEnsemble(t *testing.T) {
 }
 
 func TestMetrics_HTTPEndpoint(t *testing.T) {
-	// Use clean metrics
-	old := Metrics
-	Metrics = &metricsRegistry{
-		EnsembleRequests:   newCounterVec(),
-		EnsembleScores:     newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
-		EscalationTotal:    &simpleCounter{},
-		LocalSuccessRate:   &rollingRate{},
-		VRAMPressureEvents: &simpleCounter{},
-		RequestDuration:    newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
-		ActiveModels:       newGaugeVec(),
-	}
-	defer func() { Metrics = old }()
+	_, cleanup := setupTestMetrics()
+	defer cleanup()
 
 	// Seed some data
 	Metrics.RecordRequest("ollama", true, 100*time.Millisecond)
@@ -194,7 +165,7 @@ func TestMetrics_HTTPEndpoint(t *testing.T) {
 		"flume_ensemble_requests_total",
 		"flume_ensemble_score_histogram",
 		"flume_escalation_total",
-		"flume_local_success_rate",
+		"flume_local_requests_total",
 		"flume_vram_pressure_events_total",
 		"flume_request_duration_seconds",
 		"flume_active_models",
@@ -225,17 +196,8 @@ func TestMetrics_HTTPEndpoint(t *testing.T) {
 
 func TestMetrics_EmptyOutput(t *testing.T) {
 	// Verify it doesn't panic with zero data
-	old := Metrics
-	Metrics = &metricsRegistry{
-		EnsembleRequests:   newCounterVec(),
-		EnsembleScores:     newHistogram([]float64{50, 100}),
-		EscalationTotal:    &simpleCounter{},
-		LocalSuccessRate:   &rollingRate{},
-		VRAMPressureEvents: &simpleCounter{},
-		RequestDuration:    newHistogram([]float64{1.0}),
-		ActiveModels:       newGaugeVec(),
-	}
-	defer func() { Metrics = old }()
+	_, cleanup := setupTestMetrics()
+	defer cleanup()
 
 	InitLogger()
 	handler := HandleMetrics()
@@ -249,10 +211,10 @@ func TestMetrics_EmptyOutput(t *testing.T) {
 
 	body := rec.Body.String()
 	// Should still have HELP/TYPE lines even with no data
-	if !strings.Contains(body, "# HELP flume_escalation_total") {
+	if !strings.Contains(body, "flume_escalation_total") {
 		t.Error("missing HELP for escalation_total even with no data")
 	}
-	if !strings.Contains(body, "flume_local_success_rate 1.000000") {
-		t.Error("empty success rate should be 1.0 (healthy assumption)")
+	if !strings.Contains(body, "# HELP flume_local_requests_total") {
+		t.Error("missing metric flume_local_requests_total in output")
 	}
 }
