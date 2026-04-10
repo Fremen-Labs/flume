@@ -291,6 +291,9 @@ func TestCompileToFile(t *testing.T) {
 	if !strings.Contains(content, "DO NOT EDIT") {
 		t.Error("generated file should contain DO NOT EDIT header")
 	}
+	if !strings.Contains(content, "Flume Skill Builder") {
+		t.Error("generated file should reference 'Flume Skill Builder' in header")
+	}
 	if !strings.Contains(content, "package generated") {
 		t.Error("generated file should be in package 'generated'")
 	}
@@ -305,5 +308,153 @@ func TestCompileToFile_NonFullInception(t *testing.T) {
 	_, err := CompileToFile(def, t.TempDir())
 	if err == nil {
 		t.Fatal("expected error when compiling non-full inception skill")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Validator tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestValidateSkill_CompleteSkill(t *testing.T) {
+	def := &SkillDefinition{
+		Name:        "complete-skill",
+		Version:     "1.0.0",
+		Inception:   InceptionHybrid,
+		Description: "A complete and well-documented skill for testing",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {"name": {"type": "string"}},
+			"required": ["name"]
+		}`),
+		OutputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {"greeting": {"type": "string"}},
+			"required": ["greeting"]
+		}`),
+		PromptTemplate:  "Hello {name}!",
+		ValidationRules: []string{"Greeting must be non-empty", "Greeting must contain the name"},
+		EnsembleSize:    1,
+	}
+
+	report := ValidateSkill(def)
+	if !report.Valid {
+		t.Errorf("expected valid=true, got false. Errors: %d", report.Errors)
+		for _, f := range report.Findings {
+			t.Logf("  [%s] %s: %s", f.Severity, f.Rule, f.Message)
+		}
+	}
+	if report.Errors > 0 {
+		t.Errorf("expected 0 errors, got %d", report.Errors)
+	}
+}
+
+func TestValidateSkill_LLMOnlyNoPrompt(t *testing.T) {
+	def := &SkillDefinition{
+		Name:      "llm-no-prompt",
+		Version:   "1.0.0",
+		Inception: InceptionLLMOnly,
+		// No PromptTemplate — should trigger error
+	}
+
+	report := ValidateSkill(def)
+	if report.Valid {
+		t.Error("expected valid=false for llm-only skill without prompt")
+	}
+
+	found := false
+	for _, f := range report.Findings {
+		if f.Rule == "inception-003" && f.Severity == SeverityError {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected inception-003 error for missing prompt in llm-only skill")
+	}
+}
+
+func TestValidateSkill_SchemaPromptMisalignment(t *testing.T) {
+	def := &SkillDefinition{
+		Name:      "misalign",
+		Version:   "1.0.0",
+		Inception: InceptionHybrid,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {"name": {"type": "string"}}
+		}`),
+		PromptTemplate: "Hello {name}, your age is {age}!", // {age} not in schema
+	}
+
+	report := ValidateSkill(def)
+	found := false
+	for _, f := range report.Findings {
+		if f.Rule == "align-001" && strings.Contains(f.Message, "age") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected align-001 warning for {age} not in schema")
+	}
+}
+
+func TestValidateSkill_HighEnsemble(t *testing.T) {
+	def := &SkillDefinition{
+		Name:         "high-ensemble",
+		Version:      "1.0.0",
+		Inception:    InceptionHybrid,
+		EnsembleSize: 10,
+	}
+
+	report := ValidateSkill(def)
+	found := false
+	for _, f := range report.Findings {
+		if f.Rule == "perf-001" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected perf-001 warning for high ensemble size")
+	}
+}
+
+func TestValidateSkill_SchemaRequiredMismatch(t *testing.T) {
+	def := &SkillDefinition{
+		Name:    "schema-mismatch",
+		Version: "1.0.0",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {"name": {"type": "string"}},
+			"required": ["name", "missing_field"]
+		}`),
+	}
+
+	report := ValidateSkill(def)
+	found := false
+	for _, f := range report.Findings {
+		if f.Rule == "schema-103" && strings.Contains(f.Message, "missing_field") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected schema-103 error for required field not in properties")
+	}
+}
+
+func TestIsValidSemver(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"1.0.0", true},
+		{"2.1", true},
+		{"0.0.1", true},
+		{"abc", false},
+		{"1.", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		got := isValidSemver(tt.input)
+		if got != tt.want {
+			t.Errorf("isValidSemver(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }
