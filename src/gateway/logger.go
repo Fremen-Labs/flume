@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -85,7 +87,53 @@ func scrubAttr(a slog.Attr) slog.Attr {
 var (
 	defaultLogger *slog.Logger
 	loggerOnce    sync.Once
+	globalLevel   = &slog.LevelVar{} // Atomic level for runtime updates
 )
+
+// ConsoleHandler is a beautiful, colorized text handler for local development.
+type ConsoleHandler struct {
+	inner slog.Handler
+}
+
+func (h *ConsoleHandler) Enabled(ctx context.Context, l slog.Level) bool { return h.inner.Enabled(ctx, l) }
+func (h *ConsoleHandler) WithAttrs(as []slog.Attr) slog.Handler         { return &ConsoleHandler{inner: h.inner.WithAttrs(as)} }
+func (h *ConsoleHandler) WithGroup(n string) slog.Handler             { return &ConsoleHandler{inner: h.inner.WithGroup(n)} }
+
+func (h *ConsoleHandler) Handle(ctx context.Context, r slog.Record) error {
+	level := r.Level.String()
+	color := "\033[0m"
+	switch r.Level {
+	case slog.LevelDebug:
+		level = "DBG"
+		color = "\033[94m"
+	case slog.LevelInfo:
+		level = "INF"
+		color = "\033[92m"
+	case slog.LevelWarn:
+		level = "WRN"
+		color = "\033[93m"
+	case slog.LevelError:
+		level = "ERR"
+		color = "\033[91m"
+	}
+
+	attrs := make(map[string]interface{})
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+
+	attrStr := ""
+	if len(attrs) > 0 {
+		b, _ := json.Marshal(attrs)
+		attrStr = " " + string(b)
+	}
+
+	// [LVL] HH:MM:SS entrypoint - Message {"key":"val"}
+	os.Stdout.WriteString(fmt.Sprintf("%s[%s] %s %s%s\033[0m\n",
+		color, level, r.Time.Format("15:04:05"), r.Message, attrStr))
+	return nil
+}
 
 // parseLogLevel converts an environment string to slog.Level.
 func parseLogLevel(s string) slog.Level {
@@ -101,16 +149,35 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
+// SetLogLevel updates the gateway's global log level at runtime.
+func SetLogLevel(levelStr string) {
+	newLevel := parseLogLevel(levelStr)
+	globalLevel.Set(newLevel)
+	Log().Info("log level updated", slog.String("new_level", newLevel.String()))
+}
+
 // InitLogger initializes the global gateway logger.  Safe to call multiple
 // times; only the first call takes effect.
 func InitLogger() *slog.Logger {
 	loggerOnce.Do(func() {
-		level := parseLogLevel(os.Getenv("FLUME_GATEWAY_LOG_LEVEL"))
-		jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			Level:     level,
-			AddSource: level == slog.LevelDebug,
-		})
-		defaultLogger = slog.New(&secureHandler{inner: jsonHandler})
+		initialLevel := parseLogLevel(os.Getenv("FLUME_GATEWAY_LOG_LEVEL"))
+		globalLevel.Set(initialLevel)
+
+		jsonMode := os.Getenv("FLUME_JSON_LOGS") != "false"
+		var baseHandler slog.Handler
+
+		if jsonMode {
+			baseHandler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+				Level:     globalLevel,
+				AddSource: initialLevel == slog.LevelDebug,
+			})
+		} else {
+			// Fake handler to reuse the Level logic, but ConsoleHandler intercepts Handle
+			baseHandler = slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: globalLevel})
+			baseHandler = &ConsoleHandler{inner: baseHandler}
+		}
+
+		defaultLogger = slog.New(&secureHandler{inner: baseHandler})
 		slog.SetDefault(defaultLogger)
 	})
 	return defaultLogger

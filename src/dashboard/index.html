@@ -225,6 +225,18 @@
     }
     .worker-chip .wname { font-weight: 600; margin-bottom: 3px; }
     .worker-chip .wrole { color: var(--muted); font-size: 11px; }
+
+    /* ── Debug Toggle ── */
+    .debug-toggle {
+      margin-left: auto; display: flex; align-items: center; gap: 8px;
+      padding: 4px 10px; border-radius: 6px; background: var(--surface2);
+      border: 1px solid var(--border2); font-size: 11px; font-weight: 600;
+      color: var(--muted); user-select: none; cursor: pointer;
+    }
+    .debug-toggle:hover { border-color: var(--accent); color: var(--text); }
+    .debug-toggle.active { border-color: var(--accent); color: var(--text); background: #1e3a6b; }
+    .debug-toggle .dot { width: 6px; height: 6px; border-radius: 50%; background: #4b5563; }
+    .debug-toggle.active .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   </style>
 </head>
 <body>
@@ -263,6 +275,7 @@
     <div class="tab" data-view="blocked">Blocked <span id="blocked-badge" class="tab-badge" style="display:none"></span></div>
     <div class="tab" data-view="review">Review</div>
     <div class="tab" data-view="done">Done</div>
+    <div class="tab" data-view="settings">Settings</div>
   </div>
 
   <!-- Main grid -->
@@ -273,6 +286,21 @@
       <div id="tree"></div>
       <!-- Blocked view list (shown only on Blocked tab) -->
       <div id="blocked-list" style="display:none;"></div>
+      <!-- Settings view -->
+      <div id="settings-view" style="display:none; padding: 20px 0;">
+        <h3 style="font-size: 15px; margin-bottom: 20px; color: var(--muted);">System Observability</h3>
+        
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 16px; background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px;">
+          <div>
+            <div style="font-weight: 600; font-size: 14px; margin-bottom: 4px;">Dynamic Debug Mode</div>
+            <div style="font-size: 12px; color: var(--muted);">Enable verbose logging across Gateway and API. Resets to INF on restart.</div>
+          </div>
+          <div id="debug-trigger" class="debug-toggle" onclick="toggleDebugMode()" style="margin-left: 0;">
+            <div class="dot"></div>
+            DEBUG MODE
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Right: sidebar -->
@@ -300,6 +328,64 @@
 
 <script>
 'use strict';
+
+/**
+ * FlumeLogger: Beautiful & Secure Frontend Logging
+ * Ships critical errors to the API for central observability.
+ */
+class FlumeLogger {
+  static levels = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+  static currentLevel = FlumeLogger.levels.INFO;
+
+  static style(level) {
+    const colors = { DEBUG: '#3b82f6', INFO: '#10b981', WARN: '#f59e0b', ERROR: '#ef4444' };
+    return `color: #fff; background: ${colors[level]}; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 10px;`;
+  }
+
+  static log(level, msg, data = null) {
+    if (FlumeLogger.levels[level] < FlumeLogger.currentLevel) return;
+    
+    console.log(`%c${level}`, FlumeLogger.style(level), msg, data || '');
+
+    if (level === 'ERROR') {
+      fetch('/api/logs/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level, message: msg, data })
+      }).catch(() => {}); // Fire and forget
+    }
+  }
+
+  static debug(m, d) { this.log('DEBUG', m, d); }
+  static info(m, d)  { this.log('INFO', m, d); }
+  static warn(m, d)  { this.log('WARN', m, d); }
+  static error(m, d) { this.log('ERROR', m, d); }
+}
+
+// Global Error Hooks
+window.onerror = (m, s, l, c, e) => FlumeLogger.error(`Window Error: ${m}`, { source: s, line: l, col: c, stack: e?.stack });
+window.onunhandledrejection = (e) => FlumeLogger.error(`Unhandled Promise Rejection: ${e.reason}`);
+
+async function toggleDebugMode() {
+  const isDebug = !document.getElementById('debug-trigger').classList.contains('active');
+  const newLevel = isDebug ? 'DEBUG' : 'INFO';
+  
+  try {
+    const r = await fetch('/api/settings/log-level', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: newLevel })
+    });
+    if (r.ok) {
+      FlumeLogger.currentLevel = FlumeLogger.levels[newLevel];
+      document.getElementById('debug-trigger').classList.toggle('active', isDebug);
+      toast(`System-wide log level: ${newLevel}`, 'success');
+      FlumeLogger.info(`Debug mode ${isDebug ? 'enabled' : 'disabled'}`);
+    }
+  } catch (e) {
+    toast('Failed to toggle debug mode', 'error');
+  }
+}
 
 /* ─── State ─── */
 let SNAPSHOT = null;
@@ -472,9 +558,11 @@ async function requeueOne(taskId, btn) {
     const card = document.getElementById(`bcard-${taskId}`);
     if (card) { card.classList.add('requeued'); card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
     toast(`✓ ${taskId} requeued (role: ${data.owner || '—'})`, 'success');
+    FlumeLogger.info('Task requeued', { taskId, owner: data.owner });
   } catch(e) {
     if (btn) btn.disabled = false;
     toast(`Failed to requeue ${taskId}: ${e.message}`, 'error');
+    FlumeLogger.error('Requeue failure', { taskId, error: e.message });
   } finally {
     if (spinner) spinner.style.display = 'none';
   }
@@ -635,17 +723,23 @@ function applyFilters() {
     return true;
   });
 
-  $('list-title').textContent = ACTIVE_VIEW === 'blocked' ? 'Blocked Items' : 'Backlog / Work Items';
+  $('list-title').textContent = ACTIVE_VIEW === 'blocked' ? 'Blocked Items' : (ACTIVE_VIEW === 'settings' ? 'Settings' : 'Backlog / Work Items');
+  
+  // Hide all list-related panels first
+  $('blocked-list').style.display = 'none';
+  $('tree').style.display = 'none';
+  $('settings-view').style.display = 'none';
+  $('bulk-bar').classList.remove('visible');
 
   if (ACTIVE_VIEW === 'blocked') {
     $('blocked-list').style.display = 'block';
-    $('tree').style.display = 'none';
     renderBlockedList();
     $('bulk-bar').classList.add('visible');
+  } else if (ACTIVE_VIEW === 'settings') {
+    $('settings-view').style.display = 'block';
+    // No bulk bar in settings
   } else {
-    $('blocked-list').style.display = 'none';
     $('tree').style.display = 'block';
-    $('bulk-bar').classList.remove('visible');
     $('tree').innerHTML = renderTree(tasks);
   }
   updateBlockedBadge();
@@ -701,6 +795,18 @@ $('projectFilter').addEventListener('change', applyFilters);
 $('statusFilter').addEventListener('change', applyFilters);
 
 /* ─── Boot + polling ─── */
+(async () => {
+  try {
+    const r = await fetch('/api/snapshot');
+    const data = await r.json();
+    FlumeLogger.info('Dashboard initialized');
+    // Check if system is in debug mode already (e.g. from previous session)
+    // For now we assume INFO on boot per spec, but we could fetch settings here.
+  } catch(e) {
+    FlumeLogger.error('Initialization failure', e);
+  }
+})();
+
 loadSnapshot();
 POLL_INTERVAL = setInterval(loadSnapshot, 10000);
 </script>

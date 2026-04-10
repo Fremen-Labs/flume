@@ -9,6 +9,7 @@ import (
 
 	"github.com/Fremen-Labs/flume/cmd/flume/commands"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
+	"github.com/Fremen-Labs/flume/src/gateway"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +33,9 @@ func init() {
 }
 
 func main() {
+	// Initialize unified structured logger (off by default, INFO level)
+	gateway.InitLogger()
+
 	// Execute the 90s SciFi Artifact Banner physically BEFORE TTY interception!
 	fmt.Println(ui.SciFiLogo())
 

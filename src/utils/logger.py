@@ -6,6 +6,20 @@ from datetime import datetime, timezone
 # AP-6: RotatingFileHandler removed — all log output goes to stdout/stderr only (12-factor).
 # K8s log aggregators (Loki, Datadog, CloudWatch) collect from container stdout/stderr.
 
+SENSITIVE_FRAGMENTS = ["key", "token", "secret", "password", "pat", "credential", "auth"]
+MASKED_VALUE = "***REDACTED***"
+
+def scrub_data(data):
+    """Recursively scrub sensitive keys from a dictionary or list."""
+    if isinstance(data, dict):
+        return {
+            k: (MASKED_VALUE if any(f in k.lower() for f in SENSITIVE_FRAGMENTS) else scrub_data(v))
+            for k, v in data.items()
+        }
+    elif isinstance(data, list):
+        return [scrub_data(item) for item in data]
+    return data
+
 class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_record = {
@@ -16,9 +30,15 @@ class JSONFormatter(logging.Formatter):
         }
         if record.exc_info:
             log_record["exception"] = self.formatException(record.exc_info)
+            
         # Natively map deeply structured fields into the JSON Payload if available
-        if hasattr(record, 'structured_data'):
-            log_record.update(record.structured_data)
+        structured = getattr(record, 'structured_data', {})
+        if structured:
+            log_record.update(scrub_data(structured))
+            
+        # Trace ID propagation
+        if hasattr(record, 'trace_id'):
+            log_record["trace_id"] = record.trace_id
             
         return json.dumps(log_record)
 
@@ -34,28 +54,41 @@ class ConsoleFormatter(logging.Formatter):
 
     def format(self, record):
         color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
-        ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        msg = super().format(record)
-        return f"{color}[{ts}] {record.levelname} | {record.name} - {msg}{self.COLORS['RESET']}"
+        ts = datetime.now(timezone.utc).strftime('%H:%M:%S')
+        lvl = record.levelname[:3] # Short level: INF, DBG, ERR
+        
+        msg = record.getMessage()
+        structured = getattr(record, 'structured_data', {})
+        if structured:
+            scrubbed = scrub_data(structured)
+            msg += f" {json.dumps(scrubbed)}"
+            
+        return f"{color}[{lvl}] {ts} {record.name} - {msg}{self.COLORS['RESET']}"
+
+def set_global_log_level(level_name: str):
+    """Update all active Flume loggers to the new level."""
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    # Update the root flume logger and its children
+    logging.getLogger("flume").setLevel(level)
+    # Also update any other loggers that might be active
+    for name in logging.root.manager.loggerDict:
+        if name.startswith("flume") or "worker" in name:
+            logging.getLogger(name).setLevel(level)
 
 def get_logger(name: str, file_path: str = None) -> logging.Logger:
-    """Return a structured logger that writes to stdout only.
-
-    The *file_path* parameter is accepted but ignored — AP-6 (K8s readiness):
-    rotating file handlers have been removed in favour of stdout/stderr so that
-    the cluster log aggregator (Loki / Datadog / CloudWatch) can collect logs
-    from container output without requiring a shared volume mount.
-    """
+    """Return a structured logger that writes to stdout only."""
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    # Check for initial level from env
+    env_level = os.environ.get('FLUME_LOG_LEVEL', 'INFO').upper()
+    logger.setLevel(getattr(logging, env_level, logging.INFO))
 
     # Check if we are in ELK/JSON output mode for the terminal
     json_mode = os.environ.get('FLUME_JSON_LOGS', 'false').lower() == 'true'
 
-    # Stdout stream handler — the only sink in K8s-compatible deployments
+    # Stdout stream handler
     stream_handler = logging.StreamHandler(sys.stdout)
     if json_mode:
         stream_handler.setFormatter(JSONFormatter())
