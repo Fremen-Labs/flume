@@ -207,6 +207,10 @@ services:
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
       - FLUME_GATEWAY_URL=http://gateway:8090
+      # ES_URL: must match the service name in this compose file.
+      # worker_handlers.py, agent_runner.py, and es_credential_store.py all
+      # read ES_URL; without it they fall back to 127.0.0.1:9200 (broken inside Docker).
+      - ES_URL=http://elasticsearch:9200
     command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated

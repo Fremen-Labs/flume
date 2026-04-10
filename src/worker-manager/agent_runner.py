@@ -66,7 +66,7 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
         import ssl
         from datetime import datetime, timezone
         import os
-        es_url = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
+        es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_key = os.environ.get('ES_API_KEY', '')
         ctx = ssl.create_default_context()
         ctx.check_hostname = False

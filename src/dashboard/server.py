@@ -3306,7 +3306,98 @@ def api_task_commits(task_id: str):
 
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
-    return {"success": True}
+    """
+    Transition a task to a new status.
+
+    Allowed user-initiated transitions:
+      - ready   → re-queues the task from the same role it blocked on
+      - planned → demotes back to planning phase
+      - inbox   → returns to the intake queue
+
+    History (agent_log, commit_sha, execution_thoughts) is preserved so
+    engineers can read why the task blocked before retrying.
+    """
+    _ALLOWED_USER_STATUSES = {'ready', 'planned', 'inbox'}
+    status = (payload.get('status') or '').strip().lower()
+    if status not in _ALLOWED_USER_STATUSES:
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'status must be one of {sorted(_ALLOWED_USER_STATUSES)}, got {status!r}'},
+        )
+
+    es_id, src = find_task_doc_by_logical_id(task_id)
+    if not es_id or src is None:
+        return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
+
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    # Restart from the same role that was assigned when the task blocked.
+    owner = src.get('owner') or src.get('assigned_agent_role')
+
+    doc = {
+        'status': status,
+        'queue_state': 'queued',
+        'active_worker': None,
+        'needs_human': False,
+        'updated_at': now,
+        'last_update': now,
+        'implementer_consecutive_llm_failures': 0,
+    }
+    if owner:
+        doc['owner'] = owner
+        doc['assigned_agent_role'] = owner
+
+    es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+    logger.info(f'task transition: {task_id} → {status} (role={owner})')
+    return {'success': True, 'task_id': task_id, 'status': status, 'owner': owner, '_id': es_id}
+
+
+@app.post("/api/tasks/bulk-requeue")
+def api_tasks_bulk_requeue(payload: dict):
+    """
+    Requeue up to 50 blocked tasks in one call.
+
+    Body:    { "task_ids": ["story-1", "feat-1", ...] }
+    Returns: { "requeued": [...], "failed": [...] }
+    """
+    _MAX_BULK = 50
+    task_ids = payload.get('task_ids') or []
+    if not isinstance(task_ids, list):
+        return JSONResponse(status_code=400, content={'error': 'task_ids must be a list'})
+    if len(task_ids) > _MAX_BULK:
+        return JSONResponse(status_code=400, content={'error': f'bulk limit is {_MAX_BULK} tasks per call'})
+
+    requeued, failed = [], []
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    for task_id in task_ids:
+        try:
+            es_id, src = find_task_doc_by_logical_id(str(task_id))
+            if not es_id or src is None:
+                failed.append({'task_id': task_id, 'error': 'not found'})
+                continue
+            owner = src.get('owner') or src.get('assigned_agent_role')
+            doc = {
+                'status': 'ready',
+                'queue_state': 'queued',
+                'active_worker': None,
+                'needs_human': False,
+                'updated_at': now,
+                'last_update': now,
+                'implementer_consecutive_llm_failures': 0,
+            }
+            if owner:
+                doc['owner'] = owner
+                doc['assigned_agent_role'] = owner
+            es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+            requeued.append({'task_id': task_id, 'owner': owner})
+        except Exception as exc:
+            logger.error(f'bulk-requeue: task {task_id} failed: {exc}')
+            failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+
+    logger.info(f'bulk-requeue: requeued={len(requeued)} failed={len(failed)}')
+    return {'requeued': requeued, 'failed': failed}
+
 
 
 from fastapi import Depends, Request, Header
