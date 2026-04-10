@@ -49,14 +49,24 @@ func NewFrontierQueue(maxConcurrent int) *FrontierQueue {
 }
 
 // FrontierMaxConcurrentFromEnv reads FLUME_FRONTIER_MAX_CONCURRENT from the
-// environment and returns the value, or 0 to use the default.
+// environment and returns the parsed value, or 0 to use the default (4).
+// Logs a warning when the variable is set but cannot be parsed so that
+// operators are immediately alerted to configuration typos (e.g. "4threads").
 func FrontierMaxConcurrentFromEnv() int {
-	if v := strings.TrimSpace(os.Getenv("FLUME_FRONTIER_MAX_CONCURRENT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
+	v := strings.TrimSpace(os.Getenv("FLUME_FRONTIER_MAX_CONCURRENT"))
+	if v == "" {
+		return 0
 	}
-	return 0
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		Log().Warn("frontier_queue: FLUME_FRONTIER_MAX_CONCURRENT is invalid — using default",
+			slog.String("provided_value", v),
+			slog.Int("default", defaultFrontierMaxConcurrent),
+			slog.String("hint", "value must be a positive integer, e.g. 4"),
+		)
+		return 0
+	}
+	return n
 }
 
 // Acquire blocks until a frontier slot is available or the context is cancelled.

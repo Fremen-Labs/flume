@@ -73,23 +73,41 @@ type OllamaVRAMInfo struct {
 }
 
 // QueryOllamaVRAM fetches live VRAM usage from Ollama /api/ps.
-// Returns zero values when Ollama is unreachable or the endpoint is absent.
+// Returns zero-value OllamaVRAMInfo (TotalUsedGB=0, ModelCount=0) when Ollama
+// is unreachable or the endpoint is absent — callers should treat a zero return
+// as "assume no models loaded" for conservative sizing.
+//
+// All failure paths are logged at Warn level with structured context so that
+// operators can distinguish transient network errors from persistent misconfiguration.
 func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
+	log := Log()
 	url := strings.TrimRight(ollamaBaseURL, "/") + "/api/ps"
 	client := &http.Client{Timeout: 3 * time.Second}
 
 	resp, err := client.Get(url)
 	if err != nil {
+		log.Warn("vram_sense: failed to connect to ollama /api/ps — assuming 0 VRAM in use",
+			slog.String("url", url),
+			slog.String("error", err.Error()),
+		)
 		return OllamaVRAMInfo{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Warn("vram_sense: unexpected HTTP status from ollama /api/ps — assuming 0 VRAM in use",
+			slog.String("url", url),
+			slog.Int("status_code", resp.StatusCode),
+		)
 		return OllamaVRAMInfo{}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err != nil {
+		log.Warn("vram_sense: failed to read ollama /api/ps response body — assuming 0 VRAM in use",
+			slog.String("url", url),
+			slog.String("error", err.Error()),
+		)
 		return OllamaVRAMInfo{}
 	}
 
@@ -99,6 +117,11 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &psResp); err != nil {
+		log.Warn("vram_sense: failed to parse ollama /api/ps JSON — assuming 0 VRAM in use",
+			slog.String("url", url),
+			slog.String("error", err.Error()),
+			slog.Int("body_bytes", len(body)),
+		)
 		return OllamaVRAMInfo{}
 	}
 
@@ -115,13 +138,23 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 
 // systemMemoryGB returns the operator-configured total unified-memory (GB).
 // Default 16 GB — conservative for MacBook Air / base Mac Mini.
+// Logs a warning when FLUME_SYSTEM_MEMORY_GB is set but cannot be parsed so
+// that operators are immediately aware of configuration typos (e.g. "16G").
 func systemMemoryGB() float64 {
+	const defaultGB = 16.0
 	if v := strings.TrimSpace(os.Getenv("FLUME_SYSTEM_MEMORY_GB")); v != "" {
-		if gb, err := strconv.ParseFloat(v, 64); err == nil && gb > 0 {
-			return gb
+		gb, err := strconv.ParseFloat(v, 64)
+		if err != nil || gb <= 0 {
+			Log().Warn("adaptive_ensemble: FLUME_SYSTEM_MEMORY_GB is invalid — using default",
+				slog.String("provided_value", v),
+				slog.Float64("default_gb", defaultGB),
+				slog.String("hint", "value must be a positive number, e.g. 16 or 64"),
+			)
+			return defaultGB
 		}
+		return gb
 	}
-	return 16.0
+	return defaultGB
 }
 
 // AdaptiveEnsembleSize computes the safe jury size for the current hardware
