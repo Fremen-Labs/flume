@@ -110,7 +110,7 @@ def poll_and_sync():
                 "query": {
                     "bool": {
                         "must": [
-                            {"term": {"status": "completed"}}
+                            {"term": {"status": "done"}}
                         ],
                         "must_not": [
                             {"term": {"ast_synced": True}},

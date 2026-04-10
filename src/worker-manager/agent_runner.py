@@ -908,7 +908,7 @@ def run_implementer(
                         if task.get('requires_code')
                         else 'Decide whether this is a code task, analysis task, or context task. '
                         )
-                        + ' Explore with list_directory and read_file, act accordingly, then call implementation_complete with a clear summary.'
+                        + ' You MUST use elastro_query_ast to search the AST index FIRST. Do NOT use list_directory unless the AST search fails or is insufficient. Act accordingly, then call implementation_complete with a clear summary.'
                     ),
                 },
                 indent=2,
