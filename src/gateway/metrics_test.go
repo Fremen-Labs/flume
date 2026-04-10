@@ -19,6 +19,7 @@ func setupTestMetrics() (*metricsRegistry, func()) {
 	clean := &metricsRegistry{
 		EnsembleRequests:   newCounterVec(),
 		EnsembleScores:     newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
+		EnsembleDuration:   newHistogram([]float64{0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0}),
 		EscalationTotal:    &simpleCounter{},
 		LocalRequests:      newCounterVec(),
 		VRAMPressureEvents: &simpleCounter{},
@@ -116,11 +117,11 @@ func TestMetrics_RecordEnsemble(t *testing.T) {
 	_, cleanup := setupTestMetrics()
 	defer cleanup()
 
-	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 85)
-	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 72)
+	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 85, 1200*time.Millisecond)
+	Metrics.RecordEnsemble("qwen2.5-coder:7b", "tool_call", 3, 72, 800*time.Millisecond)
 
 	snap := Metrics.EnsembleRequests.snapshot()
-	key := `model="qwen2.5-coder:7b",task_type="tool_call",size="3"`
+	key := `model_family="qwen2.5-coder",task_type="tool_call",size="3"`
 	if snap[key] != 2 {
 		t.Errorf("ensemble requests for key = %d, want 2", snap[key])
 	}
@@ -141,7 +142,7 @@ func TestMetrics_HTTPEndpoint(t *testing.T) {
 
 	// Seed some data
 	Metrics.RecordRequest("ollama", true, 100*time.Millisecond)
-	Metrics.RecordEnsemble("qwen:7b", "chat", 2, 90)
+	Metrics.RecordEnsemble("qwen:7b", "chat", 2, 90, 400*time.Millisecond)
 	Metrics.RecordEscalation()
 	Metrics.RecordVRAMPressure()
 	Metrics.SetActiveModel("qwen:7b")
@@ -164,11 +165,16 @@ func TestMetrics_HTTPEndpoint(t *testing.T) {
 	required := []string{
 		"flume_ensemble_requests_total",
 		"flume_ensemble_score_histogram",
+		"flume_ensemble_decision_duration_seconds",
 		"flume_escalation_total",
 		"flume_local_requests_total",
 		"flume_vram_pressure_events_total",
 		"flume_request_duration_seconds",
 		"flume_active_models",
+		"flume_up",
+		"flume_build_info",
+		"go_goroutines",
+		"go_memstats_alloc_bytes",
 	}
 	for _, name := range required {
 		if !strings.Contains(body, name) {

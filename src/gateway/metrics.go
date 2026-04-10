@@ -3,6 +3,9 @@ package gateway
 import (
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +43,36 @@ func escapeLabelValue(s string) string {
 	s = strings.ReplaceAll(s, "\n", `\n`)
 	s = strings.ReplaceAll(s, "\"", `\"`)
 	return s
+}
+
+// parseModelFamily reduces a high-cardinality model string (e.g., qwen2.5-coder:7b)
+// to a low-cardinality family string (e.g., qwen2.5-coder).
+func parseModelFamily(model string) string {
+	if idx := strings.IndexByte(model, ':'); idx != -1 {
+		return model[:idx]
+	}
+	return model
+}
+
+var (
+	buildVersion = "unknown"
+	buildOnce    sync.Once
+)
+
+// getBuildVersion reads the `.version` file statically, caching the result.
+func getBuildVersion() string {
+	buildOnce.Do(func() {
+		// Start looking from cwd up to 3 directories.
+		for i := 0; i < 3; i++ {
+			prefix := strings.Repeat("../", i)
+			data, err := os.ReadFile(filepath.Join(prefix, ".version"))
+			if err == nil {
+				buildVersion = strings.TrimSpace(string(data))
+				break
+			}
+		}
+	})
+	return buildVersion
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +227,7 @@ func (g *gaugeVec) snapshot() map[string]float64 {
 var Metrics = &metricsRegistry{
 	EnsembleRequests:     newCounterVec(),
 	EnsembleScores:       newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
+	EnsembleDuration:     newHistogram([]float64{0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0}),
 	EscalationTotal:      &simpleCounter{},
 	LocalRequests:        newCounterVec(),
 	VRAMPressureEvents:   &simpleCounter{},
@@ -202,11 +236,14 @@ var Metrics = &metricsRegistry{
 }
 
 type metricsRegistry struct {
-	// flume_ensemble_requests_total{model, task_type, size}
+	// flume_ensemble_requests_total{model_family, task_type, size}
 	EnsembleRequests *counterVec
 
 	// flume_ensemble_score_histogram{} — jury scores 0-100
 	EnsembleScores *histogram
+
+	// flume_ensemble_decision_duration_seconds{} — how long the jury took to score
+	EnsembleDuration *histogram
 
 	// flume_escalation_total — frontier fallback count
 	EscalationTotal *simpleCounter
@@ -251,21 +288,24 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 }
 
 // RecordEnsemble records an ensemble execution.
-func (m *metricsRegistry) RecordEnsemble(model, taskType string, size int, bestScore int) {
+func (m *metricsRegistry) RecordEnsemble(model, taskType string, size int, bestScore int, duration time.Duration) {
+	family := parseModelFamily(model)
 	labels := formatLabels([]Label{
-		{"model", model},
+		{"model_family", family},
 		{"task_type", taskType},
 		{"size", strconv.Itoa(size)},
 	})
 	m.EnsembleRequests.Inc(labels)
 	m.EnsembleScores.Observe("", float64(bestScore))
+	m.EnsembleDuration.Observe("", duration.Seconds())
 
 	Log().Debug("metrics: ensemble recorded",
 		slog.String("component", "metrics"),
-		slog.String("model", model),
+		slog.String("model_family", family),
 		slog.String("task_type", taskType),
 		slog.Int("jury_size", size),
 		slog.Int("best_score", bestScore),
+		slog.Float64("duration_s", duration.Seconds()),
 	)
 }
 
@@ -312,8 +352,41 @@ func HandleMetrics() http.HandlerFunc {
 
 		buf := make([]byte, 0, 4096)
 
+		// ── System Health & Application ──────────────────────────────────
+		buf = append(buf, "# HELP flume_up Whether the Flume gateway process is running (1 = up).\n"...)
+		buf = append(buf, "# TYPE flume_up gauge\n"...)
+		buf = append(buf, "flume_up 1\n"...)
+
+		buf = append(buf, "# HELP flume_build_info Build version information.\n"...)
+		buf = append(buf, "# TYPE flume_build_info gauge\n"...)
+		buf = append(buf, "flume_build_info{version=\""...)
+		buf = append(buf, getBuildVersion()...)
+		buf = append(buf, "\"} 1\n"...)
+
+		// ── Go Runtime Metrics ─────────────────────────────────────────
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+
+		buf = append(buf, "# HELP go_goroutines Number of goroutines that currently exist.\n"...)
+		buf = append(buf, "# TYPE go_goroutines gauge\n"...)
+		buf = append(buf, "go_goroutines "...)
+		buf = strconv.AppendInt(buf, int64(runtime.NumGoroutine()), 10)
+		buf = append(buf, '\n')
+
+		buf = append(buf, "# HELP go_memstats_alloc_bytes Number of bytes allocated and still in use.\n"...)
+		buf = append(buf, "# TYPE go_memstats_alloc_bytes gauge\n"...)
+		buf = append(buf, "go_memstats_alloc_bytes "...)
+		buf = strconv.AppendUint(buf, mem.Alloc, 10)
+		buf = append(buf, '\n')
+		
+		buf = append(buf, "# HELP go_memstats_sys_bytes Number of bytes obtained from system.\n"...)
+		buf = append(buf, "# TYPE go_memstats_sys_bytes gauge\n"...)
+		buf = append(buf, "go_memstats_sys_bytes "...)
+		buf = strconv.AppendUint(buf, mem.Sys, 10)
+		buf = append(buf, '\n')
+
 		// ── flume_ensemble_requests_total ──────────────────────────────
-		buf = append(buf, "# HELP flume_ensemble_requests_total Total ensemble requests by model, task type, and jury size.\n"...)
+		buf = append(buf, "# HELP flume_ensemble_requests_total Total ensemble requests by model_family, task type, and jury size.\n"...)
 		buf = append(buf, "# TYPE flume_ensemble_requests_total counter\n"...)
 		for labels, count := range Metrics.EnsembleRequests.snapshot() {
 			buf = append(buf, "flume_ensemble_requests_total{"...)
@@ -327,6 +400,11 @@ func HandleMetrics() http.HandlerFunc {
 		buf = appendHistogramMetric(buf, "flume_ensemble_score_histogram",
 			"Distribution of ensemble jury scores (0-100).",
 			Metrics.EnsembleScores)
+
+		// ── flume_ensemble_decision_duration_seconds ────────────────────
+		buf = appendHistogramMetric(buf, "flume_ensemble_decision_duration_seconds",
+			"Distribution of ensemble jury consensus evaluation times from start to final score.",
+			Metrics.EnsembleDuration)
 
 		// ── flume_escalation_total ─────────────────────────────────────
 		buf = append(buf, "# HELP flume_escalation_total Total frontier LLM fallback escalations.\n"...)

@@ -67,6 +67,15 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 - **[Zero-LLM Meta-Critic CI/CD Pipeline](./docs/walkthroughs/meta-critic-pipeline.md)**: Secure your repository with our mathematically exact automated garbage-collected code linter securely.
 - **[Elastro Code Graph Indexing](./docs/walkthroughs/elastro-code-graph.md)**: Replace flawed token-RAG with AST semantic maps natively parsing variable dependencies locally.
 
+### 📊 Observability & Metrics
+*How to monitor real-time gateway performance, VRAM constraints, and fallback frequency.*
+- The Flume gateway exposes a zero-dependency **Prometheus Text Exposition Endpoint natively at `GET /metrics`** (port `8766` by default or internal via Docker).
+- **Core Insights:** Tracks `flume_ensemble_requests_total`, `flume_escalation_total`, `flume_ensemble_score_histogram`, and internal Go heuristics (`go_goroutines`, `go_memstats_alloc_bytes`).
+- Easily ingested natively by `Metricbeat` or raw Prometheus instances. Example Grafana queries:
+  - Base Local Fallback Rate: `rate(flume_escalation_total[5m])`
+  - Active Evaluator Models: `flume_active_models`
+  - High VRAM Constraint Drops: `increase(flume_vram_pressure_events_total[1h])`
+
 ### 📘 Reference Materials
 *Deep architectural explanations of Flume's matrix integrations.*
 - **[CLI Parameter Maps](./docs/reference/cli.md)**: Safely inspect exactly how `start`, `destroy`, and `doctor` flags behave cleanly.
