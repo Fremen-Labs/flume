@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/Fremen-Labs/flume/src/gateway/skills"
+	"github.com/Fremen-Labs/flume/src/gateway/skillslog"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,6 +37,8 @@ type Server struct {
 	// frontierQ gates concurrent cloud LLM escalation calls from the ensemble
 	// to prevent rate-limit cascades and unexpected cost spikes.
 	frontierQ  *FrontierQueue
+	// skills is the registry of Inception Skill handlers.
+	skills     *skills.SkillRegistry
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -66,6 +71,12 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
+
+	// Inception Skills endpoints
+	s.mux.HandleFunc("POST /skills/execute/", skills.HandleSkillExecute(s.skills))
+	s.mux.HandleFunc("GET /skills", skills.HandleSkillsList(s.skills))
+	s.mux.HandleFunc("POST /skills/reload", skills.HandleSkillsReload(s.skills))
+
 	return s
 }
 
@@ -328,6 +339,9 @@ func StartGateway(addr string) error {
 	log := Log()
 	log.Info("initializing flume-gateway", slog.String("version", "1.0.0"))
 
+	// Inject the secure gateway logger into the skills bridge
+	skillslog.SetLogger(log)
+
 	config := NewConfig("", 5*time.Second)
 	secrets := NewSecretStore("", "", "", 60*time.Second)
 
@@ -347,6 +361,19 @@ func StartGateway(addr string) error {
 	}
 
 	server := NewServer(config, secrets)
+
+	// Initialize Inception Skill Registry
+	server.skills = skills.NewSkillRegistry()
+	if err := server.skills.LoadAll(ctx); err != nil {
+		log.Warn("skill registry initialization failed (non-fatal)",
+			slog.String("error", err.Error()),
+		)
+	} else {
+		log.Info("inception skill registry initialized",
+			slog.Int("skills_loaded", server.skills.Count()),
+		)
+	}
+
 	return server.ListenAndServe(addr)
 }
 

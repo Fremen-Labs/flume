@@ -30,6 +30,7 @@ func init() {
     rootCmd.AddCommand(commands.ConfigCmd)
     rootCmd.AddCommand(commands.ProjectsCmd)
     rootCmd.AddCommand(commands.UpgradeCmd)
+    rootCmd.AddCommand(commands.SkillsCmd)
 }
 
 func main() {
