@@ -162,8 +162,8 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 
 	config.DefaultBaseURL = ts.URL
 	config.DefaultProvider = ProviderOpenAI
-	// Disable adaptive sizing for this test (no Ollama available)
 	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+	t.Setenv("LLM_API_KEY", "test-key-escalation")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
@@ -223,6 +223,7 @@ func TestEnsembleTimeout(t *testing.T) {
 	config.DefaultProvider = ProviderOpenAI
 	config.DefaultBaseURL = blockedServer.URL
 	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+	t.Setenv("LLM_API_KEY", "test-key-timeout")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
@@ -270,6 +271,7 @@ func TestHandleChat_EnsembleEnabled(t *testing.T) {
 	config.DefaultProvider = ProviderOpenAI
 	config.DefaultBaseURL = mockLLM.URL
 	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+	t.Setenv("LLM_API_KEY", "test-key-ensemble")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
@@ -439,6 +441,7 @@ func TestEarlyExitEnsemble(t *testing.T) {
 	config.DefaultProvider = ProviderOpenAI
 	config.DefaultBaseURL = goodServer.URL
 	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+	t.Setenv("LLM_API_KEY", "test-key-early-exit")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)

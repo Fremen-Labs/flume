@@ -48,6 +48,9 @@ func NewProviderRouter(config *Config, secrets *SecretStore) *ProviderRouter {
 }
 
 // Route dispatches a request to the appropriate provider.
+// Guardrails (SanitizeToolResponse) are applied to every tool-call response
+// before returning, so they fire unconditionally regardless of whether the
+// caller is a single request, an ensemble member, or a frontier fallback.
 func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools bool) (*ChatResponse, error) {
 	// Resolve effective model/provider/credential
 	model, provider, credID := r.config.ResolveModel(req)
@@ -64,7 +67,15 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 	)
 
 	// Resolve API key from OpenBao if needed
-	apiKey := r.resolveAPIKey(ctx, provider, credID)
+	apiKey, err := r.resolveAPIKey(ctx, provider, credID)
+	if err != nil {
+		log.Error("api key resolution failed — aborting request",
+			slog.String("provider", provider),
+			slog.String("cred_id", credID),
+			slog.String("error", err.Error()),
+		)
+		return nil, fmt.Errorf("api key unavailable for provider %q: %w", provider, err)
+	}
 
 	// Check FLUME_OLLAMA_THINK env override (allows per-deployment opt-in)
 	globalThinkOverride := false
@@ -76,54 +87,105 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 	enableThink := req.Think || globalThinkOverride || r.config.ShouldThink(req)
 	suppressThink := IsThinkingModel(model) && !enableThink
 
+	var resp *ChatResponse
 	switch provider {
 	case ProviderOllama:
-		return r.ollama(ctx, req, suppressThink, withTools)
+		resp, err = r.ollama(ctx, req, suppressThink, withTools)
 	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini:
-		return r.openaiCompat(ctx, req, provider, apiKey, withTools)
+		resp, err = r.openaiCompat(ctx, req, provider, apiKey, withTools)
 	case ProviderAnthropic:
-		return r.anthropic(ctx, req, apiKey, withTools)
+		resp, err = r.anthropic(ctx, req, apiKey, withTools)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// ── Fix 1: guardrails applied universally at the routing layer ──────────
+	// This ensures sanitization fires for EVERY response path — single call,
+	// ensemble member, and frontier fallback — before the result is returned
+	// to any caller. The HTTP handler also calls SanitizeToolResponse as a
+	// defence-in-depth layer; the function is idempotent.
+	if withTools {
+		SanitizeToolResponse(resp)
+	}
+
+	return resp, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API Key Resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID string) string {
+// resolveAPIKey returns the API key to use for the given provider.
+//
+// Resolution order (highest to lowest priority):
+//  1. Credential-specific key from OpenBao (via credID)
+//  2. Global LLM_API_KEY from OpenBao
+//  3. LLM_API_KEY environment variable
+//
+// Managed providers (OpenAI, Anthropic, Gemini) return an error when no key
+// is found — sending an empty Authorization header would result in an opaque
+// 401 at the provider and could leak request context in error messages.
+//
+// OpenAI-compatible local endpoints (ProviderOpenAICompat) receive a dummy
+// key to satisfy header-presence requirements without a real credential.
+//
+// Every fallback step is logged at Warn so operators can audit the resolution
+// path and detect stale/missing secrets before they cause provider errors.
+func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID string) (string, error) {
 	if provider == ProviderOllama {
-		return ""
+		return "", nil
 	}
 
-	// Try credential-specific key from OpenBao
+	log := WithContext(ctx)
+
+	// 1. Credential-specific key from OpenBao
 	if credID != "" && credID != "__settings_default__" && credID != "__ollama__" {
 		key := r.secrets.GetLLMKey(ctx, credID)
 		if key != "" {
-			return key
+			return key, nil
 		}
+		log.Warn("api_key: credential-specific key not found in OpenBao — trying global fallback",
+			slog.String("provider", provider),
+			slog.String("cred_id", credID),
+		)
 	}
 
-	// Try global secret
+	// 2. Global key from OpenBao
 	key := r.secrets.GetGlobalValue(ctx, "LLM_API_KEY")
 	if key != "" {
-		return key
+		return key, nil
 	}
+	log.Warn("api_key: global LLM_API_KEY not found in OpenBao — trying environment fallback",
+		slog.String("provider", provider),
+	)
 
-	// Fallback to env
+	// 3. Environment variable fallback
 	key = os.Getenv("LLM_API_KEY")
 	if key != "" {
-		return key
+		log.Warn("api_key: using LLM_API_KEY from environment variable — prefer OpenBao for secrets",
+			slog.String("provider", provider),
+		)
+		return key, nil
 	}
 
-	// For openai_compatible / local providers that don't need a real key,
-	// provide a dummy key to satisfy header requirements.
+	// Local OpenAI-compatible endpoints (e.g. vLLM, LM Studio) require an
+	// Authorization header but do not validate the key. Use a static dummy
+	// to satisfy the schema without leaking any real credential.
 	if provider == ProviderOpenAICompat {
-		return "sk-local-dummy-key"
+		return "sk-local-dummy-key", nil
 	}
 
-	return ""
+	// For managed providers (OpenAI, Anthropic, Gemini) an absent key means
+	// the request will fail with a provider 401. Fail early and loudly here
+	// rather than propagating an empty Authorization header.
+	log.Error("api_key: no key found for managed provider — request will be rejected",
+		slog.String("provider", provider),
+		slog.String("hint", "set LLM_API_KEY in OpenBao or the container environment"),
+	)
+	return "", fmt.Errorf("no API key available for provider %q", provider)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
