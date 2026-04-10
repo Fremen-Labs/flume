@@ -213,6 +213,7 @@ func AdaptiveEnsembleSize(model string, configuredSize int, ollamaBaseURL string
 			slog.Float64("available_gb", availableGB),
 			slog.Float64("total_used_gb", alreadyUsedGB),
 		)
+		Metrics.RecordVRAMPressure()
 		return 1
 	}
 

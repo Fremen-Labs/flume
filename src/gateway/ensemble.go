@@ -212,6 +212,19 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 			slog.Int("valid_responses", c),
 			slog.Int("total_score_proxy", totalScore),
 		)
+
+		// ── Metrics: record ensemble execution ───────────────────────
+		taskType := "chat"
+		if withTools {
+			taskType = "tool_call"
+		}
+		
+		metricModel := req.Model
+		if !s.config.IsKnownModel(metricModel) {
+			metricModel = "unknown"
+		}
+
+		Metrics.RecordEnsemble(metricModel, taskType, size, finalBest)
 	} else {
 		log.Warn("ensemble entire failure, all jury members errored")
 	}
@@ -227,6 +240,9 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 			slog.Int("score", finalBest),
 			slog.String("escalating_to", fallback),
 		)
+
+		// ── Metrics: track frontier escalation ────────────────────────
+		Metrics.RecordEscalation()
 
 		// ── Frontier backpressure via FrontierQueue ────────────────────
 		cleanup := logFrontierAcquire(timeoutCtx, fallback, s.frontierQ)
