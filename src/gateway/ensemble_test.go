@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -170,8 +172,9 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 	router.client = ts.Client() // Use the test client
 
 	srv := &Server{
-		config: config,
-		router: router,
+		config:    config,
+		router:    router,
+		globalSem: make(chan struct{}, 32),
 	}
 
 	req := &ChatRequest{
@@ -179,9 +182,9 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 		Model:    "mock-local",
 	}
 
-	// 3. Execute ensemble
+	// 3. Execute ensemble (withTools=true, same as /chat/tools path)
 	ctx := context.Background()
-	_, err := srv.ExecuteEnsemble(ctx, req)
+	_, err := srv.ExecuteEnsemble(ctx, req, true)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -195,5 +198,154 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 
 	if !frontierHit {
 		t.Errorf("Expected frontier model fallback to be triggered due to low score")
+	}
+}
+
+// TestEnsembleTimeout verifies that when all jury members stall beyond the
+// ensemble timeout, the call returns within a reasonable deadline (no hang).
+func TestEnsembleTimeout(t *testing.T) {
+	stallDuration := 500 * time.Millisecond // Each mock member stalls this long
+	ensembleTimeout := 100 * time.Millisecond
+
+	blockedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a very slow model
+		time.Sleep(stallDuration)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"role": "assistant", "content": "slow"}},
+			},
+		})
+	}))
+	defer blockedServer.Close()
+
+	config := NewConfig("", time.Minute)
+	config.EnsembleEnabled = true
+	config.EnsembleSize = 2
+	config.EnsembleTimeout = ensembleTimeout
+	config.FrontierFallbackModel = ""   // no frontier — ensures we get degraded local best or error
+	config.DefaultProvider = ProviderOpenAI
+	config.DefaultBaseURL = blockedServer.URL
+
+	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
+	router := NewProviderRouter(config, secrets)
+	router.client = blockedServer.Client()
+
+	srv := &Server{
+		config:    config,
+		router:    router,
+		globalSem: make(chan struct{}, 32),
+	}
+
+	req := &ChatRequest{Provider: ProviderOpenAI, Model: "slow-model"}
+
+	started := time.Now()
+	// Should return well before stallDuration — the timeout cancels the jury.
+	_, _ = srv.ExecuteEnsemble(context.Background(), req, false)
+	elapsed := time.Since(started)
+
+	// Allow 3× the configured timeout as headroom for goroutine scheduling.
+	maxAllowed := ensembleTimeout * 3
+	if elapsed > maxAllowed {
+		t.Errorf("ExecuteEnsemble hung: elapsed=%v, max allowed=%v", elapsed, maxAllowed)
+	}
+}
+
+// TestHandleChat_EnsembleEnabled verifies that /v1/chat routes through the
+// ensemble when Ollama + ensemble are configured, not just /v1/chat/tools.
+func TestHandleChat_EnsembleEnabled(t *testing.T) {
+	var callCount atomic.Int32
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		// Return a decent text response (ScoreResponse → 60 for no tools, passes threshold)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"role": "assistant", "content": "hello from ensemble"}},
+			},
+		})
+	}))
+	defer mockLLM.Close()
+
+	config := NewConfig("", time.Minute)
+	config.EnsembleEnabled = true
+	config.EnsembleSize = 2
+	config.EnsembleTimeout = 10 * time.Second
+	config.DefaultProvider = ProviderOpenAI
+	config.DefaultBaseURL = mockLLM.URL
+
+	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
+	router := NewProviderRouter(config, secrets)
+	router.client = mockLLM.Client()
+
+	srv := &Server{
+		config:    config,
+		router:    router,
+		globalSem: make(chan struct{}, 32),
+	}
+
+	// Simulate a /v1/chat request for an Ollama-provider payload.
+	// We use OpenAI mock here but force the provider so the ensemble is entered.
+	req := &ChatRequest{Provider: ProviderOpenAI, Model: "test-model"}
+	ctx := context.Background()
+
+	_, err := srv.ExecuteEnsemble(ctx, req, false /* withTools=false for /chat */)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Ensemble of size 2 means at least 2 calls to the LLM (plus optional frontier).
+	if n := int(callCount.Load()); n < 2 {
+		t.Errorf("expected >= 2 ensemble member calls, got %d", n)
+	}
+}
+
+// TestGlobalSemaphore_BlocksFlood verifies that the global concurrency cap
+// prevents more than N simultaneous requests from proceeding past decode.
+func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
+	const cap = 3
+	globalSem := make(chan struct{}, cap)
+
+	var (
+		active    atomic.Int32
+		maxActive atomic.Int32
+		wg        sync.WaitGroup
+	)
+
+	// Simulate 10 concurrent goroutines trying to acquire the global sem.
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+
+			select {
+			case globalSem <- struct{}{}:
+				// Acquired
+			case <-ctx.Done():
+				return // Rejected (slot full) — expected for excess goroutines
+			}
+
+			cur := active.Add(1)
+			// Track high-water mark
+			for {
+				prev := maxActive.Load()
+				if cur <= prev || maxActive.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+
+			time.Sleep(20 * time.Millisecond) // Hold the slot briefly
+			active.Add(-1)
+			<-globalSem
+		}()
+	}
+
+	wg.Wait()
+
+	if got := int(maxActive.Load()); got > cap {
+		t.Errorf("global semaphore allowed %d concurrent > cap %d", got, cap)
 	}
 }

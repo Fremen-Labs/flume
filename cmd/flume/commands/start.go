@@ -163,6 +163,12 @@ var StartCmd = &cobra.Command{
 			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
 			generatedEnv = append(generatedEnv, "OPENBAO_TOKEN="+rootToken)
 
+			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
+			esUrl := "http://localhost:" + esPort
+			if err := orchestrator.SeedLLMConfig(esUrl, "", envCfg); err != nil {
+				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
+			}
+
 			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
 				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
 			} else {
@@ -242,6 +248,13 @@ var StartCmd = &cobra.Command{
 			// docker-compose.yml uses ${OPENBAO_TOKEN} — this must be in the
 			// subprocess env for the variable substitution to resolve correctly.
 			fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
+
+			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
+			// Use localhost since we're still on the host machine at this point in boot.
+			esUrl := "http://localhost:" + esPort
+			if err := orchestrator.SeedLLMConfig(esUrl, "", envCfg); err != nil {
+				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
+			}
 
 			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
 				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)

@@ -56,6 +56,8 @@ export interface ApiWorker {
   heartbeat_at?: string;
   input_tokens?: number;
   output_tokens?: number;
+  /** ISO timestamp when the current task was claimed/started. */
+  task_started_at?: string;
 }
 
 export interface ApiRepo {

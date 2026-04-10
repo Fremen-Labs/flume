@@ -70,7 +70,7 @@ export default function AnalyticsPage() {
             <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
             <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
-            <GlassMetricCard title="AST Tokens Saved" value={savings > 1000000 ? `${(savings / 1000000).toFixed(1)}M` : (savings > 1000 ? `${(savings / 1000).toFixed(1)}K` : String(savings))} icon={TrendingUp} trend={{ value: savings, label: 'efficiency via Elastro' }} />
+            <GlassMetricCard title="AST Tokens Saved" value={savings > 1000000 ? `${(savings / 1000000).toFixed(1)}M` : (savings > 1000 ? `${(savings / 1000).toFixed(1)}K` : String(savings))} icon={TrendingUp} trend={{ value: Math.round(savings / 4), label: 'est. tokens via Elastro', suffix: '' }} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 relative z-10">

@@ -3821,7 +3821,7 @@ def api_settings_llm_update(payload: dict):
     ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
-        return {"ok": True, "restartRequired": True, "message": "Saved"}
+        return {"ok": True, "restartRequired": False, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.put("/api/settings/llm/credentials")
@@ -3846,7 +3846,7 @@ def api_settings_llm_credentials_post(payload: dict):
     if updates:
         _update_env_keys(workspace, updates)
         
-    return {"ok": True, "message": "Action applied successfully", "restartRequired": bool(updates)}
+    return {"ok": True, "message": "Action applied successfully", "restartRequired": False}
 
 @app.post("/api/settings/llm/oauth/refresh")
 def api_settings_llm_oauth_refresh():
@@ -3922,12 +3922,27 @@ def api_settings_agent_models():
     return get_agent_models_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/agent-models")
+@app.post("/api/settings/agent-models")
 def api_settings_agent_models_update(payload: dict):
-    from agent_models_settings import update_agent_models
-    ok, msg = update_agent_models(WORKSPACE_ROOT, payload)
+    from agent_models_settings import validate_save_agent_models, save_agent_models
+    import llm_credentials_store as _lcs
+    # Map useGlobal flag from the new frontend to Settings default credential.
+    roles = payload.get("roles") or {}
+    for role_id, spec in list(roles.items()):
+        if isinstance(spec, dict) and spec.get("useGlobal"):
+            roles[role_id] = {
+                "credentialId": _lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
+                "model": "",
+                "executionHost": str(spec.get("executionHost") or "").strip(),
+            }
+    ok, msg, data = validate_save_agent_models(WORKSPACE_ROOT, {"roles": roles})
     if ok:
-        return {"success": True, "message": msg}
+        # agent_models.json lives in the source tree (src/worker-manager/), not the workspace volume.
+        # Use _SRC_ROOT so the path resolves correctly whether containerised or native.
+        save_agent_models(_SRC_ROOT, data)
+        return {"success": True, "message": "Agent models saved"}
     return JSONResponse(status_code=400, content={"error": msg})
+
 
 @app.post("/api/settings/restart-services")
 def api_settings_restart_services():

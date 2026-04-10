@@ -96,26 +96,26 @@ async function fetchLlmSettings(): Promise<LlmSettingsResponse> {
   return data;
 }
 
-async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boolean; restartRequired: boolean }> {
+async function saveLlmSettings(payload: LlmSettingsPayload): Promise<{ ok: boolean }> {
   const res = await fetch('/api/settings/llm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Save failed: ${res.status}`);
-  return data as { ok: boolean; restartRequired: boolean };
+  return data as { ok: boolean };
 }
 
-async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean; restartRequired?: boolean }> {
+async function llmCredentialAction(payload: LlmCredentialActionPayload): Promise<{ ok: boolean }> {
   const res = await fetch('/api/settings/llm/credentials', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const data = await parseJsonBody<{ ok?: boolean; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-  return data as { ok: boolean; restartRequired?: boolean };
+  return data as { ok: boolean };
 }
 
 async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse> {
@@ -124,15 +124,15 @@ async function fetchCodexAppServerStatus(): Promise<CodexAppServerStatusResponse
   return res.json();
 }
 
-async function refreshOAuth(): Promise<{ ok: boolean; message?: string; restartRequired?: boolean }> {
+async function refreshOAuth(): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch('/api/settings/llm/oauth/refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
-  const data = await parseJsonBody<{ ok?: boolean; message?: string; restartRequired?: boolean; error?: string }>(res);
+  const data = await parseJsonBody<{ ok?: boolean; message?: string; error?: string }>(res);
   if (!res.ok) throw new Error(data?.error || `Refresh failed: ${res.status}`);
-  return data as { ok: boolean; message?: string; restartRequired?: boolean };
+  return data as { ok: boolean; message?: string };
 }
 
 async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
@@ -142,48 +142,7 @@ async function fetchRepoSettings(): Promise<RepoSettingsResponse> {
   return data;
 }
 
-async function restartFlumeServices(): Promise<{
-  ok: boolean;
-  mode?: string;
-  message?: string;
-  error?: string;
-}> {
-  const res = await fetch('/api/settings/restart-services', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  const data = await parseJsonBody<{ ok?: boolean; mode?: string; message?: string; error?: string }>(res);
-  if (!res.ok) {
-    throw new Error(
-      data?.error ||
-        (res.status === 404
-          ? 'Restart API not found — restart the dashboard so server.py includes POST /api/settings/restart-services.'
-          : `Restart failed: ${res.status}`),
-    );
-  }
-  return data as { ok: boolean; mode?: string; message?: string; error?: string };
-}
 
-/** Survives leaving Settings and coming back (SPA remount). Cleared after restart succeeds. */
-const FLUME_PENDING_RESTART_KEY = 'flume-pending-service-restart';
-
-function readPendingRestartFlag(): boolean {
-  try {
-    return sessionStorage.getItem(FLUME_PENDING_RESTART_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function setPendingRestartFlag(on: boolean) {
-  try {
-    if (on) sessionStorage.setItem(FLUME_PENDING_RESTART_KEY, '1');
-    else sessionStorage.removeItem(FLUME_PENDING_RESTART_KEY);
-  } catch {
-    /* private / quota */
-  }
-}
 
 const SKINS: { id: Skin; name: string; description: string }[] = [
   { id: 'default', name: 'Default', description: 'Modern glass-morphism with blue accents' },
@@ -211,9 +170,6 @@ export default function SettingsPage() {
   const [credBusy, setCredBusy] = useState<string | null>(null);
   const [credMsg, setCredMsg] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<Record<string, string>>({});
-  const [showRestartCta, setShowRestartCta] = useState(readPendingRestartFlag);
-  const [restartInfo, setRestartInfo] = useState<string | null>(null);
-  const [restartError, setRestartError] = useState<string | null>(null);
 
   // Must be declared before any early return to satisfy React's Rules of Hooks.
   const [userPerspective, setUserPerspective] = useState<string>(() => {
@@ -240,10 +196,7 @@ export default function SettingsPage() {
       setSaveSuccess(true);
       queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setSaveSuccess(false), 3000);
-      if (data.restartRequired !== false) {
-        setPendingRestartFlag(true);
-        setShowRestartCta(true);
-      }
+
     },
     onError: (e: Error) => {
       setSaveError(e.message);
@@ -257,10 +210,7 @@ export default function SettingsPage() {
       setRefreshSuccess(true);
       queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setRefreshSuccess(false), 3000);
-      if (data.restartRequired !== false) {
-        setPendingRestartFlag(true);
-        setShowRestartCta(true);
-      }
+
     },
     onError: (e: Error) => {
       setRefreshError(e.message);
@@ -324,8 +274,7 @@ export default function SettingsPage() {
       setSysSaveSuccess(true);
       queryClient.invalidateQueries({ queryKey: ['settings', 'system'] });
       setTimeout(() => setSysSaveSuccess(false), 3000);
-      setPendingRestartFlag(true);
-      setShowRestartCta(true);
+
     },
     onError: (e: Error) => {
       setSysSaveError(e.message);
@@ -334,33 +283,7 @@ export default function SettingsPage() {
 
   const effectiveSys = { ...sysData, ...sysForm };
 
-  const restartServicesMutation = useMutation({
-    mutationFn: restartFlumeServices,
-    onSuccess: (data) => {
-      setRestartError(null);
-      setPendingRestartFlag(false);
-      setShowRestartCta(false);
-      setRestartInfo(data.message ?? 'Restart initiated.');
-      setTimeout(() => setRestartInfo(null), 12_000);
-    },
-    onError: (e: unknown) => {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (
-        e instanceof TypeError ||
-        msg === 'Failed to fetch' ||
-        msg.includes('NetworkError') ||
-        msg.includes('Load failed')
-      ) {
-        setPendingRestartFlag(false);
-        setShowRestartCta(false);
-        setRestartError(null);
-        setRestartInfo('Connection closed — restart is probably running. Wait a few seconds and refresh the page.');
-        setTimeout(() => setRestartInfo(null), 12_000);
-        return;
-      }
-      setRestartError(msg);
-    },
-  });
+
 
   const effectiveSettings = { ...data?.settings, ...form };
   const providerId = effectiveSettings.provider ?? 'ollama';
@@ -440,10 +363,7 @@ export default function SettingsPage() {
     setCredBusy(payload.action + (payload.id || ''));
     try {
       const credRes = await llmCredentialAction(payload);
-      if (credRes.restartRequired) {
-        setPendingRestartFlag(true);
-        setShowRestartCta(true);
-      }
+
       setCredMsg(okMessage);
       await queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setCredMsg(null), 4000);
@@ -563,51 +483,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {showRestartCta && (
-        <div
-          className="rounded-xl border-2 border-amber-500/50 bg-amber-500/15 dark:bg-amber-950/40 px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between shadow-sm"
-          data-testid="settings-restart-services-cta"
-        >
-          <div className="space-y-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground">Apply saved settings</p>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Restart the dashboard and worker manager so workers and background tasks pick up LLM, credentials, and repo
-              tokens.
-            </p>
-          </div>
-          <Button
-            type="button"
-            variant="default"
-            className="shrink-0 font-semibold"
-            disabled={restartServicesMutation.isPending}
-            onClick={() => {
-              setRestartError(null);
-              setRestartInfo(null);
-              restartServicesMutation.mutate();
-            }}
-          >
-            {restartServicesMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RotateCcw className="h-4 w-4" />
-            )}
-            <span className="ml-2">Restart services</span>
-          </Button>
-        </div>
-      )}
 
-      {restartError && (
-        <p className="text-sm text-destructive flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          {restartError}
-        </p>
-      )}
-      {restartInfo && (
-        <p className="text-sm text-emerald-700 dark:text-emerald-400 flex items-center gap-2">
-          <RotateCcw className="h-4 w-4 shrink-0" />
-          {restartInfo}
-        </p>
-      )}
 
       <div className="glass-card p-6">
         <Accordion type="single" collapsible>
@@ -1817,7 +1693,7 @@ export default function SettingsPage() {
                     Save System Config
                   </Button>
                   {sysSaveError && <span className="text-sm text-destructive">{sysSaveError}</span>}
-                  {sysSaveSuccess && <span className="text-sm text-green-600">Saved System Config. Restart dashboard and workers to apply.</span>}
+                  {sysSaveSuccess && <span className="text-sm text-green-600">System config saved.</span>}
                 </div>
               </div>
             </AccordionContent>

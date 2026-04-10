@@ -49,6 +49,8 @@ export default function QueuePage() {
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [adminToken, setAdminToken] = useState('');
   const [thoughtTaskId, setThoughtTaskId] = useState<string | null>(null);
+  const [thoughtTaskTitle, setThoughtTaskTitle] = useState<string | undefined>(undefined);
+  const [thoughtTaskStatus, setThoughtTaskStatus] = useState<string | undefined>(undefined);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
@@ -119,7 +121,7 @@ export default function QueuePage() {
         </DialogContent>
       </Dialog>
 
-      <AgentThoughtDrawer taskId={thoughtTaskId} isOpen={drawerOpen} onOpenChange={setDrawerOpen} />
+      <AgentThoughtDrawer taskId={thoughtTaskId} taskTitle={thoughtTaskTitle} taskStatus={thoughtTaskStatus} isOpen={drawerOpen} onOpenChange={setDrawerOpen} />
 
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10 flex items-center justify-between">
         <div>
@@ -180,7 +182,7 @@ export default function QueuePage() {
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: stageIdx * 0.05 + i * 0.03 }}
                         whileHover={{ y: -2, transition: { duration: 0.15 } }}
-                        onClick={() => { setThoughtTaskId(item.id); setDrawerOpen(true); }}
+                        onClick={() => { setThoughtTaskId(item.id); setThoughtTaskTitle(item.title); setThoughtTaskStatus(item.status); setDrawerOpen(true); }}
                         className="glass-card p-3 hover-lift cursor-pointer"
                       >
                         <div className="flex items-center gap-2 mb-1.5">

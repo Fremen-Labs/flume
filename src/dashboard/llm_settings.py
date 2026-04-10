@@ -575,9 +575,14 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
         logger.debug(f"AP-10: ES LLM config read skipped in load_effective_pairs: {_e}")
 
 
-    # OpenBao: secrets (highest priority — overrides everything)
+    # OpenBao: secrets only (highest priority).
+    # LLM config keys (LLM_MODEL, LLM_PROVIDER, LLM_BASE_URL) are intentionally excluded —
+    # they are non-sensitive and are written to ES flume-llm-config by the CLI at startup.
+    # The GUI Settings page updates ES directly. OpenBao holds only actual secrets.
     bao_vals = _openbao_get_all(workspace_root)
     for key, val in bao_vals.items():
+        if key in _ES_LLM_CONFIG_KEYS:
+            continue
         if val is not None and str(val).strip():
             pairs[str(key)] = str(val).strip()
 
