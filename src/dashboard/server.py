@@ -42,7 +42,7 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from utils.logger import get_logger
+from utils.logger import get_logger, set_global_log_level
 logger = get_logger(__name__)
 
 from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # noqa: E402
@@ -77,7 +77,8 @@ def _seed_llm_config_from_env() -> None:
     env vars using doc_as_upsert — so it ONLY fills in missing fields and NEVER
     overwrites a value the user already saved via the Settings UI.
     """
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
     model = os.environ.get('LLM_MODEL', '').strip()
     provider = os.environ.get('LLM_PROVIDER', '').strip()
     base_url = os.environ.get('LLM_BASE_URL', '').strip()
@@ -2487,6 +2488,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        
+        # Avoid logging noisy polling or health checks at INFO level
+        is_noisy = "/health" in request.url.path or "/tasks" in request.url.path
+        log_func = logger.debug if is_noisy else logger.info
+        
+        log_func(
+            f"{request.method} {request.url.path} - {response.status_code}",
+            extra={
+                "structured_data": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(process_time, 2)
+                }
+            }
+        )
+        return response
+
+app.add_middleware(LoggingMiddleware)
+
+@app.post('/api/settings/log-level')
+async def api_set_log_level(payload: dict):
+    level = payload.get('level', 'INFO').upper()
+    set_global_log_level(level)
+    
+    # Proxy to Gateway
+    try:
+        gw_url = os.environ.get('GATEWAY_URL', 'http://gateway:8090').rstrip('/')
+        async with httpx.AsyncClient() as client:
+            await client.post(f"{gw_url}/internal/level", json={"level": level}, timeout=2.0)
+    except Exception as e:
+        logger.warning(f"Failed to sync log level to gateway: {e}")
+        
+    return {"status": "ok", "level": level}
+
+@app.post('/api/logs/client')
+async def api_client_logs(payload: dict):
+    """Aggregate logs from the frontend."""
+    level = payload.get('level', 'ERROR').upper()
+    message = payload.get('message', 'Unknown client error')
+    data = payload.get('data', {})
+    
+    log_func = getattr(logger, level.lower(), logger.error)
+    log_func(
+        f"CLIENT_{level}: {message}",
+        extra={"structured_data": {"client_data": data}}
+    )
+    return {"status": "ok"}
 # The legacy @app.on_event("startup") was migrated strictly up to the FastAPI lifespan architecture above.
 
 @app.get('/api/health')

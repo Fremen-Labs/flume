@@ -65,6 +65,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
 	return s
 }
 
@@ -284,6 +285,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		},
 	}
 	s.writeJSON(w, http.StatusOK, metrics)
+}
+
+func (s *Server) handleLogLevel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid body", "")
+		return
+	}
+	SetLogLevel(body.Level)
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "new_level": body.Level})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
