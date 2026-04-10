@@ -4378,7 +4378,7 @@ async def get_system_telemetry():
 
             return results
     except Exception as e:
-        logger.error(f"Failed to fetch telemetry metrics: {e}")
+        logger.error({"event": "telemetry_fetch_failed", "error": str(e), "target": "Go_Gateway_Proxy"})
         return {}
 
 @app.get("/api/logs")
