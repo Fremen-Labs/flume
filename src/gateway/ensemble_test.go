@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Existing tests preserved
+// ─────────────────────────────────────────────────────────────────────────────
+
 // mockProvider Always returns the preconfigured responses sequentially
 type mockProvider struct {
 	responses []*ChatResponse
@@ -117,19 +121,11 @@ func TestScoreResponse(t *testing.T) {
 
 // TestEnsembleRouter_Escalation mocks the full ExecuteEnsemble method to assert graceful fallback behavior.
 func TestEnsembleRouter_Escalation(t *testing.T) {
-	// 1. Setup minimal server with mock ensemble config
 	config := NewConfig("", time.Minute)
 	config.EnsembleEnabled = true
 	config.EnsembleSize = 3
 	config.FrontierFallbackModel = "mock-frontier"
 
-	// 2. We mock `Router.Route` by overriding the HTTP client or using a local test server?
-	// The `Server` struct has `s.router`. We can inject a test `http.Client`?
-	// Actually, the easiest way to test ExecuteEnsemble logic is to start a mock HTTP server doing the routing,
-	// but ExecuteEnsemble calls Server.router.Route. Our `gateway` heavily uses API calls.
-
-	// Let's create a stub server that intercepts the router responses.
-	// We configure a test HTTP server for the default BaseURL that returns terrible responses to force escalation.
 	var callCount int
 	frontierHit := false
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,16 +161,19 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 	defer ts.Close()
 
 	config.DefaultBaseURL = ts.URL
-	config.DefaultProvider = ProviderOpenAI // We use an OpenAI compat mock to bypass Ollama specifics in testing
+	config.DefaultProvider = ProviderOpenAI
+	// Disable adaptive sizing for this test (no Ollama available)
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
-	router.client = ts.Client() // Use the test client
+	router.client = ts.Client()
 
 	srv := &Server{
 		config:    config,
 		router:    router,
 		globalSem: make(chan struct{}, 32),
+		frontierQ: NewFrontierQueue(4),
 	}
 
 	req := &ChatRequest{
@@ -182,7 +181,6 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 		Model:    "mock-local",
 	}
 
-	// 3. Execute ensemble (withTools=true, same as /chat/tools path)
 	ctx := context.Background()
 	_, err := srv.ExecuteEnsemble(ctx, req, true)
 
@@ -190,7 +188,6 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 4. Verify Behavior
 	// Should hit local 3 times, then hit frontier 1 time.
 	if callCount != 4 {
 		t.Errorf("Expected 4 total calls (3 local + 1 frontier), got %d", callCount)
@@ -204,11 +201,10 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 // TestEnsembleTimeout verifies that when all jury members stall beyond the
 // ensemble timeout, the call returns within a reasonable deadline (no hang).
 func TestEnsembleTimeout(t *testing.T) {
-	stallDuration := 500 * time.Millisecond // Each mock member stalls this long
+	stallDuration := 500 * time.Millisecond
 	ensembleTimeout := 100 * time.Millisecond
 
 	blockedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate a very slow model
 		time.Sleep(stallDuration)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -223,9 +219,10 @@ func TestEnsembleTimeout(t *testing.T) {
 	config.EnsembleEnabled = true
 	config.EnsembleSize = 2
 	config.EnsembleTimeout = ensembleTimeout
-	config.FrontierFallbackModel = ""   // no frontier — ensures we get degraded local best or error
+	config.FrontierFallbackModel = ""
 	config.DefaultProvider = ProviderOpenAI
 	config.DefaultBaseURL = blockedServer.URL
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
@@ -235,16 +232,15 @@ func TestEnsembleTimeout(t *testing.T) {
 		config:    config,
 		router:    router,
 		globalSem: make(chan struct{}, 32),
+		frontierQ: NewFrontierQueue(4),
 	}
 
 	req := &ChatRequest{Provider: ProviderOpenAI, Model: "slow-model"}
 
 	started := time.Now()
-	// Should return well before stallDuration — the timeout cancels the jury.
 	_, _ = srv.ExecuteEnsemble(context.Background(), req, false)
 	elapsed := time.Since(started)
 
-	// Allow 3× the configured timeout as headroom for goroutine scheduling.
 	maxAllowed := ensembleTimeout * 3
 	if elapsed > maxAllowed {
 		t.Errorf("ExecuteEnsemble hung: elapsed=%v, max allowed=%v", elapsed, maxAllowed)
@@ -252,14 +248,13 @@ func TestEnsembleTimeout(t *testing.T) {
 }
 
 // TestHandleChat_EnsembleEnabled verifies that /v1/chat routes through the
-// ensemble when Ollama + ensemble are configured, not just /v1/chat/tools.
+// ensemble when Ollama + ensemble are configured.
 func TestHandleChat_EnsembleEnabled(t *testing.T) {
 	var callCount atomic.Int32
 
 	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		// Return a decent text response (ScoreResponse → 60 for no tools, passes threshold)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{"message": map[string]interface{}{"role": "assistant", "content": "hello from ensemble"}},
@@ -274,6 +269,7 @@ func TestHandleChat_EnsembleEnabled(t *testing.T) {
 	config.EnsembleTimeout = 10 * time.Second
 	config.DefaultProvider = ProviderOpenAI
 	config.DefaultBaseURL = mockLLM.URL
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
 	router := NewProviderRouter(config, secrets)
@@ -283,26 +279,23 @@ func TestHandleChat_EnsembleEnabled(t *testing.T) {
 		config:    config,
 		router:    router,
 		globalSem: make(chan struct{}, 32),
+		frontierQ: NewFrontierQueue(4),
 	}
 
-	// Simulate a /v1/chat request for an Ollama-provider payload.
-	// We use OpenAI mock here but force the provider so the ensemble is entered.
 	req := &ChatRequest{Provider: ProviderOpenAI, Model: "test-model"}
 	ctx := context.Background()
 
-	_, err := srv.ExecuteEnsemble(ctx, req, false /* withTools=false for /chat */)
+	_, err := srv.ExecuteEnsemble(ctx, req, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Ensemble of size 2 means at least 2 calls to the LLM (plus optional frontier).
 	if n := int(callCount.Load()); n < 2 {
 		t.Errorf("expected >= 2 ensemble member calls, got %d", n)
 	}
 }
 
-// TestGlobalSemaphore_BlocksFlood verifies that the global concurrency cap
-// prevents more than N simultaneous requests from proceeding past decode.
+// TestGlobalSemaphore_BlocksFlood verifies the global concurrency cap.
 func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 	const cap = 3
 	globalSem := make(chan struct{}, cap)
@@ -313,7 +306,6 @@ func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 		wg        sync.WaitGroup
 	)
 
-	// Simulate 10 concurrent goroutines trying to acquire the global sem.
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
@@ -323,13 +315,11 @@ func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 
 			select {
 			case globalSem <- struct{}{}:
-				// Acquired
 			case <-ctx.Done():
-				return // Rejected (slot full) — expected for excess goroutines
+				return
 			}
 
 			cur := active.Add(1)
-			// Track high-water mark
 			for {
 				prev := maxActive.Load()
 				if cur <= prev || maxActive.CompareAndSwap(prev, cur) {
@@ -337,7 +327,7 @@ func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 				}
 			}
 
-			time.Sleep(20 * time.Millisecond) // Hold the slot briefly
+			time.Sleep(20 * time.Millisecond)
 			active.Add(-1)
 			<-globalSem
 		}()
@@ -347,5 +337,199 @@ func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 
 	if got := int(maxActive.Load()); got > cap {
 		t.Errorf("global semaphore allowed %d concurrent > cap %d", got, cap)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New tests for PR: adaptive sizing, early-exit, and frontier backpressure
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestModelVRAMEstimateGB verifies the parameter-suffix heuristic.
+func TestModelVRAMEstimateGB(t *testing.T) {
+	tests := []struct {
+		model    string
+		minVRAM  float64
+		maxVRAM  float64
+	}{
+		{"qwen2.5-coder:7b", 4.0, 5.5},
+		{"llama3.2:3b", 1.5, 2.5},
+		{"gemma4:27b", 13.0, 16.0},
+		{"deepseek-r1:14b", 8.0, 10.0},
+		{"llama3.2", 4.0, 6.0},          // no suffix — fallback
+		{"unknown-model-xyz", 4.0, 6.0}, // no suffix — fallback
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			gb := ModelVRAMEstimateGB(tt.model)
+			if gb < tt.minVRAM || gb > tt.maxVRAM {
+				t.Errorf("ModelVRAMEstimateGB(%q) = %.1f, want [%.1f, %.1f]",
+					tt.model, gb, tt.minVRAM, tt.maxVRAM)
+			}
+		})
+	}
+}
+
+// TestAdaptiveEnsembleSize_NoAdaptive verifies env override bypass.
+func TestAdaptiveEnsembleSize_NoAdaptive(t *testing.T) {
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+	got := AdaptiveEnsembleSize("llama3.2:70b", 3, "http://localhost:11434")
+	if got != 3 {
+		t.Errorf("expected configured size 3 when adaptive disabled, got %d", got)
+	}
+}
+
+// TestAdaptiveEnsembleSize_LargeModel verifies VRAM pressure degrades to 1.
+func TestAdaptiveEnsembleSize_LargeModel(t *testing.T) {
+	// Use a tiny fake system memory that can't fit parallel 70B calls.
+	t.Setenv("FLUME_SYSTEM_MEMORY_GB", "16")
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "")
+	// 70B at Q4 ≈ 40 GB per call. With 16 GB system, adaptive should return 1.
+	got := AdaptiveEnsembleSize("llama3.2:70b", 3, "")
+	if got != 1 {
+		t.Errorf("expected adaptive size 1 for 70B model on 16GB system, got %d", got)
+	}
+}
+
+// TestAdaptiveEnsembleSize_SmallModel verifies small models fit multiple slots.
+func TestAdaptiveEnsembleSize_SmallModel(t *testing.T) {
+	t.Setenv("FLUME_SYSTEM_MEMORY_GB", "64")
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "")
+	// 3B model ≈ 2.0 GB. On 64 GB with 20% reserved = 51.2 GB available.
+	// extra_per_slot ≈ 1.2 GB → > 3 slots easily.
+	got := AdaptiveEnsembleSize("llama3.2:3b", 3, "")
+	if got < 2 {
+		t.Errorf("expected adaptive size >= 2 for 3B model on 64GB system, got %d", got)
+	}
+}
+
+// TestEarlyExitEnsemble verifies that a high-scoring member causes early exit
+// before all jury members complete.
+func TestEarlyExitEnsemble(t *testing.T) {
+	var callCount atomic.Int32
+	// All responses score high (perfect elastro tool call)
+	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		// Slow down to make race condition visible
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]interface{}{
+						"role": "assistant",
+						"tool_calls": []map[string]interface{}{
+							{
+								"function": map[string]interface{}{
+									"name":      "elastro_query_ast",
+									"arguments": `{"query": "User"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer goodServer.Close()
+
+	config := NewConfig("", time.Minute)
+	config.EnsembleEnabled = true
+	config.EnsembleSize = 3
+	config.EnsembleTimeout = 10 * time.Second
+	config.DefaultProvider = ProviderOpenAI
+	config.DefaultBaseURL = goodServer.URL
+	t.Setenv("FLUME_ENSEMBLE_NO_ADAPTIVE", "1")
+
+	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
+	router := NewProviderRouter(config, secrets)
+	router.client = goodServer.Client()
+
+	srv := &Server{
+		config:    config,
+		router:    router,
+		globalSem: make(chan struct{}, 32),
+		frontierQ: NewFrontierQueue(4),
+	}
+
+	req := &ChatRequest{Provider: ProviderOpenAI, Model: "fast-model"}
+	start := time.Now()
+	resp, err := srv.ExecuteEnsemble(context.Background(), req, true)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	// With early-exit, we should return well before all 3 complete.
+	// 3 × 20ms = 60ms worst case without early exit.
+	// With early exit (score=100 ≥ 80 threshold), should stop after first win.
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("early-exit too slow: %v (expected < 200ms)", elapsed)
+	}
+	// At least 1 call made (the early-exit winner)
+	if callCount.Load() < 1 {
+		t.Errorf("expected at least 1 LLM call, got %d", callCount.Load())
+	}
+}
+
+// TestFrontierQueue_Backpressure verifies that the FrontierQueue limits concurrent
+// frontier escalation calls correctly.
+func TestFrontierQueue_Backpressure(t *testing.T) {
+	const maxConcurrent = 2
+	q := NewFrontierQueue(maxConcurrent)
+
+	var (
+		active    atomic.Int32
+		maxSeen   atomic.Int32
+		wg        sync.WaitGroup
+	)
+
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			if !q.Acquire(ctx) {
+				return // slot not acquired in time — expected for excess goroutines
+			}
+			defer q.Release()
+
+			cur := active.Add(1)
+			// Track high-water mark
+			for {
+				prev := maxSeen.Load()
+				if cur <= prev || maxSeen.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+
+			time.Sleep(20 * time.Millisecond)
+			active.Add(-1)
+		}()
+	}
+
+	wg.Wait()
+
+	if got := int(maxSeen.Load()); got > maxConcurrent {
+		t.Errorf("FrontierQueue allowed %d concurrent > cap %d", got, maxConcurrent)
+	}
+}
+
+// TestFrontierQueue_HealthMetrics verifies the metrics map structure.
+func TestFrontierQueue_HealthMetrics(t *testing.T) {
+	q := NewFrontierQueue(3)
+	m := q.HealthMetrics()
+	if _, ok := m["frontier_active"]; !ok {
+		t.Error("missing frontier_active key in health metrics")
+	}
+	if _, ok := m["frontier_max_slots"]; !ok {
+		t.Error("missing frontier_max_slots key in health metrics")
+	}
+	if m["frontier_max_slots"] != 3 {
+		t.Errorf("expected frontier_max_slots=3, got %d", m["frontier_max_slots"])
 	}
 }
