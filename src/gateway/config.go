@@ -14,6 +14,39 @@ import (
 	"time"
 )
 
+// rewriteLoopbackForDocker replaces 127.0.0.1/localhost with host.docker.internal
+// when the gateway is running inside a Docker container. This mirrors the same
+// fix that Python workers apply via workspace_llm_env._rewrite_loopback_for_docker.
+//
+// Dashboard users naturally enter "http://127.0.0.1:11434" in Settings because
+// it's correct from their Mac. From inside Docker, 127.0.0.1 refers to the
+// container's own loopback — connection refused — not the Mac host running Ollama.
+//
+// Detection: /.dockerenv is created by the Docker runtime on all containers.
+// FLUME_NATIVE_MODE=1 disables the rewrite for bare-metal development.
+func rewriteLoopbackForDocker(url string) string {
+	if url == "" {
+		return url
+	}
+	if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+		return url
+	}
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		return url // not in a container
+	}
+	for _, loopback := range []string{"://127.0.0.1", "://localhost"} {
+		if strings.Contains(url, loopback) {
+			rewritten := strings.Replace(url, loopback, "://host.docker.internal", 1)
+			Log().Info("config: rewrote loopback Ollama URL for Docker",
+				slog.String("original", url),
+				slog.String("rewritten", rewritten),
+			)
+			return rewritten
+		}
+	}
+	return url
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Elasticsearch configuration loader with TTL cache and multi-model routing.
 //
@@ -252,7 +285,7 @@ func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 		c.DefaultModel = strings.TrimSpace(v)
 	}
 	if v, ok := src["LLM_BASE_URL"].(string); ok && v != "" {
-		c.DefaultBaseURL = strings.TrimSpace(v)
+		c.DefaultBaseURL = rewriteLoopbackForDocker(strings.TrimSpace(v))
 	}
 	if enabled, ok := src["ENSEMBLE_ENABLED"].(bool); ok {
 		c.EnsembleEnabled = enabled
