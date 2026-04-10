@@ -54,6 +54,7 @@ type juryResult struct {
 // or the plain-chat endpoint (false). This allows /v1/chat to benefit from the
 // ensemble without accidentally injecting tool semantics into text-only paths.
 func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTools bool) (*ChatResponse, error) {
+	ensembleStart := time.Now()
 	log := WithContext(ctx)
 
 	// ── 1. Adaptive sizing ────────────────────────────────────────────────
@@ -224,7 +225,7 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 			metricModel = "unknown"
 		}
 
-		Metrics.RecordEnsemble(metricModel, taskType, size, finalBest)
+		Metrics.RecordEnsemble(metricModel, taskType, size, finalBest, time.Since(ensembleStart))
 	} else {
 		log.Warn("ensemble entire failure, all jury members errored")
 	}
