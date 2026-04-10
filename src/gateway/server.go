@@ -125,6 +125,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Input validation: normalise and reject structurally invalid fields
+	// before any config resolution, secret lookup, or provider dispatch.
+	if err := ValidateChatRequest(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "request validation failed: "+err.Error(), requestID)
+		return
+	}
+
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
 
@@ -196,6 +203,13 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), requestID)
+		return
+	}
+
+	// ── Input validation: normalise and reject structurally invalid fields
+	// before any config resolution, secret lookup, or provider dispatch.
+	if err := ValidateChatRequest(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "request validation failed: "+err.Error(), requestID)
 		return
 	}
 
