@@ -237,6 +237,14 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 	} else {
 		m.LocalSuccessRate.RecordFailure()
 	}
+
+	Log().Debug("metrics: request recorded",
+		slog.String("component", "metrics"),
+		slog.String("provider", provider),
+		slog.Bool("success", success),
+		slog.Float64("duration_s", duration.Seconds()),
+		slog.Float64("success_rate", m.LocalSuccessRate.Rate()),
+	)
 }
 
 // RecordEnsemble records an ensemble execution.
@@ -244,21 +252,41 @@ func (m *metricsRegistry) RecordEnsemble(model, taskType string, size int, bestS
 	labels := `model="` + model + `",task_type="` + taskType + `",size="` + strconv.Itoa(size) + `"`
 	m.EnsembleRequests.Inc(labels)
 	m.EnsembleScores.Observe("", float64(bestScore))
+
+	Log().Debug("metrics: ensemble recorded",
+		slog.String("component", "metrics"),
+		slog.String("model", model),
+		slog.String("task_type", taskType),
+		slog.Int("jury_size", size),
+		slog.Int("best_score", bestScore),
+	)
 }
 
 // RecordEscalation tracks a frontier fallback event.
 func (m *metricsRegistry) RecordEscalation() {
 	m.EscalationTotal.Inc()
+	Log().Debug("metrics: frontier escalation recorded",
+		slog.String("component", "metrics"),
+		slog.Uint64("total_escalations", m.EscalationTotal.get()),
+	)
 }
 
 // RecordVRAMPressure tracks when ensemble is degraded due to VRAM pressure.
 func (m *metricsRegistry) RecordVRAMPressure() {
 	m.VRAMPressureEvents.Inc()
+	Log().Debug("metrics: VRAM pressure event recorded",
+		slog.String("component", "metrics"),
+		slog.Uint64("total_vram_events", m.VRAMPressureEvents.get()),
+	)
 }
 
 // SetActiveModel marks a model as active with a gauge value of 1.
 func (m *metricsRegistry) SetActiveModel(model string) {
 	m.ActiveModels.Set(`model="` + model + `"`, 1)
+	Log().Debug("metrics: active model set",
+		slog.String("component", "metrics"),
+		slog.String("model", model),
+	)
 }
 
 // ─── Prometheus text exposition ──────────────────────────────────────────────
@@ -267,7 +295,9 @@ func (m *metricsRegistry) SetActiveModel(model string) {
 func HandleMetrics() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log := Log()
-		log.Debug("metrics endpoint scraped")
+		log.Debug("metrics endpoint scraped",
+			slog.String("component", "metrics"),
+		)
 
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -329,7 +359,10 @@ func HandleMetrics() http.HandlerFunc {
 
 		_, err := w.Write(buf)
 		if err != nil {
-			log.Error("failed to write metrics", slog.String("error", err.Error()))
+			log.Error("failed to write metrics",
+				slog.String("component", "metrics"),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
 }
