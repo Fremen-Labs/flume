@@ -4314,6 +4314,73 @@ def get_vault_token():
             
     raise RuntimeError("Critical: Vault authentication configuration missing. Neither VAULT_TOKEN nor VAULT_ROLE_ID/VAULT_SECRET_ID provided.")
 
+@app.get("/api/telemetry")
+async def get_system_telemetry():
+    """Proxy metrics from Go Gateway and transform Prometheus text to JSON native dict."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("http://localhost:8766/metrics", timeout=2.0)
+            if resp.status_code != 200:
+                return {}
+            
+            lines = resp.text.split('\n')
+            results = {
+                "go_goroutines": 0,
+                "go_memstats_alloc_bytes": 0,
+                "go_memstats_sys_bytes": 0,
+                "flume_up": 0,
+                "flume_escalation_total": 0,
+                "flume_build_info": "unknown",
+                "flume_active_models": [],
+                "flume_ensemble_requests_total": [],
+                "flume_vram_pressure_events_total": 0,
+            }
+            
+            for line in lines:
+                if line.startswith("#"):
+                    continue
+                if not line.strip():
+                    continue
+                
+                parts = line.split(" ", 1)
+                if len(parts) == 2:
+                    key_with_tags = parts[0]
+                    val = parts[1]
+                    
+                    if key_with_tags == "go_goroutines":
+                        results["go_goroutines"] = int(val)
+                    elif key_with_tags == "go_memstats_alloc_bytes":
+                        results["go_memstats_alloc_bytes"] = int(val)
+                    elif key_with_tags == "go_memstats_sys_bytes":
+                        results["go_memstats_sys_bytes"] = int(val)
+                    elif key_with_tags == "flume_up":
+                        results["flume_up"] = int(val)
+                    elif key_with_tags == "flume_escalation_total":
+                        results["flume_escalation_total"] = int(val)
+                    elif key_with_tags == "flume_vram_pressure_events_total":
+                        results["flume_vram_pressure_events_total"] = int(val)
+                    elif key_with_tags.startswith("flume_build_info{"):
+                        m = re.search(r'version="([^"]+)"', key_with_tags)
+                        if m:
+                            results["flume_build_info"] = m.group(1)
+                    elif key_with_tags.startswith("flume_active_models{"):
+                        m = re.search(r'model="([^"]+)"', key_with_tags)
+                        if m and int(val) == 1:
+                            results["flume_active_models"].append(m.group(1))
+                    elif key_with_tags.startswith("flume_ensemble_requests_total{"):
+                        # flume_ensemble_requests_total{model_family="qwen",size="2",task_type="chat"} 1
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_ensemble_requests_total"].append({
+                            "tags": tag_dict,
+                            "count": int(val)
+                        })
+
+            return results
+    except Exception as e:
+        logger.error({"event": "telemetry_fetch_failed", "error": str(e), "target": "Go_Gateway_Proxy"})
+        return {}
+
 @app.get("/api/logs")
 def get_telemetry_logs():
     try:
