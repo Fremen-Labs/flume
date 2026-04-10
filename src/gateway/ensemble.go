@@ -11,7 +11,10 @@ import (
 )
 
 // ExecuteEnsemble coordinates parallel local generation and fallback degradation.
-func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+// withTools controls whether jury members invoke the tool-calling endpoint (true)
+// or the plain-chat endpoint (false). This allows /v1/chat to benefit from the
+// ensemble without accidentally injecting tool semantics into text-only paths.
+func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTools bool) (*ChatResponse, error) {
 	log := WithContext(ctx)
 
 	size := s.config.EnsembleSize
@@ -24,10 +27,16 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest) (*ChatRe
 		slog.Int("size", size),
 		slog.Float64("base_temperature", req.Temperature),
 		slog.String("model", req.Model),
+		slog.Bool("with_tools", withTools),
 	)
 
-	// Context timeout (2 minutes)
-	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// Apply configurable ensemble timeout (default 90s via EnsembleTimeout).
+	// Both the jury phase and the frontier escalation are bound by this budget.
+	timeout := s.config.EnsembleTimeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	g, gCtx := errgroup.WithContext(timeoutCtx)
@@ -51,7 +60,7 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest) (*ChatRe
 			}
 			cloneReq.Temperature = temp
 
-			resp, err := s.router.Route(gCtx, cloneReq, true)
+			resp, err := s.router.Route(gCtx, cloneReq, withTools)
 
 			errors[i] = err
 			responses[i] = resp
@@ -124,7 +133,8 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest) (*ChatRe
 		frontierReq.Model = fallback
 		frontierReq.Provider = "" // Will be re-resolved in Route based on rules
 
-		frontierResp, err := s.router.Route(ctx, frontierReq, true)
+		// Use timeoutCtx so a hung frontier call can't exceed the ensemble budget.
+		frontierResp, err := s.router.Route(timeoutCtx, frontierReq, withTools)
 		if err == nil {
 			log.Info("frontier escalation successful")
 			return frontierResp, nil

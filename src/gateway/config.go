@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,7 @@ type Config struct {
 	// Ensemble configuration (from flume-llm-config)
 	EnsembleEnabled       bool
 	EnsembleSize          int
+	EnsembleTimeout       time.Duration // default 90s, guards both jury + frontier
 	FrontierFallbackModel string
 
 	// Per-role model overrides (from flume-agent-models)
@@ -49,6 +51,10 @@ type Config struct {
 	cacheTTL    time.Duration
 	esURL       string
 	httpClient  *http.Client
+
+	// Singleflight guard: prevents thundering-herd ES fetches when cache expires
+	// under concurrent load. 0 = idle, 1 = refresh in progress.
+	refreshing atomic.Int32
 }
 
 // CredentialMeta holds non-secret metadata about a saved LLM credential.
@@ -72,15 +78,19 @@ func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 		cacheTTL = 5 * time.Second
 	}
 	return &Config{
-		AgentModels: make(map[string]AgentModelConfig),
-		Credentials: make(map[string]CredentialMeta),
-		cacheTTL:    cacheTTL,
-		esURL:       strings.TrimRight(esURL, "/"),
-		httpClient:  &http.Client{Timeout: 3 * time.Second},
+		AgentModels:     make(map[string]AgentModelConfig),
+		Credentials:     make(map[string]CredentialMeta),
+		cacheTTL:        cacheTTL,
+		esURL:           strings.TrimRight(esURL, "/"),
+		httpClient:      &http.Client{Timeout: 3 * time.Second},
+		EnsembleTimeout: 90 * time.Second,
 	}
 }
 
 // Refresh reloads configuration from Elasticsearch if the cache has expired.
+// A singleflight guard ensures that at most one goroutine performs the ES fetch
+// when the cache expires under concurrent load; other callers return immediately
+// (they will serve the previous values until the refresh completes).
 func (c *Config) Refresh(ctx context.Context) {
 	c.mu.RLock()
 	fresh := time.Since(c.lastRefresh) < c.cacheTTL
@@ -89,10 +99,17 @@ func (c *Config) Refresh(ctx context.Context) {
 		return
 	}
 
+	// Only one goroutine performs the refresh; others bail out immediately.
+	// They continue with stale-but-valid config until the refresh lands.
+	if !c.refreshing.CompareAndSwap(0, 1) {
+		return
+	}
+	defer c.refreshing.Store(0)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Double-check after acquiring write lock
+	// Double-check after acquiring write lock (another goroutine may have just finished)
 	if time.Since(c.lastRefresh) < c.cacheTTL {
 		return
 	}
@@ -244,6 +261,11 @@ func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 		c.EnsembleSize = int(sizeRaw)
 	} else {
 		c.EnsembleSize = 2 // default
+	}
+	if timeoutSecs, ok := src["ENSEMBLE_TIMEOUT_SECONDS"].(float64); ok && timeoutSecs > 0 {
+		c.EnsembleTimeout = time.Duration(timeoutSecs) * time.Second
+	} else if c.EnsembleTimeout == 0 {
+		c.EnsembleTimeout = 90 * time.Second
 	}
 	if fallback, ok := src["FRONTIER_FALLBACK_MODEL"].(string); ok && fallback != "" {
 		c.FrontierFallbackModel = strings.TrimSpace(fallback)

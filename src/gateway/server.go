@@ -17,12 +17,32 @@ import (
 //   GET  /health         — Docker healthcheck
 // ─────────────────────────────────────────────────────────────────────────────
 
+// maxBodyBytes caps the request body to prevent slow-body / large-body floods
+// from holding HTTP server goroutines before the provider semaphore even runs.
+const maxBodyBytes = 2 << 20 // 2 MiB
+
 // Server is the gateway HTTP server.
 type Server struct {
 	router    *ProviderRouter
 	config    *Config
 	mux       *http.ServeMux
 	ollamaSem *OllamaSemaphore
+	// globalSem is a provider-agnostic gate applied before JSON decode.
+	// It prevents floods of non-Ollama requests from overwhelming the gateway
+	// before any per-provider semaphore has a chance to protect anything.
+	globalSem chan struct{}
+}
+
+// globalMaxConcurrent is the total cross-provider cap. Override via
+// FLUME_GATEWAY_MAX_CONCURRENT; default = 32.
+func globalMaxConcurrent() int {
+	if v := os.Getenv("FLUME_GATEWAY_MAX_CONCURRENT"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 32
 }
 
 // NewServer creates a fully wired gateway server.
@@ -36,6 +56,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		config:    config,
 		mux:       http.NewServeMux(),
 		ollamaSem: NewOllamaSemaphore(maxConcurrent),
+		globalSem: make(chan struct{}, globalMaxConcurrent()),
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -67,9 +88,32 @@ func (s *Server) ListenAndServe(addr string) error {
 // Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
+// acquireGlobal blocks until the global concurrency slot is available or ctx is
+// cancelled. Returns false if the context expired while waiting.
+func (s *Server) acquireGlobal(ctx context.Context) bool {
+	select {
+	case s.globalSem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Server) releaseGlobal() { <-s.globalSem }
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	requestID := shortID()
 	start := time.Now()
+
+	// ── Fix 3: global gate applied before JSON decode ──────────────────────
+	if !s.acquireGlobal(r.Context()) {
+		s.writeError(w, http.StatusServiceUnavailable, "gateway at capacity", requestID)
+		return
+	}
+	defer s.releaseGlobal()
+
+	// Cap body size to prevent slow-body attacks.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -80,14 +124,40 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
 
-	// Refresh config from ES (cached, sub-ms if fresh)
+	// ── Fix 4: refresh is now singleflight-guarded inside Refresh() ───────
 	s.config.Refresh(ctx)
 
 	log.Info("incoming chat request",
 		slog.Int("messages", len(req.Messages)),
 	)
 
-	resp, err := s.router.Route(ctx, &req, false)
+	// ── Fix 1: resolve model/provider before choosing code path ───────────
+	_, provider, _ := s.config.ResolveModel(&req)
+
+	// ── Fix 1 continued: acquire Ollama slot for /chat too ────────────────
+	if provider == ProviderOllama {
+		log.Info("awaiting ollama slot",
+			slog.Int("active", s.ollamaSem.ActiveSlots()),
+			slog.Int("max", s.ollamaSem.MaxSlots()),
+		)
+		if !s.ollamaSem.Acquire(ctx) {
+			s.writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for ollama slot", requestID)
+			return
+		}
+		defer s.ollamaSem.Release()
+	}
+
+	var resp *ChatResponse
+	var err error
+
+	// ── Fix 1 continued: /chat also benefits from ensemble when enabled ────
+	// withTools=false keeps text-only semantics in each jury member call.
+	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+		resp, err = s.ExecuteEnsemble(ctx, &req, false)
+	} else {
+		resp, err = s.router.Route(ctx, &req, false)
+	}
+
 	if err != nil {
 		log.Error("chat failed",
 			slog.String("error", err.Error()),
@@ -108,6 +178,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	requestID := shortID()
 	start := time.Now()
+
+	// ── Fix 3: global gate applied before JSON decode ──────────────────────
+	if !s.acquireGlobal(r.Context()) {
+		s.writeError(w, http.StatusServiceUnavailable, "gateway at capacity", requestID)
+		return
+	}
+	defer s.releaseGlobal()
+
+	// Cap body size to prevent slow-body attacks.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -145,7 +225,7 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
-		resp, err = s.ExecuteEnsemble(ctx, &req)
+		resp, err = s.ExecuteEnsemble(ctx, &req, true)
 	} else {
 		resp, err = s.router.Route(ctx, &req, true)
 	}

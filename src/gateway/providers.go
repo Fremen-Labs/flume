@@ -442,6 +442,14 @@ func (r *ProviderRouter) doPost(
 	var lastErr error
 
 	for attempt := 0; attempt < 4; attempt++ {
+		// Bail immediately if context is already cancelled (e.g., ensemble timeout)
+		if ctx.Err() != nil {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
@@ -461,7 +469,12 @@ func (r *ProviderRouter) doPost(
 				slog.String("error", err.Error()),
 				slog.Duration("backoff", sleepDuration),
 			)
-			time.Sleep(sleepDuration)
+			// Context-aware sleep: stops immediately on cancellation.
+			select {
+			case <-time.After(sleepDuration):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+			}
 			continue
 		}
 
@@ -477,7 +490,12 @@ func (r *ProviderRouter) doPost(
 				slog.Int("attempt", attempt+1),
 				slog.Duration("backoff", sleepDuration),
 			)
-			time.Sleep(sleepDuration)
+			// Context-aware sleep: stops immediately on cancellation.
+			select {
+			case <-time.After(sleepDuration):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+			}
 			continue
 		}
 
