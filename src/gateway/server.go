@@ -159,7 +159,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	_, provider, _ := s.config.ResolveModel(&req)
 
 	// Track active model for metrics
-	Metrics.SetActiveModel(req.Model)
+	metricModel := req.Model
+	if !s.config.IsKnownModel(metricModel) {
+		metricModel = "unknown"
+	}
+	Metrics.SetActiveModel(metricModel)
 
 	// ── Fix 1 continued: acquire Ollama slot for /chat too ────────────────
 	if provider == ProviderOllama {

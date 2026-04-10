@@ -3,11 +3,36 @@ package gateway
 import (
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// Label represents a key-value pair for Prometheus metrics.
+type Label struct {
+	Key   string
+	Value string
+}
+
+// formatLabels formats and escapes a slice of labels into a Prometheus label string.
+func formatLabels(labels []Label) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, l := range labels {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(l.Key)
+		sb.WriteString(`="`)
+		sb.WriteString(escapeLabelValue(l.Value))
+		sb.WriteString(`"`)
+	}
+	return sb.String()
+}
 
 // escapeLabelValue escapes backslashes, double-quotes, and newlines in label values.
 func escapeLabelValue(s string) string {
@@ -113,11 +138,9 @@ func (h *histogram) Observe(labels string, value float64) {
 	}
 	d.sum += value
 	d.count++
-	for i, bound := range h.buckets {
-		if value <= bound {
-			d.bucketCounts[i]++
-			break
-		}
+	i := sort.Search(len(h.buckets), func(i int) bool { return h.buckets[i] >= value })
+	if i < len(h.buckets) {
+		d.bucketCounts[i]++
 	}
 }
 
@@ -207,15 +230,17 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 	if success {
 		successLabel = "true"
 	}
-	provider = escapeLabelValue(provider)
-	labels := `provider="` + provider + `",success="` + successLabel + `"`
+	labels := formatLabels([]Label{
+		{"provider", provider},
+		{"success", successLabel},
+	})
 	m.RequestDuration.Observe(labels, duration.Seconds())
 
+	status := "failure"
 	if success {
-		m.LocalRequests.Inc(`status="success"`)
-	} else {
-		m.LocalRequests.Inc(`status="failure"`)
+		status = "success"
 	}
+	m.LocalRequests.Inc(formatLabels([]Label{{"status", status}}))
 
 	Log().Debug("metrics: request recorded",
 		slog.String("component", "metrics"),
@@ -227,9 +252,11 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 
 // RecordEnsemble records an ensemble execution.
 func (m *metricsRegistry) RecordEnsemble(model, taskType string, size int, bestScore int) {
-	modelEscaped := escapeLabelValue(model)
-	taskTypeEscaped := escapeLabelValue(taskType)
-	labels := `model="` + modelEscaped + `",task_type="` + taskTypeEscaped + `",size="` + strconv.Itoa(size) + `"`
+	labels := formatLabels([]Label{
+		{"model", model},
+		{"task_type", taskType},
+		{"size", strconv.Itoa(size)},
+	})
 	m.EnsembleRequests.Inc(labels)
 	m.EnsembleScores.Observe("", float64(bestScore))
 
@@ -262,8 +289,8 @@ func (m *metricsRegistry) RecordVRAMPressure() {
 
 // SetActiveModel marks a model as active with a gauge value of 1.
 func (m *metricsRegistry) SetActiveModel(model string) {
-	modelEscaped := escapeLabelValue(model)
-	m.ActiveModels.Set(`model="` + modelEscaped + `"`, 1)
+	labels := formatLabels([]Label{{"model", model}})
+	m.ActiveModels.Set(labels, 1)
 	Log().Debug("metrics: active model set",
 		slog.String("component", "metrics"),
 		slog.String("model", model),

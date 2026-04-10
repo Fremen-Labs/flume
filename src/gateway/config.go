@@ -263,6 +263,26 @@ func (c *Config) ShouldThink(req *ChatRequest) bool {
 	return false
 }
 
+// IsKnownModel returns true if the model name is found in the static deployment
+// configuration (e.g. DefaultModel, FrontierFallbackModel, or an Agent override).
+func (c *Config) IsKnownModel(model string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if model == "" || model == c.DefaultModel || model == c.FrontierFallbackModel {
+		return true
+	}
+	if model == os.Getenv("LLM_MODEL") || model == "llama3.2" || model == "gpt-4o" {
+		return true
+	}
+	for _, override := range c.AgentModels {
+		if override.Model == model {
+			return true
+		}
+	}
+	return false
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ES fetchers (private)
 // ─────────────────────────────────────────────────────────────────────────────

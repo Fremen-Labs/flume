@@ -218,7 +218,13 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 		if withTools {
 			taskType = "tool_call"
 		}
-		Metrics.RecordEnsemble(req.Model, taskType, size, finalBest)
+		
+		metricModel := req.Model
+		if !s.config.IsKnownModel(metricModel) {
+			metricModel = "unknown"
+		}
+
+		Metrics.RecordEnsemble(metricModel, taskType, size, finalBest)
 	} else {
 		log.Warn("ensemble entire failure, all jury members errored")
 	}
