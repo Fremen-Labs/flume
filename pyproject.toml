@@ -1,6 +1,6 @@
 [project]
 name = "flume"
-version = "0.1.44"
+version = "0.1.45"
 description = "Autonomous Engineering Frontier"
 readme = "README.md"
 requires-python = ">=3.10"
