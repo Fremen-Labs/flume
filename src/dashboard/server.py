@@ -77,7 +77,8 @@ def _seed_llm_config_from_env() -> None:
     env vars using doc_as_upsert — so it ONLY fills in missing fields and NEVER
     overwrites a value the user already saved via the Settings UI.
     """
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
     model = os.environ.get('LLM_MODEL', '').strip()
     provider = os.environ.get('LLM_PROVIDER', '').strip()
     base_url = os.environ.get('LLM_BASE_URL', '').strip()
@@ -2488,7 +2489,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 class LoggingMiddleware(BaseHTTPMiddleware):
