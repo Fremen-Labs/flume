@@ -29,7 +29,7 @@ import (
 
 var SkillsCmd = &cobra.Command{
 	Use:   "skills",
-	Short: "Manage Inception Skills — list, compile, and reload Markdown-driven handlers",
+	Short: "Manage Inception Skills — list, compile, validate, and reload Markdown-driven handlers",
 }
 
 var skillsListCmd = &cobra.Command{
@@ -51,11 +51,21 @@ var skillsReloadCmd = &cobra.Command{
 	Run:   runSkillsReload,
 }
 
+var skillsValidateCmd = &cobra.Command{
+	Use:   "validate [skill-name]",
+	Short: "Validate skill definitions against schemas and Meta-Critic rules",
+	Args:  cobra.MaximumNArgs(1),
+	Run:   runSkillsValidate,
+}
+
 func init() {
 	skillsCompileCmd.Flags().Bool("all", false, "Compile all inception:full skills")
+	skillsValidateCmd.Flags().Bool("all", false, "Validate all discovered skills")
+	skillsValidateCmd.Flags().Bool("json", false, "Output validation report as JSON")
 	SkillsCmd.AddCommand(skillsListCmd)
 	SkillsCmd.AddCommand(skillsCompileCmd)
 	SkillsCmd.AddCommand(skillsReloadCmd)
+	SkillsCmd.AddCommand(skillsValidateCmd)
 }
 
 func runSkillsList(cmd *cobra.Command, args []string) {
@@ -197,5 +207,116 @@ func runSkillsReload(cmd *cobra.Command, args []string) {
 		}
 		fmt.Println(ui.ErrorRed(fmt.Sprintf("Reload failed: %s", errMsg)))
 		os.Exit(1)
+	}
+}
+
+func runSkillsValidate(cmd *cobra.Command, args []string) {
+	log := skillslog.Log().With(slog.String("component", "cli_skills_validate"))
+	ctx := context.Background()
+	validateAll, _ := cmd.Flags().GetBool("all")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	files, err := skills.DiscoverSkillFiles(ctx)
+	if err != nil {
+		fmt.Println(ui.ErrorRed(fmt.Sprintf("Skill discovery failed: %v", err)))
+		os.Exit(1)
+	}
+
+	if len(files) == 0 {
+		fmt.Println(ui.NeonGreen("No .skill.md files found."))
+		return
+	}
+
+	// If no --all and no name, default to all
+	if !validateAll && len(args) == 0 {
+		validateAll = true
+	}
+
+	var allReports []*skills.ValidationReport
+	var totalErrors, totalWarnings int
+
+	for _, path := range files {
+		def, err := skills.ParseSkillFile(path)
+		if err != nil {
+			log.Warn("skipping unparseable skill", slog.String("path", path), slog.String("error", err.Error()))
+			if !jsonOutput {
+				fmt.Printf("\n%s %s\n  Parse error: %s\n", ui.ErrorRed("✗"), path, err.Error())
+			}
+			totalErrors++
+			continue
+		}
+
+		// Filter by name if specified
+		if !validateAll && def.Name != args[0] {
+			continue
+		}
+
+		report := skills.ValidateSkill(def)
+		allReports = append(allReports, report)
+		totalErrors += report.Errors
+		totalWarnings += report.Warnings
+
+		if !jsonOutput {
+			printValidationReport(report)
+		}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(map[string]interface{}{
+			"reports":        allReports,
+			"total_skills":   len(allReports),
+			"total_errors":   totalErrors,
+			"total_warnings": totalWarnings,
+		})
+	} else {
+		fmt.Println(strings.Repeat("═", 70))
+		if totalErrors > 0 {
+			fmt.Println(ui.ErrorRed(fmt.Sprintf("✗ Validation failed: %d error(s), %d warning(s) across %d skill(s)",
+				totalErrors, totalWarnings, len(allReports))))
+			os.Exit(1)
+		} else if totalWarnings > 0 {
+			fmt.Printf("%s Validation passed with %d warning(s) across %d skill(s)\n",
+				ui.NeonGreen("⚠"), totalWarnings, len(allReports))
+		} else {
+			fmt.Println(ui.NeonGreen(fmt.Sprintf("✓ All %d skill(s) passed validation", len(allReports))))
+		}
+	}
+}
+
+func printValidationReport(report *skills.ValidationReport) {
+	statusIcon := ui.NeonGreen("✓")
+	if !report.Valid {
+		statusIcon = ui.ErrorRed("✗")
+	} else if report.Warnings > 0 {
+		statusIcon = "⚠"
+	}
+
+	fmt.Printf("\n%s %s (v%s)\n", statusIcon, report.SkillName,
+		func() string {
+			// Extract version from skill name context
+			if report.SkillPath != "" {
+				return report.SkillPath
+			}
+			return "unknown"
+		}())
+	fmt.Println(strings.Repeat("─", 70))
+
+	for _, f := range report.Findings {
+		severityTag := ""
+		switch f.Severity {
+		case skills.SeverityError:
+			severityTag = ui.ErrorRed("ERROR")
+		case skills.SeverityWarning:
+			severityTag = "WARN "
+		case skills.SeverityInfo:
+			severityTag = "INFO "
+		}
+		fmt.Printf("  [%s] [%s] %s\n", severityTag, f.Rule, f.Message)
+	}
+
+	if len(report.Findings) == 0 {
+		fmt.Println("  No issues found.")
 	}
 }
