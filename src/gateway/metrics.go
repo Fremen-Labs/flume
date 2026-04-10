@@ -116,6 +116,7 @@ func (h *histogram) Observe(labels string, value float64) {
 	for i, bound := range h.buckets {
 		if value <= bound {
 			d.bucketCounts[i]++
+			break
 		}
 	}
 }
@@ -166,7 +167,7 @@ func (g *gaugeVec) snapshot() map[string]float64 {
 
 // ─── Rolling success rate tracker ────────────────────────────────────────────
 
-// rollingRate tracks success/total over a sliding window for gauge output.
+// rollingRate tracks success/total over a cumulative period for gauge output.
 type rollingRate struct {
 	mu       sync.Mutex
 	success  uint64
@@ -398,7 +399,9 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 		}
 
 		// Buckets
+		var cumulative uint64
 		for i, bound := range h.buckets {
+			cumulative += data.bucketCounts[i]
 			buf = append(buf, name...)
 			buf = append(buf, "_bucket{"...)
 			if labels != "" {
@@ -408,7 +411,7 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 			buf = append(buf, `le="`...)
 			buf = strconv.AppendFloat(buf, bound, 'f', -1, 64)
 			buf = append(buf, `"} `...)
-			buf = strconv.AppendUint(buf, data.bucketCounts[i], 10)
+			buf = strconv.AppendUint(buf, cumulative, 10)
 			buf = append(buf, '\n')
 		}
 		// +Inf bucket

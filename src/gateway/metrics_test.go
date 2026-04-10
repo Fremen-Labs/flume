@@ -46,13 +46,13 @@ func TestMetrics_Histogram(t *testing.T) {
 	if d.bucketCounts[0] != 1 {
 		t.Errorf("bucket[0] (le=1.0) = %d, want 1", d.bucketCounts[0])
 	}
-	// bucket[1] le=5.0 → 0.5, 3.0 = 2
-	if d.bucketCounts[1] != 2 {
-		t.Errorf("bucket[1] (le=5.0) = %d, want 2", d.bucketCounts[1])
+	// bucket[1] le=5.0 → 3.0 = 1
+	if d.bucketCounts[1] != 1 {
+		t.Errorf("bucket[1] (le=5.0) = %d, want 1", d.bucketCounts[1])
 	}
-	// bucket[2] le=10.0 → 0.5, 3.0, 7.0 = 3
-	if d.bucketCounts[2] != 3 {
-		t.Errorf("bucket[2] (le=10.0) = %d, want 3", d.bucketCounts[2])
+	// bucket[2] le=10.0 → 7.0 = 1
+	if d.bucketCounts[2] != 1 {
+		t.Errorf("bucket[2] (le=10.0) = %d, want 1", d.bucketCounts[2])
 	}
 }
 
