@@ -97,17 +97,6 @@ func (q *FrontierQueue) MaxSlots() int {
 	return q.maxSlots
 }
 
-// Queued returns how many callers are waiting for a slot.
-// This is an approximation: len(chan) gives slots held, not queue depth.
-// Real queue depth = Active - MaxSlots when overflow occurs, but since we
-// block in Acquire, Active never exceeds MaxSlots.
-func (q *FrontierQueue) Queued() int {
-	// Waiting goroutines blocked on Acquire. We track this cheaply:
-	// Active is the max at any time == len(sem), so queue depth == 0 here.
-	// The useful signal for health is "slots in use / max".
-	return 0
-}
-
 // HealthMetrics returns a snapshot of queue state suitable for the /health response.
 func (q *FrontierQueue) HealthMetrics() map[string]int {
 	return map[string]int{

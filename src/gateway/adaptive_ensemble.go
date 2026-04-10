@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,7 +25,17 @@ import (
 // FLUME_ENSEMBLE_NO_ADAPTIVE=1 disables this entirely and uses the configured size.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// modelParamBrackets maps known parameter-count suffixes to estimated VRAM (GB)
+// systemReservedMemoryFactor is the fraction of total unified memory reserved
+// for the operating system, non-model processes, and GPU driver overhead.
+// Empirically tuned for Apple Silicon (macOS uses ~15-20% for OS footprint).
+const systemReservedMemoryFactor = 0.20
+
+// perSlotKVShareFactor is the fraction of a model's estimated VRAM footprint
+// that each additional parallel inference slot requires beyond the first.
+// Model weights are shared by Ollama's memory layout; each extra slot only
+// needs its own KV cache and compute buffers, not a full model copy.
+const perSlotKVShareFactor = 0.60
+
 // at Q4_K_M quantisation (Ollama default). Formula: params_B × 0.5 + 1 GB KV cache.
 var modelParamBrackets = []struct {
 	suffix string
@@ -81,13 +92,20 @@ type OllamaVRAMInfo struct {
 // operators can distinguish transient network errors from persistent misconfiguration.
 func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 	log := Log()
-	url := strings.TrimRight(ollamaBaseURL, "/") + "/api/ps"
+	psURL, err := url.JoinPath(ollamaBaseURL, "/api/ps")
+	if err != nil {
+		log.Warn("vram_sense: invalid ollama base URL — cannot construct /api/ps endpoint",
+			slog.String("base_url", ollamaBaseURL),
+			slog.String("error", err.Error()),
+		)
+		return OllamaVRAMInfo{}
+	}
 	client := &http.Client{Timeout: 3 * time.Second}
 
-	resp, err := client.Get(url)
+	resp, err := client.Get(psURL)
 	if err != nil {
 		log.Warn("vram_sense: failed to connect to ollama /api/ps — assuming 0 VRAM in use",
-			slog.String("url", url),
+			slog.String("url", psURL),
 			slog.String("error", err.Error()),
 		)
 		return OllamaVRAMInfo{}
@@ -96,7 +114,7 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 
 	if resp.StatusCode != http.StatusOK {
 		log.Warn("vram_sense: unexpected HTTP status from ollama /api/ps — assuming 0 VRAM in use",
-			slog.String("url", url),
+			slog.String("url", psURL),
 			slog.Int("status_code", resp.StatusCode),
 		)
 		return OllamaVRAMInfo{}
@@ -105,7 +123,7 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err != nil {
 		log.Warn("vram_sense: failed to read ollama /api/ps response body — assuming 0 VRAM in use",
-			slog.String("url", url),
+			slog.String("url", psURL),
 			slog.String("error", err.Error()),
 		)
 		return OllamaVRAMInfo{}
@@ -118,7 +136,7 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 	}
 	if err := json.Unmarshal(body, &psResp); err != nil {
 		log.Warn("vram_sense: failed to parse ollama /api/ps JSON — assuming 0 VRAM in use",
-			slog.String("url", url),
+			slog.String("url", psURL),
 			slog.String("error", err.Error()),
 			slog.Int("body_bytes", len(body)),
 		)
@@ -179,14 +197,12 @@ func AdaptiveEnsembleSize(model string, configuredSize int, ollamaBaseURL string
 	totalMemGB := systemMemoryGB()
 
 	info := QueryOllamaVRAM(ollamaBaseURL)
-	// Reserve 20% of total for OS + non-model overhead.
-	reservedGB := totalMemGB * 0.20
+	// Reserve a fraction of total memory for OS and non-model overhead.
+	reservedGB := totalMemGB * systemReservedMemoryFactor
 	alreadyUsedGB := info.TotalUsedGB
-	// The running model itself is already loaded (counted in alreadyUsedGB),
-	// so each *additional* parallel call needs one more slot's worth of KV cache
-	// and compute buffers. We estimate that as perCallGB × 0.6 (KV cache + buffers,
-	// not the weights themselves which are shared in Ollama's memory layout).
-	perExtraSlotGB := perCallGB * 0.60
+	// The running model's weights are shared by Ollama; each additional parallel
+	// call only needs its own KV cache and compute buffers (perSlotKVShareFactor).
+	perExtraSlotGB := perCallGB * perSlotKVShareFactor
 
 	availableGB := totalMemGB - reservedGB - alreadyUsedGB
 	if availableGB < perExtraSlotGB {

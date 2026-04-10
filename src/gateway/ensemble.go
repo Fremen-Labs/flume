@@ -35,6 +35,11 @@ import (
 // A response scoring ≥ this is returned immediately without waiting for peers.
 const scoreThreshold = 80
 
+// temperatureIncrement is the per-member temperature step applied across jury
+// members to encourage response diversity without extreme randomness.
+// Member 0 uses the base temperature; member i uses base + i*temperatureIncrement.
+const temperatureIncrement = 0.2
+
 // juryResult carries one jury member's outcome.
 type juryResult struct {
 	index    int
@@ -100,7 +105,7 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 
 			cloneReq := cloneChatRequest(req)
 			// Vary temperature for diversity among jury members.
-			temp := cloneReq.Temperature + float64(i)*0.2
+			temp := cloneReq.Temperature + float64(i)*temperatureIncrement
 			if temp > 1.0 {
 				temp = 1.0
 			}
