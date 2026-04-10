@@ -1,71 +1,708 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Agent Work Dashboard</title>
+  <title>Flume · Agent Work Dashboard</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background:#0b1020; color:#e8ecf3; }
-    h1,h2 { margin: 0 0 12px; }
-    .toolbar { display:flex; gap:12px; margin: 12px 0 20px; flex-wrap:wrap; }
-    select,input { background:#151c31; color:#e8ecf3; border:1px solid #2b3557; border-radius:8px; padding:8px 10px; }
-    .tabs { display:flex; gap:10px; margin: 0 0 20px; flex-wrap:wrap; }
-    .tab { padding:8px 12px; border:1px solid #2b3557; border-radius:999px; cursor:pointer; background:#151c31; }
-    .tab.active { background:#2a3d70; }
-    .grid { display:grid; grid-template-columns: 2.1fr 1fr; gap:20px; }
-    .card { background:#151c31; border:1px solid #2b3557; border-radius:12px; padding:16px; }
-    .tree details { margin-left: 14px; }
-    .row { padding:10px 0; border-bottom:1px solid #243050; }
-    .meta { color:#9fb0d1; font-size:12px; margin-top:4px; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; margin-right:6px; background:#26345e; }
-    .epic{background:#4d2f88}.feature{background:#1f6f8b}.story{background:#2d7d46}.task{background:#6b5b1e}.bug{background:#8b2f3a}
-    .status-done{background:#215d36}.status-blocked{background:#7a2831}.status-running{background:#8b6a1b}.status-review{background:#385a8a}.status-ready{background:#2e6a6a}.status-planned{background:#4b5672}.status-claimed{background:#6c5a2a}.status-idle{background:#555}
-    code { color:#a9d3ff; }
-    .small { font-size: 11px; color:#9fb0d1; }
+    :root {
+      --bg: #080e1c;
+      --surface: #0f1629;
+      --surface2: #141d35;
+      --border: #1e2d50;
+      --border2: #243260;
+      --text: #dce6f8;
+      --muted: #7a91bc;
+      --accent: #3b82f6;
+      --accent-hover: #60a5fa;
+      --danger: #ef4444;
+      --warn-bg: #2c1a06;
+      --warn-border: #92400e;
+      --warn-text: #fde68a;
+      --success-bg: #052e16;
+      --success-border: #166534;
+      --success-text: #4ade80;
+      --toast-gap: 10px;
+      --r: 10px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 0; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    /* ── Layout ── */
+    .header { padding: 18px 24px 0; display: flex; align-items: center; gap: 14px; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
+    .header .logo { width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+    .main { padding: 16px 24px 80px; }
+
+    /* ── Toolbar ── */
+    .toolbar { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; align-items: center; }
+    .toolbar input, .toolbar select {
+      background: var(--surface); color: var(--text); border: 1px solid var(--border2);
+      border-radius: 7px; padding: 7px 11px; font-size: 13px; outline: none;
+      transition: border-color .15s;
+    }
+    .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
+    .toolbar input { width: 220px; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 6px; margin: 0 0 18px; flex-wrap: wrap; }
+    .tab {
+      padding: 6px 14px; border: 1px solid var(--border2); border-radius: 999px;
+      cursor: pointer; background: var(--surface); font-size: 13px; color: var(--muted);
+      display: flex; align-items: center; gap: 6px; transition: all .15s; user-select: none;
+    }
+    .tab:hover { background: var(--surface2); color: var(--text); }
+    .tab.active { background: #1e3a6b; border-color: var(--accent); color: var(--text); }
+    .tab-badge {
+      background: var(--danger); color: #fff; font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 999px; min-width: 18px; text-align: center;
+    }
+    .tab-badge.pulse { animation: badgepulse 2s ease-in-out infinite; }
+    @keyframes badgepulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+
+    /* ── Grid ── */
+    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; }
+    @media(max-width:900px){ .grid { grid-template-columns: 1fr; } }
+
+    /* ── Cards ── */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; }
+    .card h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--text); }
+
+    /* ── Task rows (general) ── */
+    .row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .row:last-child { border-bottom: none; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .small { font-size: 11px; color: var(--muted); }
+    code { color: #93c5fd; font-size: 11px; }
+
+    /* ── Pills ── */
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+    .epic    { background:#3b1f77 }
+    .feature { background:#1a5778 }
+    .story   { background:#1e6040 }
+    .task    { background:#5e4a16 }
+    .bug     { background:#7a2222 }
+    .status-done    { background:#14532d }
+    .status-blocked { background:#7f1d1d }
+    .status-running { background:#78350f }
+    .status-review  { background:#1e3a8a }
+    .status-ready   { background:#134e4a }
+    .status-planned { background:#312e81 }
+    .status-claimed { background:#5c3a0d }
+    .status-idle    { background:#374151 }
+
+    /* ══════════════════════════════════════════
+       BLOCKED VIEW — rich task cards
+    ══════════════════════════════════════════ */
+    .blocked-card {
+      background: var(--surface2); border: 1px solid #2a1a1a; border-radius: 10px;
+      padding: 14px 16px; margin-bottom: 10px; transition: border-color .2s;
+      position: relative;
+    }
+    .blocked-card:hover { border-color: #5f2d2d; }
+    .blocked-card.optimistic { opacity: .55; pointer-events: none; }
+    .blocked-card.requeued {
+      border-color: var(--success-border); background: #061a10;
+      animation: slidein .3s ease;
+    }
+    @keyframes slidein { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:none} }
+
+    .bcard-header { display: flex; align-items: flex-start; gap: 10px; }
+    .bcard-check { margin-top: 3px; accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; flex-shrink: 0; }
+    .bcard-meta { flex: 1; min-width: 0; }
+    .bcard-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; word-break: break-word; }
+    .bcard-sub { font-size: 12px; color: var(--muted); }
+
+    /* warning callout */
+    .bcard-warn {
+      margin: 10px 0 0; padding: 8px 12px; border-radius: 7px;
+      background: var(--warn-bg); border: 1px solid var(--warn-border);
+      color: var(--warn-text); font-size: 12px; display: flex; gap: 7px; align-items: flex-start;
+    }
+    .bcard-warn .warn-icon { flex-shrink: 0; font-size: 14px; }
+
+    /* reason toggle */
+    .bcard-reason { margin-top: 8px; }
+    .reason-toggle {
+      background: none; border: none; color: var(--muted); font-size: 11px;
+      cursor: pointer; padding: 0; display: flex; align-items: center; gap: 4px;
+    }
+    .reason-toggle:hover { color: var(--text); }
+    .reason-body {
+      display: none; margin-top: 6px; padding: 8px 10px; border-radius: 6px;
+      background: #0b1120; border: 1px solid var(--border); font-size: 11px;
+      color: #93c5fd; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto;
+    }
+    .reason-body.open { display: block; }
+
+    /* action row */
+    .bcard-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; justify-content: flex-end; }
+
+    .btn-requeue {
+      background: var(--accent); color: #fff; border: none; border-radius: 6px;
+      padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; gap: 6px; transition: background .15s;
+    }
+    .btn-requeue:hover { background: var(--accent-hover); }
+    .btn-requeue:disabled { opacity: .5; cursor: default; }
+
+    /* dropdown container */
+    .btn-split { display: flex; border-radius: 6px; overflow: hidden; }
+    .btn-split .btn-requeue { border-radius: 0; }
+    .btn-split .btn-requeue:first-child { border-radius: 6px 0 0 6px; }
+    .btn-drop {
+      background: #2563eb; border: none; border-left: 1px solid rgba(255,255,255,.15);
+      color: #fff; padding: 0 8px; cursor: pointer; border-radius: 0 6px 6px 0;
+      font-size: 12px; transition: background .15s;
+    }
+    .btn-drop:hover { background: var(--accent-hover); }
+
+    /* dropdown menu */
+    .drop-menu {
+      display: none; position: absolute; right: 16px; top: calc(100% - 22px);
+      background: var(--surface2); border: 1px solid var(--border2); border-radius: 7px;
+      padding: 4px; z-index: 40; min-width: 170px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    }
+    .drop-menu.open { display: block; }
+    .drop-item {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      color: var(--text); font-size: 12px; padding: 7px 10px; border-radius: 5px;
+      cursor: pointer;
+    }
+    .drop-item:hover { background: var(--border); }
+
+    /* spinner */
+    .spinner {
+      width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.25);
+      border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Bulk toolbar ── */
+    .bulk-bar {
+      display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
+      background: #0e1d3a; border-top: 1px solid var(--border2);
+      padding: 12px 24px; align-items: center; gap: 14px;
+      backdrop-filter: blur(8px);
+    }
+    .bulk-bar.visible { display: flex; }
+    .bulk-bar .count { font-size: 13px; color: var(--muted); flex: 1; }
+    .bulk-bar .count strong { color: var(--text); }
+    .btn-bulk {
+      background: var(--accent); color: #fff; border: none; border-radius: 7px;
+      padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; gap: 7px; transition: background .15s;
+    }
+    .btn-bulk:hover { background: var(--accent-hover); }
+    .btn-bulk:disabled { opacity: .5; cursor: default; }
+    .bulk-shortcut { font-size: 11px; color: var(--muted); font-family: monospace; background: var(--surface2); padding: 2px 6px; border-radius: 4px; }
+
+    /* ── Toasts ── */
+    #toast-area {
+      position: fixed; top: 16px; right: 16px; z-index: 9999;
+      display: flex; flex-direction: column; gap: var(--toast-gap); pointer-events: none;
+    }
+    .toast {
+      pointer-events: all; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+      display: flex; align-items: center; gap: 9px; min-width: 260px; max-width: 360px;
+      border: 1px solid; box-shadow: 0 4px 20px rgba(0,0,0,.5);
+      animation: toastin .25s ease; word-break: break-word;
+    }
+    .toast.success { background: var(--success-bg); border-color: var(--success-border); color: var(--success-text); }
+    .toast.error   { background: #200a0a; border-color: #7f1d1d; color: #fca5a5; }
+    @keyframes toastin { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:none} }
+    .toast-dismiss { margin-left: auto; cursor: pointer; opacity: .6; font-size: 15px; background: none; border: none; color: inherit; }
+
+    /* ── Sidebar panels ── */
+    .side-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; margin-bottom: 14px; }
+    .side-card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+
+    /* ── Workers ── */
+    .workers-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+    .worker-chip {
+      background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px;
+      padding: 8px 11px; font-size: 12px; min-width: 130px;
+    }
+    .worker-chip .wname { font-weight: 600; margin-bottom: 3px; }
+    .worker-chip .wrole { color: var(--muted); font-size: 11px; }
   </style>
 </head>
 <body>
-  <h1>Agent Work Dashboard</h1>
-  <div class="card" style="margin-bottom:20px;">
+
+<div id="toast-area"></div>
+
+<div class="header">
+  <div class="logo">⚡</div>
+  <h1>Flume Dashboard</h1>
+</div>
+
+<div class="main">
+
+  <!-- Workers -->
+  <div class="card" style="margin-bottom:16px;">
     <h2>Active Workers</h2>
-    <div id="workers"></div>
+    <div id="workers" class="workers-grid"></div>
   </div>
+
+  <!-- Toolbar -->
   <div class="toolbar">
-    <input id="q" placeholder="Search title/id/repo" />
+    <input id="q" placeholder="🔍  Search title / id / repo" />
     <select id="projectFilter"><option value="">All projects</option></select>
-    <select id="statusFilter"><option value="">All statuses</option><option>inbox</option><option>planned</option><option>ready</option><option>running</option><option>review</option><option>blocked</option><option>done</option></select>
+    <select id="statusFilter">
+      <option value="">All statuses</option>
+      <option>inbox</option><option>planned</option><option>ready</option>
+      <option>running</option><option>review</option><option>blocked</option><option>done</option>
+    </select>
   </div>
+
+  <!-- Tabs -->
   <div class="tabs">
     <div class="tab active" data-view="all">All</div>
     <div class="tab" data-view="backlog">Backlog</div>
     <div class="tab" data-view="active">Active</div>
-    <div class="tab" data-view="blocked">Blocked</div>
+    <div class="tab" data-view="blocked">Blocked <span id="blocked-badge" class="tab-badge" style="display:none"></span></div>
     <div class="tab" data-view="review">Review</div>
     <div class="tab" data-view="done">Done</div>
   </div>
+
+  <!-- Main grid -->
   <div class="grid">
+    <!-- Left: task list -->
     <div class="card">
-      <h2>Backlog / Work Items</h2>
-      <div id="tree" class="tree"></div>
+      <h2 id="list-title">Backlog / Work Items</h2>
+      <div id="tree"></div>
+      <!-- Blocked view list (shown only on Blocked tab) -->
+      <div id="blocked-list" style="display:none;"></div>
     </div>
+
+    <!-- Right: sidebar -->
     <div>
-      <div class="card" style="margin-bottom:20px;"><h2>Recent Reviews</h2><div id="reviews"></div></div>
-      <div class="card" style="margin-bottom:20px;"><h2>Recent Failures</h2><div id="failures"></div></div>
-      <div class="card"><h2>Recent Provenance</h2><div id="provenance"></div></div>
+      <div class="side-card"><h2>Recent Reviews</h2><div id="reviews"></div></div>
+      <div class="side-card"><h2>Recent Failures</h2><div id="failures"></div></div>
+      <div class="side-card"><h2>Recent Provenance</h2><div id="provenance"></div></div>
     </div>
   </div>
+</div>
+
+<!-- Bulk requeue bar -->
+<div id="bulk-bar" class="bulk-bar">
+  <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;">
+    <input id="select-all" type="checkbox" style="accent-color:var(--accent);width:15px;height:15px;" />
+    Select all
+  </label>
+  <span class="count" id="bulk-count"><strong>0</strong> selected</span>
+  <span class="bulk-shortcut" title="Keyboard shortcut">Shift+R</span>
+  <button class="btn-bulk" id="bulk-requeue-btn" disabled>
+    <span id="bulk-spinner" class="spinner"></span>
+    ↺ Requeue Selected
+  </button>
+</div>
+
 <script>
-let SNAPSHOT=null, ACTIVE_VIEW='all';
-const $=id=>document.getElementById(id);
-function norm(v){return (v||'').toString().toLowerCase();}
-function itemType(t){return t.work_item_type||'task';}
-function parentId(t){return t.parent_id||null;}
-function visibleByView(t){const s=t.status||''; if(ACTIVE_VIEW==='all') return true; if(ACTIVE_VIEW==='backlog') return ['inbox','planned','ready'].includes(s); if(ACTIVE_VIEW==='active') return ['running'].includes(s); if(ACTIVE_VIEW==='blocked') return ['blocked'].includes(s); if(ACTIVE_VIEW==='review') return ['review'].includes(s); if(ACTIVE_VIEW==='done') return ['done'].includes(s); return true;}
-function rowHtml(t){const type=itemType(t), status=t.status||'unknown', artifacts=(t.artifacts||[]).length; return `<div class="row"><span class="pill ${type}">${type}</span><span class="pill status-${status}">${status}</span><strong>${t.title||t.id}</strong><div class="meta">project=${t.project||'-'} · repo=${t.repo||'-'} · owner=${t.owner||t.assigned_agent_role||'-'} · model=${t.preferred_model||'-'} · host=${t.execution_host||'-'} · priority=${t.priority||'-'}</div><div class="small">id=<code>${t.id||t._id}</code> ${artifacts?`· artifacts=${artifacts}`:''}</div></div>`;}
-function renderTree(tasks){const byParent=new Map(); for(const t of tasks){const pid=parentId(t)||'__root__'; if(!byParent.has(pid)) byParent.set(pid,[]); byParent.get(pid).push(t);} for(const arr of byParent.values()) arr.sort((a,b)=>(a.title||'').localeCompare(b.title||'')); function subtreeVisible(t){if(visibleByView(t)) return true; const kids=byParent.get(t.id)||[]; return kids.some(subtreeVisible);} function renderNode(t){const kids=(byParent.get(t.id)||[]).filter(subtreeVisible); const header=rowHtml(t); return kids.length?`<details open><summary>${header}</summary>${kids.map(renderNode).join('')}</details>`:`<div>${header}</div>`;} const roots=(byParent.get('__root__')||[]).filter(subtreeVisible); return roots.map(renderNode).join('')||'<div class="meta">No items</div>';}
-function renderList(el, items, fn){el.innerHTML=items.slice(0,12).map(fn).join('')||'<div class="meta">None</div>';}
-function applyFilters(){if(!SNAPSHOT) return; const q=norm($('q').value), pf=$('projectFilter').value, sf=$('statusFilter').value; let tasks=(SNAPSHOT.tasks||[]).filter(t=>{const hay=`${t.title||''} ${t.id||''} ${t.repo||''} ${t.project||''}`.toLowerCase(); if(q&&!hay.includes(q)) return false; if(pf&&(t.project||'')!==pf) return false; if(sf&&(t.status||'')!==sf) return false; return true;}); $('tree').innerHTML=renderTree(tasks);}
-fetch('/api/snapshot').then(r=>r.json()).then(data=>{SNAPSHOT=data; const projects=[...new Set((data.tasks||[]).map(t=>t.project).filter(Boolean))].sort(); for(const p of projects){const o=document.createElement('option'); o.value=p; o.textContent=p; $('projectFilter').appendChild(o);} $('q').addEventListener('input',applyFilters); $('projectFilter').addEventListener('change',applyFilters); $('statusFilter').addEventListener('change',applyFilters); document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active')); tab.classList.add('active'); ACTIVE_VIEW=tab.dataset.view; applyFilters();})); applyFilters(); renderList($('workers'), data.workers||[], w=>`<div class="row"><span class="pill">${w.role}</span><span class="pill status-${w.status||'idle'}">${w.status||'idle'}</span><strong>${w.name}</strong><div class="meta">model=${w.model||w.preferred_model||'-'} · host=${w.execution_host||'-'} · task=${w.current_task_id||'-'}</div></div>`); renderList($('reviews'), data.reviews||[], r=>`<div class="row"><span class="pill">${r.verdict||'review'}</span><strong>${r.task_id||r.review_id}</strong><div class="meta">${r.summary||''}</div></div>`); renderList($('failures'), data.failures||[], f=>`<div class="row"><strong>${f.task_id||f.id}</strong><div class="meta">${f.error_class||''} · ${f.summary||''}</div></div>`); renderList($('provenance'), data.provenance||[], p=>`<div class="row"><strong>${p.task_id||p.id}</strong><div class="meta">role=${p.agent_role||'-'} · verdict=${p.review_verdict||'-'} · repo=${p.repo||'-'}</div></div>`);});
+'use strict';
+
+/* ─── State ─── */
+let SNAPSHOT = null;
+let ACTIVE_VIEW = 'all';
+let BLOCKED_SELECTION = new Set();       // task_id strings
+let OPTIMISTIC_REQUEUED = new Set();     // task_ids visually transitioned
+let POLL_INTERVAL = null;
+
+const $ = id => document.getElementById(id);
+
+/* ─── Toast system ─── */
+function toast(msg, type = 'success', duration = 4000) {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  const icon = type === 'success' ? '✅' : '❌';
+  el.innerHTML = `<span>${icon}</span><span style="flex:1">${msg}</span><button class="toast-dismiss" onclick="this.parentElement.remove()">✕</button>`;
+  $('toast-area').appendChild(el);
+  setTimeout(() => el.remove(), duration);
+}
+
+/* ─── Utilities ─── */
+function norm(v) { return (v || '').toString().toLowerCase(); }
+function itemType(t) { return t.work_item_type || t.item_type || 'task'; }
+function parentId(t) { return t.parent_id || null; }
+function esc(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function visibleByView(t) {
+  const s = t.status || '';
+  if (ACTIVE_VIEW === 'all') return true;
+  if (ACTIVE_VIEW === 'backlog') return ['inbox','planned','ready'].includes(s);
+  if (ACTIVE_VIEW === 'active') return s === 'running';
+  if (ACTIVE_VIEW === 'blocked') return s === 'blocked';
+  if (ACTIVE_VIEW === 'review') return s === 'review';
+  if (ACTIVE_VIEW === 'done') return s === 'done';
+  return true;
+}
+
+/* ─── General row (non-blocked views) ─── */
+function rowHtml(t) {
+  const type = itemType(t), status = t.status || 'unknown';
+  const artifacts = (t.artifacts || []).length;
+  return `<div class="row">
+    <span class="pill ${type}">${type}</span>
+    <span class="pill status-${status}">${status}</span>
+    <strong>${esc(t.title || t.id)}</strong>
+    <div class="meta">project=${esc(t.project||'-')} · repo=${esc(t.repo||'-')} · owner=${esc(t.owner||t.assigned_agent_role||'-')} · model=${esc(t.preferred_model||'-')} · priority=${esc(t.priority||'-')}</div>
+    <div class="small">id=<code>${esc(t.id||t._id)}</code>${artifacts ? ` · artifacts=${artifacts}` : ''}</div>
+  </div>`;
+}
+
+/* ─── Tree renderer ─── */
+function renderTree(tasks) {
+  const byParent = new Map();
+  for (const t of tasks) {
+    const pid = parentId(t) || '__root__';
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid).push(t);
+  }
+  for (const arr of byParent.values()) arr.sort((a,b) => (a.title||'').localeCompare(b.title||''));
+  function subtreeVisible(t) {
+    if (visibleByView(t)) return true;
+    return (byParent.get(t.id) || []).some(subtreeVisible);
+  }
+  function renderNode(t) {
+    const kids = (byParent.get(t.id) || []).filter(subtreeVisible);
+    const header = rowHtml(t);
+    return kids.length
+      ? `<details open><summary>${header}</summary>${kids.map(renderNode).join('')}</details>`
+      : `<div>${header}</div>`;
+  }
+  const roots = (byParent.get('__root__') || []).filter(subtreeVisible);
+  return roots.map(renderNode).join('') || '<div class="meta">No items</div>';
+}
+
+/* ─── Blocked card renderer ─── */
+function renderBlockedCard(t) {
+  const id = t.id || t._id;
+  const type = itemType(t);
+  const checked = BLOCKED_SELECTION.has(id) ? 'checked' : '';
+  const isOptimistic = OPTIMISTIC_REQUEUED.has(id);
+
+  // Reason: pull last 3 non-empty lines from agent_log
+  const logLines = ((t.agent_log || '') + (t.agent_notes || '')).trim().split('\n').filter(l => l.trim());
+  const lastLines = logLines.slice(-3).join('\n');
+  const hasReason = lastLines.length > 0;
+
+  const warningHtml = t.needs_human
+    ? `<div class="bcard-warn"><span class="warn-icon">⚠️</span><span>Reviewer blocked — no commit SHA recorded. Check the implementation log before requeuing; this task may fail again for the same reason.</span></div>`
+    : '';
+
+  const reasonHtml = hasReason
+    ? `<div class="bcard-reason">
+        <button class="reason-toggle" onclick="toggleReason(this)">▶ Show reason</button>
+        <div class="reason-body">${esc(lastLines)}</div>
+      </div>`
+    : '';
+
+  const optClass = isOptimistic ? ' optimistic' : '';
+
+  return `<div class="blocked-card${optClass}" id="bcard-${esc(id)}">
+    <div class="bcard-header">
+      <input type="checkbox" class="bcard-check" data-id="${esc(id)}" ${checked} onchange="toggleSelect(this)" />
+      <div class="bcard-meta">
+        <div>
+          <span class="pill ${type}">${type}</span>
+          <span class="pill status-blocked">blocked</span>
+          <span class="pill" style="background:#1e1e3a;color:var(--muted)">${esc(t.assigned_agent_role || t.owner || '—')}</span>
+        </div>
+        <div class="bcard-title">${esc(t.title || id)}</div>
+        <div class="bcard-sub">
+          <code>${esc(id)}</code>
+          ${t.repo ? ` · ${esc(t.repo)}` : ''}
+          ${t.project ? ` · ${esc(t.project)}` : ''}
+        </div>
+      </div>
+    </div>
+    ${warningHtml}
+    ${reasonHtml}
+    <div class="bcard-actions">
+      <div class="btn-split" style="position:relative">
+        <button class="btn-requeue" id="rbtn-${esc(id)}" onclick="requeueOne('${esc(id)}', this)">
+          <span class="spinner" id="rspinner-${esc(id)}"></span>
+          ↺ Requeue
+        </button>
+        <button class="btn-drop" onclick="toggleDrop('${esc(id)}')" title="More options">▾</button>
+        <div class="drop-menu" id="drop-${esc(id)}">
+          <button class="drop-item" onclick="requeueOne('${esc(id)}', document.getElementById('rbtn-${esc(id)}'))">↺ Requeue (keep history)</button>
+          <button class="drop-item" onclick="requeueFull('${esc(id)}')">🗑 Full reset &amp; retry</button>
+          <button class="drop-item" onclick="closeDrop('${esc(id)}')">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleReason(btn) {
+  const body = btn.nextElementSibling;
+  const open = body.classList.toggle('open');
+  btn.textContent = (open ? '▼' : '▶') + ' Show reason';
+}
+
+function toggleDrop(id) {
+  document.querySelectorAll('.drop-menu.open').forEach(d => { if (d.id !== `drop-${id}`) d.classList.remove('open'); });
+  document.getElementById(`drop-${id}`)?.classList.toggle('open');
+}
+function closeDrop(id) { document.getElementById(`drop-${id}`)?.classList.remove('open'); }
+document.addEventListener('click', e => {
+  if (!e.target.closest('.btn-split')) document.querySelectorAll('.drop-menu.open').forEach(d => d.classList.remove('open'));
+});
+
+/* ─── Requeue logic ─── */
+async function requeueOne(taskId, btn) {
+  closeDrop(taskId);
+  if (!taskId || (btn && btn.disabled)) return;
+  const spinner = document.getElementById(`rspinner-${taskId}`);
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.style.display = 'inline-block';
+
+  try {
+    const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'ready' }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+    OPTIMISTIC_REQUEUED.add(taskId);
+    const card = document.getElementById(`bcard-${taskId}`);
+    if (card) { card.classList.add('requeued'); card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+    toast(`✓ ${taskId} requeued (role: ${data.owner || '—'})`, 'success');
+  } catch(e) {
+    if (btn) btn.disabled = false;
+    toast(`Failed to requeue ${taskId}: ${e.message}`, 'error');
+  } finally {
+    if (spinner) spinner.style.display = 'none';
+  }
+}
+
+async function requeueFull(taskId) {
+  closeDrop(taskId);
+  // Full reset clears agent_log too — POST to transition then PATCH log
+  const btn = document.getElementById(`rbtn-${taskId}`);
+  const spinner = document.getElementById(`rspinner-${taskId}`);
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.style.display = 'inline-block';
+  try {
+    const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'ready', full_reset: true }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    OPTIMISTIC_REQUEUED.add(taskId);
+    const card = document.getElementById(`bcard-${taskId}`);
+    if (card) { card.classList.add('requeued'); card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+    toast(`✓ ${taskId} fully reset and requeued`, 'success');
+  } catch(e) {
+    if (btn) btn.disabled = false;
+    toast(`Reset failed for ${taskId}: ${e.message}`, 'error');
+  } finally {
+    if (spinner) spinner.style.display = 'none';
+  }
+}
+
+/* ─── Bulk requeue ─── */
+async function bulkRequeue() {
+  const ids = [...BLOCKED_SELECTION].filter(id => !OPTIMISTIC_REQUEUED.has(id));
+  if (!ids.length) return;
+  const btn = $('bulk-requeue-btn');
+  const sp = $('bulk-spinner');
+  btn.disabled = true;
+  sp.style.display = 'inline-block';
+
+  try {
+    const r = await fetch('/api/tasks/bulk-requeue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_ids: ids }),
+    });
+    const data = await r.json().catch(() => ({}));
+    const requeued = data.requeued || [];
+    const failed = data.failed || [];
+
+    for (const item of requeued) {
+      OPTIMISTIC_REQUEUED.add(item.task_id);
+      const card = document.getElementById(`bcard-${item.task_id}`);
+      if (card) { card.classList.add('requeued'); card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+    }
+    if (requeued.length) toast(`↺ ${requeued.length} task${requeued.length > 1 ? 's' : ''} requeued successfully`, 'success');
+    for (const f of failed) toast(`Failed: ${f.task_id} — ${f.error}`, 'error');
+
+    BLOCKED_SELECTION.clear();
+    updateBulkBar();
+  } catch(e) {
+    toast(`Bulk requeue error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    sp.style.display = 'none';
+  }
+}
+
+/* ─── Selection management ─── */
+function toggleSelect(cb) {
+  const id = cb.dataset.id;
+  cb.checked ? BLOCKED_SELECTION.add(id) : BLOCKED_SELECTION.delete(id);
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  const active = [...BLOCKED_SELECTION].filter(id => !OPTIMISTIC_REQUEUED.has(id));
+  const total = (SNAPSHOT?.tasks || []).filter(t => t.status === 'blocked' && !OPTIMISTIC_REQUEUED.has(t.id)).length;
+  const bar = $('bulk-bar');
+  const countEl = $('bulk-count');
+  const btn = $('bulk-requeue-btn');
+  const selAll = $('select-all');
+
+  if (ACTIVE_VIEW === 'blocked' && total > 0) {
+    bar.classList.add('visible');
+    countEl.innerHTML = `<strong>${active.length}</strong> of <strong>${total}</strong> selected`;
+    btn.disabled = active.length === 0;
+    selAll.indeterminate = active.length > 0 && active.length < total;
+    selAll.checked = active.length === total && total > 0;
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+$('select-all').addEventListener('change', function() {
+  const blocked = (SNAPSHOT?.tasks || []).filter(t => t.status === 'blocked' && !OPTIMISTIC_REQUEUED.has(t.id));
+  if (this.checked) blocked.forEach(t => BLOCKED_SELECTION.add(t.id));
+  else BLOCKED_SELECTION.clear();
+  renderBlockedList();
+  updateBulkBar();
+});
+
+$('bulk-requeue-btn').addEventListener('click', bulkRequeue);
+
+/* Shift+R shortcut */
+document.addEventListener('keydown', e => {
+  if (e.shiftKey && e.key === 'R' && ACTIVE_VIEW === 'blocked' && !e.target.matches('input,textarea,select')) {
+    e.preventDefault();
+    // Select all first
+    (SNAPSHOT?.tasks || []).filter(t => t.status === 'blocked' && !OPTIMISTIC_REQUEUED.has(t.id)).forEach(t => BLOCKED_SELECTION.add(t.id));
+    bulkRequeue();
+  }
+});
+
+/* ─── Render blocked list ─── */
+function renderBlockedList() {
+  const searchQ = norm($('q').value);
+  const projF = $('projectFilter').value;
+  const tasks = (SNAPSHOT?.tasks || []).filter(t => {
+    if (t.status !== 'blocked') return false;
+    const hay = `${t.title||''} ${t.id||''} ${t.repo||''} ${t.project||''}`.toLowerCase();
+    if (searchQ && !hay.includes(searchQ)) return false;
+    if (projF && (t.project || '') !== projF) return false;
+    return true;
+  });
+  if (!tasks.length) {
+    $('blocked-list').innerHTML = '<div class="meta" style="padding:12px 0">No blocked tasks 🎉</div>';
+    return;
+  }
+  $('blocked-list').innerHTML = tasks.map(renderBlockedCard).join('');
+  updateBulkBar();
+}
+
+/* ─── Badge updater ─── */
+function updateBlockedBadge() {
+  const count = (SNAPSHOT?.tasks || []).filter(t => t.status === 'blocked' && !OPTIMISTIC_REQUEUED.has(t.id)).length;
+  const badge = $('blocked-badge');
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = 'inline-block';
+    badge.classList.add('pulse');
+  } else {
+    badge.style.display = 'none';
+    badge.classList.remove('pulse');
+  }
+}
+
+/* ─── Filters ─── */
+function applyFilters() {
+  if (!SNAPSHOT) return;
+  const q = norm($('q').value), pf = $('projectFilter').value, sf = $('statusFilter').value;
+  let tasks = (SNAPSHOT.tasks || []).filter(t => {
+    const hay = `${t.title||''} ${t.id||''} ${t.repo||''} ${t.project||''}`.toLowerCase();
+    if (q && !hay.includes(q)) return false;
+    if (pf && (t.project||'') !== pf) return false;
+    if (sf && (t.status||'') !== sf) return false;
+    return true;
+  });
+
+  $('list-title').textContent = ACTIVE_VIEW === 'blocked' ? 'Blocked Items' : 'Backlog / Work Items';
+
+  if (ACTIVE_VIEW === 'blocked') {
+    $('blocked-list').style.display = 'block';
+    $('tree').style.display = 'none';
+    renderBlockedList();
+    $('bulk-bar').classList.add('visible');
+  } else {
+    $('blocked-list').style.display = 'none';
+    $('tree').style.display = 'block';
+    $('bulk-bar').classList.remove('visible');
+    $('tree').innerHTML = renderTree(tasks);
+  }
+  updateBlockedBadge();
+}
+
+/* ─── Sidebar helpers ─── */
+function renderList(el, items, fn) {
+  el.innerHTML = items.slice(0,12).map(fn).join('') || '<div class="meta">None</div>';
+}
+
+function workerHtml(w) {
+  return `<div class="worker-chip">
+    <div class="wname">${esc(w.name)}</div>
+    <div class="wrole">
+      <span class="pill status-${esc(w.status||'idle')}">${esc(w.status||'idle')}</span>
+      ${esc(w.role||'')}
+    </div>
+    <div class="small">task=${esc(w.current_task_id||'—')}</div>
+  </div>`;
+}
+
+/* ─── Data load ─── */
+function loadSnapshot() {
+  fetch('/api/snapshot').then(r => r.json()).then(data => {
+    SNAPSHOT = data;
+
+    // Populate project filter (preserve current selection)
+    const pf = $('projectFilter');
+    const cur = pf.value;
+    while (pf.options.length > 1) pf.remove(1);
+    const projects = [...new Set((data.tasks||[]).map(t => t.project).filter(Boolean))].sort();
+    for (const p of projects) { const o = document.createElement('option'); o.value = p; o.textContent = p; pf.appendChild(o); }
+    if (cur) pf.value = cur;
+
+    renderList($('workers'), data.workers||[], workerHtml);
+    renderList($('reviews'), data.reviews||[], r => `<div class="row"><span class="pill">${esc(r.verdict||'review')}</span><strong>${esc(r.task_id||r.review_id)}</strong><div class="meta">${esc(r.summary||'')}</div></div>`);
+    renderList($('failures'), data.failures||[], f => `<div class="row"><strong>${esc(f.task_id||f.id)}</strong><div class="meta">${esc(f.error_class||'')} · ${esc(f.summary||'')}</div></div>`);
+    renderList($('provenance'), data.provenance||[], p => `<div class="row"><strong>${esc(p.task_id||p.id)}</strong><div class="meta">role=${esc(p.agent_role||'—')} · verdict=${esc(p.review_verdict||'—')}</div></div>`);
+
+    applyFilters();
+  }).catch(e => console.warn('snapshot error', e));
+}
+
+/* ─── Wire tabs + inputs ─── */
+document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  ACTIVE_VIEW = tab.dataset.view;
+  applyFilters();
+}));
+$('q').addEventListener('input', applyFilters);
+$('projectFilter').addEventListener('change', applyFilters);
+$('statusFilter').addEventListener('change', applyFilters);
+
+/* ─── Boot + polling ─── */
+loadSnapshot();
+POLL_INTERVAL = setInterval(loadSnapshot, 10000);
 </script>
 </body>
 </html>

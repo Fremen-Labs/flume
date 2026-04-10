@@ -12,6 +12,11 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+const (
+	seedMaxRetries    = 10
+	seedRetryInterval = 2 * time.Second
+)
+
 func esRequest(esURL, apiKey, endpoint, method string, payload interface{}) ([]byte, int, error) {
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(esURL, "/"), strings.TrimLeft(endpoint, "/"))
 
@@ -159,7 +164,22 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 // document at runtime to switch models without a restart.
 func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 	// Fetch existing document to avoid overwriting fields not supplied in this run.
-	existBody, status, _ := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "GET", nil)
+	// On macOS Docker Desktop the ES port-forward can have a brief lag after the
+	// healthcheck passes — retry until ES responds before giving up.
+	var existBody []byte
+	var status int
+	for attempt := 1; attempt <= seedMaxRetries; attempt++ {
+		var reqErr error
+		existBody, status, reqErr = esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "GET", nil)
+		if reqErr == nil {
+			break
+		}
+		log.Warn("[ELASTICSEARCH BOOTSTRAP] ES not yet reachable, retrying...",
+			"attempt", attempt, "max", seedMaxRetries, "error", reqErr)
+		if attempt < seedMaxRetries {
+			time.Sleep(seedRetryInterval)
+		}
+	}
 
 	existing := map[string]interface{}{}
 	if status == 200 && existBody != nil {
@@ -176,9 +196,7 @@ func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 	if provider == "" {
 		provider = "ollama"
 	}
-	if provider != "" {
-		existing["LLM_PROVIDER"] = provider
-	}
+	existing["LLM_PROVIDER"] = provider
 	if cfg.Model != "" {
 		existing["LLM_MODEL"] = cfg.Model
 	}
@@ -192,11 +210,19 @@ func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 		existing["LLM_BASE_URL"] = baseURL
 	}
 
-	_, _, err := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
-	if err != nil {
-		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to seed flume-llm-config", "error", err)
-		return err
+	// Retry the PUT as well in case the GET succeeded but a brief blip occurred.
+	for attempt := 1; attempt <= seedMaxRetries; attempt++ {
+		_, _, err := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
+		if err == nil {
+			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config",
+				"provider", provider, "model", cfg.Model, "attempt", attempt)
+			return nil
+		}
+		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to write flume-llm-config, retrying...",
+			"attempt", attempt, "max", seedMaxRetries, "error", err)
+		if attempt < seedMaxRetries {
+			time.Sleep(seedRetryInterval)
+		}
 	}
-	log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config", "provider", provider, "model", cfg.Model)
-	return nil
+	return fmt.Errorf("failed to seed flume-llm-config after %d attempts", seedMaxRetries)
 }

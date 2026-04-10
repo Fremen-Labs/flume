@@ -41,7 +41,7 @@ from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_t
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace  # noqa: E402
 
-ES_URL = os.environ.get('ES_URL', 'http://127.0.0.1:9200').rstrip('/')
+ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')

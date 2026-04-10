@@ -63,6 +63,79 @@ _DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == 
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
+
+
+def _seed_llm_config_from_env() -> None:
+    """
+    Fallback boot-time seed for flume-llm-config/singleton.
+
+    The CLI's SeedLLMConfig() runs on the host machine against localhost:9200
+    before the dashboard container starts. On macOS Docker Desktop the port-forward
+    can have a brief lag causing that write to timeout silently. This function
+    runs inside the container (where ES is always reachable via the Docker service
+    name) and writes LLM_MODEL / LLM_PROVIDER / LLM_BASE_URL from the container
+    env vars using doc_as_upsert — so it ONLY fills in missing fields and NEVER
+    overwrites a value the user already saved via the Settings UI.
+    """
+    import urllib.request, urllib.error
+    model = os.environ.get('LLM_MODEL', '').strip()
+    provider = os.environ.get('LLM_PROVIDER', '').strip()
+    base_url = os.environ.get('LLM_BASE_URL', '').strip()
+
+    if not model and not provider:
+        logger.debug('_seed_llm_config_from_env: no LLM_MODEL or LLM_PROVIDER in env — skipping')
+        return
+
+    # Build upsert payload only from non-empty env values
+    doc: dict = {}
+    if model:
+        doc['LLM_MODEL'] = model
+    if provider:
+        doc['LLM_PROVIDER'] = provider
+    if base_url:
+        doc['LLM_BASE_URL'] = base_url
+
+    # Use the update API with detect_noop=true so ES ignores no-op writes.
+    # doc_as_upsert creates the doc if absent; otherwise only merges missing fields
+    # because we explicitly do NOT overwrite here — we only supply missing values.
+    try:
+        es_url_local = OS_ENV_ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
+        url = f'{es_url_local}/flume-llm-config/_update/singleton'
+        headers: dict = {'Content-Type': 'application/json'}
+        api_key = os.environ.get('ES_API_KEY', '')
+        if api_key and 'bypass' not in api_key:
+            headers['Authorization'] = f'ApiKey {api_key}'
+
+        # Fetch first to check if values already set — never clobber user changes
+        get_req = urllib.request.Request(
+            f'{es_url_local}/flume-llm-config/_doc/singleton',
+            headers=headers, method='GET',
+        )
+        try:
+            with urllib.request.urlopen(get_req, timeout=5) as r:
+                import json as _json
+                existing_src = _json.loads(r.read()).get('_source', {})
+                # Remove fields already present in ES so we don't overwrite them
+                for k in list(doc.keys()):
+                    if existing_src.get(k):
+                        doc.pop(k, None)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                logger.warning(f'_seed_llm_config_from_env: GET failed ({e}) — proceeding with full upsert')
+        except Exception as e:
+            logger.warning(f'_seed_llm_config_from_env: GET error ({e}) — proceeding with full upsert')
+
+        if not doc:
+            logger.info('_seed_llm_config_from_env: all LLM fields already present in ES — nothing to seed')
+            return
+
+        body = json.dumps({'doc': doc, 'doc_as_upsert': True}).encode()
+        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as r:
+            logger.info(f'_seed_llm_config_from_env: seeded {list(doc.keys())} → flume-llm-config (model={model})')
+    except Exception as e:
+        logger.warning(f'_seed_llm_config_from_env: non-fatal failure — {e}')
+
 HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
 PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
@@ -2392,6 +2465,11 @@ async def lifespan(app: FastAPI):
 
     # AP-3 resolved: _migrate_legacy_projects_json() removed — migration is complete.
 
+    # Fallback LLM config seed: if the CLI's SeedLLMConfig write failed (e.g. due to
+    # macOS Docker Desktop port-forward lag), seed from the container's env vars.
+    # Uses doc_as_upsert so we never overwrite a value the user saved via the Settings UI.
+    _seed_llm_config_from_env()
+
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
 
@@ -3306,7 +3384,98 @@ def api_task_commits(task_id: str):
 
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
-    return {"success": True}
+    """
+    Transition a task to a new status.
+
+    Allowed user-initiated transitions:
+      - ready   → re-queues the task from the same role it blocked on
+      - planned → demotes back to planning phase
+      - inbox   → returns to the intake queue
+
+    History (agent_log, commit_sha, execution_thoughts) is preserved so
+    engineers can read why the task blocked before retrying.
+    """
+    _ALLOWED_USER_STATUSES = {'ready', 'planned', 'inbox'}
+    status = (payload.get('status') or '').strip().lower()
+    if status not in _ALLOWED_USER_STATUSES:
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'status must be one of {sorted(_ALLOWED_USER_STATUSES)}, got {status!r}'},
+        )
+
+    es_id, src = find_task_doc_by_logical_id(task_id)
+    if not es_id or src is None:
+        return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
+
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    # Restart from the same role that was assigned when the task blocked.
+    owner = src.get('owner') or src.get('assigned_agent_role')
+
+    doc = {
+        'status': status,
+        'queue_state': 'queued',
+        'active_worker': None,
+        'needs_human': False,
+        'updated_at': now,
+        'last_update': now,
+        'implementer_consecutive_llm_failures': 0,
+    }
+    if owner:
+        doc['owner'] = owner
+        doc['assigned_agent_role'] = owner
+
+    es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+    logger.info(f'task transition: {task_id} → {status} (role={owner})')
+    return {'success': True, 'task_id': task_id, 'status': status, 'owner': owner, '_id': es_id}
+
+
+@app.post("/api/tasks/bulk-requeue")
+def api_tasks_bulk_requeue(payload: dict):
+    """
+    Requeue up to 50 blocked tasks in one call.
+
+    Body:    { "task_ids": ["story-1", "feat-1", ...] }
+    Returns: { "requeued": [...], "failed": [...] }
+    """
+    _MAX_BULK = 50
+    task_ids = payload.get('task_ids') or []
+    if not isinstance(task_ids, list):
+        return JSONResponse(status_code=400, content={'error': 'task_ids must be a list'})
+    if len(task_ids) > _MAX_BULK:
+        return JSONResponse(status_code=400, content={'error': f'bulk limit is {_MAX_BULK} tasks per call'})
+
+    requeued, failed = [], []
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    for task_id in task_ids:
+        try:
+            es_id, src = find_task_doc_by_logical_id(str(task_id))
+            if not es_id or src is None:
+                failed.append({'task_id': task_id, 'error': 'not found'})
+                continue
+            owner = src.get('owner') or src.get('assigned_agent_role')
+            doc = {
+                'status': 'ready',
+                'queue_state': 'queued',
+                'active_worker': None,
+                'needs_human': False,
+                'updated_at': now,
+                'last_update': now,
+                'implementer_consecutive_llm_failures': 0,
+            }
+            if owner:
+                doc['owner'] = owner
+                doc['assigned_agent_role'] = owner
+            es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+            requeued.append({'task_id': task_id, 'owner': owner})
+        except Exception as exc:
+            logger.error(f'bulk-requeue: task {task_id} failed: {exc}')
+            failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+
+    logger.info(f'bulk-requeue: requeued={len(requeued)} failed={len(failed)}')
+    return {'requeued': requeued, 'failed': failed}
+
 
 
 from fastapi import Depends, Request, Header
