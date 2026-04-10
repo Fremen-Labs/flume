@@ -4,9 +4,18 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// escapeLabelValue escapes backslashes, double-quotes, and newlines in label values.
+func escapeLabelValue(s string) string {
+	s = strings.ReplaceAll(s, "\\", `\\`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\"", `\"`)
+	return s
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prometheus Metrics — Lightweight, zero-dependency Prometheus exporter.
@@ -229,6 +238,7 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 	if success {
 		successLabel = "true"
 	}
+	provider = escapeLabelValue(provider)
 	labels := `provider="` + provider + `",success="` + successLabel + `"`
 	m.RequestDuration.Observe(labels, duration.Seconds())
 
@@ -249,7 +259,9 @@ func (m *metricsRegistry) RecordRequest(provider string, success bool, duration 
 
 // RecordEnsemble records an ensemble execution.
 func (m *metricsRegistry) RecordEnsemble(model, taskType string, size int, bestScore int) {
-	labels := `model="` + model + `",task_type="` + taskType + `",size="` + strconv.Itoa(size) + `"`
+	modelEscaped := escapeLabelValue(model)
+	taskTypeEscaped := escapeLabelValue(taskType)
+	labels := `model="` + modelEscaped + `",task_type="` + taskTypeEscaped + `",size="` + strconv.Itoa(size) + `"`
 	m.EnsembleRequests.Inc(labels)
 	m.EnsembleScores.Observe("", float64(bestScore))
 
@@ -282,7 +294,8 @@ func (m *metricsRegistry) RecordVRAMPressure() {
 
 // SetActiveModel marks a model as active with a gauge value of 1.
 func (m *metricsRegistry) SetActiveModel(model string) {
-	m.ActiveModels.Set(`model="` + model + `"`, 1)
+	modelEscaped := escapeLabelValue(model)
+	m.ActiveModels.Set(`model="` + modelEscaped + `"`, 1)
 	Log().Debug("metrics: active model set",
 		slog.String("component", "metrics"),
 		slog.String("model", model),
@@ -379,15 +392,13 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 	buf = append(buf, " histogram\n"...)
 
 	for labels, data := range h.snapshot() {
-		prefix := name
+		var labelSuffix string
 		if labels != "" {
-			prefix = name + "{" + labels + "}"
+			labelSuffix = "{" + labels + "}"
 		}
 
 		// Buckets
-		var cumulative uint64
 		for i, bound := range h.buckets {
-			cumulative += data.bucketCounts[i]
 			buf = append(buf, name...)
 			buf = append(buf, "_bucket{"...)
 			if labels != "" {
@@ -397,7 +408,7 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 			buf = append(buf, `le="`...)
 			buf = strconv.AppendFloat(buf, bound, 'f', -1, 64)
 			buf = append(buf, `"} `...)
-			buf = strconv.AppendUint(buf, cumulative, 10)
+			buf = strconv.AppendUint(buf, data.bucketCounts[i], 10)
 			buf = append(buf, '\n')
 		}
 		// +Inf bucket
@@ -412,25 +423,16 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 		buf = append(buf, '\n')
 
 		// _sum and _count
-		_ = prefix // used for consistent naming
 		buf = append(buf, name...)
 		buf = append(buf, "_sum"...)
-		if labels != "" {
-			buf = append(buf, "{"...)
-			buf = append(buf, labels...)
-			buf = append(buf, "}"...)
-		}
+		buf = append(buf, labelSuffix...)
 		buf = append(buf, ' ')
 		buf = strconv.AppendFloat(buf, data.sum, 'f', 6, 64)
 		buf = append(buf, '\n')
 
 		buf = append(buf, name...)
 		buf = append(buf, "_count"...)
-		if labels != "" {
-			buf = append(buf, "{"...)
-			buf = append(buf, labels...)
-			buf = append(buf, "}"...)
-		}
+		buf = append(buf, labelSuffix...)
 		buf = append(buf, ' ')
 		buf = strconv.AppendUint(buf, data.count, 10)
 		buf = append(buf, '\n')
