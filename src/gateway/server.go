@@ -71,6 +71,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
+	s.mux.HandleFunc("GET /metrics", HandleMetrics())
 
 	// Inception Skills endpoints
 	s.mux.HandleFunc("POST /skills/execute/", skills.HandleSkillExecute(s.skills))
@@ -157,6 +158,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// ── Fix 1: resolve model/provider before choosing code path ───────────
 	_, provider, _ := s.config.ResolveModel(&req)
 
+	// Track active model for metrics
+	Metrics.SetActiveModel(req.Model)
+
 	// ── Fix 1 continued: acquire Ollama slot for /chat too ────────────────
 	if provider == ProviderOllama {
 		log.Info("awaiting ollama slot",
@@ -186,9 +190,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
+		Metrics.RecordRequest(string(provider), false, time.Since(start))
 		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
 		return
 	}
+
+	Metrics.RecordRequest(string(provider), true, time.Since(start))
 
 	log.Info("chat completed",
 		slog.Int("content_len", len(resp.Message.Content)),
@@ -238,6 +245,9 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	// Acquire Ollama concurrency slot (blocks until available)
 	// This prevents invisible queue buildup in Ollama's serial inference engine.
 	model, provider, _ := s.config.ResolveModel(&req)
+
+	// Track active model for metrics
+	Metrics.SetActiveModel(req.Model)
 	if provider == ProviderOllama {
 		log.Info("awaiting ollama slot",
 			slog.Int("active", s.ollamaSem.ActiveSlots()),
@@ -265,9 +275,12 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
+		Metrics.RecordRequest(string(provider), false, time.Since(start))
 		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
 		return
 	}
+
+	Metrics.RecordRequest(string(provider), true, time.Since(start))
 
 	// Apply guardrails: deduplicate, filter invalid tool calls
 	SanitizeToolResponse(resp)
