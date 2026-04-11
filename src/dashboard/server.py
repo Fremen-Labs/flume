@@ -4322,8 +4322,9 @@ def get_vault_token():
 async def get_system_telemetry():
     """Proxy metrics from Go Gateway and transform Prometheus text to JSON native dict."""
     try:
+        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
         async with httpx.AsyncClient() as client:
-            resp = await client.get("http://localhost:8766/metrics", timeout=2.0)
+            resp = await client.get(f"{gateway_url}/metrics", timeout=2.0)
             if resp.status_code != 200:
                 from fastapi import HTTPException
                 raise HTTPException(status_code=503, detail="Gateway metrics disabled or unreachable")
