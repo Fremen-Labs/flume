@@ -71,7 +71,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
-	s.mux.HandleFunc("GET /metrics", HandleMetrics())
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	// Inception Skills endpoints
 	s.mux.HandleFunc("POST /skills/execute/", skills.HandleSkillExecute(s.skills))
@@ -313,6 +313,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		},
 	}
 	s.writeJSON(w, http.StatusOK, metrics)
+}
+
+// handleMetrics gates the Prometheus metrics endpoint dynamically based on config.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.config.IsPrometheusEnabled() {
+		http.NotFound(w, r)
+		return
+	}
+	HandleMetrics()(w, r)
 }
 
 func (s *Server) handleLogLevel(w http.ResponseWriter, r *http.Request) {

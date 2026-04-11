@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,13 +57,14 @@ func parseModelFamily(model string) string {
 
 var (
 	buildVersion = "unknown"
+	buildCommit  = "unknown"
+	goVersion    = "unknown"
 	buildOnce    sync.Once
 )
 
-// getBuildVersion reads the `.version` file statically, caching the result.
-func getBuildVersion() string {
+// ensureBuildInfo reads version metadata statically, caching the result.
+func ensureBuildInfo() {
 	buildOnce.Do(func() {
-		// Start looking from cwd up to 3 directories.
 		for i := 0; i < 3; i++ {
 			prefix := strings.Repeat("../", i)
 			data, err := os.ReadFile(filepath.Join(prefix, ".version"))
@@ -71,8 +73,21 @@ func getBuildVersion() string {
 				break
 			}
 		}
+
+		goVersion = runtime.Version()
+
+		if info, ok := debug.ReadBuildInfo(); ok {
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" {
+					buildCommit = setting.Value
+					if len(buildCommit) > 7 {
+						buildCommit = buildCommit[:7]
+					}
+					break
+				}
+			}
+		}
 	})
-	return buildVersion
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -357,10 +372,15 @@ func HandleMetrics() http.HandlerFunc {
 		buf = append(buf, "# TYPE flume_up gauge\n"...)
 		buf = append(buf, "flume_up 1\n"...)
 
+		ensureBuildInfo()
 		buf = append(buf, "# HELP flume_build_info Build version information.\n"...)
 		buf = append(buf, "# TYPE flume_build_info gauge\n"...)
 		buf = append(buf, "flume_build_info{version=\""...)
-		buf = append(buf, getBuildVersion()...)
+		buf = append(buf, escapeLabelValue(buildVersion)...)
+		buf = append(buf, "\",commit=\""...)
+		buf = append(buf, escapeLabelValue(buildCommit)...)
+		buf = append(buf, "\",go_version=\""...)
+		buf = append(buf, escapeLabelValue(goVersion)...)
 		buf = append(buf, "\"} 1\n"...)
 
 		// ── Go Runtime Metrics ─────────────────────────────────────────
@@ -383,6 +403,12 @@ func HandleMetrics() http.HandlerFunc {
 		buf = append(buf, "# TYPE go_memstats_sys_bytes gauge\n"...)
 		buf = append(buf, "go_memstats_sys_bytes "...)
 		buf = strconv.AppendUint(buf, mem.Sys, 10)
+		buf = append(buf, '\n')
+
+		buf = append(buf, "# HELP go_gc_duration_seconds_sum A summary of the pause duration of garbage collection cycles.\n"...)
+		buf = append(buf, "# TYPE go_gc_duration_seconds_sum counter\n"...)
+		buf = append(buf, "go_gc_duration_seconds_sum "...)
+		buf = strconv.AppendFloat(buf, float64(mem.PauseTotalNs)/1e9, 'f', -1, 64)
 		buf = append(buf, '\n')
 
 		// ── flume_ensemble_requests_total ──────────────────────────────

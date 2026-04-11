@@ -62,6 +62,9 @@ func rewriteLoopbackForDocker(url string) string {
 type Config struct {
 	mu sync.RWMutex
 
+	// System settings (from flume-settings)
+	PrometheusEnabled bool
+
 	// Global LLM defaults (from flume-llm-config)
 	DefaultProvider string
 	DefaultModel    string
@@ -111,6 +114,7 @@ func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 		cacheTTL = 5 * time.Second
 	}
 	return &Config{
+		PrometheusEnabled: true,
 		AgentModels:     make(map[string]AgentModelConfig),
 		Credentials:     make(map[string]CredentialMeta),
 		cacheTTL:        cacheTTL,
@@ -150,6 +154,7 @@ func (c *Config) Refresh(ctx context.Context) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "config_refresh")()
 
+	c.loadSystemConfig(ctx, log)
 	c.loadGlobalConfig(ctx, log)
 	c.loadAgentModels(ctx, log)
 	c.loadCredentials(ctx, log)
@@ -247,6 +252,13 @@ func (c *Config) GetOllamaBaseURL() string {
 	return raw
 }
 
+// IsPrometheusEnabled safely reads the current Prometheus toggled state.
+func (c *Config) IsPrometheusEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.PrometheusEnabled
+}
+
 // ShouldThink returns whether thinking should be enabled for a request.
 func (c *Config) ShouldThink(req *ChatRequest) bool {
 	if req.Think {
@@ -324,6 +336,24 @@ func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 		c.FrontierFallbackModel = strings.TrimSpace(fallback)
 	} else if c.FrontierFallbackModel == "" {
 		c.FrontierFallbackModel = "gpt-4o"
+	}
+}
+
+func (c *Config) loadSystemConfig(ctx context.Context, log *slog.Logger) {
+	body, err := c.esGet(ctx, "/flume-settings/_doc/system")
+	if err != nil {
+		log.Debug("flume-settings system doc not found, using defaults", slog.String("error", err.Error()))
+		return
+	}
+	src, ok := extractSource(body)
+	if !ok {
+		return
+	}
+	
+	if enabled, ok := src["prometheus_enabled"].(bool); ok {
+		c.PrometheusEnabled = enabled
+	} else if enabledStr, ok := src["prometheus_enabled"].(string); ok {
+		c.PrometheusEnabled = strings.ToLower(enabledStr) == "true"
 	}
 }
 
