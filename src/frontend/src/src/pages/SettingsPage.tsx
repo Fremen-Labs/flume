@@ -27,6 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import type {
   LlmSettingsCatalogItem,
   LlmSettingsResponse,
@@ -44,6 +45,7 @@ interface SystemSettingsPayload {
   es_api_key: string;
   openbao_url: string;
   vault_token: string;
+  prometheus_enabled?: boolean;
 }
 
 async function fetchSystemSettings(): Promise<SystemSettingsPayload> {
@@ -1673,14 +1675,31 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3 pt-4">
+                <div className="space-y-4 pt-4 border-t border-border/40">
+                  <div>
+                    <Label>Observability</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Toggle system telemetry routing to the Prometheus /metrics endpoint.
+                    </p>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Switch
+                      checked={sysForm.prometheus_enabled ?? effectiveSys.prometheus_enabled ?? true}
+                      onCheckedChange={(v) => setSysForm(p => ({ ...p, prometheus_enabled: v }))}
+                    />
+                    <Label>Enable Prometheus Telemetry</Label>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-border/40">
                   <Button 
                     onClick={() => {
                       sysMutation.mutate({
                         es_url: effectiveSys.es_url ?? 'http://127.0.0.1:9200',
                         es_api_key: sysForm.es_api_key ?? (effectiveSys.es_api_key ?? ''),
                         openbao_url: effectiveSys.openbao_url ?? 'http://127.0.0.1:8200',
-                        vault_token: sysForm.vault_token ?? (effectiveSys.vault_token ?? '')
+                        vault_token: sysForm.vault_token ?? (effectiveSys.vault_token ?? ''),
+                        prometheus_enabled: sysForm.prometheus_enabled ?? effectiveSys.prometheus_enabled ?? true,
                       });
                     }} 
                     disabled={sysMutation.isPending}

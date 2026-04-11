@@ -4100,6 +4100,7 @@ class SystemSettingsRequest(BaseModel):
     es_api_key: str
     openbao_url: str
     vault_token: str
+    prometheus_enabled: bool
 
 @app.get("/api/settings/system")
 def get_system_settings():
@@ -4116,7 +4117,8 @@ def get_system_settings():
         "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
         "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
         "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
-        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else ""
+        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else "",
+        "prometheus_enabled": sys_conf.get('prometheus_enabled', True)
     }
 
 @app.put("/api/settings/system")
@@ -4135,6 +4137,8 @@ def update_system_settings(settings: SystemSettingsRequest):
         sys_conf['openbao_url'] = settings.openbao_url
         if settings.vault_token and settings.vault_token != "••••":
             sys_conf['vault_token'] = settings.vault_token
+            
+        sys_conf['prometheus_enabled'] = settings.prometheus_enabled
             
         es_post('flume-settings/_doc/system', sys_conf)
         return {"status": "ok"}
