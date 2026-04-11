@@ -201,6 +201,7 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
     headers = {'Content-Type': 'application/json'}
     if extra_headers:
         headers.update(extra_headers)
+
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),

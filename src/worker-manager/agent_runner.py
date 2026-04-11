@@ -973,7 +973,7 @@ def run_implementer(
             break
 
         done = False
-        for call in tool_calls:
+        for call in norm_calls:
             fn_name = call.get('function', {}).get('name', '')
             fn_args = call.get('function', {}).get('arguments', {})
             if isinstance(fn_args, str):
