@@ -23,9 +23,14 @@ type ChatRequest struct {
 }
 
 // Message represents a single chat message.
+// Fields beyond Role/Content carry OpenAI tool-calling metadata required by
+// Gemini and other providers for multi-turn tool conversations.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string                   `json:"role"`
+	Content    string                   `json:"content"`
+	ToolCalls  []map[string]interface{} `json:"tool_calls,omitempty"`
+	ToolCallID string                   `json:"tool_call_id,omitempty"`
+	Name       string                   `json:"name,omitempty"`
 }
 
 // Tool represents an OpenAI-format tool definition.
