@@ -1,30 +1,30 @@
-version: 0.1.55
+version: 0.1.56
 build:
-    createdAt: "2026-04-11T14:18:23Z"
+    createdAt: "2026-04-11T21:29:20Z"
     git:
         branch: main
-        commit: f82a4ca4ec4ae29a285bd05590af787dedb80a98
-        tag: v0.1.55
-        appCommit: f82a4ca4ec4ae29a285bd05590af787dedb80a98
+        commit: 97cc07e0d8c7b544189cc09cbf004a20dcda32c6
+        tag: v0.1.56
+        appCommit: 97cc07e0d8c7b544189cc09cbf004a20dcda32c6
     registry: your.azurecr.io
 sources:
     releaseFlow:
         repo: https://github.com/Fremen-Labs/flume
         branch: main
-        commit: f82a4ca4ec4ae29a285bd05590af787dedb80a98
-        tag: v0.1.55
+        commit: 97cc07e0d8c7b544189cc09cbf004a20dcda32c6
+        tag: v0.1.56
     app:
         repo: https://github.com/Fremen-Labs/flume
-        commit: f82a4ca4ec4ae29a285bd05590af787dedb80a98
+        commit: 97cc07e0d8c7b544189cc09cbf004a20dcda32c6
 images:
     api:
         repository: api
         type: directory
-        tag: 0.1.55
+        tag: 0.1.56
         path: .
         dockerfile: Dockerfile
         security:
-            sbom: security/sbom/api-0.1.55.spdx.json.zst
+            sbom: security/sbom/api-0.1.56.spdx.json.zst
             scan:
                 tool: trivy
-                resultFile: security/scans/api-0.1.55.trivy.json.zst
+                resultFile: security/scans/api-0.1.56.trivy.json.zst
