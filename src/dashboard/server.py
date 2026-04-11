@@ -4325,7 +4325,8 @@ async def get_system_telemetry():
         async with httpx.AsyncClient() as client:
             resp = await client.get("http://localhost:8766/metrics", timeout=2.0)
             if resp.status_code != 200:
-                return {}
+                from fastapi import HTTPException
+                raise HTTPException(status_code=503, detail="Gateway metrics disabled or unreachable")
             
             lines = resp.text.split('\n')
             results = {
@@ -4383,8 +4384,8 @@ async def get_system_telemetry():
             return results
     except Exception as e:
         logger.error({"event": "telemetry_fetch_failed", "error": str(e), "target": "Go_Gateway_Proxy"})
-        return {}
-
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Gateway telemetry unreachable")
 @app.get("/api/logs")
 def get_telemetry_logs():
     try:
