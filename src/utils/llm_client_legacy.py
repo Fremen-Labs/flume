@@ -367,6 +367,32 @@ def _ollama_chat_tools(messages, tools, model, temperature, max_tokens, base_url
 # OpenAI / OpenAI-compatible / Gemini
 # ---------------------------------------------------------------------------
 
+
+def _normalize_messages_for_openai(messages: list) -> list:
+    """Ensure tool_calls arguments are JSON strings, not dicts.
+
+    OpenAI and Gemini's OpenAI-compatible endpoints require
+    ``tool_calls[].function.arguments`` to be a JSON *string*. The Flume
+    agent loop stores them as parsed dicts after the first turn, which
+    causes HTTP 400 'Value is not a string' on the follow-up request.
+    """
+    import copy
+    out = []
+    for m in messages:
+        nm = dict(m)
+        if 'tool_calls' in nm and isinstance(nm['tool_calls'], list):
+            norm_calls = []
+            for tc in nm['tool_calls']:
+                tc = copy.deepcopy(tc)
+                fn = tc.get('function', {})
+                args = fn.get('arguments')
+                if args is not None and not isinstance(args, str):
+                    fn['arguments'] = json.dumps(args)
+                norm_calls.append(tc)
+            nm['tool_calls'] = norm_calls
+        out.append(nm)
+    return out
+
 def _openai_headers():
     key = (_api_key() or '').strip()
     if not key:
@@ -390,11 +416,14 @@ def _openai_chat(messages, model, temperature, max_tokens, provider=None, base_u
 
 def _openai_chat_tools(messages, tools, model, temperature, max_tokens, provider=None, base_url_override=None):
     url = _base_url(provider, base_url_override) + '/v1/chat/completions'
+    # Normalise messages: OpenAI/Gemini require tool_calls.function.arguments
+    # to be JSON strings, but Python may have them as dicts from prior turns.
+    norm_messages = _normalize_messages_for_openai(messages)
     data = _post(
         url,
         {
             'model': model,
-            'messages': messages,
+            'messages': norm_messages,
             'tools': tools,
             'temperature': temperature,
             'max_tokens': max_tokens,
