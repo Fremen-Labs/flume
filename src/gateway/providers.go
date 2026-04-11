@@ -300,9 +300,14 @@ func (r *ProviderRouter) openaiCompat(
 	}
 	url := strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
 
+	// Normalise messages for OpenAI-compatible APIs: tool_calls arguments
+	// must be JSON *strings*, not parsed objects.  The gateway may have
+	// received them as objects from Python on a follow-up turn.
+	normMsgs := normalizeMessagesForOpenAI(req.Messages)
+
 	payload := map[string]interface{}{
 		"model":       req.Model,
-		"messages":    req.Messages,
+		"messages":    normMsgs,
 		"temperature": req.Temperature,
 		"max_tokens":  req.MaxTokens,
 	}
@@ -339,7 +344,9 @@ func (r *ProviderRouter) openaiCompat(
 			fn, _ := tcMap["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
 			argsRaw := fn["arguments"]
-			// Arguments may be a JSON string or already parsed
+			// Parse string arguments into objects for the Python consumer.
+			// The normalizeMessagesForOpenAI function will re-stringify them
+			// if they flow back through the gateway on subsequent turns.
 			var args interface{}
 			if argsStr, ok := argsRaw.(string); ok {
 				if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
@@ -573,6 +580,66 @@ func (r *ProviderRouter) doPost(
 	}
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
+}
+
+// normalizeMessagesForOpenAI ensures that every message in the conversation
+// conforms to OpenAI / Gemini expectations:
+//   - assistant messages with tool_calls must have arguments as JSON *strings*
+//
+// The gateway parses arguments into Go objects internally; this function
+// re-stringifies them before the payload is forwarded to the provider.
+func normalizeMessagesForOpenAI(msgs []Message) []interface{} {
+	out := make([]interface{}, len(msgs))
+	for i, m := range msgs {
+		nm := map[string]interface{}{
+			"role":    m.Role,
+			"content": m.Content,
+		}
+		if m.ToolCallID != "" {
+			nm["tool_call_id"] = m.ToolCallID
+		}
+		if m.Name != "" {
+			nm["name"] = m.Name
+		}
+		if len(m.ToolCalls) > 0 {
+			normCalls := make([]interface{}, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				tc = deepCopyMap(tc)
+				if fn, ok := tc["function"].(map[string]interface{}); ok {
+					if args := fn["arguments"]; args != nil {
+						switch v := args.(type) {
+						case string:
+							// Already a string — leave as-is.
+						default:
+							// Object/array/number — re-stringify for the provider.
+							bs, err := json.Marshal(v)
+							if err == nil {
+								fn["arguments"] = string(bs)
+							}
+						}
+					}
+				}
+				normCalls[j] = tc
+			}
+			nm["tool_calls"] = normCalls
+		}
+		out[i] = nm
+	}
+	return out
+}
+
+// deepCopyMap creates a shallow copy of a map so mutations don't affect the
+// original request message.
+func deepCopyMap(src map[string]interface{}) map[string]interface{} {
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		if sub, ok := v.(map[string]interface{}); ok {
+			dst[k] = deepCopyMap(sub)
+		} else {
+			dst[k] = v
+		}
+	}
+	return dst
 }
 
 // messagesToSlice is a no-op type assertion helper —  Message slice is
