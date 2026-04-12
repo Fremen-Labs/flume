@@ -145,6 +145,9 @@ func ValidateToolMessages(messages []Message) error {
 		switch m.Role {
 		case "tool":
 			if strings.TrimSpace(m.ToolCallID) == "" {
+				Log().Warn("rejected tool message with empty tool_call_id",
+					slog.Int("message_index", i),
+				)
 				return fmt.Errorf(
 					"message[%d] has role \"tool\" but tool_call_id is empty — "+
 						"every tool result must reference the originating tool_call_id",
@@ -155,6 +158,10 @@ func ValidateToolMessages(messages []Message) error {
 			for j, tc := range m.ToolCalls {
 				id, _ := tc["id"].(string)
 				if strings.TrimSpace(id) == "" {
+					Log().Warn("rejected assistant tool_call with missing id",
+						slog.Int("message_index", i),
+						slog.Int("tool_call_index", j),
+					)
 					return fmt.Errorf(
 						"message[%d].tool_calls[%d] has no \"id\" field — "+
 							"OpenAI-compatible APIs require each tool_call to carry a unique id",

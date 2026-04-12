@@ -660,6 +660,7 @@ func messagesToSlice(msgs []Message) []Message {
 func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
 	var system string
 	var out []interface{}
+	var toolResultCount, toolUseCount int
 
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
@@ -682,6 +683,7 @@ func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
 					"tool_use_id": msgs[i].ToolCallID,
 					"content":     msgs[i].Content,
 				})
+				toolResultCount++
 				i++
 			}
 			i-- // back up — the outer for-loop will increment
@@ -718,6 +720,7 @@ func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
 						"name":  name,
 						"input": args,
 					})
+					toolUseCount++
 				}
 				out = append(out, map[string]interface{}{
 					"role":    "assistant",
@@ -737,6 +740,16 @@ func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
 				"content": m.Content,
 			})
 		}
+	}
+
+	if toolResultCount > 0 || toolUseCount > 0 {
+		Log().Debug("normalized messages for anthropic",
+			slog.Int("input_messages", len(msgs)),
+			slog.Int("output_messages", len(out)),
+			slog.Int("tool_results", toolResultCount),
+			slog.Int("tool_use_blocks", toolUseCount),
+			slog.Bool("has_system", system != ""),
+		)
 	}
 
 	return system, out
