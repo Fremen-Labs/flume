@@ -341,6 +341,8 @@ func (r *ProviderRouter) openaiCompat(
 	if tcs, ok := choiceMsg["tool_calls"].([]interface{}); ok {
 		for _, tc := range tcs {
 			tcMap, _ := tc.(map[string]interface{})
+			tcID, _ := tcMap["id"].(string)
+			tcType, _ := tcMap["type"].(string)
 			fn, _ := tcMap["function"].(map[string]interface{})
 			name, _ := fn["name"].(string)
 			argsRaw := fn["arguments"]
@@ -356,6 +358,8 @@ func (r *ProviderRouter) openaiCompat(
 				args = argsRaw
 			}
 			toolCalls = append(toolCalls, ToolCall{
+				ID:       tcID,
+				Type:     tcType,
 				Function: ToolCallFunction{Name: name, Arguments: args},
 			})
 		}
@@ -397,16 +401,10 @@ func (r *ProviderRouter) anthropic(
 ) (*ChatResponse, error) {
 	defer LogDuration(ctx, "anthropic_chat")()
 
-	// Separate system from messages (Anthropic uses a top-level system field)
-	var system string
-	var messages []map[string]string
-	for _, m := range req.Messages {
-		if m.Role == "system" {
-			system = m.Content
-		} else {
-			messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
-		}
-	}
+	// Translate OpenAI-format messages into Anthropic's Messages API format.
+	// This handles role:"tool" → role:"user" with tool_result blocks, and
+	// role:"assistant" with tool_calls → content blocks with tool_use entries.
+	system, messages := normalizeMessagesForAnthropic(req.Messages)
 
 	payload := map[string]interface{}{
 		"model":       req.Model,
@@ -436,7 +434,8 @@ func (r *ProviderRouter) anthropic(
 		return nil, err
 	}
 
-	// Parse Anthropic response
+	// Parse Anthropic response — capture tool_use IDs so the Python side
+	// can reference them on follow-up turns via tool_call_id.
 	var content string
 	var toolCalls []ToolCall
 	contentBlocks, _ := data["content"].([]interface{})
@@ -448,8 +447,11 @@ func (r *ProviderRouter) anthropic(
 			content, _ = b["text"].(string)
 		case "tool_use":
 			name, _ := b["name"].(string)
+			id, _ := b["id"].(string)
 			args := b["input"]
 			toolCalls = append(toolCalls, ToolCall{
+				ID:       id,
+				Type:     "function",
 				Function: ToolCallFunction{Name: name, Arguments: args},
 			})
 		}
@@ -646,4 +648,96 @@ func deepCopyMap(src map[string]interface{}) map[string]interface{} {
 // already the correct type for Ollama/internal use.
 func messagesToSlice(msgs []Message) []Message {
 	return msgs
+}
+
+// normalizeMessagesForAnthropic translates OpenAI-format messages into
+// Anthropic's Messages API format:
+//   - system messages are extracted to a top-level field (returned separately)
+//   - role:"tool" messages become role:"user" with tool_result content blocks
+//   - role:"assistant" messages with tool_calls become content blocks with tool_use entries
+//   - consecutive role:"tool" messages are merged into a single role:"user" message
+//     (Claude requires strict user/assistant alternation)
+func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
+	var system string
+	var out []interface{}
+
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+
+		switch m.Role {
+		case "system":
+			if system != "" {
+				system += "\n\n"
+			}
+			system += m.Content
+
+		case "tool":
+			// Collect all consecutive tool messages into one role:"user" message
+			// with multiple tool_result content blocks. Claude requires strict
+			// user/assistant alternation, so parallel tool results must be merged.
+			var results []interface{}
+			for i < len(msgs) && msgs[i].Role == "tool" {
+				results = append(results, map[string]interface{}{
+					"type":        "tool_result",
+					"tool_use_id": msgs[i].ToolCallID,
+					"content":     msgs[i].Content,
+				})
+				i++
+			}
+			i-- // back up — the outer for-loop will increment
+			out = append(out, map[string]interface{}{
+				"role":    "user",
+				"content": results,
+			})
+
+		case "assistant":
+			if len(m.ToolCalls) > 0 {
+				// Convert tool_calls to Claude's tool_use content blocks.
+				var blocks []interface{}
+				if m.Content != "" {
+					blocks = append(blocks, map[string]interface{}{
+						"type": "text",
+						"text": m.Content,
+					})
+				}
+				for _, tc := range m.ToolCalls {
+					id, _ := tc["id"].(string)
+					fn, _ := tc["function"].(map[string]interface{})
+					name, _ := fn["name"].(string)
+					args := fn["arguments"]
+					// Claude expects input as an object, not a JSON string.
+					if argsStr, ok := args.(string); ok {
+						var parsed interface{}
+						if err := json.Unmarshal([]byte(argsStr), &parsed); err == nil {
+							args = parsed
+						}
+					}
+					blocks = append(blocks, map[string]interface{}{
+						"type":  "tool_use",
+						"id":    id,
+						"name":  name,
+						"input": args,
+					})
+				}
+				out = append(out, map[string]interface{}{
+					"role":    "assistant",
+					"content": blocks,
+				})
+			} else {
+				// Plain assistant message.
+				out = append(out, map[string]interface{}{
+					"role":    "assistant",
+					"content": m.Content,
+				})
+			}
+
+		case "user":
+			out = append(out, map[string]interface{}{
+				"role":    "user",
+				"content": m.Content,
+			})
+		}
+	}
+
+	return system, out
 }
