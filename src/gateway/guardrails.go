@@ -121,6 +121,56 @@ func ValidateChatRequest(req *ChatRequest) error {
 		req.Messages[i] = m
 	}
 
+	// ── Tool message integrity ──────────────────────────────────────────────
+	if err := ValidateToolMessages(req.Messages); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ValidateToolMessages checks that every role:"tool" message carries a
+// non-empty tool_call_id, and that every role:"assistant" message which
+// includes tool_calls has a matching "id" field on each call.
+//
+// This catches the exact class of bug that caused Gemini INVALID_ARGUMENT
+// errors: the Python agent_runner was iterating over raw tool_calls (no id)
+// instead of norm_calls (with synthetic id), sending empty tool_call_id on
+// every tool result message.
+//
+// This function can be called standalone (e.g. from tests or pre-send
+// assertions) or as part of ValidateChatRequest.
+func ValidateToolMessages(messages []Message) error {
+	for i, m := range messages {
+		switch m.Role {
+		case "tool":
+			if strings.TrimSpace(m.ToolCallID) == "" {
+				Log().Warn("rejected tool message with empty tool_call_id",
+					slog.Int("message_index", i),
+				)
+				return fmt.Errorf(
+					"message[%d] has role \"tool\" but tool_call_id is empty — "+
+						"every tool result must reference the originating tool_call_id",
+					i,
+				)
+			}
+		case "assistant":
+			for j, tc := range m.ToolCalls {
+				id, _ := tc["id"].(string)
+				if strings.TrimSpace(id) == "" {
+					Log().Warn("rejected assistant tool_call with missing id",
+						slog.Int("message_index", i),
+						slog.Int("tool_call_index", j),
+					)
+					return fmt.Errorf(
+						"message[%d].tool_calls[%d] has no \"id\" field — "+
+							"OpenAI-compatible APIs require each tool_call to carry a unique id",
+						i, j,
+					)
+				}
+			}
+		}
+	}
 	return nil
 }
 // DeduplicateToolCalls removes duplicate tool calls based on function name +

@@ -62,6 +62,8 @@ type ResponseMessage struct {
 
 // ToolCall represents a single function invocation from the model.
 type ToolCall struct {
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
 	Function ToolCallFunction `json:"function"`
 }
 
