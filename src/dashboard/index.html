@@ -276,6 +276,7 @@
     <div class="tab" data-view="review">Review</div>
     <div class="tab" data-view="done">Done</div>
     <div class="tab" data-view="settings">Settings</div>
+    <div class="tab" data-view="skills">Skills</div>
   </div>
 
   <!-- Main grid -->
@@ -300,6 +301,17 @@
             DEBUG MODE
           </div>
         </div>
+      </div>
+
+      <!-- Skills view -->
+      <div id="skills-view" style="display:none; padding: 20px 0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+           <h3 style="font-size: 15px; margin: 0; color: var(--muted);">Compiled Skills Registry</h3>
+           <button class="btn-bulk" onclick="compileSkills()" id="btn-compile">
+             <span id="spin-compile" class="spinner"></span> ⚙ Compile &amp; Reload
+           </button>
+        </div>
+        <div id="skills-list"></div>
       </div>
     </div>
 
@@ -723,12 +735,13 @@ function applyFilters() {
     return true;
   });
 
-  $('list-title').textContent = ACTIVE_VIEW === 'blocked' ? 'Blocked Items' : (ACTIVE_VIEW === 'settings' ? 'Settings' : 'Backlog / Work Items');
+  $('list-title').textContent = ACTIVE_VIEW === 'blocked' ? 'Blocked Items' : (ACTIVE_VIEW === 'settings' ? 'Settings' : (ACTIVE_VIEW === 'skills' ? 'Inception Skills' : 'Backlog / Work Items'));
   
   // Hide all list-related panels first
   $('blocked-list').style.display = 'none';
   $('tree').style.display = 'none';
   $('settings-view').style.display = 'none';
+  $('skills-view').style.display = 'none';
   $('bulk-bar').classList.remove('visible');
 
   if (ACTIVE_VIEW === 'blocked') {
@@ -738,11 +751,57 @@ function applyFilters() {
   } else if (ACTIVE_VIEW === 'settings') {
     $('settings-view').style.display = 'block';
     // No bulk bar in settings
+  } else if (ACTIVE_VIEW === 'skills') {
+    $('skills-view').style.display = 'block';
+    loadSkills();
   } else {
     $('tree').style.display = 'block';
     $('tree').innerHTML = renderTree(tasks);
   }
   updateBlockedBadge();
+}
+
+async function loadSkills() {
+  $('skills-list').innerHTML = '<div class="meta">Loading skills...</div>';
+  try {
+    const res = await fetch('/api/skills').then(r => r.json());
+    if (res.error || !res.skills) {
+       $('skills-list').innerHTML = `<div class="bcard-warn"><span class="warn-icon">⚠️</span><span>Gateway Unreachable: ${esc(res.error || 'Unknown error')}</span></div>`;
+       return;
+    }
+    const html = (res.skills || []).map(s => {
+      const isFull = s.inception === 'full';
+      return `<div class="row" style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <span class="pill ${isFull ? 'story' : 'task'}">${esc(s.inception)}</span>
+          <strong>${esc(s.name)}</strong> <span class="meta">(v${esc(s.version)})</span>
+          <div class="small" style="margin-top:6px;">Ensemble: ${s.ensemble_size} · Creativity: ${s.creativity_level}</div>
+        </div>
+        <div class="meta" style="text-align:right">
+           <code style="background:var(--surface2);padding:4px 6px;border-radius:4px;">${esc(s.source_path)}</code>
+        </div>
+      </div>`;
+    }).join("");
+    $('skills-list').innerHTML = html || '<div class="meta">No skills found</div>';
+  } catch(e) {
+    $('skills-list').innerHTML = `<div class="meta">Error loading skills: ${e.message}</div>`;
+  }
+}
+
+async function compileSkills() {
+  const btn = $('btn-compile'), sp = $('spin-compile');
+  btn.disabled = true; sp.style.display = 'inline-block';
+  try {
+    const r = await fetch('/api/skills/compile', { method: 'POST' });
+    const data = await r.json();
+    if (data.status === 'ok') {
+       toast(data.message, 'success', 8000);
+       loadSkills();
+    } else {
+       toast(data.message, 'error', 10000);
+    }
+  } catch(e) { toast('Error compiling: ' + e.message, 'error'); }
+  finally { btn.disabled = false; sp.style.display = 'none'; }
 }
 
 /* ─── Sidebar helpers ─── */

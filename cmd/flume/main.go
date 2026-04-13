@@ -10,6 +10,7 @@ import (
 	"github.com/Fremen-Labs/flume/cmd/flume/commands"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/Fremen-Labs/flume/src/gateway"
+	_ "github.com/Fremen-Labs/flume/src/gateway/skills/generated"
 	"github.com/spf13/cobra"
 )
 
