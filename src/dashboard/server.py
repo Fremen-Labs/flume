@@ -692,8 +692,22 @@ RULES:
   }
 - When the user asks to add, remove, or modify items, return the full updated plan.
 - Use short, descriptive IDs (epic-1, feat-1, story-1, task-1, etc.).
-- Be thorough: break work into granular, implementable tasks.
-- Only output the JSON object, nothing before or after it.\
+- Only output the JSON object, nothing before or after it.
+
+COMPLEXITY-PROPORTIONAL PLANNING (critical):
+- Match task granularity to ACTUAL complexity. Do NOT over-decompose simple work.
+- TRIVIAL changes (update a URL, fix a typo, change a config value, swap a constant):
+  produce 1-2 tasks MAXIMUM. One task for the change, optionally one for verification.
+- SINGLE-COMPONENT changes (add a feature to one module, update one API endpoint):
+  produce 3-5 tasks.
+- CROSS-CUTTING changes (new API + UI + database + tests): use full decomposition.
+- NEVER create separate tasks for "locate the file" and "make the change" — the
+  implementer agent has AST search and file-read tools built in.
+- NEVER create a task that assumes an artifact exists without evidence (e.g.,
+  "replace the SVG icon" when no SVG was mentioned by the user).
+- Combine all verification steps (lint, test, visual check) into ONE task unless
+  the project has distinct test suites requiring separate execution.
+- A single-file edit should NEVER produce more than 3 tasks total.\
 """
 
 
