@@ -66,9 +66,11 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 - **[Zero-Cost Local Inference Setup](./docs/walkthroughs/local-inference.md)**: Bypass OpenAI completely and run open-weight models (via Exo / Ollama) through the `host.docker.internal` bridge smoothly.
 - **[Zero-LLM Meta-Critic CI/CD Pipeline](./docs/walkthroughs/meta-critic-pipeline.md)**: Secure your repository with our mathematically exact automated garbage-collected code linter securely.
 - **[Elastro Code Graph Indexing](./docs/walkthroughs/elastro-code-graph.md)**: Replace flawed token-RAG with AST semantic maps natively parsing variable dependencies locally.
+- **[Inception Skills Integration](./docs/walkthroughs/inception-skills.md)**: Construct deterministic, natively compiled Golang skill handlers leveraging localized Elastic Context RAG nodes without parsing latency.
 
 ### 📊 Observability & Metrics
 *How to monitor real-time gateway performance, VRAM constraints, and fallback frequency.*
+- **[Advanced Telemetry Uplink](./docs/operations/observability-telemetry.md)**: Guide on configuring the zero-dependency Prometheus `GET /metrics` backend and parsing the React-based visual dashboard arrays.
 - The Flume gateway exposes a zero-dependency **Prometheus Text Exposition Endpoint natively at `GET /metrics`** (port `8766` by default or internal via Docker).
 - **Core Insights:** Tracks `flume_ensemble_requests_total`, `flume_escalation_total`, `flume_ensemble_score_histogram`, and internal Go heuristics (`go_goroutines`, `go_memstats_alloc_bytes`).
 - Easily ingested natively by `Metricbeat` or raw Prometheus instances. Example Grafana queries:
@@ -81,3 +83,4 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 - **[CLI Parameter Maps](./docs/reference/cli.md)**: Safely inspect exactly how `start`, `destroy`, and `doctor` flags behave cleanly.
 - **[The Container Matrix Architecture](./docs/reference/architecture.md)**: Understand the strict isolation paradigm splitting the execution logic from your raw SSD safely.
 - **[Settings & System Configuration](./docs/reference/settings-management.md)**: Deep dive into the Flume configuration GUI managing strict LLM limits, Vault keys, and GitHub/ADO tokens securely.
+- **[Provider Architecture Interface](./docs/reference/providers.md)**: Detailed mapping of internal gateway translation protocols parsing Anthropic nodes and Gemini execution invariants.

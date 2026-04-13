@@ -43,3 +43,14 @@ echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
 1. Execute `flume doctor` safely. This runs native `lipgloss` telemetry arrays to pinpoint exactly which UI process is eating the port.
 2. If `flume doctor` confirms the mismatch, forcefully wipe the container bridge natively: `flume destroy`
 3. Fallback (Native Bash): `sudo lsof -i :8765` and `kill -9 <PID>` to nuke the parent daemon out of existence.
+
+## 4. Telemetry UI Rendering Collisions (Black Screen)
+
+**Symptom**: Navigating to the **Advanced Telemetry** monitoring pane entirely locks the React interface rendering a persistent visual void (black screen) preventing manual intervention.
+
+**Root Cause**: When the underlying `/metrics` Go Gateway export layer natively disconnects or disables, returning a raw boolean zero-payload (`{}`), React hooks natively iterate through non-existent structural arrays without graceful fallback bounds inherently crashing the DOM map.
+
+**Resolution**:
+The underlying code strictly enforces proper `HTTP 503` proxies via the API translator securely bounding the React pipeline. Ensure your Flume instance is synchronized across orchestrators:
+1. Reload the Flume matrix gracefully executing `./flume restart` to resync the Gateway payload loops correctly. 
+2. If the UI still throws catastrophic render faults securely hard-refresh your browser clearing stale structural component caches seamlessly. 
