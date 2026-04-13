@@ -666,6 +666,7 @@ RULES:
 - "message" is your conversational reply to the user (markdown is fine).
 - "plan" is the current complete work breakdown with this exact structure:
   {
+    "complexityScore": <1-10>,
     "epics": [
       {
         "id": "epic-<n>",
@@ -1123,6 +1124,13 @@ def commit_plan(repo: str, plan: dict):
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     docs = []
 
+    # ── Adaptive LLM Routing ────────────────────────────────────────────────
+    complexity_score = plan.get('complexityScore', 5)
+    fast_model = os.environ.get('FLUME_FAST_MODEL') or 'o3-mini'
+    routing_model = fast_model if complexity_score <= 3 else None
+    if routing_model:
+        logger.info(f"Adaptive Routing: complexity={complexity_score}, routing tasks to {routing_model}")
+
     # ── Fast path: ≤2 tasks → skip hierarchy, create tasks directly ────────
     total_tasks = _count_plan_tasks(plan)
     if 0 < total_tasks <= 2:
@@ -1152,6 +1160,7 @@ def commit_plan(repo: str, plan: dict):
                             'last_update': now,
                             'needs_human': False,
                             'risk': 'medium',
+                            'preferred_model': routing_model,
                         }
                         docs.append(task_doc)
                         prev_task_id = task_id
@@ -1278,6 +1287,7 @@ def commit_plan(repo: str, plan: dict):
                         'last_update': now,
                         'needs_human': False,
                         'risk': 'medium',
+                        'preferred_model': routing_model,
                     }
                     docs.append(task_doc)
                     prev_task_id = task_id
