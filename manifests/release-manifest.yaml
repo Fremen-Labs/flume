@@ -1,30 +1,30 @@
-version: 0.1.61
+version: 0.1.62
 build:
-    createdAt: "2026-04-13T21:46:38Z"
+    createdAt: "2026-04-13T22:17:25Z"
     git:
         branch: main
-        commit: 20b5253bf754bbc1d564c2c0544696694dd8d53d
-        tag: v0.1.61
-        appCommit: 20b5253bf754bbc1d564c2c0544696694dd8d53d
+        commit: c7449e8e07d784e1f465e77d423bd1c103282e1e
+        tag: v0.1.62
+        appCommit: c7449e8e07d784e1f465e77d423bd1c103282e1e
     registry: your.azurecr.io
 sources:
     releaseFlow:
         repo: https://github.com/Fremen-Labs/flume
         branch: main
-        commit: 20b5253bf754bbc1d564c2c0544696694dd8d53d
-        tag: v0.1.61
+        commit: c7449e8e07d784e1f465e77d423bd1c103282e1e
+        tag: v0.1.62
     app:
         repo: https://github.com/Fremen-Labs/flume
-        commit: 20b5253bf754bbc1d564c2c0544696694dd8d53d
+        commit: c7449e8e07d784e1f465e77d423bd1c103282e1e
 images:
     api:
         repository: api
         type: directory
-        tag: 0.1.61
+        tag: 0.1.62
         path: .
         dockerfile: Dockerfile
         security:
-            sbom: security/sbom/api-0.1.61.spdx.json.zst
+            sbom: security/sbom/api-0.1.62.spdx.json.zst
             scan:
                 tool: trivy
-                resultFile: security/scans/api-0.1.61.trivy.json.zst
+                resultFile: security/scans/api-0.1.62.trivy.json.zst
