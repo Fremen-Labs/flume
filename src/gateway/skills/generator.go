@@ -229,10 +229,22 @@ var generatedHandlerTemplate = template.Must(template.New("handler").Parse(`// C
 package generated
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/Fremen-Labs/flume/src/gateway/skills"
+	"github.com/Fremen-Labs/flume/src/gateway/skillslog"
 )
+
+func init() {
+	skills.RegisterCompiledHandler("{{.Name}}", &{{.StructName}}Handler{})
+}
 
 // {{.StructName}}Handler implements the SkillHandler interface for the
 // "{{.Name}}" skill (v{{.Version}}).
@@ -240,11 +252,54 @@ type {{.StructName}}Handler struct{}
 
 // Execute runs the deterministic logic for the "{{.Name}}" skill.
 func (h *{{.StructName}}Handler) Execute(ctx context.Context, input json.RawMessage) (json.RawMessage, error) {
+	log := skillslog.WithContext(ctx).With(
+		slog.String("component", "compiled_skill"),
+		slog.String("skill", "{{.Name}}"),
+	)
+	log.Debug("executing natively compiled handler")
+
 	// ── Input validation ──────────────────────────────────────────────────
 	var inputData map[string]interface{}
 	if err := json.Unmarshal(input, &inputData); err != nil {
+		log.Warn("input validation failed", slog.String("error", err.Error()))
 		return nil, fmt.Errorf("invalid input JSON: %w", err)
 	}
+
+	// ── Elastro Context Retrieval ─────────────────────────────────────────
+	elastroContext := make([]interface{}, 0)
+	{{if .ContextReqs}}
+	esURL := os.Getenv("ES_URL")
+	if esURL == "" {
+		esURL = "http://localhost:9200"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	{{range .ContextReqs}}
+	// Index: {{.Index}}, Query: {{.Query}}
+	{
+		queryPayload := map[string]interface{}{
+			"query": map[string]interface{}{
+				"match": map[string]interface{}{
+					"content": "{{.Query}}",
+				},
+			},
+		}
+		queryBytes, _ := json.Marshal(queryPayload)
+		reqURL := fmt.Sprintf("%s/%s/_search", esURL, "{{.Index}}")
+		resp, err := client.Post(reqURL, "application/json", bytes.NewReader(queryBytes))
+		if err != nil {
+			log.Warn("elastro query failed", slog.String("index", "{{.Index}}"), slog.String("error", err.Error()))
+		} else {
+			defer resp.Body.Close()
+			var esResult map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&esResult); err == nil {
+				if hits, ok := esResult["hits"]; ok {
+					elastroContext = append(elastroContext, hits)
+				}
+			}
+		}
+	}
+	{{end}}
+	{{end}}
 
 	// ── Deterministic execution ───────────────────────────────────────────
 	result := map[string]interface{}{
@@ -253,16 +308,24 @@ func (h *{{.StructName}}Handler) Execute(ctx context.Context, input json.RawMess
 		"status":  "executed",
 		"mode":    "full-compiled",
 		"input":   inputData,
+		"context": elastroContext,
 	}
 
-	return json.Marshal(result)
+	out, err := json.Marshal(result)
+	if err != nil {
+		log.Error("failed to marshal compiled skill response", slog.String("error", err.Error()))
+		return nil, err
+	}
+	log.Info("natively compiled skill completed successfully", slog.Int("output_bytes", len(out)))
+	return out, nil
 }
 `))
 
 type templateData struct {
-	Name       string
-	Version    string
-	StructName string
+	Name        string
+	Version     string
+	StructName  string
+	ContextReqs []ContextReq
 }
 
 // CompileToFile generates a standalone Go handler file for a full-inception skill.
@@ -283,9 +346,10 @@ func CompileToFile(def *SkillDefinition, outputDir string) (string, error) {
 	}
 
 	data := templateData{
-		Name:       def.Name,
-		Version:    def.Version,
-		StructName: toGoStructName(def.Name),
+		Name:        def.Name,
+		Version:     def.Version,
+		StructName:  toGoStructName(def.Name),
+		ContextReqs: def.ContextReqs,
 	}
 
 	var buf bytes.Buffer

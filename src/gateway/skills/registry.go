@@ -25,6 +25,19 @@ type SkillHandler interface {
 	Execute(ctx context.Context, input json.RawMessage) (json.RawMessage, error)
 }
 
+var (
+	compiledHandlersMu sync.RWMutex
+	compiledHandlers   = make(map[string]SkillHandler)
+)
+
+// RegisterCompiledHandler is called by generated init() functions to inject
+// natively compiled skills into the router at boot.
+func RegisterCompiledHandler(name string, h SkillHandler) {
+	compiledHandlersMu.Lock()
+	defer compiledHandlersMu.Unlock()
+	compiledHandlers[name] = h
+}
+
 // RegisteredSkill wraps a parsed definition with its runtime handler.
 type RegisteredSkill struct {
 	Definition SkillDefinition
@@ -71,7 +84,25 @@ func (r *SkillRegistry) LoadAll(ctx context.Context) error {
 			continue
 		}
 
-		handler, err := GenerateHandler(ctx, def)
+		// First attempt to load generated compiled handlers directly.
+		var handler SkillHandler
+
+		if def.Inception == InceptionFull {
+			compiledHandlersMu.RLock()
+			ch, exists := compiledHandlers[def.Name]
+			compiledHandlersMu.RUnlock()
+
+			if exists {
+				log.Info("injected natively compiled handler", slog.String("name", def.Name))
+				handler = ch
+			} else {
+				// Dynamic runtime generation (fallback / hybrid / llm-only)
+				handler, err = GenerateHandler(ctx, def)
+			}
+		} else {
+			handler, err = GenerateHandler(ctx, def)
+		}
+
 		if err != nil {
 			log.Warn("failed to generate handler for skill",
 				slog.String("name", def.Name),
