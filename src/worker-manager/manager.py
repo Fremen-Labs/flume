@@ -294,6 +294,70 @@ def ready_items_for_role(role):
     return es_request(f'/{TASK_INDEX}/_search', body, method='GET').get('hits', {}).get('hits', [])
 
 
+def _normalize_title(title: str) -> str:
+    """Lowercase, strip whitespace and punctuation for dedup comparison."""
+    import re
+    return re.sub(r'[^a-z0-9 ]', '', (title or '').lower()).strip()
+
+
+def _is_duplicate_task(task_title: str, task_id: str) -> bool:
+    """Check if a task with the same normalized title is already running, in review, or done.
+
+    Returns True if a duplicate exists, meaning this task should be skipped
+    to prevent parallel agents from redundantly executing the same work.
+    """
+    norm = _normalize_title(task_title)
+    if not norm:
+        return False
+    try:
+        body = {
+            'size': 0,
+            'query': {'bool': {'must': [
+                {'bool': {'should': [
+                    {'term': {'status': 'running'}},
+                    {'term': {'status': 'review'}},
+                    {'term': {'status': 'done'}},
+                ], 'minimum_should_match': 1}},
+            ], 'must_not': [
+                {'term': {'_id': task_id}},
+            ]}},
+        }
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+        hits = res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
+        # Full scan: fetch titles of active tasks and compare normalized
+        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
+            body['size'] = 50
+            body['_source'] = ['title']
+            res2 = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+            for h in res2.get('hits', {}).get('hits', []):
+                existing_title = _normalize_title(h.get('_source', {}).get('title', ''))
+                if existing_title == norm:
+                    log(f"dedup: skipping task '{task_title}' — duplicate of {h['_id']} already in progress")
+                    return True
+        return False
+    except Exception as e:
+        log(f"dedup check error: {e}")
+        return False  # fail open — better to allow potential dups than block work
+
+
+def _dedup_skip_task(task_id: str, reason: str):
+    """Mark a task as skipped due to deduplication."""
+    try:
+        es_request(
+            f'/{TASK_INDEX}/_update/{task_id}?refresh=true',
+            {'doc': {
+                'status': 'done',
+                'queue_state': 'skipped',
+                'active_worker': None,
+                'updated_at': now_iso(),
+                'agent_log': [{'note': f'Skipped: {reason}', 'ts': now_iso()}],
+            }},
+            method='POST',
+        )
+    except Exception as e:
+        log(f"failed to mark task {task_id} as skipped: {e}")
+
+
 def try_atomic_claim(
     role: str,
     worker_name: str,
@@ -416,7 +480,15 @@ def try_atomic_claim(
             method='GET',
         ).get('hits', {}).get('hits', [])
         if hits:
-            return hits[0]
+            claimed = hits[0]
+            claimed_src = claimed.get('_source', {})
+            claimed_title = claimed_src.get('title', '')
+            claimed_doc_id = claimed.get('_id', '')
+            # Dedup gate: if an identical task is already active, release this claim
+            if claimed_title and _is_duplicate_task(claimed_title, claimed_doc_id):
+                _dedup_skip_task(claimed_doc_id, f'Duplicate of existing active task with title: {claimed_title}')
+                return None
+            return claimed
         return None
     except Exception as e:
         # Log but don't surface — callers treat None as "nothing available"

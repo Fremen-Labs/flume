@@ -91,7 +91,7 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 	switch provider {
 	case ProviderOllama:
 		resp, err = r.ollama(ctx, req, suppressThink, withTools)
-	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini:
+	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini, ProviderXAI, ProviderGrok:
 		resp, err = r.openaiCompat(ctx, req, provider, apiKey, withTools)
 	case ProviderAnthropic:
 		resp, err = r.anthropic(ctx, req, apiKey, withTools)
@@ -178,7 +178,7 @@ func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID str
 		return "sk-local-dummy-key", nil
 	}
 
-	// For managed providers (OpenAI, Anthropic, Gemini) an absent key means
+	// For managed providers (OpenAI, Anthropic, Gemini, xAI) an absent key means
 	// the request will fail with a provider 401. Fail early and loudly here
 	// rather than propagating an empty Authorization header.
 	log.Error("api_key: no key found for managed provider — request will be rejected",
@@ -294,6 +294,8 @@ func (r *ProviderRouter) openaiCompat(
 			baseURL = ProviderBaseURLs[ProviderGemini]
 		} else if provider == ProviderOpenAI {
 			baseURL = ProviderBaseURLs[ProviderOpenAI]
+		} else if provider == ProviderXAI || provider == ProviderGrok {
+			baseURL = ProviderBaseURLs[provider]
 		} else {
 			baseURL = os.Getenv("LLM_BASE_URL")
 		}

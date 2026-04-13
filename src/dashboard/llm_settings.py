@@ -159,6 +159,16 @@ PROVIDER_CATALOG = [
         ],
     },
     {
+        "id": "grok",
+        "name": "Grok (xAI)",
+        "baseUrlDefault": "https://api.x.ai/v1",
+        "authMode": "api_key",
+        "models": [
+            {"id": "grok-2", "name": "Grok 2"},
+            {"id": "grok-2-mini", "name": "Grok 2 Mini"},
+        ],
+    },
+    {
         "id": "mistral",
         "name": "Mistral AI",
         "baseUrlDefault": "https://api.mistral.ai",
@@ -790,7 +800,7 @@ def validate_llm_settings(payload: dict[str, Any], workspace_root: Path) -> tupl
         token_url = str(payload.get("oauthTokenUrl") or "https://auth.openai.com/oauth/token").strip()
         updates["OPENAI_OAUTH_TOKEN_URL"] = token_url
 
-    if provider in ("openai", "anthropic", "gemini", "xai", "mistral", "cohere") and not base_url:
+    if provider in ("openai", "anthropic", "gemini", "xai", "grok", "mistral", "cohere") and not base_url:
         updates["LLM_BASE_URL"] = ""  # Use provider default (llm_client uses _PROVIDER_BASE_URLS)
 
     return True, "", updates

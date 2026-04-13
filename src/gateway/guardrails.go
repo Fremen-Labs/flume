@@ -41,6 +41,8 @@ var allowedProviders = map[string]bool{
 	ProviderOpenAICompat: true,
 	ProviderAnthropic:    true,
 	ProviderGemini:       true,
+	ProviderXAI:          true,
+	ProviderGrok:         true,
 	"": true, // empty = resolved from config
 }
 

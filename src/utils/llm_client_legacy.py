@@ -4,11 +4,11 @@
 Provides a unified interface for multiple LLM providers. Configure via
 environment variables:
 
-  LLM_PROVIDER   : ollama | openai | openai_compatible | anthropic | gemini
+  LLM_PROVIDER   : ollama | openai | openai_compatible | anthropic | gemini | xai | grok
                    Default: ollama
   LLM_BASE_URL   : Base URL for 'ollama' (default: http://localhost:11434)
                    or full base URL for 'openai_compatible'
-  LLM_API_KEY    : API key for openai, anthropic, gemini, openai_compatible
+  LLM_API_KEY    : API key for openai, anthropic, gemini, openai_compatible, xai, grok
   LLM_MODEL      : Default model name (default: llama3.2)
 
 Public API:
@@ -28,6 +28,7 @@ Provider-specific notes:
   anthropic        : Uses api.anthropic.com/v1/messages. Set LLM_API_KEY.
   gemini           : Uses Gemini's OpenAI-compatible endpoint. Set LLM_API_KEY (AI Studio key);
                      uses Authorization: Bearer <key> per Google docs.
+  xai              : Uses https://api.x.ai/v1/chat/completions. Set LLM_API_KEY.
 """
 
 import json
@@ -62,6 +63,8 @@ _PROVIDER_BASE_URLS = {
     'openai': 'https://api.openai.com',
     'anthropic': 'https://api.anthropic.com',
     'gemini': 'https://generativelanguage.googleapis.com/v1beta/openai',
+    'xai': 'https://api.x.ai',
+    'grok': 'https://api.x.ai',
 }
 
 # Retired IDs on generativelanguage OpenAI-compat API → current stable names
@@ -398,8 +401,8 @@ def _openai_headers():
     key = (_api_key() or '').strip()
     if not key:
         provider = _provider()
-        if provider == 'openai':
-            raise RuntimeError('LLM_API_KEY is empty for public OpenAI provider.')
+        if provider in ('openai', 'xai', 'grok'):
+            raise RuntimeError(f'LLM_API_KEY is empty for managed provider {provider}.')
         key = 'sk-local-dummy-key'
     return {'Authorization': f'Bearer {key}'}
 

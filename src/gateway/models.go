@@ -161,6 +161,8 @@ const (
 	ProviderOpenAICompat = "openai_compatible"
 	ProviderAnthropic    = "anthropic"
 	ProviderGemini       = "gemini"
+	ProviderXAI          = "xai"
+	ProviderGrok         = "grok"
 )
 
 // ProviderBaseURLs are the default API base URLs for managed providers.
@@ -168,6 +170,8 @@ var ProviderBaseURLs = map[string]string{
 	ProviderOpenAI:    "https://api.openai.com",
 	ProviderAnthropic: "https://api.anthropic.com",
 	ProviderGemini:    "https://generativelanguage.googleapis.com/v1beta/openai",
+	ProviderXAI:       "https://api.x.ai",
+	ProviderGrok:      "https://api.x.ai",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

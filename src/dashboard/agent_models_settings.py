@@ -56,7 +56,7 @@ def _provider_is_configured_env(workspace_root: Path, provider_id: str, pairs: d
     if pid == "openai_compatible":
         return current == "openai_compatible" and bool(api_key) and bool(base_url)
 
-    if pid in ("anthropic", "gemini", "xai", "mistral", "cohere"):
+    if pid in ("anthropic", "gemini", "xai", "grok", "mistral", "cohere"):
         return current == pid and bool(api_key)
 
     return False
@@ -129,7 +129,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "providerId": current,
                 "configured": settings_ok,
                 "models": models,
-                "allowCustomModelId": current in ("ollama", "openai_compatible"),
+                "allowCustomModelId": current in ("ollama", "openai_compatible", "xai", "grok"),
                 "hint": None
                 if settings_ok
                 else "Set this provider and API key (or OAuth) under Settings → LLM.",
@@ -195,7 +195,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "configured": row_ok,
                 "keySuffix": ks,
                 "models": models,
-                "allowCustomModelId": pid in ("ollama", "openai_compatible"),
+                "allowCustomModelId": pid in ("ollama", "openai_compatible", "xai", "grok"),
                 "hint": hint,
             }
         )
@@ -247,7 +247,7 @@ def _custom_model_ok(provider_id: str, model_id: str) -> bool:
         return False
     if not re.match(r"^[\w.\-:/]+$", mid):
         return False
-    return provider_id in ("ollama", "openai_compatible")
+    return provider_id in ("ollama", "openai_compatible", "xai", "grok")
 
 
 def _role_model_allowed(groups: list[dict[str, Any]], cred_id: str, model: str) -> bool:

@@ -828,6 +828,71 @@ def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd
         raise e
 
 
+# ── Pre-flight phantom task detection ────────────────────────────────────
+# Patterns that suggest a task assumes specific artifacts exist.
+# Each entry: (keywords_in_title, file_extensions_to_check)
+_PHANTOM_ARTIFACT_PATTERNS = [
+    (['replace', 'svg'], ['.svg']),
+    (['replace', 'icon', 'asset'], ['.svg', '.png', '.ico']),
+    (['replace', 'image', 'asset'], ['.png', '.jpg', '.jpeg', '.webp']),
+    (['replace', 'png'], ['.png']),
+    (['swap', 'icon'], ['.svg', '.png', '.ico']),
+    (['swap', 'image'], ['.png', '.jpg', '.jpeg', '.webp']),
+    (['update', 'icon', 'asset'], ['.svg', '.png', '.ico']),
+]
+
+
+def _preflight_validate_task(
+    task: dict,
+    repo_path: Optional[str],
+    progress_fn=None,
+) -> Optional['AgentResult']:
+    """Detect phantom tasks that reference non-existent artifacts.
+
+    Returns an AgentResult to skip the task if validation fails,
+    or None if the task looks valid and should proceed normally.
+    """
+    if not repo_path:
+        return None
+    title = (task.get('title') or '').lower()
+    desc = (task.get('description') or task.get('objective') or '').lower()
+    combined = f"{title} {desc}"
+
+    for keywords, extensions in _PHANTOM_ARTIFACT_PATTERNS:
+        if all(kw in combined for kw in keywords):
+            # This task assumes specific artifacts exist — verify they do
+            repo = Path(repo_path)
+            found = False
+            for ext in extensions:
+                # Quick check: does at least one file with this extension exist?
+                try:
+                    result = subprocess.run(
+                        ['find', str(repo), '-name', f'*{ext}', '-type', 'f', '-maxdepth', '5'],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if result.stdout.strip():
+                        found = True
+                        break
+                except Exception:
+                    found = True  # fail open
+                    break
+            if not found:
+                reason = (
+                    f"Pre-flight validation: task assumes {'/'.join(extensions)} artifacts exist "
+                    f"but none were found in {repo_path}. Skipping phantom task."
+                )
+                if progress_fn:
+                    progress_fn(f'Skipping: {reason}')
+                logger.warning(reason)
+                return AgentResult(
+                    action='implementation_complete',
+                    summary=reason,
+                    artifacts=[],
+                    metadata={'source': 'preflight_skip', 'commit_sha': '', 'commit_message': ''},
+                )
+    return None
+
+
 def run_implementer(
     task: dict[str, Any],
     repo_path: Optional[str] = None,
@@ -886,6 +951,14 @@ def run_implementer(
             artifacts=[],
             metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
         )
+
+    # ── Pre-flight: detect phantom tasks before burning LLM tokens ─────────
+    # If the task title/description references specific file types (SVG, PNG, icon
+    # asset, etc.) that don't exist in the workspace, skip immediately rather than
+    # running 50+ shell commands searching for them.
+    _phantom_result = _preflight_validate_task(task, repo_path, _progress)
+    if _phantom_result is not None:
+        return _phantom_result
 
     # AST is always available — projects are cloned and AST-indexed before work begins.
     system_prompt += "\n\nCRITICAL CONTEXT: An Elastro AST index is available. You MUST use the `elastro_query_ast` tool to search for function names, component paths, or code structures BEFORE listing directories or reading files. This is dramatically faster than directory traversal. You may also use `grep` or `find` via `run_shell` for targeted file searches."

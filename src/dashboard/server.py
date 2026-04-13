@@ -516,7 +516,27 @@ def _planner_runtime_config() -> dict:
     if provider == 'ollama':
         base_url = resolve_effective_ollama_base_url(pairs).strip()
     else:
-        base_url = (pairs.get('LLM_BASE_URL') or os.environ.get('LLM_BASE_URL') or LLM_BASE_URL).strip()
+        # explicitly handle None to allow "" (empty string) to pass natively to llm_client
+        if pairs.get('LLM_BASE_URL') is not None:
+            base_url = str(pairs.get('LLM_BASE_URL')).strip()
+        elif os.environ.get('LLM_BASE_URL') is not None:
+            base_url = os.environ.get('LLM_BASE_URL').strip()
+        else:
+            base_url = ''
+        # When base_url is empty for a managed provider, resolve the provider's
+        # default URL from the catalog rather than falling back to localhost:11434.
+        if not base_url and provider != 'ollama':
+            from llm_settings import PROVIDER_CATALOG
+            for entry in PROVIDER_CATALOG:
+                if entry.get('id') == provider:
+                    base_url = (entry.get('baseUrlDefault') or '').rstrip('/')
+                    break
+            # Also check if 'grok' should map to 'xai' catalog entry
+            if not base_url and provider == 'grok':
+                for entry in PROVIDER_CATALOG:
+                    if entry.get('id') == 'xai':
+                        base_url = (entry.get('baseUrlDefault') or '').rstrip('/')
+                        break
     parsed = urlparse(base_url) if base_url else None
     host = parsed.netloc or parsed.path if parsed else ''
     cfg = {
@@ -595,12 +615,12 @@ def _test_planner_connection(status: dict) -> dict:
     url = base_url
     if provider == 'ollama':
         url = base_url + '/api/version'
-    elif provider in ('openai', 'openai_compatible', 'gemini'):
+    elif provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok'):
         url = base_url + '/v1/models'
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
     try:
-        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
+        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode(errors='ignore')
             status['connectionTestOk'] = True
@@ -672,8 +692,22 @@ RULES:
   }
 - When the user asks to add, remove, or modify items, return the full updated plan.
 - Use short, descriptive IDs (epic-1, feat-1, story-1, task-1, etc.).
-- Be thorough: break work into granular, implementable tasks.
-- Only output the JSON object, nothing before or after it.\
+- Only output the JSON object, nothing before or after it.
+
+COMPLEXITY-PROPORTIONAL PLANNING (critical):
+- Match task granularity to ACTUAL complexity. Do NOT over-decompose simple work.
+- TRIVIAL changes (update a URL, fix a typo, change a config value, swap a constant):
+  produce 1-2 tasks MAXIMUM. One task for the change, optionally one for verification.
+- SINGLE-COMPONENT changes (add a feature to one module, update one API endpoint):
+  produce 3-5 tasks.
+- CROSS-CUTTING changes (new API + UI + database + tests): use full decomposition.
+- NEVER create separate tasks for "locate the file" and "make the change" — the
+  implementer agent has AST search and file-read tools built in.
+- NEVER create a task that assumes an artifact exists without evidence (e.g.,
+  "replace the SVG icon" when no SVG was mentioned by the user).
+- Combine all verification steps (lint, test, visual check) into ONE task unless
+  the project has distinct test suites requiring separate execution.
+- A single-file edit should NEVER produce more than 3 tasks total.\
 """
 
 
