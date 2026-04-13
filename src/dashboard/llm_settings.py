@@ -159,6 +159,16 @@ PROVIDER_CATALOG = [
         ],
     },
     {
+        "id": "grok",
+        "name": "Grok (xAI)",
+        "baseUrlDefault": "https://api.x.ai/v1",
+        "authMode": "api_key",
+        "models": [
+            {"id": "grok-2", "name": "Grok 2"},
+            {"id": "grok-2-mini", "name": "Grok 2 Mini"},
+        ],
+    },
+    {
         "id": "mistral",
         "name": "Mistral AI",
         "baseUrlDefault": "https://api.mistral.ai",

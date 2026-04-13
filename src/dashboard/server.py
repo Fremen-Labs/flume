@@ -522,7 +522,21 @@ def _planner_runtime_config() -> dict:
         elif os.environ.get('LLM_BASE_URL') is not None:
             base_url = os.environ.get('LLM_BASE_URL').strip()
         else:
-            base_url = LLM_BASE_URL.strip()
+            base_url = ''
+        # When base_url is empty for a managed provider, resolve the provider's
+        # default URL from the catalog rather than falling back to localhost:11434.
+        if not base_url and provider != 'ollama':
+            from llm_settings import PROVIDER_CATALOG
+            for entry in PROVIDER_CATALOG:
+                if entry.get('id') == provider:
+                    base_url = (entry.get('baseUrlDefault') or '').rstrip('/')
+                    break
+            # Also check if 'grok' should map to 'xai' catalog entry
+            if not base_url and provider == 'grok':
+                for entry in PROVIDER_CATALOG:
+                    if entry.get('id') == 'xai':
+                        base_url = (entry.get('baseUrlDefault') or '').rstrip('/')
+                        break
     parsed = urlparse(base_url) if base_url else None
     host = parsed.netloc or parsed.path if parsed else ''
     cfg = {
