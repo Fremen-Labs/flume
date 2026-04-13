@@ -277,7 +277,7 @@ func TestResolveAPIKey_OllamaReturnsEmpty(t *testing.T) {
 // TestResolveAPIKey_ManagedProviderFailsClosed verifies that OpenAI/Anthropic/Gemini
 // return an error (and do NOT send an empty Authorization header) when no key is found.
 func TestResolveAPIKey_ManagedProviderFailsClosed(t *testing.T) {
-	managedProviders := []string{ProviderOpenAI, ProviderAnthropic, ProviderGemini}
+	managedProviders := []string{ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderXAI}
 	for _, p := range managedProviders {
 		t.Run(p, func(t *testing.T) {
 			config := NewConfig("", time.Minute)
