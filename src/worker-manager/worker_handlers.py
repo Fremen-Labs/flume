@@ -119,9 +119,33 @@ def fetch_task_doc(task_id):
     return None, None
 
 
+def emit_task_event(task_id: str, event_type: str, details: dict):
+    """Event-Sourced State Machine: Append an immutable event describing a task transition (CQRS OpenHands pattern)."""
+    # Sanitize details to prevent accidental token linkage
+    sanitized = {
+        k: v for k, v in details.items() 
+        if not k.lower().endswith(('token', 'key', 'secret', 'password'))
+    }
+    event_doc = {
+        'task_id': task_id,
+        'event_type': event_type,
+        'details': sanitized,
+        'timestamp': now_iso()
+    }
+    try:
+        es_request('/flume-task-events/_doc', event_doc, method='POST')
+        _handlers_logger.debug(f"Event Sourcing: Emitted {event_type} for task {task_id}")
+    except Exception as e:
+        _handlers_logger.error(f"Event Sourcing Failure: Could not emit event for task {task_id}: {e}")
+
+
 def update_task_doc(es_id, doc):
     doc['updated_at'] = now_iso()
     doc['last_update'] = now_iso()
+    
+    # Dual-Write CQRS Materialization: Emit immutable event before updating in-place Materialized View
+    emit_task_event(es_id, 'doc_update', doc)
+    
     es_request(f'/{TASK_INDEX}/_update/{es_id}', {'doc': doc}, method='POST')
 
 
