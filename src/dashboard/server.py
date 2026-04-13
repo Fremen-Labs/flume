@@ -1061,6 +1061,16 @@ def get_next_id_sequence(prefix: str) -> int:
     return max_n + 1
 
 
+def _count_plan_tasks(plan: dict) -> int:
+    """Count total leaf tasks across all epics/features/stories."""
+    total = 0
+    for epic in plan.get('epics') or []:
+        for feat in epic.get('features') or []:
+            for story in feat.get('stories') or []:
+                total += len(story.get('tasks') or [])
+    return total
+
+
 def commit_plan(repo: str, plan: dict):
     """
     Translate a plan tree (epics/features/stories/tasks) into TASK_SCHEMA docs
@@ -1068,10 +1078,58 @@ def commit_plan(repo: str, plan: dict):
 
     IDs are always freshly allocated by querying existing records, so numbers
     are never reused even after items are deleted.
+
+    FAST PATH: When the plan has ≤2 total tasks, skip the epic/feature/story
+    hierarchy entirely and create tasks directly as 'ready'. This eliminates
+    structural overhead for trivial changes (e.g., URL updates, typo fixes).
     """
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     docs = []
 
+    # ── Fast path: ≤2 tasks → skip hierarchy, create tasks directly ────────
+    total_tasks = _count_plan_tasks(plan)
+    if 0 < total_tasks <= 2:
+        task_seq = get_next_id_sequence('task')
+        prev_task_id = None
+        for epic in plan.get('epics') or []:
+            for feat in epic.get('features') or []:
+                for story in feat.get('stories') or []:
+                    ac = story.get('acceptanceCriteria') or []
+                    for task in story.get('tasks') or []:
+                        task_id = f'task-{task_seq}'
+                        task_seq += 1
+                        task_doc = {
+                            'id': task_id,
+                            'title': task.get('title') or '',
+                            'objective': epic.get('description') or story.get('title') or '',
+                            'repo': repo,
+                            'worktree': None,
+                            'item_type': 'task',
+                            'owner': 'implementer',
+                            'status': 'ready' if prev_task_id is None else 'planned',
+                            'priority': 'normal',
+                            'parent_id': None,
+                            'depends_on': [prev_task_id] if prev_task_id else [],
+                            'acceptance_criteria': ac,
+                            'artifacts': [],
+                            'last_update': now,
+                            'needs_human': False,
+                            'risk': 'medium',
+                        }
+                        docs.append(task_doc)
+                        prev_task_id = task_id
+        es_counter_set_hwm('task', task_seq - 1)
+        task_ids = [d['id'] for d in docs]
+        logger.info(
+            "commit_plan: FAST PATH — %d tasks created directly (no epic/feature/story hierarchy): %s",
+            len(docs), task_ids,
+        )
+        results = []
+        for d in docs:
+            results.append(es_upsert('agent-task-records', d['id'], d))
+        return docs, results
+
+    # ── Standard path: full epic/feature/story/task hierarchy ───────────────
     # Allocate monotonically-increasing sequence numbers for each item type.
     # These are fetched once before the loop so we don't make N round-trips.
     epic_seq = get_next_id_sequence('epic')
