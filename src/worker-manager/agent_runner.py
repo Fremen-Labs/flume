@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -842,6 +843,19 @@ _PHANTOM_ARTIFACT_PATTERNS = [
 ]
 
 
+def _extract_validation_symbols(text: str) -> list[str]:
+    """Extract likely file names and components/functions for AST validation."""
+    # Common file names with relevant extensions
+    files = re.findall(r'\b[\w\.\-]+\.(?:tsx|ts|js|jsx|py|go|html|css|md|json|yml|yaml)\b', text, re.IGNORECASE)
+    # PascalCase/CamelCase words (likely components, classes, or function names)
+    symbols = re.findall(r'\b[A-Z][a-z]+[A-Z][a-zA-Z]*\b', text)
+    
+    found = set([s.strip('.') for s in files] + symbols)
+    # Filter out common UI/design terms that might be capitalized but aren't specific AST symbols
+    ignore = {'API', 'URL', 'UI', 'UX', 'JSON', 'HTML', 'HTTP', 'REST', 'GraphQL', 'PDF', 'XML'}
+    return [s for s in found if s not in ignore]
+
+
 def _preflight_validate_task(
     task: dict,
     repo_path: Optional[str],
@@ -890,6 +904,42 @@ def _preflight_validate_task(
                     artifacts=[],
                     metadata={'source': 'preflight_skip', 'commit_sha': '', 'commit_message': ''},
                 )
+
+    # ── AST-Aware Task Validation ─────────────────────────────────────────
+    # For modification tasks, extract targeted symbols and query the AST.
+    # If a modification task specifies exact targets but NONE exist in the AST,
+    # skip it to prevent extreme hallucination spirals.
+    mod_verbs = ['update', 'replace', 'modify', 'edit', 'fix', 'change']
+    is_mod_task = any(verb in combined for verb in mod_verbs)
+    create_verbs = ['create', 'add ', 'new ', 'implement']
+    is_create_task = any(verb in combined for verb in create_verbs)
+    
+    if is_mod_task and not is_create_task:
+        symbols = _extract_validation_symbols(combined)
+        if symbols:
+            all_missed = True
+            for sym in symbols:
+                # Reuse the AST query function
+                ast_result = _exec_elastro_query_ast({'query': sym}, repo_path)
+                if "No matching nodes found" not in ast_result:
+                    all_missed = False
+                    break # At least one extracted symbol exists
+            
+            if all_missed:
+                reason = (
+                    f"AST-Aware Validation: task aims to modify specific symbols ({', '.join(symbols)}) "
+                    f"but none were found in the Elastro index for {repo_path}. Skipping phantom task."
+                )
+                if progress_fn:
+                    progress_fn(f'Skipping: {reason}')
+                logger.warning(reason)
+                return AgentResult(
+                    action='implementation_complete',
+                    summary=reason,
+                    artifacts=[],
+                    metadata={'source': 'preflight_skip', 'commit_sha': '', 'commit_message': ''},
+                )
+                
     return None
 
 

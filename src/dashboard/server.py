@@ -1061,13 +1061,50 @@ def get_next_id_sequence(prefix: str) -> int:
     return max_n + 1
 
 
+def _extract_target_file(title: str) -> str | None:
+    """Extract a likely filename target from a task title."""
+    match = re.search(r'\b([\w\.\-]+\.(?:tsx|ts|js|jsx|py|go|html|css|md|json|yml|yaml))\b', title, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def _coalesce_story_tasks(tasks: list[dict]) -> list[dict]:
+    """Auto-merge adjacent tasks that modify the same file into a single compound task."""
+    if not tasks:
+        return []
+    coalesced = []
+    curr = dict(tasks[0])
+    for task in tasks[1:]:
+        t_file = _extract_target_file(task.get('title', ''))
+        c_file = _extract_target_file(curr.get('title', ''))
+        if t_file and c_file and t_file == c_file:
+            curr['title'] = f"Compound Task: {curr.get('title', '')} (+ {task.get('title', '')})"
+            curr_obj = curr.get('objective', '') or ''
+            task_obj = task.get('objective', '') or ''
+            curr['objective'] = f"{curr_obj}\n\n- {task.get('title', '')}: {task_obj}".strip()
+            curr['_coalesced_count'] = curr.get('_coalesced_count', 1) + 1
+        else:
+            coalesced.append(curr)
+            curr = dict(task)
+    coalesced.append(curr)
+    
+    # Log any coalescing using the centralized logger
+    for t in coalesced:
+        if t.get('_coalesced_count', 1) > 1:
+            logger.info("Task Coalescing Engine: Merged %d tasks into a single compound task targeting %s", 
+                        t['_coalesced_count'], _extract_target_file(t.get('title', '')))
+    return coalesced
+
+
 def _count_plan_tasks(plan: dict) -> int:
-    """Count total leaf tasks across all epics/features/stories."""
+    """Count total leaf tasks across all epics/features/stories after coalescing."""
     total = 0
     for epic in plan.get('epics') or []:
         for feat in epic.get('features') or []:
             for story in feat.get('stories') or []:
-                total += len(story.get('tasks') or [])
+                coalesced = _coalesce_story_tasks(story.get('tasks') or [])
+                total += len(coalesced)
     return total
 
 
@@ -1095,7 +1132,7 @@ def commit_plan(repo: str, plan: dict):
             for feat in epic.get('features') or []:
                 for story in feat.get('stories') or []:
                     ac = story.get('acceptanceCriteria') or []
-                    for task in story.get('tasks') or []:
+                    for task in _coalesce_story_tasks(story.get('tasks') or []):
                         task_id = f'task-{task_seq}'
                         task_seq += 1
                         task_doc = {
@@ -1217,14 +1254,14 @@ def commit_plan(repo: str, plan: dict):
                 # previous task so the implementer can't start task N+1 until
                 # task N is fully done. The first task is immediately 'ready'.
                 prev_task_id = None
-                for task in story.get('tasks') or []:
+                for task in _coalesce_story_tasks(story.get('tasks') or []):
                     task_id = f'task-{task_seq}'
                     task_seq += 1
                     task_title = task.get('title') or ''
                     task_doc = {
                         'id': task_id,
                         'title': task_title,
-                        'objective': f"Task for {story_title}",
+                        'objective': task.get('objective') or f"Task for {story_title}",
                         'repo': repo,
                         'worktree': None,
                         'item_type': 'task',
