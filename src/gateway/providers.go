@@ -91,7 +91,7 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 	switch provider {
 	case ProviderOllama:
 		resp, err = r.ollama(ctx, req, suppressThink, withTools)
-	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini, ProviderXAI:
+	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini, ProviderXAI, ProviderGrok:
 		resp, err = r.openaiCompat(ctx, req, provider, apiKey, withTools)
 	case ProviderAnthropic:
 		resp, err = r.anthropic(ctx, req, apiKey, withTools)
@@ -294,8 +294,8 @@ func (r *ProviderRouter) openaiCompat(
 			baseURL = ProviderBaseURLs[ProviderGemini]
 		} else if provider == ProviderOpenAI {
 			baseURL = ProviderBaseURLs[ProviderOpenAI]
-		} else if provider == ProviderXAI {
-			baseURL = ProviderBaseURLs[ProviderXAI]
+		} else if provider == ProviderXAI || provider == ProviderGrok {
+			baseURL = ProviderBaseURLs[provider]
 		} else {
 			baseURL = os.Getenv("LLM_BASE_URL")
 		}

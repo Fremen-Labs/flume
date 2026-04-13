@@ -595,12 +595,12 @@ def _test_planner_connection(status: dict) -> dict:
     url = base_url
     if provider == 'ollama':
         url = base_url + '/api/version'
-    elif provider in ('openai', 'openai_compatible', 'gemini', 'xai'):
+    elif provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok'):
         url = base_url + '/v1/models'
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
     try:
-        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini', 'xai') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
+        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode(errors='ignore')
             status['connectionTestOk'] = True
