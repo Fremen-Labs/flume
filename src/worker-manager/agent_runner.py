@@ -1203,20 +1203,50 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     topology = _get_cluster_topology()
     logger.info(f"run_pm_dispatcher: got cluster topology {topology}. Checking codex app server.")
     
+    # ── Complexity-aware instruction ──────────────────────────────────────
+    # Prevent the PM from re-decomposing tasks that the planner already scoped.
+    item_type = (task or {}).get('item_type', 'task')
+    task_title = (task or {}).get('title', '')
+
     instruction = (
         f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"
         f"- Available Implementer Nodes: {topology['available_implementers']}\n"
         f"- Target Implementer Models: {', '.join(topology['target_models'])}\n\n"
-        "If the Implementer target models are local, highly quantized (e.g., qwen or llama), or generic, "
-        "you MUST tightly decompose this work into microscopic, heavily isolated sub-components (1 function/file per task) "
-        "so the LLMs do not hallucinate.\n"
-        "If the Implementer models are Frontier API models (e.g., gemini-pro, gpt-4), you may chunk the work "
-        "into broader architecture scopes.\n\n"
-        "If the task requires decomposition (e.g., it is a high-level Feature or Epic), return action='decompose' "
-        "and supply an array of subtasks (features, stories, or tasks).\n"
-        "If the task is already scoped at the lowest granular execution limit ('task'), return action='compute_ready' "
-        "to push it to the queue."
     )
+
+    # CRITICAL: Only decompose if the item is a parent container (epic/feature/story).
+    # If the task is already item_type='task', it has been scoped by the planner — do NOT
+    # create additional subtasks. This prevents the 2-task → 13-item explosion.
+    if item_type == 'task':
+        instruction += (
+            "This item is already a TASK (leaf-level work item). It has been scoped by the planner "
+            "and should NOT be decomposed further.\n"
+            "Return action='compute_ready' to push it to the execution queue.\n"
+            "Do NOT return action='decompose'. Do NOT create subtasks.\n"
+        )
+    else:
+        instruction += (
+            "COMPLEXITY-PROPORTIONAL DECOMPOSITION RULES:\n"
+            "- If the task title describes a trivial change (URL update, typo fix, config change, "
+            "single-file edit), return action='compute_ready' — do NOT decompose.\n"
+            "- Only return action='decompose' if the work genuinely requires multiple independent "
+            "implementation steps across different files or components.\n"
+            "- When decomposing, create the MINIMUM number of subtasks needed. Each subtask must "
+            "modify different files or components. Never create separate tasks for 'locate file' "
+            "and 'make change'.\n"
+            "- Never create subtasks that assume artifacts exist without evidence (e.g., "
+            "'replace icon asset' when no SVG files were mentioned).\n\n"
+        )
+        if 'gpt-4' not in (str((task or {}).get('preferred_model') or '')).lower():
+            instruction += (
+                "The Implementer models are local/quantized — if decomposition is needed, "
+                "keep subtasks tightly scoped (1 function/file per task) to reduce hallucination.\n"
+            )
+        else:
+            instruction += (
+                "The Implementer models are Frontier API models — you may chunk work "
+                "into broader architecture scopes if decomposition is needed.\n"
+            )
     
     if _task_uses_codex_app_server(task):
         logger.info("run_pm_dispatcher: Using codex app server. calling _run_codex_json_task.")

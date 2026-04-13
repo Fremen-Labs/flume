@@ -773,7 +773,19 @@ def compute_ready_for_repo(repo):
         log(f"compute_ready: promoted {item_id} to ready")
 
     # Pass 2: mark parent items 'done' when all their children are 'done'
-    # Process from leaf parents up (epics last) using type ordering
+    # Process from leaf parents up (stories first, then features, then epics)
+    # so a story becoming 'done' can trigger a feature becoming 'done' in the same pass.
+    # A child is considered "terminal" if its status is 'done' or 'archived',
+    # OR if its queue_state is 'skipped' (dedup gate marked it as redundant).
+    def _is_terminal(item):
+        if not item:
+            return False
+        if item.get('status') in ('done', 'archived'):
+            return True
+        if item.get('queue_state') == 'skipped':
+            return True
+        return False
+
     type_order = {'task': 0, 'story': 1, 'feature': 2, 'epic': 3}
     parents = sorted(
         [item_id for item_id in children_of if item_id in by_id],
@@ -786,12 +798,12 @@ def compute_ready_for_repo(repo):
         child_ids = children_of.get(parent_id, [])
         if not child_ids:
             continue
-        all_done = all(by_id.get(cid, {}).get('status') == 'done' for cid in child_ids)
-        if all_done:
-            update_task_doc(src['_es_id'], {'status': 'done'})
+        all_terminal = all(_is_terminal(by_id.get(cid)) for cid in child_ids)
+        if all_terminal:
+            update_task_doc(src['_es_id'], {'status': 'done', 'active_worker': None, 'queue_state': 'queued'})
             src['status'] = 'done'  # update local view for subsequent passes
             changed += 1
-            log(f"compute_ready: marked parent {parent_id} ({src.get('item_type')}) done — all children done")
+            log(f"compute_ready: marked parent {parent_id} ({src.get('item_type')}) done — all children terminal")
 
     return changed
 
