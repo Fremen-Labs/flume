@@ -516,7 +516,13 @@ def _planner_runtime_config() -> dict:
     if provider == 'ollama':
         base_url = resolve_effective_ollama_base_url(pairs).strip()
     else:
-        base_url = (pairs.get('LLM_BASE_URL') or os.environ.get('LLM_BASE_URL') or LLM_BASE_URL).strip()
+        # explicitly handle None to allow "" (empty string) to pass natively to llm_client
+        if pairs.get('LLM_BASE_URL') is not None:
+            base_url = str(pairs.get('LLM_BASE_URL')).strip()
+        elif os.environ.get('LLM_BASE_URL') is not None:
+            base_url = os.environ.get('LLM_BASE_URL').strip()
+        else:
+            base_url = LLM_BASE_URL.strip()
     parsed = urlparse(base_url) if base_url else None
     host = parsed.netloc or parsed.path if parsed else ''
     cfg = {
