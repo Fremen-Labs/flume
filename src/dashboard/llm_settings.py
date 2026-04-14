@@ -19,6 +19,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from utils.logger import get_logger
+
+logger = get_logger("llm_settings")
+
 _DEFAULT_OPENAI_OAUTH_SCOPES = (
     'openid profile email offline_access model.request api.model.read api.responses.write'
 )
@@ -227,7 +231,7 @@ def _normalize_ollama_base_url(base_url: str) -> str:
             parsed = parsed._replace(path="")
             return urllib.parse.urlunparse(parsed).rstrip("/")
     except Exception:
-        pass
+        logger.debug("URL parse fallback during Ollama base URL normalization")
     if raw.endswith("/v1"):
         return raw[:-3].rstrip("/")
     if raw.endswith("/api"):
@@ -259,7 +263,7 @@ def resolve_effective_ollama_base_url(pairs: dict[str, str]) -> str:
         if _host_is_loopback(llm_host) and not _host_is_loopback(local_host):
             return local_base
     except Exception:
-        pass
+        logger.debug("URL parse fallback during Ollama effective URL resolution")
     return llm_base
 
 
@@ -424,7 +428,7 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
             addr = addr.replace("openbao", "127.0.0.1")
             pairs["OPENBAO_ADDR"] = addr
         except Exception:
-            pass
+            logger.debug("OpenBao hostname resolution to 127.0.0.1 failed — using original address")
 
     return True, pairs
 
@@ -438,6 +442,7 @@ def is_openbao_installed() -> bool:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
     except Exception:
+        logger.debug("OpenBao health check failed — treating as unavailable")
         return False
 
 
@@ -473,7 +478,8 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
             payload = json.loads(r.read())
             data = payload.get("data", {}).get("data", {})
             return {str(k): str(v) for k, v in data.items() if v is not None}
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to read secrets from OpenBao", extra={"structured_data": {"error": str(e)}})
         return {}
 
 
@@ -503,7 +509,8 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
         )
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status in (200, 201, 204)
-    except Exception:
+    except Exception as e:
+        logger.error("Failed to write secrets to OpenBao", extra={"structured_data": {"error": str(e)}})
         return False
 
 

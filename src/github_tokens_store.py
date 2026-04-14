@@ -10,6 +10,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from utils.logger import get_logger
+
+logger = get_logger("github_tokens_store")
+
 MASK = "***"
 ENV_GH_TOKEN = "GH_TOKEN"
 
@@ -33,8 +37,8 @@ def load_document(workspace_root=None) -> dict[str, Any]:
             if not isinstance(doc.get("tokens"), list):
                 doc["tokens"] = []
             return doc
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load GitHub tokens from ES — using defaults", extra={"structured_data": {"error": str(e)}})
     return _default_doc()
 
 
@@ -47,8 +51,8 @@ def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
     try:
         from es_credential_store import save_gh_tokens
         save_gh_tokens(masked_doc)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to persist GitHub tokens to ES", extra={"structured_data": {"error": str(e)}})
 
 
 
@@ -113,7 +117,7 @@ def get_active_token_plain(workspace_root: Path) -> str:
                 if delegated_token:
                     token = delegated_token
             except ImportError:
-                pass
+                logger.debug("OpenBao delegation import unavailable for GitHub token resolution")
         return token
     return ""
 
@@ -174,7 +178,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             from llm_settings import _openbao_put_many
             _openbao_put_many(workspace_root, {f"FLUME_GH_{cid}": ""})
         except ImportError:
-            pass
+            logger.debug("OpenBao delegation import unavailable during GitHub token delete")
         save_document(workspace_root, doc)
         _sync_active_to_env(workspace_root)
         return True, ""
@@ -216,7 +220,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
                     from llm_settings import _openbao_put_many
                     _openbao_put_many(workspace_root, {f"FLUME_GH_{cred_id}": token_in})
                 except ImportError:
-                    pass
+                    logger.debug("OpenBao put unavailable during GitHub token upsert (update)")
             save_document(workspace_root, doc)
             _sync_active_to_env(workspace_root)
             return True, ""
@@ -238,7 +242,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
                 from llm_settings import _openbao_put_many
                 _openbao_put_many(workspace_root, {f"FLUME_GH_{new_id}": token_in})
             except ImportError:
-                pass
+                logger.debug("OpenBao put unavailable during GitHub token upsert (new)")
         save_document(workspace_root, doc)
         _sync_active_to_env(workspace_root)
         return True, ""
@@ -262,7 +266,7 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
                         from llm_settings import _openbao_put_many
                         _openbao_put_many(workspace_root, {f"FLUME_GH_{aid}": token})
                     except ImportError:
-                        pass
+                        logger.debug("OpenBao put unavailable during GitHub legacy value (active)")
                 save_document(workspace_root, doc)
                 _sync_active_to_env(workspace_root)
                 return True, ""
@@ -274,7 +278,7 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
             from llm_settings import _openbao_put_many
             _openbao_put_many(workspace_root, {f"FLUME_GH_{new_id}": token})
         except ImportError:
-            pass
+            logger.debug("OpenBao put unavailable during GitHub legacy value (new)")
     save_document(workspace_root, doc)
     _sync_active_to_env(workspace_root)
     return True, ""
