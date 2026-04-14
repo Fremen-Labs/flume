@@ -11,6 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from utils.logger import get_logger
+
+logger = get_logger("llm_credentials_store")
+
 OLLAMA_CREDENTIAL_ID = "__ollama__"
 # Use global LLM_* from env / Settings (no row in llm_credentials.json).
 SETTINGS_DEFAULT_CREDENTIAL_ID = "__settings_default__"
@@ -72,8 +76,8 @@ def load_document(workspace_root=None) -> dict[str, Any]:
             if not isinstance(doc.get("credentials"), list):
                 doc["credentials"] = []
             return doc
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load LLM credentials from ES — using defaults", extra={"structured_data": {"error": str(e)}})
     return _default_doc()
 
 
@@ -93,8 +97,8 @@ def save_document(workspace_root=None, doc: dict[str, Any] = None) -> None:
     try:
         from es_credential_store import save_llm_credentials
         save_llm_credentials(masked_doc)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to persist LLM credentials to ES", extra={"structured_data": {"error": str(e)}})
 
 
 
@@ -182,7 +186,7 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
             if delegated_key:
                 key = delegated_key
         except ImportError:
-            pass
+            logger.debug("OpenBao delegation import unavailable for credential resolution")
     return {"provider": prov, "api_key": key, "base_url": base}
 
 
@@ -253,7 +257,7 @@ def upsert_credential(
             from llm_settings import _openbao_put_many
             _openbao_put_many(workspace_root, {f"FLUME_CRED_{new_id}": key})
         except ImportError:
-            pass
+            logger.debug("OpenBao delegation import unavailable during credential upsert")
     save_document(workspace_root, doc)
     return new_id
 
@@ -303,7 +307,7 @@ def delete_credential(workspace_root: Path, cred_id: str) -> bool:
         from llm_settings import _openbao_put_many
         _openbao_put_many(workspace_root, {f"FLUME_CRED_{cred_id}": ""})
     except ImportError:
-        pass
+        logger.debug("OpenBao delegation import unavailable during credential delete")
     save_document(workspace_root, doc)
     return True
 
@@ -354,7 +358,7 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
             if delegated_key:
                 key = delegated_key
         except ImportError:
-            pass
+            logger.debug("OpenBao delegation import unavailable during activation")
     prov = normalize_provider_id(str(c.get("provider") or "openai").strip().lower())
     base = str(c.get("baseUrl") or "").strip()
     out: dict[str, str] = {
