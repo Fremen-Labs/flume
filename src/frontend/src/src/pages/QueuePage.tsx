@@ -76,7 +76,7 @@ export default function QueuePage() {
         toast({ title: "Halt Failed", description, variant: "destructive" });
       }
     } catch (e) {
-      console.error(e);
+      console.error('Halt-all-swarms request failed:', e);
       toast({ title: "System Exception", description: "Exception occurred triggering Kill Switch bounds.", variant: "destructive" });
     } finally {
       setIsHalting(false);
