@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -426,7 +427,7 @@ func StartGateway(addr string) error {
 	// Register node mesh API endpoints.
 	server.mux.HandleFunc("GET /api/nodes", server.handleGetNodes)
 	server.mux.HandleFunc("POST /api/nodes", server.handleAddNode)
-	server.mux.HandleFunc("DELETE /api/nodes/", server.handleDeleteNode)
+	server.mux.HandleFunc("DELETE /api/nodes/{id}", server.handleDeleteNode)
 
 	// Initialize Inception Skill Registry
 	server.skills = skills.NewSkillRegistry()
@@ -504,9 +505,12 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Input validation: host must be non-empty
-	if node.Host == "" {
-		http.Error(w, `{"error":"host is required"}`, http.StatusBadRequest)
+	// Input validation: host SSRF prevention
+	if !isValidNodeHost(node.Host) {
+		log.Warn("node_api: invalid host format or unsafe target",
+			slog.String("host", node.Host),
+		)
+		http.Error(w, `{"error":"host must be a valid hostname or IP:port and cannot point to local/internal services"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -540,9 +544,8 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	log := WithContext(r.Context())
 
-	// Extract node ID from URL path: /api/nodes/{id}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/nodes/"), "/")
-	nodeID := parts[0]
+	// Extract node ID from URL path natively in Go 1.22+
+	nodeID := r.PathValue("id")
 
 	if nodeID == "" || !isValidNodeID(nodeID) {
 		http.Error(w, `{"error":"invalid or missing node ID"}`, http.StatusBadRequest)
@@ -576,5 +579,45 @@ func isValidNodeID(id string) bool {
 			return false
 		}
 	}
+	return true
+}
+
+// isValidNodeHost ensures the host is a valid IP:port or hostname:port format,
+// blocking path traversal characters and common SSRF target domains/IPs.
+func isValidNodeHost(host string) bool {
+	if host == "" || len(host) > 255 {
+		return false
+	}
+
+	h, portStr, err := net.SplitHostPort(host)
+	if err != nil {
+		return false // must contain a port
+	}
+
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port < 1 || port > 65535 {
+		return false
+	}
+
+	lowerHost := strings.ToLower(h)
+	
+	// Pre-filter outright path traversal or spaces
+	if strings.ContainsAny(lowerHost, "/\\?#& ") {
+		return false
+	}
+
+	// Validate allowed characters: alphanumeric, hyphens, and dots
+	for _, c := range lowerHost {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.') {
+			return false
+		}
+	}
+
+	// Basic SSRF restrictions against internal loopback or cloud metadata services
+	if lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "::1" ||
+		strings.Contains(lowerHost, "metadata.google.internal") || strings.Contains(lowerHost, "169.254.169.254") {
+		return false
+	}
+
 	return true
 }

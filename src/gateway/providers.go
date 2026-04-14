@@ -154,7 +154,10 @@ func (r *ProviderRouter) RouteToNode(ctx context.Context, req *ChatRequest, node
 func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, baseURL, authToken string, suppressThink, withTools bool) (*ChatResponse, error) {
 	numCtx := 8192
 	if v := os.Getenv("FLUME_OLLAMA_NUM_CTX"); v != "" {
-		fmt.Sscanf(v, "%d", &numCtx)
+		if _, err := fmt.Sscanf(v, "%d", &numCtx); err != nil {
+			log := WithContext(ctx)
+			log.Warn("failed to parse FLUME_OLLAMA_NUM_CTX, using default", slog.String("value", v), slog.String("error", err.Error()))
+		}
 	}
 
 	options := map[string]interface{}{

@@ -228,9 +228,11 @@ func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *No
 
 // probeLoad calls GET /api/ps on the node and returns a load factor 0.0-1.0.
 func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *Node) float64 {
+	log := WithContext(ctx)
 	url := strings.TrimRight(baseURL, "/") + "/api/ps"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		log.Warn("load probe failed: build request", slog.String("node_id", node.ID), slog.String("error", err.Error()))
 		return 0
 	}
 	if node.AuthToken != "" {
@@ -239,16 +241,19 @@ func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *No
 
 	resp, err := hc.httpClient.Do(req)
 	if err != nil {
+		log.Warn("load probe failed: http request", slog.String("node_id", node.ID), slog.String("error", err.Error()))
 		return 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Warn("load probe failed: non-200 status", slog.String("node_id", node.ID), slog.Int("status", resp.StatusCode))
 		return 0
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err != nil {
+		log.Warn("load probe failed: read body", slog.String("node_id", node.ID), slog.String("error", err.Error()))
 		return 0
 	}
 
@@ -258,6 +263,7 @@ func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *No
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &psResp); err != nil {
+		log.Warn("load probe failed: json unmarshal", slog.String("node_id", node.ID), slog.String("error", err.Error()))
 		return 0
 	}
 
