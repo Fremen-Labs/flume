@@ -112,7 +112,8 @@ var StartCmd = &cobra.Command{
 			envCfg.RepoType = promptCfg.RepoType
 			envCfg.GithubToken = promptCfg.GithubToken
 			envCfg.ADOOrg = promptCfg.ADOOrg
-			envCfg.ADOProject = promptCfg.ADOProject
+			// ADOProject is no longer collected in the CLI wizard — not used in
+			// connection string construction. Retained in EnvConfig for forward-compat.
 			envCfg.ADOToken = promptCfg.ADOToken
 
 			if promptCfg.Provider == "ollama" {
@@ -283,7 +284,31 @@ var StartCmd = &cobra.Command{
 			return err
 		}
 
-
+		// ── Deployment summary ────────────────────────────────────────────────
+		workerCount := 3 // default Docker / native worker spawn count
+		if w := strings.TrimSpace(WorkersFlag); w != "" && w != "auto" {
+			if n, err := strconv.Atoi(w); err == nil && n > 0 {
+				workerCount = n
+			}
+		}
+		ui.PrintDeploymentSummary(ui.DeploymentSummary{
+			NativeMode:      NativeFlag,
+			Provider:        envCfg.Provider,
+			Model:           envCfg.Model,
+			OllamaHost:      envCfg.Host,
+			DashboardPort:   dashboardPort,
+			ElasticPort:     esPort,
+			VaultPort:       vaultPort,
+			ExternalElastic: envCfg.ExternalElastic,
+			ElasticURL:      envCfg.ESUrl,
+			RepoType:        envCfg.RepoType,
+			ADOOrg:          envCfg.ADOOrg,
+			WorkerCount:     workerCount,
+			HasAPIKey:       strings.TrimSpace(envCfg.APIKey) != "",
+			HasGithubToken:  envCfg.GithubToken != "",
+			HasADOToken:     envCfg.ADOToken != "",
+			VaultDeployed:   true,
+		})
 
 		return nil
 	},

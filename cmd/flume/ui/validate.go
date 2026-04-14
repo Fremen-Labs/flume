@@ -275,9 +275,6 @@ func validateForStep(step int, val string) string {
 	case StepADOOrg:
 		return validateADOOrg(val)
 
-	case StepADOProject:
-		return validateADOProject(val)
-
 	case StepADOToken:
 		return validateADOToken(val)
 	}
