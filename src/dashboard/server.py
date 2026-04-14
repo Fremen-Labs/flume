@@ -641,9 +641,16 @@ def _test_planner_connection(status: dict) -> dict:
     headers: dict = {}
     url: str = base_url   # default fallback
 
-    if provider in ('ollama', 'exo'):
-        # Ollama/Exo: use the /api/version health endpoint — no auth needed.
+    if provider == 'ollama':
+        # Ollama uses the /api/version health endpoint
         url = base_url + '/api/version'
+
+    elif provider == 'exo':
+        # Exo acts as an OpenAI-compatible API (port 52415), using /v1/models
+        norm = base_url
+        if norm.endswith('/v1'):
+            norm = norm[:-3]
+        url = norm.rstrip('/') + '/v1/models'
 
     elif provider == 'anthropic':
         # Anthropic always uses a fixed root, ignoring whatever base_url
@@ -695,7 +702,7 @@ def _test_planner_connection(status: dict) -> dict:
                 f'{provider.upper()} connection OK — {url} responded HTTP {status_code}'
             )
             # For Ollama, surface the version string.
-            if provider in ('ollama', 'exo'):
+            if provider == 'ollama':
                 try:
                     version = json.loads(body).get('version')
                     if version:
