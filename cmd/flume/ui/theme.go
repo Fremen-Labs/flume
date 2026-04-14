@@ -288,6 +288,7 @@ func PrintDeploymentSummary(s DeploymentSummary) {
 	add(divider)
 	add("  " + styleSuccess.Render("Flume is live. Open your browser to start orchestrating agents."))
 	add("  " + dimStyle.Render("→  Dashboard:   http://localhost:"+s.DashboardPort))
+	add("  " + dimStyle.Render("→  API Docs:     http://localhost:"+s.DashboardPort+"/docs"))
 	add("  " + dimStyle.Render("→  Gateway API:  http://localhost:8090/health"))
 	add("")
 	add(divider)
