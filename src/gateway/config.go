@@ -413,6 +413,7 @@ func (c *Config) loadCredentials(ctx context.Context, log *slog.Logger) {
 	}
 	credsBytes, err := json.Marshal(credsRaw)
 	if err != nil {
+		log.Warn("failed to marshal credential metadata", slog.String("error", err.Error()))
 		return
 	}
 	var creds []CredentialMeta
