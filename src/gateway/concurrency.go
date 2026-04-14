@@ -27,7 +27,85 @@ import (
 //  1. Query Ollama /api/ps to see loaded models and their VRAM usage
 //  2. Fall back to CPU core count / 4 (conservative: 1 inference per 4 cores)
 //  3. Allow override via FLUME_OLLAMA_MAX_CONCURRENT env var
+//
+// NodeSemaphoreMap extends this to a distributed node mesh: each registered
+// Ollama node gets its own OllamaSemaphore sized from its capabilities, so
+// concurrency limits are enforced independently per node.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// NodeSemaphoreMap manages per-node concurrency semaphores for the distributed
+// Ollama node mesh. Each node has an independent slot pool sized proportionally
+// to its reported MemoryGB, preventing any single node from being overloaded
+// while leaving healthier nodes idle.
+type NodeSemaphoreMap struct {
+	mu   sync.RWMutex
+	sems map[string]*OllamaSemaphore // keyed by node ID
+}
+
+// NewNodeSemaphoreMap creates an empty semaphore map.
+func NewNodeSemaphoreMap() *NodeSemaphoreMap {
+	return &NodeSemaphoreMap{
+		sems: make(map[string]*OllamaSemaphore),
+	}
+}
+
+// SlotsForNode returns or lazily creates a semaphore for the given node.
+// The slot count is derived from the node's MemoryGB: 1 slot per 8 GB,
+// clamped to [1, 8]. For example, a 64 GB Mac Pro gets 8 slots; a 16 GB
+// Mac Mini gets 2 slots.
+func (m *NodeSemaphoreMap) SlotsForNode(node *Node) *OllamaSemaphore {
+	m.mu.RLock()
+	if sem, ok := m.sems[node.ID]; ok {
+		m.mu.RUnlock()
+		return sem
+	}
+	m.mu.RUnlock()
+
+	slots := int(node.Capabilities.MemoryGB / 8)
+	if slots < 1 {
+		slots = 1
+	}
+	if slots > 8 {
+		slots = 8
+	}
+
+	log := Log()
+	log.Info("node_semaphore: allocating slots for node",
+		slog.String("node_id", node.ID),
+		slog.Float64("memory_gb", node.Capabilities.MemoryGB),
+		slog.Int("slots", slots),
+	)
+
+	sem := NewOllamaSemaphore(slots)
+
+	m.mu.Lock()
+	m.sems[node.ID] = sem
+	m.mu.Unlock()
+
+	return sem
+}
+
+// Remove deletes the semaphore for a node that has been deregistered.
+func (m *NodeSemaphoreMap) Remove(nodeID string) {
+	m.mu.Lock()
+	delete(m.sems, nodeID)
+	m.mu.Unlock()
+
+	Log().Info("node_semaphore: removed slot pool for node",
+		slog.String("node_id", nodeID),
+	)
+}
+
+// Snapshot returns a map of nodeID → active/max slots for health metrics.
+func (m *NodeSemaphoreMap) Snapshot() map[string][2]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string][2]int, len(m.sems))
+	for id, sem := range m.sems {
+		out[id] = [2]int{sem.ActiveSlots(), sem.MaxSlots()}
+	}
+	return out
+}
 
 // OllamaSemaphore controls concurrent access to the Ollama inference engine.
 type OllamaSemaphore struct {

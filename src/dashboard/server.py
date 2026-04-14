@@ -4392,6 +4392,90 @@ def api_workflow_agents_stop():
         return {'status': 'ok'}
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node Mesh API — proxy to Go Gateway /api/nodes
+# All writes are forwarded to the Gateway, which persists to Elasticsearch
+# (flume-node-registry). The dashboard never writes node docs directly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gateway_base() -> str:
+    """Return the Go Gateway base URL, stripped of trailing slashes."""
+    return os.environ.get('GATEWAY_URL', 'http://gateway:8090').rstrip('/')
+
+
+@app.get('/api/nodes')
+async def api_nodes_list(request: Request):
+    """Proxy GET /api/nodes to the Go Gateway and return the node mesh inventory."""
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{gw_url}/api/nodes", timeout=5.0)
+        logger.info(
+            "node_mesh: fetched node list from gateway",
+            extra={"component": "node_mesh_api", "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "node_mesh: failed to fetch nodes from gateway",
+            extra={"component": "node_mesh_api", "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
+@app.post('/api/nodes')
+async def api_nodes_add(request: Request):
+    """Register a new Ollama node in the mesh via the Go Gateway."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{gw_url}/api/nodes", json=body, timeout=5.0)
+        logger.info(
+            "node_mesh: registered node via gateway",
+            extra={"component": "node_mesh_api", "node_id": body.get("id", "unknown"), "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "node_mesh: failed to register node",
+            extra={"component": "node_mesh_api", "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
+@app.delete('/api/nodes/{node_id}')
+async def api_nodes_delete(node_id: str, request: Request):
+    """Remove an Ollama node from the mesh via the Go Gateway."""
+    # Basic validation — mirrors the gateway's isValidNodeID check.
+    import re
+    if not re.fullmatch(r'[a-z0-9\-]{1,64}', node_id):
+        logger.warning(
+            "node_mesh: rejected delete for invalid node_id",
+            extra={"component": "node_mesh_api", "node_id": node_id}
+        )
+        return JSONResponse(status_code=400, content={"error": "Invalid node ID format"})
+
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(f"{gw_url}/api/nodes/{node_id}", timeout=5.0)
+        logger.info(
+            "node_mesh: deleted node via gateway",
+            extra={"component": "node_mesh_api", "node_id": node_id, "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "node_mesh: failed to delete node",
+            extra={"component": "node_mesh_api", "node_id": node_id, "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):

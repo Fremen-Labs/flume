@@ -51,8 +51,12 @@ type juryResult struct {
 
 // ExecuteEnsemble coordinates parallel local generation and fallback degradation.
 // withTools controls whether jury members invoke the tool-calling endpoint (true)
-// or the plain-chat endpoint (false). This allows /v1/chat to benefit from the
-// ensemble without accidentally injecting tool semantics into text-only paths.
+// or the plain-chat endpoint (false).
+//
+// When nodeRegistry has ≥2 healthy nodes, jury members are distributed across
+// distinct nodes (true distributed ensemble). When only 1 node (or none) is
+// available, the existing temperature-diversity approach runs all calls against
+// the single configured Ollama instance.
 func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTools bool) (*ChatResponse, error) {
 	ensembleStart := time.Now()
 	log := WithContext(ctx)
@@ -64,8 +68,37 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 		return s.router.Route(ctx, req, withTools)
 	}
 
-	ollamaURL := s.config.GetOllamaBaseURL()
-	size := AdaptiveEnsembleSize(req.Model, configuredSize, ollamaURL)
+	// ── Resolve node mesh ───────────────────────────────────────────────────
+	var healthyNodes []*Node
+	distributedMode := false
+	if s.nodeRegistry != nil {
+		healthyNodes = s.nodeRegistry.HealthyNodes()
+		if len(healthyNodes) >= 2 {
+			distributedMode = true
+		}
+	}
+
+	var size int
+	if distributedMode {
+		// In distributed mode, clamp size to number of available nodes.
+		// Each node is assigned at most one jury slot to maximize hardware diversity.
+		sizeLimit := len(healthyNodes)
+		if configuredSize < sizeLimit {
+			sizeLimit = configuredSize
+		}
+		// Apply per-node VRAM sizing on the first (primary) node as a conservative estimate.
+		size = AdaptiveEnsembleSizeForNode(req.Model, sizeLimit, healthyNodes[0])
+
+		log.Info("ensemble: distributed mode across nodes",
+			slog.Int("size", size),
+			slog.Int("available_nodes", len(healthyNodes)),
+			slog.Bool("distributed", true),
+		)
+	} else {
+		// Legacy single-node path with temperature-diversity.
+		ollamaURL := s.config.GetOllamaBaseURL()
+		size = AdaptiveEnsembleSize(req.Model, configuredSize, ollamaURL)
+	}
 
 	if size <= 1 {
 		// Hardware pressure: single-call fallback
@@ -82,6 +115,7 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 		slog.Float64("base_temperature", req.Temperature),
 		slog.String("model", req.Model),
 		slog.Bool("with_tools", withTools),
+		slog.Bool("distributed", distributedMode),
 	)
 
 	// ── 2. Apply ensemble timeout ─────────────────────────────────────────
@@ -112,7 +146,38 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 			}
 			cloneReq.Temperature = temp
 
-			resp, err := s.router.Route(gCtx, cloneReq, withTools)
+			var resp *ChatResponse
+			var err error
+
+			if distributedMode && i < len(healthyNodes) {
+				// ── Distributed path: route each jury member to a distinct node ──
+				node := healthyNodes[i]
+
+				// Acquire per-node concurrency slot.
+				var nodeSem *OllamaSemaphore
+				if s.nodeSems != nil {
+					nodeSem = s.nodeSems.SlotsForNode(node)
+				}
+				if nodeSem != nil && !nodeSem.Acquire(gCtx) {
+					earlyWin <- juryResult{index: i, err: gCtx.Err()}
+					return nil
+				}
+				if nodeSem != nil {
+					defer nodeSem.Release()
+				}
+
+				nodeURL := "http://" + node.Host
+				log.Debug("ensemble: dispatching jury member to node",
+					slog.Int("member", i),
+					slog.String("node_id", node.ID),
+					slog.String("host", node.Host),
+				)
+				Metrics.RecordNodeRequest(node.ID, cloneReq.Model)
+				resp, err = s.router.RouteToNode(gCtx, cloneReq, nodeURL, node.AuthToken, withTools)
+			} else {
+				// ── Legacy path: single Ollama with temperature diversity ──
+				resp, err = s.router.Route(gCtx, cloneReq, withTools)
+			}
 
 			score := 0
 			if resp != nil && err == nil {
