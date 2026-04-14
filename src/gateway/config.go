@@ -302,7 +302,7 @@ func (c *Config) IsKnownModel(model string) bool {
 func (c *Config) loadGlobalConfig(ctx context.Context, log *slog.Logger) {
 	body, err := c.esGet(ctx, "/flume-llm-config/_doc/singleton")
 	if err != nil {
-		// Index may not exist yet or singleton not written — that's fine, falls back to .env
+		// Index may not exist yet or singleton not written — that's fine, falls back to process env defaults
 		log.Debug("flume-llm-config not found, using global defaults", slog.String("error", err.Error()))
 		return
 	}

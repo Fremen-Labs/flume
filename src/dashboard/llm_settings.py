@@ -358,41 +358,39 @@ _BOOTSTRAP_ONLY_KEYS = frozenset({
 })
 
 
-def _parse_env_lines(text: str) -> dict[str, str]:
-    """Parse a .env file into a key/value dict (bootstrap config only)."""
-    out: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        out[key.strip()] = val.strip()
-    return out
-
-
 def _load_bootstrap_env(workspace_root: Path) -> dict[str, str]:
-    """Load BOOTSTRAP-ONLY keys from .env files (ES_URL, OPENBAO_ADDR, etc.).
+    """AP-10 / P6a: Load bootstrap-tier keys from ES flume-settings.
 
-    The .env file is no longer the source of truth for LLM settings or tokens.
-    This function reads it only for cluster-connection bootstrap parameters.
+    Replaces the former .env file reader. Resolution order:
+      1. ES flume-settings/_doc/system (written by CLI SeedBootstrapConfig at startup)
+      2. Process env fallback (Docker/CLI injects bootstrap vars at container start)
+
+    workspace_root is kept as a parameter for API compatibility but is no longer
+    used to locate a file — the path-based lookup is fully retired.
     """
-    out: dict[str, str] = {}
-    wr = workspace_root.resolve()
-    for base in (wr, wr.parent):
-        path = base / ".env"
-        if path.is_file():
-            try:
-                out.update(_parse_env_lines(path.read_text(encoding="utf-8", errors="replace")))
-            except OSError:
-                pass
-    return out
+    try:
+        from flume_secrets import load_elastic_config
+        data = load_elastic_config()
+    except Exception as e:
+        logger.debug(f"AP-10: _load_bootstrap_env ES read skipped: {e}")
+        data = {}
+
+    # Supplement with process env for any keys not found in ES (cold-start safety)
+    for key in _BOOTSTRAP_ONLY_KEYS:
+        if key not in data:
+            v = os.environ.get(key, "").strip()
+            if v:
+                data[key] = v
+
+    return data
 
 
-# Keep load_env_pairs as a thin alias so existing callers that only need
-# bootstrap config (OpenBao connection, ES URL) don't break.
+# load_env_pairs: thin alias kept for API compatibility. Callers that need only
+# bootstrap config (OpenBao connection, ES URL) can continue using this.
+# AP-10 / P6a: No longer reads .env — delegates to ES + process env via _load_bootstrap_env().
 def load_env_pairs(workspace_root: Path) -> dict[str, str]:
-    """Return bootstrap .env keys (ES_URL, OPENBAO_ADDR, etc.). LLM settings
-    are no longer stored in .env — use load_effective_pairs() for those."""
+    """Return bootstrap keys (ES_URL, OPENBAO_ADDR, etc.) from ES flume-settings
+    with process env as fallback. LLM settings use load_effective_pairs()."""
     return _load_bootstrap_env(workspace_root)
 
 
@@ -606,15 +604,76 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     return pairs
 
 
+def _save_bootstrap_to_es(keys: dict[str, str]) -> None:
+    """AP-10 / P6a: Persist bootstrap-tier keys to ES flume-settings/_doc/system.
+
+    This replaces the former .env file write. Keys written here (ES_URL,
+    OPENBAO_ADDR, BAO_SECRET_ID, etc.) are read back by _load_bootstrap_env()
+    and load_elastic_config() on the next service restart.
+    """
+    import json as _json
+    import urllib.request
+
+    es_native = os.environ.get("FLUME_NATIVE_MODE") == "1"
+    es_url = "http://localhost:9200" if es_native else os.environ.get("ES_URL", "http://elasticsearch:9200")
+    es_key = os.environ.get("ES_API_KEY", "")
+
+    # Map uppercase env key names to the lowercase field names used in flume-settings
+    _KEY_MAP = {
+        "ES_URL": "es_url",
+        "ES_API_KEY": "es_api_key",
+        "ES_VERIFY_TLS": "es_verify_tls",
+        "OPENBAO_ADDR": "openbao_url",
+        "OPENBAO_TOKEN": "openbao_token",
+        "OPENBAO_MOUNT": "openbao_mount",
+        "OPENBAO_PATH": "openbao_path",
+        "OPENBAO_TOKEN_FILE": "openbao_token_file",
+        "BAO_SECRET_ID": "bao_secret_id",
+        "FLUME_ADMIN_TOKEN": "flume_admin_token",
+    }
+
+    doc = {_KEY_MAP.get(k, k.lower()): v for k, v in keys.items() if v is not None}
+    if not doc:
+        return
+
+    payload = _json.dumps({"doc": doc, "doc_as_upsert": True}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{es_url.rstrip('/')}/flume-settings/_update/system",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    if es_key:
+        req.add_header("Authorization", f"ApiKey {es_key}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            if r.status not in (200, 201):
+                logger.warning(
+                    "AP-10: flume-settings bootstrap update returned unexpected status",
+                    extra={"structured_data": {"status": r.status, "keys": list(doc.keys())}},
+                )
+            else:
+                logger.debug(
+                    "AP-10: bootstrap keys written to ES flume-settings",
+                    extra={"structured_data": {"keys": list(doc.keys())}},
+                )
+    except Exception as e:
+        logger.warning(
+            "AP-10: Failed to write bootstrap keys to ES flume-settings",
+            extra={"structured_data": {"error": str(e), "keys": list(doc.keys())}},
+        )
+
+
 def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
-    """AP-10: Cluster-native settings write path.
+    """AP-10 / P6a: Cluster-native settings write path.
 
     Routing:
       • LLM non-sensitive config (provider, model, baseUrl)  → ES flume-llm-config
       • Sensitive secrets (API key, OAuth tokens)            → OpenBao KV
-      • Bootstrap keys (ES_URL, OPENBAO_ADDR, etc.)         → .env only (never LLM keys)
+      • Bootstrap keys (ES_URL, OPENBAO_ADDR, BAO_SECRET_ID) → ES flume-settings
 
-    The .env file is NEVER written with LLM or token keys at runtime.
+    No .env files are written at runtime.
     """
     if not updates:
         return
@@ -650,33 +709,11 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
                 "Configure OPENBAO_ADDR/OPENBAO_TOKEN or restart with OpenBao running."
             )
 
-    # 3. Bootstrap keys only — write to .env (ES_URL, OPENBAO_ADDR, etc.)
+    # 3. Bootstrap keys only — write to ES flume-settings (AP-10 / P6a: replaces .env write)
     bootstrap_updates = {k: v for k, v in updates.items()
                          if k in _BOOTSTRAP_ONLY_KEYS and k not in _MUST_NOT_GO_TO_ENV}
     if bootstrap_updates:
-        # Find the .env file (parent dir wins over workspace subdir)
-        wr = workspace_root.resolve()
-        env_path = wr.parent / ".env" if (wr.parent / ".env").is_file() else wr / ".env"
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-        seen: set[str] = set()
-        new_lines: list[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                new_lines.append(line)
-                continue
-            if "=" in stripped:
-                k = stripped.split("=")[0].strip()
-                if k in bootstrap_updates:
-                    new_lines.append(f"{k}={bootstrap_updates[k]}")
-                    seen.add(k)
-                    continue
-            new_lines.append(line)
-        for k, v in bootstrap_updates.items():
-            if k not in seen:
-                new_lines.append(f"{k}={v}")
-        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        _save_bootstrap_to_es(bootstrap_updates)
 
 
 

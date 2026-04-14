@@ -31,9 +31,10 @@ class FlumeSettings(BaseSettings):
     WORKER_MANAGER_POLL_SECONDS: int = 2
     WORKERS_PER_ROLE: int | None = None
 
+    # AP-10 / P6a: env_file removed — all values come from process env (Docker
+    # compose / CLI injects bootstrap vars) or are overlaid by apply_runtime_config()
+    # which reads from ES flume-settings + OpenBao. No .env file is read at startup.
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="allow",
     )
 
@@ -195,23 +196,34 @@ def resolve_oauth_state_path(workspace_root: Path, state_file: str = "") -> Path
     return workspace_root / '.agent' / 'openai_oauth_state.json'
 
 def hydrate_secrets_from_openbao() -> None:
-    """Natively bridges centralized OpenBao ingestion mapping strict JSON observability traces (PR 65 Compliance)."""
+    """Hydrate os.environ with secrets from OpenBao KV (secret/flume/keys).
+
+    Bootstrap order for OPENBAO_TOKEN:
+      1. OPENBAO_TOKEN process env (Docker/CLI injects this at container start)
+      2. AppRole login using VAULT_ROLE_ID + BAO_SECRET_ID from process env or
+         ES flume-settings (written by CLI SeedBootstrapConfig after provisioning).
+    """
     addr = os.environ.get("OPENBAO_ADDR", "http://openbao:8200")
     token = os.environ.get("OPENBAO_TOKEN", "")
-    
+
     if not token:
         role_id = os.environ.get("VAULT_ROLE_ID")
-        # Bootstrap writes the dynamic BAO_SECRET_ID to /app/.env after
-        # AppRole provisioning. Compose env was evaluated BEFORE bootstrap ran,
-        # so VAULT_SECRET_ID may have the stale default. Read from .env directly.
         secret_id = os.environ.get("VAULT_SECRET_ID", "")
-        env_file = Path("/app/.env")
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("BAO_SECRET_ID="):
-                    secret_id = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
+
+        # AP-10 / P6a: BAO_SECRET_ID is written to ES flume-settings by the CLI
+        # SeedBootstrapConfig() after AppRole provisioning. Read from ES instead
+        # of the former /app/.env file path (which no longer exists).
+        if not secret_id:
+            try:
+                es_config = load_elastic_config()
+                secret_id = es_config.get("BAO_SECRET_ID", "").strip()
+                if secret_id:
+                    logger.debug("Loaded BAO_SECRET_ID from ES flume-settings")
+                else:
+                    logger.debug("BAO_SECRET_ID not found in ES flume-settings; AppRole login skipped")
+            except Exception as e:
+                logger.warning(f"Failed to load BAO_SECRET_ID from ES flume-settings: {e}")
+
         if role_id and secret_id:
             try:
                 import hvac

@@ -1671,7 +1671,7 @@ def main():
         
     if 'https' in os.environ.get("ES_URL", "") and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
         raise SystemExit(
-            'ES_API_KEY is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
+            'ES_API_KEY is required for TLS clusters. Use OpenBao KV (secret/flume) or process env'
         )
     target_worker = sys.argv[1] if len(sys.argv) > 1 else None
     if target_worker:

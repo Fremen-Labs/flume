@@ -744,7 +744,7 @@ def main():
     hydrate_secrets_from_openbao()
     if 'https' in ES_URL and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
         raise SystemExit(
-            'ES_API_KEY is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
+            'ES_API_KEY is required for TLS clusters. Store it in OpenBao KV (secret/flume) or process env'
         )
         
     def ping_local_llm():
@@ -752,7 +752,7 @@ def main():
         # Strip /v1 suffix — Ollama's native API endpoints are at /api/*, not /v1/api/*
         url = raw.rstrip('/').removesuffix('/v1')
         if "docker" in url and sys.platform.startswith("linux"):
-            log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="define LOCAL_LLM_HOST=172.17.0.1 in .env")
+            log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="set LOCAL_LLM_HOST=172.17.0.1 in process env or ES flume-settings")
         try:
             req = urllib.request.Request(f"{url}/api/tags", method="GET")
             with urllib.request.urlopen(req, timeout=3):

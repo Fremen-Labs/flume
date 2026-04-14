@@ -3,7 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from utils.workspace import resolve_safe_workspace
 
 class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # AP-10 / P6a: env_file removed — bootstrap config comes from process env
+    # (Docker/CLI injects ES_URL, FLUME_ADMIN_TOKEN, etc.) or from ES flume-settings
+    # via apply_runtime_config(). No .env file is read at dashboard startup.
+    model_config = SettingsConfigDict(extra="ignore")
     ES_URL: str = "http://localhost:9200"
     ES_API_KEY: str = ""
     ES_CA_CERTS: str = ""
