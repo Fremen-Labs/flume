@@ -206,9 +206,10 @@ func PrintDeploymentSummary(s DeploymentSummary) {
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorNeonGreen).
 			Padding(0, 2).
+			MarginLeft(2).
 			Render("🔐  OPENBAO NATIVE KMS DEPLOYED SUCCESSFULLY  🔐")
 		add("")
-		add("  " + vaultHeader)
+		add(vaultHeader)
 		add("")
 	}
 	add(divider)
