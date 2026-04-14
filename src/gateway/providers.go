@@ -114,6 +114,83 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 	return resp, nil
 }
 
+// RouteToNode dispatches a request to a specific Ollama node, overriding the
+// base URL and optionally injecting bearer authentication.
+// This is used by MultiNodeRouter to route to individual mesh nodes.
+func (r *ProviderRouter) RouteToNode(ctx context.Context, req *ChatRequest, nodeURL, authToken string, withTools bool) (*ChatResponse, error) {
+	log := WithContext(ctx)
+	log.Info("routing to mesh node",
+		slog.String("provider", ProviderOllama),
+		slog.String("node_url", nodeURL),
+		slog.String("model", req.Model),
+		slog.Bool("with_tools", withTools),
+		slog.Bool("has_auth", authToken != ""),
+	)
+
+	// Check FLUME_OLLAMA_THINK env override
+	globalThinkOverride := false
+	if v := strings.TrimSpace(os.Getenv("FLUME_OLLAMA_THINK")); v == "1" || v == "true" || v == "yes" {
+		globalThinkOverride = true
+	}
+	enableThink := req.Think || globalThinkOverride || r.config.ShouldThink(req)
+	suppressThink := IsThinkingModel(req.Model) && !enableThink
+
+	var resp *ChatResponse
+	var err error
+
+	resp, err = r.ollamaWithNode(ctx, req, nodeURL, authToken, suppressThink, withTools)
+	if err != nil {
+		return nil, err
+	}
+
+	if withTools {
+		SanitizeToolResponse(resp)
+	}
+
+	return resp, nil
+}
+
+// ollamaWithNode is the node-specific Ollama dispatch, using a given base URL.
+func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, baseURL, authToken string, suppressThink, withTools bool) (*ChatResponse, error) {
+	numCtx := 8192
+	if v := os.Getenv("FLUME_OLLAMA_NUM_CTX"); v != "" {
+		fmt.Sscanf(v, "%d", &numCtx)
+	}
+
+	options := map[string]interface{}{
+		"temperature": req.Temperature,
+		"num_predict": req.MaxTokens,
+		"num_ctx":     numCtx,
+	}
+
+	messages := messagesToSlice(req.Messages)
+
+	if suppressThink {
+		options["think"] = false
+		messages = InjectNoThinkSystem(messages)
+	}
+
+	if withTools && len(req.Tools) > 0 {
+		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options)
+	}
+
+	if suppressThink {
+		content, thoughts, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+		if err != nil {
+			return nil, err
+		}
+		return &ChatResponse{
+			Message: ResponseMessage{
+				Role:     "assistant",
+				Content:  content,
+				Thoughts: thoughts,
+			},
+		}, nil
+	}
+
+	return r.ollamaNonStream(ctx, baseURL, messages, req.Model, options)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // API Key Resolution
 // ─────────────────────────────────────────────────────────────────────────────

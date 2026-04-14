@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Fremen-Labs/flume/src/gateway/skills"
@@ -39,6 +40,12 @@ type Server struct {
 	frontierQ  *FrontierQueue
 	// skills is the registry of Inception Skill handlers.
 	skills     *skills.SkillRegistry
+	// nodeRegistry manages the distributed Ollama node mesh.
+	nodeRegistry   *NodeRegistry
+	// healthChecker probes node health in the background.
+	healthChecker  *HealthChecker
+	// multiRouter coordinates smart routing across the node mesh.
+	multiRouter    *MultiNodeRouter
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -388,6 +395,39 @@ func StartGateway(addr string) error {
 
 	server := NewServer(config, secrets)
 
+	// ── Distributed Node Mesh initialization ────────────────────────────
+	esURL := os.Getenv("ES_URL")
+	if esURL == "" {
+		esURL = "http://elasticsearch:9200"
+	}
+	server.nodeRegistry = NewNodeRegistry(esURL)
+
+	// Ensure the node registry ES index exists.
+	if err := server.nodeRegistry.EnsureIndex(ctx); err != nil {
+		log.Warn("failed to ensure node-registry index",
+			slog.String("error", err.Error()),
+		)
+	}
+
+	// Load nodes from ES.
+	server.nodeRegistry.RefreshFromES(ctx)
+	nodeCount := server.nodeRegistry.Count()
+	log.Info("node mesh initialized",
+		slog.Int("registered_nodes", nodeCount),
+	)
+
+	// Start background health checker.
+	server.healthChecker = NewHealthChecker(server.nodeRegistry)
+	server.healthChecker.Start(ctx)
+
+	// Create multi-node router.
+	server.multiRouter = NewMultiNodeRouter(server.router, server.nodeRegistry, config)
+
+	// Register node mesh API endpoints.
+	server.mux.HandleFunc("GET /api/nodes", server.handleGetNodes)
+	server.mux.HandleFunc("POST /api/nodes", server.handleAddNode)
+	server.mux.HandleFunc("DELETE /api/nodes/", server.handleDeleteNode)
+
 	// Initialize Inception Skill Registry
 	server.skills = skills.NewSkillRegistry()
 	if err := server.skills.LoadAll(ctx); err != nil {
@@ -423,4 +463,118 @@ func msElapsed(start time.Time) float64 {
 // shortID generates a short request ID without external deps.
 func shortID() string {
 	return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Node Mesh API Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// handleGetNodes returns the list of all registered nodes (AuthToken redacted).
+func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+	log.Debug("handling GET /api/nodes")
+
+	nodes := s.nodeRegistry.AllNodes()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"nodes": nodes,
+		"count": len(nodes),
+	})
+}
+
+// handleAddNode registers a new Ollama node in the mesh.
+func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+
+	var node Node
+	if err := json.NewDecoder(r.Body).Decode(&node); err != nil {
+		log.Warn("node_api: invalid JSON body",
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Input validation: node ID format
+	if !isValidNodeID(node.ID) {
+		log.Warn("node_api: invalid node ID",
+			slog.String("node_id", node.ID),
+		)
+		http.Error(w, `{"error":"node ID must match ^[a-z0-9-]+$ and be 1-64 chars"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Input validation: host must be non-empty
+	if node.Host == "" {
+		http.Error(w, `{"error":"host is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Default health state for new nodes.
+	node.Health = NodeHealth{
+		Status:   NodeStatusOffline,
+		LastSeen: time.Now(),
+	}
+
+	if err := s.nodeRegistry.UpsertNodeToES(r.Context(), &node); err != nil {
+		log.Error("node_api: failed to persist node",
+			slog.String("node_id", node.ID),
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, `{"error":"failed to persist node"}`, http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("node_api: node registered",
+		slog.String("node_id", node.ID),
+		slog.String("host", node.Host),
+		slog.String("model", node.ModelTag),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"status": "created", "id": node.ID})
+}
+
+// handleDeleteNode removes a node from the mesh.
+func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+
+	// Extract node ID from URL path: /api/nodes/{id}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/nodes/"), "/")
+	nodeID := parts[0]
+
+	if nodeID == "" || !isValidNodeID(nodeID) {
+		http.Error(w, `{"error":"invalid or missing node ID"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := s.nodeRegistry.DeleteNodeFromES(r.Context(), nodeID); err != nil {
+		log.Error("node_api: failed to delete node",
+			slog.String("node_id", nodeID),
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, `{"error":"failed to delete node"}`, http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("node_api: node deleted",
+		slog.String("node_id", nodeID),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": nodeID})
+}
+
+// isValidNodeID validates node IDs against ^[a-z0-9\-]+$ (1-64 chars).
+func isValidNodeID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }

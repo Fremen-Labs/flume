@@ -248,6 +248,11 @@ var Metrics = &metricsRegistry{
 	VRAMPressureEvents:   &simpleCounter{},
 	RequestDuration:      newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
 	ActiveModels:         newGaugeVec(),
+	NodeRequests:         newCounterVec(),
+	RoutingDecisions:     newCounterVec(),
+	NodeLoad:             newGaugeVec(),
+	NodeHealthGauge:      newGaugeVec(),
+	LocalOffloadPct:      newGaugeVec(),
 }
 
 type metricsRegistry struct {
@@ -274,6 +279,23 @@ type metricsRegistry struct {
 
 	// flume_active_models{model}
 	ActiveModels *gaugeVec
+
+	// ── Node Mesh metrics ──────────────────────────────────────────────
+
+	// flume_node_requests_total{node_id, model}
+	NodeRequests *counterVec
+
+	// flume_routing_decision{strategy, task_type}
+	RoutingDecisions *counterVec
+
+	// flume_node_load{node_id}
+	NodeLoad *gaugeVec
+
+	// flume_node_health{node_id, model, status}
+	NodeHealthGauge *gaugeVec
+
+	// flume_local_offload_percentage
+	LocalOffloadPct *gaugeVec
 }
 
 // RecordRequest records a completed request's duration and success state.
@@ -350,6 +372,42 @@ func (m *metricsRegistry) SetActiveModel(model string) {
 		slog.String("component", "metrics"),
 		slog.String("model", model),
 	)
+}
+
+// RecordNodeRequest tracks a request routed to a specific node.
+func (m *metricsRegistry) RecordNodeRequest(nodeID, model string) {
+	labels := formatLabels([]Label{{"node_id", nodeID}, {"model", model}})
+	m.NodeRequests.Inc(labels)
+}
+
+// RecordRoutingDecision tracks a routing strategy decision.
+func (m *metricsRegistry) RecordRoutingDecision(strategy, taskType string) {
+	labels := formatLabels([]Label{{"strategy", strategy}, {"task_type", taskType}})
+	m.RoutingDecisions.Inc(labels)
+}
+
+// SetNodeLoad sets the current load gauge for a node.
+func (m *metricsRegistry) SetNodeLoad(nodeID string, load float64) {
+	labels := formatLabels([]Label{{"node_id", nodeID}})
+	m.NodeLoad.Set(labels, load)
+}
+
+// SetNodeHealth sets the health status gauge for a node.
+func (m *metricsRegistry) SetNodeHealth(nodeID, model, status string) {
+	// Reset all status values for this node, then set current.
+	for _, s := range []string{"healthy", "degraded", "offline"} {
+		labels := formatLabels([]Label{{"node_id", nodeID}, {"model", model}, {"status", s}})
+		if s == status {
+			m.NodeHealthGauge.Set(labels, 1)
+		} else {
+			m.NodeHealthGauge.Set(labels, 0)
+		}
+	}
+}
+
+// SetLocalOffloadPercentage sets the percentage of requests handled locally vs. frontier.
+func (m *metricsRegistry) SetLocalOffloadPercentage(pct float64) {
+	m.LocalOffloadPct.Set("", pct)
 }
 
 // ─── Prometheus text exposition ──────────────────────────────────────────────
@@ -469,6 +527,65 @@ func HandleMetrics() http.HandlerFunc {
 			buf = append(buf, "flume_active_models{"...)
 			buf = append(buf, labels...)
 			buf = append(buf, "} "...)
+			buf = strconv.AppendFloat(buf, val, 'f', 1, 64)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_node_requests_total ──────────────────────────────────
+		buf = append(buf, "# HELP flume_node_requests_total Total requests routed to each node.\n"...)
+		buf = append(buf, "# TYPE flume_node_requests_total counter\n"...)
+		for labels, count := range Metrics.NodeRequests.snapshot() {
+			buf = append(buf, "flume_node_requests_total{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendUint(buf, count, 10)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_routing_decision ────────────────────────────────────
+		buf = append(buf, "# HELP flume_routing_decision Total routing decisions by strategy and task type.\n"...)
+		buf = append(buf, "# TYPE flume_routing_decision counter\n"...)
+		for labels, count := range Metrics.RoutingDecisions.snapshot() {
+			buf = append(buf, "flume_routing_decision{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendUint(buf, count, 10)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_node_load ───────────────────────────────────────────
+		buf = append(buf, "# HELP flume_node_load Current load factor per node (0.0-1.0).\n"...)
+		buf = append(buf, "# TYPE flume_node_load gauge\n"...)
+		for labels, val := range Metrics.NodeLoad.snapshot() {
+			buf = append(buf, "flume_node_load{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendFloat(buf, val, 'f', 3, 64)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_node_health ─────────────────────────────────────────
+		buf = append(buf, "# HELP flume_node_health Node health status (1 = this status is active).\n"...)
+		buf = append(buf, "# TYPE flume_node_health gauge\n"...)
+		for labels, val := range Metrics.NodeHealthGauge.snapshot() {
+			buf = append(buf, "flume_node_health{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendFloat(buf, val, 'f', 1, 64)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_local_offload_percentage ────────────────────────────
+		buf = append(buf, "# HELP flume_local_offload_percentage Percentage of requests handled by local nodes.\n"...)
+		buf = append(buf, "# TYPE flume_local_offload_percentage gauge\n"...)
+		for labels, val := range Metrics.LocalOffloadPct.snapshot() {
+			buf = append(buf, "flume_local_offload_percentage"...)
+			if labels != "" {
+				buf = append(buf, '{')  
+				buf = append(buf, labels...)
+				buf = append(buf, '}')  
+			}
+			buf = append(buf, ' ')
 			buf = strconv.AppendFloat(buf, val, 'f', 1, 64)
 			buf = append(buf, '\n')
 		}
