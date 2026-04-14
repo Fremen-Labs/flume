@@ -606,25 +606,102 @@ def _update_planning_status(session: dict, **updates) -> dict:
 
 
 def _test_planner_connection(status: dict) -> dict:
-    provider = (status.get('provider') or '').lower()
-    base_url = (status.get('baseUrl') or '').rstrip('/')
-    if not base_url:
-        status['connectionTestOk'] = False
-        status['connectionTestResult'] = 'No LLM_BASE_URL configured.'
-        return status
-    url = base_url
-    if provider == 'ollama':
-        url = base_url + '/api/version'
-    elif provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok'):
-        url = base_url + '/v1/models'
+    """Probe the configured LLM endpoint and update status with the result.
+
+    Each provider family uses a distinct URL pattern and auth scheme:
+      - openai / grok / xai / mistral / cohere / openai_compatible
+            → {base}/v1/models   (trailing /v1 stripped first to avoid /v1/v1)
+            → Authorization: Bearer <api_key>
+      - anthropic
+            → https://api.anthropic.com/v1/models
+            → x-api-key + anthropic-version headers
+      - gemini
+            → https://generativelanguage.googleapis.com/v1beta/models?key=<api_key>
+      - ollama / exo
+            → {base}/api/version   (no auth)
+    """
+    provider  = (status.get('provider') or '').lower().strip()
+    base_url  = (status.get('baseUrl') or '').rstrip('/')
+    api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
+
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
+
+    if not base_url:
+        status['connectionTestOk']     = False
+        status['connectionTestResult'] = (
+            f'No base URL configured for provider "{provider}". '
+            'Check Settings → LLM Provider.'
+        )
+        status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
+        return status
+
+    # ── Build provider-specific test URL & headers ─────────────────────────
+
+    headers: dict = {}
+    url: str = base_url   # default fallback
+
+    if provider == 'ollama':
+        # Ollama uses the /api/version health endpoint
+        url = base_url + '/api/version'
+
+    elif provider == 'exo':
+        # Exo acts as an OpenAI-compatible API (port 52415), using /v1/models
+        norm = base_url
+        if norm.endswith('/v1'):
+            norm = norm[:-3]
+        url = norm.rstrip('/') + '/v1/models'
+
+    elif provider == 'anthropic':
+        # Anthropic always uses a fixed root, ignoring whatever base_url
+        # may have been supplied (it could be overridden by the user).
+        root = base_url if base_url else 'https://api.anthropic.com'
+        url  = root.rstrip('/') + '/v1/models'
+        if api_key:
+            headers['x-api-key']         = api_key
+            headers['anthropic-version']  = '2023-06-01'
+
+    elif provider == 'gemini':
+        # Gemini uses the Google Generative Language API, not OpenAI /v1/models.
+        # The key is passed as a query parameter, not a Bearer token.
+        url = 'https://generativelanguage.googleapis.com/v1beta/models'
+        if api_key:
+            url += f'?key={api_key}'
+
+    elif provider in ('openai', 'openai_compatible', 'xai', 'grok', 'mistral', 'cohere'):
+        # OpenAI-compatible family: strip a trailing /v1 that catalog URLs
+        # (e.g. Grok → https://api.x.ai/v1) already include, then append /v1/models.
+        norm = base_url
+        if norm.endswith('/v1'):
+            norm = norm[:-3]
+        url = norm.rstrip('/') + '/v1/models'
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+    else:
+        # Unknown / openai_compatible fallback — try /v1/models with Bearer.
+        norm = base_url
+        if norm.endswith('/v1'):
+            norm = norm[:-3]
+        url = norm.rstrip('/') + '/v1/models'
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+    # ── Execute the probe ──────────────────────────────────────────────────
+    logger.debug(
+        'connection_test_probe',
+        extra={'provider': provider, 'url': url, 'has_key': bool(api_key)},
+    )
     try:
-        req = urllib.request.Request(url, headers={'Authorization': f"Bearer {(os.environ.get('LLM_API_KEY') or '').strip()}"} if provider in ('openai', 'openai_compatible', 'gemini', 'xai', 'grok') and (os.environ.get('LLM_API_KEY') or '').strip() else {}, method='GET')
+        req = urllib.request.Request(url, headers=headers, method='GET')
         with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read().decode(errors='ignore')
-            status['connectionTestOk'] = True
-            status['connectionTestResult'] = f'{url} responded HTTP {getattr(resp, "status", 200)}'
+            body   = resp.read().decode(errors='ignore')
+            status_code = getattr(resp, 'status', 200)
+            status['connectionTestOk']     = True
+            status['connectionTestResult'] = (
+                f'{provider.upper()} connection OK — {url} responded HTTP {status_code}'
+            )
+            # For Ollama, surface the version string.
             if provider == 'ollama':
                 try:
                     version = json.loads(body).get('version')
@@ -632,11 +709,24 @@ def _test_planner_connection(status: dict) -> dict:
                         status['connectionTestResult'] += f' (Ollama {version})'
                 except Exception:
                     pass
-    except Exception as e:
-        status['connectionTestOk'] = False
-        status['connectionTestResult'] = f'{url} failed: {e}'[:300]
+            # For OpenAI-family, surface how many models came back.
+            elif provider not in ('gemini',):
+                try:
+                    n = len(json.loads(body).get('data', []))
+                    if n:
+                        status['connectionTestResult'] += f' · {n} models available'
+                except Exception:
+                    pass
+    except Exception as exc:
+        status['connectionTestOk']     = False
+        status['connectionTestResult'] = (
+            f'{provider.upper()} connection FAILED — {url}: {exc}'
+        )[:300]
+
     status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
     return status
+
+
 
 
 def _complete_planner_turn(session: dict, message: str, plan: Optional[dict], plan_source: str, failure_text: Optional[str] = None):

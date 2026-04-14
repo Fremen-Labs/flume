@@ -10,10 +10,10 @@ import (
 )
 
 type PromptConfig struct {
-	Provider       string
-	Model          string
-	APIKey         string
-	Host           string
+	Provider string
+	Model    string
+	APIKey   string
+	Host     string
 
 	ExternalElastic bool
 	ElasticURL      string
@@ -21,8 +21,11 @@ type PromptConfig struct {
 	RepoType    string
 	GithubToken string
 	ADOOrg      string
-	ADOProject  string
-	ADOToken    string
+	// ADOProject is collected for optional future use but is NOT used to build
+	// ADO connection strings in the current version. Org + PAT are sufficient.
+	// It is retained in the struct for forward-compatibility only.
+	ADOProject string
+	ADOToken   string
 }
 
 const (
@@ -38,17 +41,27 @@ const (
 	StepRepoType
 	StepGithubToken
 	StepADOOrg
-	StepADOProject
 	StepADOToken
 	StepDone
 )
 
+// providerLabel maps a provider key to its display name used across prompts.
+// This is the single source of truth so that all prompts are consistent.
+var providerLabel = map[string]string{
+	"openai":    "OpenAI",
+	"anthropic": "Anthropic",
+	"ollama":    "Ollama",
+	"exo":       "Exo (Mac MLX)",
+	"gemini":    "Gemini",
+	"grok":      "Grok",
+}
+
 type promptModel struct {
-	step      int
-	cfg       *PromptConfig
-	inputs    map[int]textinput.Model
+	step     int
+	cfg      *PromptConfig
+	inputs   map[int]textinput.Model
 	exoActive bool
-	errMsg    string // validation error shown inline; cleared on next keypress
+	errMsg   string // validation error shown inline; cleared on next keypress
 }
 
 // errStyle renders inline validation errors in a distinctive amber/red colour.
@@ -61,10 +74,19 @@ func renderErr(msg string) string {
 	return "\n" + errStyle.Render("⚠ "+msg) + "\n"
 }
 
+// displayProvider returns a human-readable provider name for the chosen provider.
+// Falls back to the raw identifier when no mapping exists (defensive).
+func displayProvider(p string) string {
+	if label, ok := providerLabel[p]; ok {
+		return label
+	}
+	return p
+}
+
 func InitialPromptModel(cfg *PromptConfig, exoActive bool) promptModel {
 	m := promptModel{
-		cfg:       cfg,
-		inputs:    make(map[int]textinput.Model),
+		cfg:      cfg,
+		inputs:   make(map[int]textinput.Model),
 		exoActive: exoActive,
 	}
 
@@ -89,7 +111,7 @@ func InitialPromptModel(cfg *PromptConfig, exoActive bool) promptModel {
 	} else {
 		m.step = StepProvider
 	}
-	
+
 	ti := m.inputs[m.step]
 	ti.Focus()
 	m.inputs[m.step] = ti
@@ -211,9 +233,6 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.next(StepDone)
 			case StepADOOrg:
 				m.cfg.ADOOrg = val
-				return m.next(StepADOProject)
-			case StepADOProject:
-				m.cfg.ADOProject = val
 				return m.next(StepADOToken)
 			case StepADOToken:
 				m.cfg.ADOToken = val
@@ -232,19 +251,22 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m promptModel) View() string {
 	ti := m.inputs[m.step]
 	err := renderErr(m.errMsg)
+	// provider label used in dynamic prompts below.
+	pLabel := displayProvider(m.cfg.Provider)
+
 	switch m.step {
 	case StepExoPrompt:
 		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepProvider:
 		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
-		return NeonGreen("Enter specific LLM Model constraint (e.g. qwen, llama3.2):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter " + pLabel + " model constraint (e.g. gpt-4o, claude-opus-4-5, qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaScope:
 		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaIP:
 		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepAPIKey:
-		return NeonGreen("Enter API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter " + pLabel + " API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticMenu:
 		return NeonGreen("Select Elasticsearch capability:\n") + "\n1. Use default Flume Docker instance\n2. Use an existing External Elastic instance\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticURL:
@@ -254,13 +276,11 @@ func (m promptModel) View() string {
 	case StepRepoType:
 		return NeonGreen("Select Source Control Provider:\n") + "\n1. GitHub\n2. Azure DevOps (ADO)\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepGithubToken:
-		return NeonGreen("Enter GitHub Personal Access Token:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter GitHub Personal Access Token (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOOrg:
 		return NeonGreen("Enter Azure DevOps Organization Name:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
-	case StepADOProject:
-		return NeonGreen("Enter Azure DevOps Project Name:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOToken:
-		return NeonGreen("Enter Azure DevOps Personal Access Token (Masked):\n") + "\n" + ti.View() + err + "\n(Press enter to submit)\n"
+		return NeonGreen("Enter Azure DevOps Personal Access Token (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to submit)\n"
 	}
 	return SuccessBlue("Credentials received securely.")
 }
