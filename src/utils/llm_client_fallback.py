@@ -6,11 +6,12 @@ and local clusters (Ollama).
 """
 
 import json
-import logging
 import urllib.request
 import urllib.error
 
-logger = logging.getLogger("llm_client_fallback")
+from utils.logger import get_logger
+
+logger = get_logger("llm_client_fallback")
 
 # Hardcoded cloud fallback maps (Prefix match -> Fallback model)
 CLOUD_FALLBACKS = {

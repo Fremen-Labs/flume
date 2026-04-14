@@ -36,6 +36,10 @@ import os
 import urllib.request
 import urllib.error
 
+from utils.logger import get_logger
+
+logger = get_logger("llm_client_legacy")
+
 def _provider() -> str:
     return os.environ.get('LLM_PROVIDER', 'ollama').lower()
 
@@ -223,8 +227,6 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
             last_err = e
             
             if e.code in [400, 404] and not swapped_fallback and isinstance(payload, dict) and payload.get('model'):
-                import logging
-                logger = logging.getLogger("llm_client_legacy")
                 try:
                     from utils.llm_client_fallback import resolve_fallback_model
                     prov = "unknown"
@@ -258,8 +260,6 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
                 detail += f' (model={model})'
             raise RuntimeError(detail) from e
         except urllib.error.URLError as e:
-            import logging
-            logger = logging.getLogger("llm_client_legacy")
             logger.warning(f"URLError connecting to LLM provider (attempt {attempt + 1}/{max_retries}): {e}. Retrying after {2 ** attempt}s...")
             last_err = e
             
