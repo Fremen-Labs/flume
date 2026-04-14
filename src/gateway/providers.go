@@ -276,7 +276,12 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 	baseURL := r.config.GetOllamaBaseURL()
 	numCtx := 8192
 	if v := os.Getenv("FLUME_OLLAMA_NUM_CTX"); v != "" {
-		fmt.Sscanf(v, "%d", &numCtx)
+		if _, err := fmt.Sscanf(v, "%d", &numCtx); err != nil {
+			WithContext(ctx).Warn("failed to parse FLUME_OLLAMA_NUM_CTX, using default",
+				slog.String("value", v),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	options := map[string]interface{}{
