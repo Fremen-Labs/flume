@@ -32,12 +32,14 @@ export function useTelemetryStream() {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
+        console.warn(`[useTelemetryStream] WebSocket closed (code ${ev.code}), reconnecting in 3s`);
         reconnectTimeout = setTimeout(connect, 3000);
       };
-      
-      ws.onerror = () => {
-          ws?.close();
+
+      ws.onerror = (ev) => {
+        console.warn('[useTelemetryStream] WebSocket error', ev);
+        ws?.close();
       };
     };
 
