@@ -240,3 +240,72 @@ func AdaptiveEnsembleSize(model string, configuredSize int, ollamaBaseURL string
 
 	return safeSize
 }
+
+// AdaptiveEnsembleSizeForNode is the node-mesh variant of AdaptiveEnsembleSize.
+// Instead of reading FLUME_SYSTEM_MEMORY_GB from the environment, it uses the
+// MemoryGB reported by the Node struct, and probes the node's own /api/ps
+// endpoint for live VRAM usage. This allows per-node VRAM pressure sensing when
+// the ensemble distributes jury members across a heterogeneous fleet.
+//
+// Falls back to configuredSize when FLUME_ENSEMBLE_NO_ADAPTIVE=1.
+func AdaptiveEnsembleSizeForNode(model string, configuredSize int, node *Node) int {
+	if configuredSize <= 1 {
+		return configuredSize
+	}
+	if strings.TrimSpace(os.Getenv("FLUME_ENSEMBLE_NO_ADAPTIVE")) == "1" {
+		return configuredSize
+	}
+
+	log := Log()
+
+	perCallGB := ModelVRAMEstimateGB(model)
+	totalMemGB := node.Capabilities.MemoryGB
+	if totalMemGB <= 0 {
+		// Node has no declared memory — fall back to the global env-based estimate.
+		log.Debug("adaptive_ensemble_node: node has no declared memory, using global estimate",
+			slog.String("node_id", node.ID),
+		)
+		return AdaptiveEnsembleSize(model, configuredSize, "http://"+node.Host)
+	}
+
+	nodeBaseURL := "http://" + node.Host
+	info := QueryOllamaVRAM(nodeBaseURL)
+
+	reservedGB := totalMemGB * systemReservedMemoryFactor
+	alreadyUsedGB := info.TotalUsedGB
+	perExtraSlotGB := perCallGB * perSlotKVShareFactor
+
+	availableGB := totalMemGB - reservedGB - alreadyUsedGB
+	if availableGB < perExtraSlotGB {
+		log.Warn("adaptive_ensemble_node: insufficient VRAM — degrading node to single call",
+			slog.String("node_id", node.ID),
+			slog.String("model", model),
+			slog.Float64("available_gb", availableGB),
+			slog.Float64("total_used_gb", alreadyUsedGB),
+			slog.Float64("node_memory_gb", totalMemGB),
+		)
+		Metrics.RecordVRAMPressure()
+		return 1
+	}
+
+	extraSlots := int(availableGB / perExtraSlotGB)
+	safeSize := extraSlots + 1
+	if safeSize > configuredSize {
+		safeSize = configuredSize
+	}
+	if safeSize < 1 {
+		safeSize = 1
+	}
+
+	if safeSize < configuredSize {
+		log.Info("adaptive_ensemble_node: size clamped for node",
+			slog.String("node_id", node.ID),
+			slog.String("model", model),
+			slog.Int("configured", configuredSize),
+			slog.Int("adaptive", safeSize),
+			slog.Float64("available_gb", availableGB),
+		)
+	}
+
+	return safeSize
+}

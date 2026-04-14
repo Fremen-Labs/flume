@@ -47,6 +47,8 @@ type Server struct {
 	healthChecker  *HealthChecker
 	// multiRouter coordinates smart routing across the node mesh.
 	multiRouter    *MultiNodeRouter
+	// nodeSems provides per-node concurrency semaphores for the distributed ensemble.
+	nodeSems       *NodeSemaphoreMap
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -420,6 +422,9 @@ func StartGateway(addr string) error {
 	// Start background health checker.
 	server.healthChecker = NewHealthChecker(server.nodeRegistry)
 	server.healthChecker.Start(ctx)
+
+	// Initialize per-node semaphore map.
+	server.nodeSems = NewNodeSemaphoreMap()
 
 	// Create multi-node router.
 	server.multiRouter = NewMultiNodeRouter(server.router, server.nodeRegistry, config)

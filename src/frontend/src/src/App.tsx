@@ -16,6 +16,7 @@ import SettingsPage from "@/pages/SettingsPage";
 import SecurityPage from "@/pages/SecurityPage";
 import MissionControlPage from "@/pages/MissionControlPage";
 import TelemetryPage from "@/pages/TelemetryPage";
+import NodesOverview from "@/pages/NodesOverview";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -39,6 +40,7 @@ const App = () => (
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/security" element={<SecurityPage />} />
+              <Route path="/nodes" element={<NodesOverview />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<NotFound />} />
