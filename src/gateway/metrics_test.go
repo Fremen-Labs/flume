@@ -25,6 +25,11 @@ func setupTestMetrics() (*metricsRegistry, func()) {
 		VRAMPressureEvents: &simpleCounter{},
 		RequestDuration:    newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
 		ActiveModels:       newGaugeVec(),
+		NodeRequests:       newCounterVec(),
+		RoutingDecisions:   newCounterVec(),
+		NodeLoad:           newGaugeVec(),
+		NodeHealthGauge:    newGaugeVec(),
+		LocalOffloadPct:    newGaugeVec(),
 	}
 	Metrics = clean
 	return clean, func() { Metrics = old }
