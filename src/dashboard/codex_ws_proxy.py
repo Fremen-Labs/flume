@@ -16,6 +16,10 @@ import threading
 import traceback
 from typing import Any
 
+from utils.logger import get_logger
+
+logger = get_logger("codex_ws_proxy")
+
 WEBSOCKETS_IMPORT_ERROR: str | None = None
 try:
     import websockets  # type: ignore[import-untyped]
@@ -160,6 +164,10 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
     except Exception as e:
         try:
             reason = str(e)[:120]
+            logger.warning(
+                "WebSocket relay error — closing browser connection",
+                extra={"structured_data": {"upstream": upstream_uri, "error": str(e)}},
+            )
             await browser_ws.close(code=1011, reason=reason)
         except Exception:
             pass
@@ -194,14 +202,26 @@ async def _async_main() -> None:
             ping_interval=20,
             ping_timeout=120,
         ):
+            logger.info(
+                "Codex WebSocket proxy listening",
+                extra={"structured_data": {"bind": f"{host}:{port}", "upstream": upstream}},
+            )
             _serve_ready.set()
             _proxy_listen_error = None
             await asyncio.Future()
     except OSError as e:
         _proxy_listen_error = f"{type(e).__name__}: {e}"
+        logger.error(
+            "Codex WebSocket proxy failed to bind",
+            extra={"structured_data": {"bind": f"{host}:{port}", "error": _proxy_listen_error}},
+        )
         _serve_ready.set()
     except Exception:
         _proxy_listen_error = traceback.format_exc()[-500:]
+        logger.error(
+            "Codex WebSocket proxy crashed",
+            extra={"structured_data": {"error": _proxy_listen_error}},
+        )
         _serve_ready.set()
 
 
@@ -225,12 +245,20 @@ def start_codex_ws_proxy_background() -> None:
         except Exception:
             global _proxy_listen_error
             _proxy_listen_error = traceback.format_exc()[-500:]
+            logger.error(
+                "Codex WebSocket proxy runner crashed",
+                extra={"structured_data": {"error": _proxy_listen_error}},
+            )
             _serve_ready.set()
 
     _proxy_thread = threading.Thread(
         target=runner,
         daemon=True,
         name="flume-codex-ws-proxy",
+    )
+    logger.info(
+        "Starting Codex WebSocket proxy thread",
+        extra={"structured_data": {"bind": f"{proxy_bind_host()}:{proxy_port()}"}},
     )
     _proxy_thread.start()
     # So startup logs reflect listen failure or success without racing the first HTTP request.

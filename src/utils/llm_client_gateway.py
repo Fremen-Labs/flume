@@ -18,6 +18,10 @@ import urllib.request
 import urllib.error
 import time
 
+from utils.logger import get_logger
+
+logger = get_logger("llm_client_gateway")
+
 # ---------------------------------------------------------------------------
 # Gateway connection
 # ---------------------------------------------------------------------------
@@ -38,7 +42,8 @@ def _gateway_available() -> bool:
             _gateway_ok = resp.status == 200
             _gateway_checked_at = now
             return _gateway_ok
-    except Exception:
+    except Exception as e:
+        logger.debug("Gateway health check failed", extra={"structured_data": {"url": _gateway_url(), "error": str(e)}})
         _gateway_ok = False
         _gateway_checked_at = now
         return False
@@ -135,8 +140,11 @@ def chat(
             if return_usage:
                 return content, resp.get('usage', {})
             return content
-        except Exception:
-            pass  # Fall through to legacy
+        except Exception as e:
+            logger.warning(
+                "Gateway call failed — falling back to legacy direct provider",
+                extra={"structured_data": {"gateway_url": _gateway_url(), "error": str(e)}},
+            )
 
     # Fallback to direct provider calls
     leg = _legacy()
@@ -199,8 +207,11 @@ def chat_with_tools(
                 'agent_role': agent_role,
             }
             return _post_gateway('/v1/chat/tools', payload, timeout=180)
-        except Exception:
-            pass  # Fall through to legacy
+        except Exception as e:
+            logger.warning(
+                "Gateway tool call failed — falling back to legacy direct provider",
+                extra={"structured_data": {"gateway_url": _gateway_url(), "error": str(e)}},
+            )
 
     leg = _legacy()
     return leg.chat_with_tools(

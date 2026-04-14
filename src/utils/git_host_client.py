@@ -30,6 +30,10 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any
 
+from utils.logger import get_logger
+
+logger = get_logger("git_host_client")
+
 
 # ---------------------------------------------------------------------------
 # Shared exceptions
@@ -154,17 +158,21 @@ def _http_json(
         except Exception:
             pass
         if e.code in (401, 403):
+            logger.warning("Git API auth failure", extra={"structured_data": {"url": url, "status": e.code}})
             raise GitHostAuthError(
                 f"Authentication failed ({e.code}) for {url}: {body_text}"
             ) from e
         if e.code == 404:
+            logger.debug("Git API resource not found", extra={"structured_data": {"url": url}})
             raise GitHostNotFoundError(
                 f"Not found ({e.code}) for {url}: {body_text}"
             ) from e
+        logger.error("Git API HTTP error", extra={"structured_data": {"url": url, "status": e.code, "body": body_text}})
         raise GitHostError(
             f"HTTP {e.code} for {url}: {body_text}"
         ) from e
     except Exception as exc:
+        logger.error("Git API request failed", extra={"structured_data": {"url": url, "error": str(exc)}})
         raise GitHostError(f"Request failed for {url}: {exc}") from exc
 
 
@@ -184,11 +192,15 @@ def _http_raw(url: str, *, token: str) -> bytes:
             return resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:
+            logger.debug("Git raw file not found", extra={"structured_data": {"url": url}})
             raise GitHostNotFoundError(f"File not found: {url}") from e
         if e.code in (401, 403):
+            logger.warning("Git raw file auth failure", extra={"structured_data": {"url": url, "status": e.code}})
             raise GitHostAuthError(f"Auth failed ({e.code}): {url}") from e
+        logger.error("Git raw file HTTP error", extra={"structured_data": {"url": url, "status": e.code}})
         raise GitHostError(f"HTTP {e.code}: {url}") from e
     except Exception as exc:
+        logger.error("Git raw file request failed", extra={"structured_data": {"url": url, "error": str(exc)}})
         raise GitHostError(f"Request failed: {url}: {exc}") from exc
 
 
@@ -677,8 +689,11 @@ def get_git_client(proj: dict) -> GitHostClient:
             raw = github_tokens_store.get_active_token_plain(ws)
             if raw and "OPENBAO_DELEGATED" not in raw:
                 token = raw
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "GitHub token resolution from OpenBao failed — falling back to env",
+                extra={"structured_data": {"error": str(e)}},
+            )
         if not token:
             token = _get_github_token()
         if not token:
@@ -706,8 +721,11 @@ def get_git_client(proj: dict) -> GitHostClient:
             raw = ado_tokens_store.get_active_token_plain(ws)
             if raw and "OPENBAO_DELEGATED" not in raw:
                 token = raw
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "ADO token resolution from OpenBao failed — falling back to env",
+                extra={"structured_data": {"error": str(e)}},
+            )
         if not token:
             token = _get_ado_token()
         if not token:
