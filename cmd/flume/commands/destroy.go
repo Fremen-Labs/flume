@@ -25,6 +25,7 @@ var DestroyCmd = &cobra.Command{
 Use --purge to also remove Elasticsearch containers/volumes and all Flume Docker images.
 This is a hard reset that requires explicit confirmation.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := cmd.Context()
 		fmt.Println(ui.CyberGradient("Initiating Terminal Docker Annihilation Protocol..."))
 
 		// --- Kill any native daemon PID ---
@@ -56,7 +57,7 @@ This is a hard reset that requires explicit confirmation.`,
 		// --- Standard destroy: always include managed_elastic profile so ES containers/volumes are also stopped ---
 		fmt.Println(ui.CyberGradient("Removing Flume containers and volumes (openbao, workers, dashboard, elasticsearch)..."))
 		downArgs := []string{"compose", "--profile", "managed_elastic", "down", "-v"}
-		c := exec.Command("docker", downArgs...)
+		c := exec.CommandContext(ctx, "docker", downArgs...)
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		c.Env = destroyEnv
@@ -77,7 +78,7 @@ This is a hard reset that requires explicit confirmation.`,
 			fmt.Println(ui.WarningGold("⚡ PURGE MODE: Removing all Flume Docker images..."))
 			flumeImages := []string{"flume-dashboard", "flume-worker"}
 			for _, img := range flumeImages {
-				rmImg := exec.Command("docker", "rmi", "-f", img)
+				rmImg := exec.CommandContext(ctx, "docker", "rmi", "-f", img)
 				rmImg.Stdout = os.Stdout
 				rmImg.Stderr = os.Stderr
 				if err := rmImg.Run(); err != nil {
@@ -95,7 +96,7 @@ This is a hard reset that requires explicit confirmation.`,
 		// from repeated destroy/rebuild cycles filled the Docker VM disk (29.9GB
 		// observed), causing Elasticsearch to fail on /tmp writes at startup.
 		fmt.Println(ui.CyberGradient("Pruning Docker builder cache..."))
-		pruneCache := exec.Command("docker", "builder", "prune", "-f")
+		pruneCache := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
 		pruneCache.Stdout = os.Stdout
 		pruneCache.Stderr = os.Stderr
 		pruneCache.Run() // best-effort

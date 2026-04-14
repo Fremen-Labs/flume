@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,7 @@ Worker count options:
   --workers 4      explicit count
   --workers auto   auto-detect from CPU cores and available RAM`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
 		fmt.Println(ui.CyberGradient("═══════════════════════════════════════"))
 		fmt.Println(ui.CyberGradient("  Flume Upgrade System"))
 		fmt.Println(ui.CyberGradient("═══════════════════════════════════════"))
@@ -69,7 +71,7 @@ Worker count options:
 			fmt.Println(ui.WarningGold("  Run 'flume start' first to create one, or enter credentials now:"))
 			fmt.Println()
 			// Fall back to interactive prompt (reuse start flow)
-			return runUpgradeFallback(upgradeWorkersFlag)
+			return runUpgradeFallback(ctx, upgradeWorkersFlag)
 		}
 		fmt.Println(ui.SuccessBlue(fmt.Sprintf("✓  (provider: %s · model: %s)", envCfg.Provider, envCfg.Model)))
 
@@ -80,7 +82,7 @@ Worker count options:
 		// ── Phase 4: Rebuild images ───────────────────────────────────────────
 		fmt.Println(ui.WarningGold("  Rebuilding dashboard and worker images..."))
 		buildArgs := []string{"compose", "--profile", "managed_elastic", "build", "dashboard", "worker"}
-		buildCmd := exec.Command("docker", buildArgs...)
+		buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
 		buildCmd.Env = os.Environ()
@@ -92,7 +94,7 @@ Worker count options:
 		fmt.Print(ui.WarningGold("  Stopping dashboard and workers (ES + OpenBao unaffected)... "))
 		stopServices := buildStopServiceNames(workerCount)
 		stopArgs := append([]string{"compose", "stop"}, stopServices...)
-		stopCmd := exec.Command("docker", stopArgs...)
+		stopCmd := exec.CommandContext(ctx, "docker", stopArgs...)
 		stopCmd.Env = append(os.Environ(), "OPENBAO_TOKEN=flume-dev-token")
 		var stopBuf bytes.Buffer
 		stopCmd.Stderr = &stopBuf
@@ -105,7 +107,7 @@ Worker count options:
 		// ── Phase 6: Re-provision AppRole (OpenBao KV data preserved) ─────────
 		fmt.Print(ui.WarningGold("  Re-provisioning AppRole credentials... "))
 		vaultPort := "8200"
-		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
 		if vaultErr != nil {
 			return fmt.Errorf("vault provisioning failed: %w", vaultErr)
 		}
@@ -121,7 +123,7 @@ Worker count options:
 
 		upServices := orchestrator.BuildWorkerServiceNames(workerCount)
 		upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait"}, upServices...)
-		upCmd := exec.Command("docker", upArgs...)
+		upCmd := exec.CommandContext(ctx, "docker", upArgs...)
 		upCmd.Env = fullEnv
 
 		var upOut, upErr bytes.Buffer
@@ -143,7 +145,7 @@ Worker count options:
 		_ = orchestrator.SaveCredentials(envCfg)
 
 		// ── Pruning builder cache to avoid Docker VM disk exhaustion ──────────
-		pruneCmd := exec.Command("docker", "builder", "prune", "-f")
+		pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
 		pruneCmd.Stdout = os.Stdout
 		pruneCmd.Stderr = os.Stderr
 		pruneCmd.Run() // best-effort
@@ -166,7 +168,7 @@ func buildStopServiceNames(workerCount int) []string {
 
 // runUpgradeFallback falls through to a condensed interactive credential prompt
 // when no snapshot exists, then performs the normal upgrade flow.
-func runUpgradeFallback(workersFlag string) error {
+func runUpgradeFallback(ctx context.Context, workersFlag string) error {
 	log.Info("Falling back to interactive credential entry...")
 	promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
 	if err != nil {
@@ -199,12 +201,12 @@ func runUpgradeFallback(workersFlag string) error {
 
 	// Now do a normal flume start sequence since this is effectively a first run
 	log.Info("Credentials captured. Running full start sequence...")
-	return runStartSequence(envCfg, workersFlag)
+	return runStartSequence(ctx, envCfg, workersFlag)
 }
 
 // runStartSequence runs the docker compose up + vault provisioning sequence
 // used by both fallback upgrade and start command.
-func runStartSequence(envCfg orchestrator.EnvConfig, workersFlag string) error {
+func runStartSequence(ctx context.Context, envCfg orchestrator.EnvConfig, workersFlag string) error {
 	adminToken, err := orchestrator.GenerateAdminToken()
 	if err != nil {
 		return err
@@ -216,7 +218,7 @@ func runStartSequence(envCfg orchestrator.EnvConfig, workersFlag string) error {
 
 	// Boot data grid first
 	dataArgs := []string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait", "elasticsearch", "openbao"}
-	dataCmd := exec.Command("docker", dataArgs...)
+	dataCmd := exec.CommandContext(ctx, "docker", dataArgs...)
 	dataCmd.Env = fullEnv
 	dataCmd.Stdout = os.Stdout
 	dataCmd.Stderr = os.Stderr
@@ -224,7 +226,7 @@ func runStartSequence(envCfg orchestrator.EnvConfig, workersFlag string) error {
 		return fmt.Errorf("data grid boot failed: %w", err)
 	}
 
-	secretID, rootToken, vErr := orchestrator.DeployVaultTopology("8200", envCfg)
+	secretID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, "8200", envCfg)
 	if vErr != nil {
 		return vErr
 	}
@@ -234,7 +236,7 @@ func runStartSequence(envCfg orchestrator.EnvConfig, workersFlag string) error {
 	workerCount := orchestrator.ResolveWorkerCount(workersFlag)
 	upServices := orchestrator.BuildWorkerServiceNames(workerCount)
 	upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait"}, upServices...)
-	upCmd := exec.Command("docker", upArgs...)
+	upCmd := exec.CommandContext(ctx, "docker", upArgs...)
 	upCmd.Env = fullEnv
 	upCmd.Stdout = os.Stdout
 	upCmd.Stderr = os.Stderr

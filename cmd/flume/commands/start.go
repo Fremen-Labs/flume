@@ -36,6 +36,7 @@ var StartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Initiate Flume V3 Edge Orchestrator",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
 		log.Info("Booting Flume Matrix...")
 
 		log.Infof("💾 Jacking into the local mainframe... Scanning global systemic hardware matrices 🔌")
@@ -142,7 +143,7 @@ var StartCmd = &cobra.Command{
 			}
 			dockerArgs = append(dockerArgs, "openbao")
 
-			c := exec.Command("docker", dockerArgs...)
+			c := exec.CommandContext(ctx, "docker", dockerArgs...)
 			c.Env = append(os.Environ(), generatedEnv...)
 
 			var outBuf, errBuf bytes.Buffer
@@ -156,7 +157,7 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -166,7 +167,7 @@ var StartCmd = &cobra.Command{
 
 			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			esUrl := "http://localhost:" + esPort
-			if err := orchestrator.SeedLLMConfig(esUrl, "", envCfg); err != nil {
+			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
 				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
 			}
 
@@ -178,7 +179,7 @@ var StartCmd = &cobra.Command{
 
 			go func() {
 				log.Info("Spawning FastAPI Dashboard daemon natively...")
-				dash := exec.Command("uv", "run", "src/dashboard/server.py")
+				dash := exec.CommandContext(ctx, "uv", "run", "src/dashboard/server.py")
 
 				dashEnv := append(os.Environ(), portEnvOverrides...)
 				dashEnv = append(dashEnv, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
@@ -223,7 +224,7 @@ var StartCmd = &cobra.Command{
 			}
 			dockerArgs = append(dockerArgs, "openbao")
 
-			c := exec.Command("docker", dockerArgs...)
+			c := exec.CommandContext(ctx, "docker", dockerArgs...)
 			fullEnv := append(os.Environ(), portEnvOverrides...)
 			fullEnv = append(fullEnv, generatedEnv...)
 			c.Env = fullEnv
@@ -239,7 +240,7 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(vaultPort, envCfg)
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -253,7 +254,7 @@ var StartCmd = &cobra.Command{
 			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			// Use localhost since we're still on the host machine at this point in boot.
 			esUrl := "http://localhost:" + esPort
-			if err := orchestrator.SeedLLMConfig(esUrl, "", envCfg); err != nil {
+			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
 				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
 			}
 
@@ -269,7 +270,7 @@ var StartCmd = &cobra.Command{
 			}
 			swArgs = append(swArgs, "up", "-d", "--build", "--wait", "dashboard", "worker")
 
-			swC := exec.Command("docker", swArgs...)
+			swC := exec.CommandContext(ctx, "docker", swArgs...)
 			swC.Env = fullEnv
 			swC.Stdout = os.Stdout
 			swC.Stderr = os.Stderr

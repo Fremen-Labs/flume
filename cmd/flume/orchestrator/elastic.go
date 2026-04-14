@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,7 @@ const (
 	seedRetryInterval = 2 * time.Second
 )
 
-func esRequest(esURL, apiKey, endpoint, method string, payload interface{}) ([]byte, int, error) {
+func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payload interface{}) ([]byte, int, error) {
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(esURL, "/"), strings.TrimLeft(endpoint, "/"))
 
 	var reqBody io.Reader
@@ -29,7 +30,7 @@ func esRequest(esURL, apiKey, endpoint, method string, payload interface{}) ([]b
 		reqBody = bytes.NewBuffer(bodyBytes)
 	}
 
-	req, err := http.NewRequest(method, url, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -57,7 +58,7 @@ func esRequest(esURL, apiKey, endpoint, method string, payload interface{}) ([]b
 	return respBody, resp.StatusCode, nil
 }
 
-func BootstrapElasticsearch(esURL, apiKey string) error {
+func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 	log.Info("[ELASTICSEARCH BOOTSTRAP] Bootstrapping Kubernetes-Grade Integration", "url", esURL)
 
 	// 1. Create ILM Policy
@@ -85,7 +86,7 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 		},
 	}
 
-	_, _, err := esRequest(esURL, apiKey, "_ilm/policy/flume-task-records-policy", "PUT", ilmPolicy)
+	_, _, err := esRequest(ctx, esURL, apiKey, "_ilm/policy/flume-task-records-policy", "PUT", ilmPolicy)
 	if err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create ILM policy", "error", err)
 	} else {
@@ -127,7 +128,7 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 		},
 	}
 
-	_, _, err = esRequest(esURL, apiKey, "_index_template/flume-task-records-template", "PUT", template)
+	_, _, err = esRequest(ctx, esURL, apiKey, "_index_template/flume-task-records-template", "PUT", template)
 	if err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create Index Template", "error", err)
 	} else {
@@ -135,7 +136,7 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 	}
 
 	// 3. Bootstrap Initial Index for the Alias
-	_, status, _ := esRequest(esURL, apiKey, "_alias/agent-task-records", "GET", nil)
+	_, status, _ := esRequest(ctx, esURL, apiKey, "_alias/agent-task-records", "GET", nil)
 	if status == 404 {
 		initialIndex := map[string]interface{}{
 			"aliases": map[string]interface{}{
@@ -144,7 +145,7 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 				},
 			},
 		}
-		_, _, err = esRequest(esURL, apiKey, "agent-task-records-000001", "PUT", initialIndex)
+		_, _, err = esRequest(ctx, esURL, apiKey, "agent-task-records-000001", "PUT", initialIndex)
 		if err != nil {
 			log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to bootstrap initial write index", "error", err)
 		} else {
@@ -162,7 +163,7 @@ func BootstrapElasticsearch(esURL, apiKey string) error {
 // interactive prompt and writes them to ES so the dashboard reads them correctly on
 // first load — no GUI save required. The Settings page can then update the same
 // document at runtime to switch models without a restart.
-func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
+func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) error {
 	// Fetch existing document to avoid overwriting fields not supplied in this run.
 	// On macOS Docker Desktop the ES port-forward can have a brief lag after the
 	// healthcheck passes — retry until ES responds before giving up.
@@ -170,14 +171,18 @@ func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 	var status int
 	for attempt := 1; attempt <= seedMaxRetries; attempt++ {
 		var reqErr error
-		existBody, status, reqErr = esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "GET", nil)
+		existBody, status, reqErr = esRequest(ctx, esURL, apiKey, "flume-llm-config/_doc/singleton", "GET", nil)
 		if reqErr == nil {
 			break
 		}
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] ES not yet reachable, retrying...",
 			"attempt", attempt, "max", seedMaxRetries, "error", reqErr)
 		if attempt < seedMaxRetries {
-			time.Sleep(seedRetryInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(seedRetryInterval):
+			}
 		}
 	}
 
@@ -212,7 +217,7 @@ func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 
 	// Retry the PUT as well in case the GET succeeded but a brief blip occurred.
 	for attempt := 1; attempt <= seedMaxRetries; attempt++ {
-		_, _, err := esRequest(esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
+		_, _, err := esRequest(ctx, esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
 		if err == nil {
 			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config",
 				"provider", provider, "model", cfg.Model, "attempt", attempt)
@@ -221,7 +226,11 @@ func SeedLLMConfig(esURL, apiKey string, cfg EnvConfig) error {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to write flume-llm-config, retrying...",
 			"attempt", attempt, "max", seedMaxRetries, "error", err)
 		if attempt < seedMaxRetries {
-			time.Sleep(seedRetryInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(seedRetryInterval):
+			}
 		}
 	}
 	return fmt.Errorf("failed to seed flume-llm-config after %d attempts", seedMaxRetries)
