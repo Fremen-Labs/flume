@@ -4,6 +4,10 @@ import urllib.request
 import json
 from pathlib import Path
 
+from utils.logger import get_logger
+
+logger = get_logger("elastro_sync")
+
 def sync_ast():
     """Robust fallback traversing AST scopes natively exporting boundaries to ES"""
     es_url = os.environ.get("ES_URL", "http://elasticsearch:9200")
@@ -17,7 +21,13 @@ def sync_ast():
             req = urllib.request.Request(url, data=payload.encode(), headers=headers, method="POST")
             try:
                 urllib.request.urlopen(req, timeout=2)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e:
+                logger.warning(
+                    "Failed to write AST entry to ES",
+                    extra={"structured_data": {"file": str(filepath.name), "error": str(e)}},
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to parse AST for file",
+                extra={"structured_data": {"file": str(filepath), "error": str(e)}},
+            )

@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from utils.logger import get_logger
+
+logger = get_logger("codex_app_server")
+
 DEFAULT_LISTEN_URL = 'ws://127.0.0.1:4500'
 DOCS_URL = 'https://developers.openai.com/codex/app-server'
 ENV_LISTEN = 'FLUME_CODEX_APP_SERVER_LISTEN'
@@ -87,7 +91,7 @@ def launch_args(extra_args: list[str] | None = None) -> list[str]:
 
 def run_foreground(extra_args: list[str] | None = None) -> int:
     cmd = launch_args(extra_args)
-    print('Running:', ' '.join(cmd), flush=True)
+    logger.info("Launching Codex app-server", extra={"structured_data": {"cmd": " ".join(cmd)}})
     proc = subprocess.run(cmd)
     return int(proc.returncode)
 

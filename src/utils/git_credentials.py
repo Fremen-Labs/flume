@@ -12,6 +12,10 @@ import re
 import urllib.parse
 from pathlib import Path
 
+from utils.logger import get_logger
+
+logger = get_logger("git_credentials")
+
 
 # ---------------------------------------------------------------------------
 # Provider detection
@@ -111,7 +115,8 @@ def strip_credentials(repo_url: str) -> str:
         parsed = urllib.parse.urlparse(repo_url)
         clean = parsed._replace(netloc=parsed.hostname + (f":{parsed.port}" if parsed.port else ""))
         return urllib.parse.urlunparse(clean)
-    except Exception:
+    except Exception as e:
+        logger.debug("URL parse failed in strip_credentials — returning original", extra={"structured_data": {"error": str(e)}})
         return repo_url
 
 
@@ -124,7 +129,8 @@ def _has_credentials(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
         return bool(parsed.username or parsed.password)
-    except Exception:
+    except Exception as e:
+        logger.debug("URL parse failed in _has_credentials", extra={"structured_data": {"error": str(e)}})
         return False
 
 
@@ -151,8 +157,11 @@ def _resolve_token(repo_type: str) -> str:
             raw = ado_tokens_store.get_active_token_plain(ws)
             if raw and _DELEGATED not in raw:
                 return raw
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "ADO token resolution from OpenBao failed — falling back to env",
+                extra={"structured_data": {"error": str(e)}},
+            )
         # 2. Env var fallback
         token = (
             os.environ.get("ADO_TOKEN", "")
@@ -169,8 +178,11 @@ def _resolve_token(repo_type: str) -> str:
             raw = github_tokens_store.get_active_token_plain(ws)
             if raw and _DELEGATED not in raw:
                 return raw
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "GitHub token resolution from OpenBao failed — falling back to env",
+                extra={"structured_data": {"error": str(e)}},
+            )
         # 2. Env var fallback
         token = (
             os.environ.get("GH_TOKEN", "")
