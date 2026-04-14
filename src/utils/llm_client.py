@@ -18,6 +18,10 @@ import urllib.request
 import urllib.error
 import time
 
+from utils.logger import get_logger
+
+logger = get_logger("llm_client")
+
 # ---------------------------------------------------------------------------
 # Gateway connection
 # ---------------------------------------------------------------------------
@@ -136,13 +140,10 @@ def chat(
                 return content, resp.get('usage', {})
             return content
         except Exception as e:
-            import logging
             leg = _legacy()
             p = provider_override or leg._provider()
             m = model or leg._default_model()
             b = base_url_override or leg._base_url(p, base_url_override)
-            
-            logger = logging.getLogger("llm_client")
             try:
                 from utils.llm_client_fallback import resolve_fallback_model
                 fallback = resolve_fallback_model(p, m, b)
@@ -226,13 +227,10 @@ def chat_with_tools(
             }
             return _post_gateway('/v1/chat/tools', payload, timeout=180)
         except Exception as e:
-            import logging
             leg = _legacy()
             p = provider_override or leg._provider()
             m = model or leg._default_model()
             b = base_url_override or leg._base_url(p, base_url_override)
-            
-            logger = logging.getLogger("llm_client")
             try:
                 from utils.llm_client_fallback import resolve_fallback_model
                 fallback = resolve_fallback_model(p, m, b)

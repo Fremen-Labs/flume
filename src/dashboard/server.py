@@ -461,7 +461,7 @@ def load_session(session_id):
         if hits:
             return hits[0].get('_source')
     except Exception as e:
-        print(f"Error loading session {session_id} from ES: {e}")
+        logger.error("Error loading session from ES", extra={"structured_data": {"session_id": session_id, "error": str(e)}})
     return None
 
 
@@ -470,7 +470,7 @@ def save_session(session):
         session['updated_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         es_post(f'agent-plan-sessions/_doc/{session["id"]}?refresh=true', session)
     except Exception as e:
-        print(f"Error saving session to ES: {e}")
+        logger.error("Error saving session to ES", extra={"structured_data": {"error": str(e)}})
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -1686,7 +1686,7 @@ def load_workers() -> list:
                         pass
                 workers.append(w)
     except Exception as e:
-        print(f"Error loading workers from ES: {e}")
+        logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)}})
         return []
         
     try:
@@ -2446,7 +2446,7 @@ def agents_status() -> dict:
             'cluster_status': status
         }
     except Exception as e:
-        print(f"Error fetching agent status: {e}")
+        logger.error("Error fetching agent status", extra={"structured_data": {"error": str(e)}})
         return {'running': False, 'error': str(e)}
 
 

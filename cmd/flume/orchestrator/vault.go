@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,12 +34,17 @@ func GenerateESAPIKey() (string, error) {
 }
 
 // AwaitOpenBao gracefully awaits native OpenBao cluster locks indefinitely.
-func AwaitOpenBao(vaultURL string) error {
+func AwaitOpenBao(ctx context.Context, vaultURL string) error {
 	log.Info("Awaiting OpenBao KMS Cluster Generation Locks...", "url", vaultURL)
-	client := &http.Client{Timeout: 2 * time.Second}
 
 	for i := 0; i < 40; i++ {
-		resp, err := client.Get(fmt.Sprintf("%s/v1/sys/health", vaultURL))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		resp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/health", vaultURL), "", nil)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 || resp.StatusCode == 429 || resp.StatusCode == 472 || resp.StatusCode == 473 || resp.StatusCode == 501 || resp.StatusCode == 503 {
@@ -46,16 +52,19 @@ func AwaitOpenBao(vaultURL string) error {
 				return nil
 			}
 		}
-		time.Sleep(2 * time.Second)
+		
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return fmt.Errorf("openbao initialization timeout")
 }
 
 // InitializeAndUnseal loads or creates the cluster keys and unseals it natively.
-func InitializeAndUnseal(vaultURL string) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	resp, err := client.Get(fmt.Sprintf("%s/v1/sys/init", vaultURL))
+func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
+	resp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/init", vaultURL), "", nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to check vault init status: %w", err)
 	}
@@ -76,16 +85,13 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 			"secret_shares":    1,
 			"secret_threshold": 1,
 		}
-		bodyBytes, _ := json.Marshal(initPayload)
 
-		req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/sys/init", vaultURL), bytes.NewReader(bodyBytes))
-		req.Header.Set("Content-Type", "application/json")
-		initResp, err := client.Do(req)
+		initResp, err := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/init", vaultURL), "", initPayload)
 		if err != nil || initResp.StatusCode != 200 {
 			if initResp != nil {
 				initResp.Body.Close()
 			}
-			return "", fmt.Errorf("vault init failed: %v", err)
+			return "", fmt.Errorf("vault init failed: %w", err)
 		}
 		defer initResp.Body.Close()
 
@@ -109,7 +115,7 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		// to mint a fresh root token via the generate-root workflow, because
 		// we have no persisted token from a previous run (orphaned volume).
 		// We check health first: 200 = unsealed, 503 = sealed.
-		healthResp, hErr := client.Get(fmt.Sprintf("%s/v1/sys/health", vaultURL))
+		healthResp, hErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/health", vaultURL), "", nil)
 		if hErr != nil {
 			log.Warn("Vault health check failed during orphan recovery check — cannot determine sealed state", "error", hErr)
 		} else {
@@ -117,7 +123,7 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 			if healthResp.StatusCode == 200 {
 				// Already unsealed — generate a fresh root token.
 				log.Warn("Orphaned Vault detected (unsealed, no root token). Recovering via generate-root workflow.")
-				recoveredToken, rErr := GenerateRootToken(vaultURL)
+				recoveredToken, rErr := GenerateRootToken(ctx, vaultURL)
 				if rErr != nil {
 					log.Error("generate-root recovery failed. Run: flume destroy --purge && flume start", "error", rErr)
 					return "", fmt.Errorf("vault root-token recovery failed: %w", rErr)
@@ -130,7 +136,7 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 	}
 
 	// Determine sealed state natively
-	respHealth, err := client.Get(fmt.Sprintf("%s/v1/sys/health", vaultURL))
+	respHealth, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/health", vaultURL), "", nil)
 	if err != nil {
 		return "", fmt.Errorf("health check failed: %w", err)
 	}
@@ -162,14 +168,12 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 		unsealPayload := map[string]interface{}{
 			"key": keys.KeysB64[0],
 		}
-		bodyBytes, _ := json.Marshal(unsealPayload)
-		req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/sys/unseal", vaultURL), bytes.NewReader(bodyBytes))
-		unsealResp, err := client.Do(req)
+		unsealResp, err := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/unseal", vaultURL), "", unsealPayload)
 		if err != nil || unsealResp.StatusCode != 200 {
 			if unsealResp != nil {
 				unsealResp.Body.Close()
 			}
-			return "", fmt.Errorf("failed to submit unseal KMS natively: %v", err)
+			return "", fmt.Errorf("failed to submit unseal KMS natively: %w", err)
 		}
 		unsealResp.Body.Close()
 		log.Info("OpenBao KMS Unsealed Successfully.")
@@ -181,14 +185,14 @@ func InitializeAndUnseal(vaultURL string) (string, error) {
 }
 
 // doVaultRequest is a core helper for submitting HTTP sequences natively towards Vault.
-func doVaultRequest(method, url, token string, body interface{}) (*http.Response, error) {
+func doVaultRequest(ctx context.Context, method, url, token string, body interface{}) (*http.Response, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	var reader io.Reader
 	if body != nil {
 		bodyBytes, _ := json.Marshal(body)
 		reader = bytes.NewReader(bodyBytes)
 	}
-	req, err := http.NewRequest(method, url, reader)
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +208,7 @@ func doVaultRequest(method, url, token string, body interface{}) (*http.Response
 // GenerateRootToken mints a fresh root token via the Vault sys/generate-root workflow.
 // Required when the Vault is already initialized + unsealed but the original root_token
 // is lost (orphaned persistent volume scenario). Uses a one-time OTP pad for encoding.
-func GenerateRootToken(vaultURL string) (string, error) {
+func GenerateRootToken(ctx context.Context, vaultURL string) (string, error) {
 	// Generate a 16-byte OTP and base64-encode it for the Vault API.
 	otpRaw := make([]byte, 16)
 	if _, err := rand.Read(otpRaw); err != nil {
@@ -213,7 +217,7 @@ func GenerateRootToken(vaultURL string) (string, error) {
 	otpB64 := base64.StdEncoding.EncodeToString(otpRaw)
 
 	// Step 1 — start the generate-root attempt
-	startResp, err := doVaultRequest("PUT", fmt.Sprintf("%s/v1/sys/generate-root/attempt", vaultURL), "",
+	startResp, err := doVaultRequest(ctx, "PUT", fmt.Sprintf("%s/v1/sys/generate-root/attempt", vaultURL), "",
 		map[string]interface{}{"otp": otpB64})
 	if err != nil {
 		return "", fmt.Errorf("generate-root/attempt request failed: %w", err)
@@ -234,7 +238,7 @@ func GenerateRootToken(vaultURL string) (string, error) {
 	}
 
 	// Step 2 — provide the unseal key (empty = already unsealed, 1-of-1 share)
-	updateResp, err := doVaultRequest("PUT", fmt.Sprintf("%s/v1/sys/generate-root/update", vaultURL), "",
+	updateResp, err := doVaultRequest(ctx, "PUT", fmt.Sprintf("%s/v1/sys/generate-root/update", vaultURL), "",
 		map[string]interface{}{"key": "", "nonce": attemptData.Nonce})
 	if err != nil {
 		return "", fmt.Errorf("generate-root/update request failed: %w", err)
@@ -285,9 +289,9 @@ func GenerateRootToken(vaultURL string) (string, error) {
 
 
 // ConfigureSecretsEngine structures the KeyVault KV topology dynamically natively.
-func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error {
+func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken string, envCfg EnvConfig) error {
 	// 1. Enable KV v2 natively at "secret/"
-	sysMountsResp, err := doVaultRequest("GET", fmt.Sprintf("%s/v1/sys/mounts", vaultURL), rootToken, nil)
+	sysMountsResp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/mounts", vaultURL), rootToken, nil)
 	if err != nil {
 		return fmt.Errorf("failed to query mounts: %w", err)
 	}
@@ -306,12 +310,12 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 						"version": "2",
 					},
 				}
-				mountResp, mErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/sys/mounts/secret", vaultURL), rootToken, mountConf)
+				mountResp, mErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/mounts/secret", vaultURL), rootToken, mountConf)
 				if mErr != nil || (mountResp.StatusCode != 200 && mountResp.StatusCode != 204) {
 					if mountResp != nil {
 						mountResp.Body.Close()
 					}
-					return fmt.Errorf("failed to enable secrets native engine natively: %v", mErr)
+					return fmt.Errorf("failed to enable secrets native engine natively: %w", mErr)
 				}
 				mountResp.Body.Close()
 				log.Info("Successfully enabled Vault secret engine at secret/ natively.")
@@ -327,12 +331,12 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 				"version": "2",
 			},
 		}
-		mountResp, mErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/sys/mounts/secret", vaultURL), rootToken, mountConf)
+		mountResp, mErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/mounts/secret", vaultURL), rootToken, mountConf)
 		if mErr != nil || (mountResp.StatusCode != 200 && mountResp.StatusCode != 204) {
 			if mountResp != nil {
 				mountResp.Body.Close()
 			}
-			return fmt.Errorf("failed to enable secrets native engine natively: %v", mErr)
+			return fmt.Errorf("failed to enable secrets native engine natively: %w", mErr)
 		}
 		mountResp.Body.Close()
 		log.Info("Successfully enabled Vault secret engine at secret/ natively.")
@@ -368,7 +372,7 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 	}
 
 	// Fetch existing configurations before injecting gracefully natively
-	existResp, eErr := doVaultRequest("GET", fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultURL), rootToken, nil)
+	existResp, eErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultURL), rootToken, nil)
 	if eErr == nil && existResp.StatusCode == 200 {
 		var existMap map[string]interface{}
 		json.NewDecoder(existResp.Body).Decode(&existMap)
@@ -405,14 +409,14 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 	writeConf := map[string]interface{}{
 		"data": kvPayload,
 	}
-	writeResp, wErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultURL), rootToken, writeConf)
+	writeResp, wErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultURL), rootToken, writeConf)
 	if wErr != nil || (writeResp.StatusCode != 200 && writeResp.StatusCode != 204) {
 		if writeResp != nil {
 			body, _ := io.ReadAll(writeResp.Body)
 			writeResp.Body.Close()
 			return fmt.Errorf("failed to sink KV bindings into OpenBao natively (%v): %s", writeResp.StatusCode, string(body))
 		}
-		return fmt.Errorf("failed to sink KV bindings into OpenBao natively: %v", wErr)
+		return fmt.Errorf("failed to sink KV bindings into OpenBao natively: %w", wErr)
 	}
 	writeResp.Body.Close()
 
@@ -426,9 +430,9 @@ func ConfigureSecretsEngine(vaultURL, rootToken string, envCfg EnvConfig) error 
 }
 
 // ProvisionAppRole enables the AppRole engine seamlessly and retrieves the dynamically bound flume-worker Token secret.
-func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
+func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, error) {
 	// Enable approle dynamically natively
-	aResp, aErr := doVaultRequest("GET", fmt.Sprintf("%s/v1/sys/auth", vaultURL), rootToken, nil)
+	aResp, aErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/auth", vaultURL), rootToken, nil)
 	if aErr != nil {
 		return "", fmt.Errorf("failed to query auth methods: %w", aErr)
 	}
@@ -448,7 +452,7 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 
 	if shouldEnable {
 		authConf := map[string]interface{}{"type": "approle"}
-		enResp, enErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/sys/auth/approle", vaultURL), rootToken, authConf)
+		enResp, enErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/auth/approle", vaultURL), rootToken, authConf)
 		if enErr == nil && enResp.StatusCode == 204 {
 			log.Info("Enabled AppRole authentication engine.")
 		}
@@ -462,7 +466,7 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 	// Policy configuration
 	policyStr := `path "secret/data/flume/*" { capabilities = ["read"] }`
 	polConf := map[string]interface{}{"policy": policyStr}
-	pResp, pErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/sys/policies/acl/flume-read-policy", vaultURL), rootToken, polConf)
+	pResp, pErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/policies/acl/flume-read-policy", vaultURL), rootToken, polConf)
 	if pErr == nil && pResp.StatusCode == 204 {
 		pResp.Body.Close()
 	} else if pResp != nil {
@@ -471,7 +475,7 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 
 	// Write Role natively
 	roleConf := map[string]interface{}{"token_policies": []string{"flume-read-policy"}}
-	rResp, rErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker", vaultURL), rootToken, roleConf)
+	rResp, rErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker", vaultURL), rootToken, roleConf)
 	if rErr == nil && rResp.StatusCode == 204 {
 		rResp.Body.Close()
 	} else if rResp != nil {
@@ -480,7 +484,7 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 
 	// Write Role ID natively
 	rIdConf := map[string]interface{}{"role_id": "flume-client-role"}
-	idResp, idErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker/role-id", vaultURL), rootToken, rIdConf)
+	idResp, idErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker/role-id", vaultURL), rootToken, rIdConf)
 	if idErr == nil && idResp.StatusCode == 204 {
 		idResp.Body.Close()
 	} else if idResp != nil {
@@ -488,7 +492,7 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 	}
 
 	// Retrieve Secret ID mapping natively
-	secResp, secErr := doVaultRequest("POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker/secret-id", vaultURL), rootToken, nil)
+	secResp, secErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/auth/approle/role/flume-worker/secret-id", vaultURL), rootToken, nil)
 	if secErr != nil {
 		return "", fmt.Errorf("failed to fetch secret-id natively: %w", secErr)
 	}
@@ -508,23 +512,23 @@ func ProvisionAppRole(vaultURL, rootToken string) (string, error) {
 }
 
 // DeployVaultTopology sequences the Native HTTP Client bootstrap without containerizing natively.
-func DeployVaultTopology(vaultPort string, envCfg EnvConfig) (string, string, error) {
+func DeployVaultTopology(ctx context.Context, vaultPort string, envCfg EnvConfig) (string, string, error) {
 	vaultURL := fmt.Sprintf("http://localhost:%s", vaultPort)
 
-	if err := AwaitOpenBao(vaultURL); err != nil {
+	if err := AwaitOpenBao(ctx, vaultURL); err != nil {
 		return "", "", err
 	}
 
-	rootToken, err := InitializeAndUnseal(vaultURL)
+	rootToken, err := InitializeAndUnseal(ctx, vaultURL)
 	if err != nil {
 		return "", "", err
 	}
 
-	if err := ConfigureSecretsEngine(vaultURL, rootToken, envCfg); err != nil {
+	if err := ConfigureSecretsEngine(ctx, vaultURL, rootToken, envCfg); err != nil {
 		return "", "", err
 	}
 
-	secretID, err := ProvisionAppRole(vaultURL, rootToken)
+	secretID, err := ProvisionAppRole(ctx, vaultURL, rootToken)
 	if err != nil {
 		return "", "", err
 	}
