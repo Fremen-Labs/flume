@@ -239,7 +239,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'tester':
         must = [
-            {'term': {'status': 'ready'}},
+            {'term': {'status': 'review'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'tester'}},
                 {'term': {'owner': 'tester'}},
@@ -247,7 +247,7 @@ def ready_items_for_role(role):
         ]
     elif role == 'reviewer':
         must = [
-            {'term': {'status': 'ready'}},
+            {'term': {'status': 'review'}},
             {'bool': {'should': [
                 {'term': {'assigned_agent_role': 'reviewer'}},
                 {'term': {'owner': 'reviewer'}},
@@ -382,7 +382,14 @@ def try_atomic_claim(
     Returns the claimed task _source dict on success, or None if no task was available
     or the script raced with another worker (both of which are safe no-ops).
     """
-    target_status = 'planned' if role == 'pm' else 'ready'
+    # Tester & reviewer pick up tasks in 'review' status (set by implementer handoff);
+    # PM picks up 'planned'; all other roles pick up 'ready'.
+    if role == 'pm':
+        target_status = 'planned'
+    elif role in ('tester', 'reviewer'):
+        target_status = 'review'
+    else:
+        target_status = 'ready'
 
     # Build the role filter
     if role == 'pm':
