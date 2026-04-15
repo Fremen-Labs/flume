@@ -155,6 +155,7 @@ def _call_ollama(
             temperature=0.2,
             max_tokens=8192,
             return_usage=True,
+            timeout_seconds=300,
             ollama_think=False,
             **kw,
         )
