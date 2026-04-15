@@ -155,6 +155,7 @@ def _call_ollama(
             temperature=0.2,
             max_tokens=8192,
             return_usage=True,
+            timeout_seconds=300,
             ollama_think=False,
             **kw,
         )
@@ -667,6 +668,13 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         if not cmd_list:
             return json.dumps({"status": "error", "message": "Empty command provided."})
             
+        if len(cmd_list) >= 3 and cmd_list[0] == 'cd' and cmd_list[2] == '&&':
+            resolved_cwd = _resolve_path(cmd_list[1], repo_path)
+            cwd = str(resolved_cwd)
+            cmd_list = cmd_list[3:]
+            if not cmd_list:
+                return json.dumps({"status": "error", "message": "Empty command provided after cd."})
+                
         executable = cmd_list[0]
         allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find'}
         

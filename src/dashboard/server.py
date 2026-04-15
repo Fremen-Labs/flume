@@ -3797,6 +3797,27 @@ class ElasticsearchClient:
         except httpx.HTTPStatusError as e:
             raise KillSwitchDatabaseError(f"HTTP error updating Elasticsearch: {e.response.status_code}")
 
+    async def update_tasks_to_ready(self):
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"status": "blocked"}},
+                        {"term": {"ast_sync_status": "halted"}}
+                    ]
+                }
+            },
+            "script": {"source": "ctx._source.status = 'ready'; ctx._source.ast_sync_status = null; ctx._source.owner = ctx._source.assigned_agent_role;"}
+        }
+        url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
+        try:
+            response = await self.client.post(url, json=query)
+            response.raise_for_status()
+        except httpx.RequestError as e:
+            raise KillSwitchDatabaseError(f"Network error updating Elasticsearch: {e}")
+        except httpx.HTTPStatusError as e:
+            raise KillSwitchDatabaseError(f"HTTP error updating Elasticsearch: {e.response.status_code}")
+
 class AgentSupervisor:
     def terminate_all(self) -> dict:
         return agents_stop()
@@ -3892,6 +3913,18 @@ async def api_tasks_stop_all(kill_switch_service: KillSwitchService = Depends(ge
         if isinstance(e, KillSwitchProcessError):
             error_message = "CRITICAL: Tasks were marked as halted, but failed to terminate running processes. Manual intervention may be required."
         raise HTTPException(status_code=500, detail={'error': error_message, 'correlation_id': correlation_id})
+
+@app.post("/api/tasks/resume-all", dependencies=[Depends(verify_admin_access)])
+async def api_tasks_resume_all(es_client: ElasticsearchClient = Depends(get_es_client)):
+    correlation_id = str(uuid.uuid4())
+    try:
+        await es_client.update_tasks_to_ready()
+        logger.info(json.dumps({"event": "kill_switch.resume.success", "elasticsearch_status": "ready", "message": "All halted Swarm tasks resumed natively", "correlation_id": correlation_id}))
+        return {"success": True, "message": "All halted tasks have been reset to active. Workers will re-acquire them shortly."}
+    except KillSwitchDatabaseError as e:
+        logger.error(json.dumps({"event": "kill_switch.resume.failure", "error": str(e), "correlation_id": correlation_id}))
+        raise HTTPException(status_code=500, detail={'error': "Database error occurred while resuming swarms.", 'correlation_id': correlation_id})
+
 @app.get("/api/repos/{project_id}/branches")
 def api_repo_branches(project_id: str):
     """
