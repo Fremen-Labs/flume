@@ -643,7 +643,7 @@ export default function SettingsPage() {
                         </>
                       )}
                     </>
-                  ) : models.length > 0 ? (
+                  ) : modelSuggestions.length > 0 ? (
                     <Select
                       value={effectiveSettings.model ?? ''}
                       onValueChange={(v) => updateForm({ model: v })}
@@ -652,7 +652,7 @@ export default function SettingsPage() {
                         <SelectValue placeholder="Select model" />
                       </SelectTrigger>
                       <SelectContent>
-                        {models.map((m) => (
+                        {modelSuggestions.map((m) => (
                           <SelectItem key={m.id} value={m.id}>
                             {m.name}
                           </SelectItem>
@@ -668,14 +668,19 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                {providerId === 'openai_compatible' && (
+                {(providerId === 'openai_compatible' || providerId === 'ollama') && (
                   <div className="space-y-2">
                     <Label>Base URL</Label>
                     <Input
-                      placeholder="https://api.example.com/v1"
+                      placeholder={providerId === 'ollama' ? 'http://192.168.0.x:11434  (leave empty for localhost)' : 'https://api.example.com/v1'}
                       value={form.baseUrl ?? effectiveSettings.baseUrl ?? ''}
                       onChange={(e) => updateForm({ baseUrl: e.target.value })}
                     />
+                    {providerId === 'ollama' && (
+                      <p className="text-[11px] text-muted-foreground leading-snug">
+                        Point to any Ollama instance on your network. The remote host must have <code className="text-[10px]">OLLAMA_HOST=0.0.0.0</code> set.
+                      </p>
+                    )}
                   </div>
                 )}
 

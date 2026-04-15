@@ -94,7 +94,7 @@ def _oauth_scope_status(dec: dict[str, Any], has_access: bool) -> str:
 PROVIDER_CATALOG = [
     {
         "id": "ollama",
-        "name": "Ollama (local)",
+        "name": "Ollama",
         "baseUrlDefault": "http://127.0.0.1:11434",
         "authMode": "none",
         "models": [
