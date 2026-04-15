@@ -139,7 +139,25 @@ def emit_task_event(task_id: str, event_type: str, details: dict):
         _handlers_logger.error(f"Event Sourcing Failure: Could not emit event for task {task_id}: {e}")
 
 
+class KillSwitchAbortError(Exception):
+    pass
+
+
+def check_kill_switch(es_id: str):
+    """Enforce native state bounding to synchronously interrupt stray execution loops."""
+    try:
+        res = es_request(f'/{TASK_INDEX}/_doc/{es_id}?_source=status')
+        if res.get('_source', {}).get('status') == 'blocked':
+            _handlers_logger.warning("Kill Switch Engaged: Worker thread aborting immediately for blocked task.")
+            raise KillSwitchAbortError("Task was halted via Kill Switch")
+    except KillSwitchAbortError as e:
+        raise e
+    except Exception as e:
+        _handlers_logger.debug(f"Non-fatal failure checking kill switch for {es_id}: {e}")
+
+
 def update_task_doc(es_id, doc):
+    check_kill_switch(es_id)
     doc['updated_at'] = now_iso()
     doc['last_update'] = now_iso()
     
@@ -155,6 +173,7 @@ def write_doc(index, doc):
 
 def append_agent_note(es_id: str, note: str) -> None:
     """Append a live progress note to the task's agent_log field (capped at 100 entries)."""
+    check_kill_switch(es_id)
     try:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
@@ -176,6 +195,7 @@ def append_agent_note(es_id: str, note: str) -> None:
 
 def append_execution_thought(es_id: str, thought: str) -> None:
     """Append a live thought to the task's execution_thoughts field (capped at 500 entries)."""
+    check_kill_switch(es_id)
     try:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {

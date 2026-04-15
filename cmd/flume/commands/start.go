@@ -294,6 +294,7 @@ var StartCmd = &cobra.Command{
 		}
 		ui.PrintDeploymentSummary(ui.DeploymentSummary{
 			NativeMode:      NativeFlag,
+			AdminToken:      envCfg.AdminToken,
 			Provider:        envCfg.Provider,
 			Model:           envCfg.Model,
 			OllamaHost:      envCfg.Host,

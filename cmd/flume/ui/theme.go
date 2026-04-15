@@ -141,6 +141,9 @@ type DeploymentSummary struct {
 	// Deployment mode
 	NativeMode bool
 
+	// Secrets
+	AdminToken string
+
 	// LLM configuration
 	Provider   string
 	Model      string
@@ -281,8 +284,15 @@ func PrintDeploymentSummary(s DeploymentSummary) {
 	add(divider)
 	add("  " + secureStyle.Render("✔") + "  Secrets stored exclusively in OpenBao KV-V2 — never written to disk.")
 	add("  " + secureStyle.Render("✔") + "  Elasticsearch API key scoped to Flume role (least-privilege).")
-	add("  " + secureStyle.Render("✔") + "  Admin token generated via crypto/rand (256-bit entropy).")
 	add("  " + secureStyle.Render("✔") + "  API keys masked during input — never echo'd to terminal.")
+	add(divider)
+	add("")
+	add(sectionStyle.Render("  KILL SWITCH AUTHENTICATION"))
+	add(divider)
+	add(row("Flume Admin Token", secureStyle.Render(s.AdminToken)))
+	add("  " + styleError.Render("⚠") + "  " + dimStyle.Render("This token grants root kill-switch control over your orchestration layer."))
+	add("  " + styleError.Render("⚠") + "  " + dimStyle.Render("It was generated purely in-memory and has skipped persistent disk storage."))
+	add("  " + styleError.Render("⚠") + "  " + styleWarning.Render("SAVE IT TO A PASSWORD MANAGER NOW. IT WILL NOT BE DISPLAYED AGAIN."))
 
 	// ── Footer ────────────────────────────────────────────────────────────────
 	add("")

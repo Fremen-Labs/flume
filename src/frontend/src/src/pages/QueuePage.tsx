@@ -46,7 +46,7 @@ export default function QueuePage() {
   const { data: snapshot, isLoading, error, mutate } = useSnapshot();
   const { toast } = useToast();
   const [isHalting, setIsHalting] = useState(false);
-  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [dialogAction, setDialogAction] = useState<'halt' | 'resume' | null>(null);
   const [adminToken, setAdminToken] = useState('');
   const [thoughtTaskId, setThoughtTaskId] = useState<string | null>(null);
   const [thoughtTaskTitle, setThoughtTaskTitle] = useState<string | undefined>(undefined);
@@ -55,10 +55,12 @@ export default function QueuePage() {
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
 
-  const handleConfirmHalt = async () => {
+  const handleConfirmAction = async () => {
+    if (!dialogAction) return;
     try {
       setIsHalting(true);
-      const res = await fetch('/api/tasks/stop-all', { 
+      const url = dialogAction === 'halt' ? '/api/tasks/stop-all' : '/api/tasks/resume-all';
+      const res = await fetch(url, { 
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${adminToken}`
@@ -67,32 +69,34 @@ export default function QueuePage() {
       if (res.ok) {
         mutate();
         setAdminToken('');
-        toast({ title: "Swarms Halted", description: "All active tasks successfully halted." });
+        toast({ title: dialogAction === 'halt' ? "Swarms Halted" : "Swarms Resumed", description: dialogAction === 'halt' ? "All active tasks successfully halted." : "Blocked tasks restored successfully." });
       } else {
         const errorBody = await res.json().catch(() => ({}));
         const description = errorBody.error 
           ? `Error: ${errorBody.error} (Request ID: ${errorBody.correlation_id || 'Unknown'})`
           : "An unknown error occurred resolving the native API.";
-        toast({ title: "Halt Failed", description, variant: "destructive" });
+        toast({ title: "Operation Failed", description, variant: "destructive" });
       }
     } catch (e) {
-      console.error('Halt-all-swarms request failed:', e);
-      toast({ title: "System Exception", description: "Exception occurred triggering Kill Switch bounds.", variant: "destructive" });
+      console.error('Swarms request failed:', e);
+      toast({ title: "System Exception", description: "Exception occurred triggering Swarm operation bounds.", variant: "destructive" });
     } finally {
       setIsHalting(false);
-      setShowConfirmDialog(false);
+      setDialogAction(null);
     }
   };
 
   return (
     <div className="p-6 lg:p-8 max-w-[1800px] mx-auto space-y-6 relative">
 
-      <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+      <Dialog open={!!dialogAction} onOpenChange={(open) => !open && setDialogAction(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Stop All Swarms</DialogTitle>
+            <DialogTitle>{dialogAction === 'halt' ? 'Stop All Swarms' : 'Resume Blocked Swarms'}</DialogTitle>
             <DialogDescription className="space-y-3 pt-2">
-              <p>Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.</p>
+              <p>{dialogAction === 'halt' 
+                ? 'Are you sure you want to stop all active tasks? This will immediately terminate running processes and block all queued tasks from starting.'
+                : 'Are you sure you want to resume all halted tasks? This will reset them back into the active pipeline pool.'}</p>
               <Input 
                 type="password" 
                 placeholder="Flume Admin Token" 
@@ -104,18 +108,18 @@ export default function QueuePage() {
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-0 mt-4">
             <button
-              onClick={() => setShowConfirmDialog(false)}
+              onClick={() => setDialogAction(null)}
               className="px-4 py-2 border rounded-md text-sm hover:bg-muted"
             >
               Cancel
             </button>
             <button
-              onClick={handleConfirmHalt}
+              onClick={handleConfirmAction}
               disabled={isHalting}
-              className="px-4 py-2 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md text-sm flex items-center justify-center gap-2"
+              className={`px-4 py-2 rounded-md text-sm flex items-center justify-center gap-2 text-primary-foreground ${dialogAction === 'halt' ? 'bg-destructive hover:bg-destructive/90 text-destructive-foreground' : 'bg-primary hover:bg-primary/90'}`}
             >
               {isHalting && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isHalting ? 'Terminating...' : 'Force Kill Processes'}
+              {isHalting ? (dialogAction === 'halt' ? 'Terminating...' : 'Resuming...') : (dialogAction === 'halt' ? 'Force Kill Processes' : 'Resume Tasks')}
             </button>
           </DialogFooter>
         </DialogContent>
@@ -130,14 +134,24 @@ export default function QueuePage() {
             {isLoading ? 'Loading…' : `Live pipeline — ${tasks.length} items`}
           </p>
         </div>
-        <button 
-          onClick={() => setShowConfirmDialog(true)}
-          disabled={isHalting}
-          className="flex items-center gap-2 px-4 py-2 bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/20 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
-        >
-          {isHalting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
-          {isHalting ? 'Halting LLM Generation...' : 'Halt All Swarms'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setDialogAction('resume')}
+            disabled={isHalting}
+            className="flex items-center gap-2 px-4 py-2 bg-primary/10 text-primary hover:bg-primary/20 border border-primary/20 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            {isHalting && dialogAction === 'resume' ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitBranch className="w-4 h-4" />}
+            Resume Swarms
+          </button>
+          <button 
+            onClick={() => setDialogAction('halt')}
+            disabled={isHalting}
+            className="flex items-center gap-2 px-4 py-2 bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/20 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            {isHalting && dialogAction === 'halt' ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
+            Halt All Swarms
+          </button>
+        </div>
       </motion.div>
 
       {isLoading && (
