@@ -72,7 +72,7 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 // indexDef holds the name and optional explicit mapping for an ES index.
 type indexDef struct {
 	Name    string
-	Mapping map[string]interface{} // nil = create with default dynamic mapping
+	Mapping map[string]interface{} // nil = use singleNodeDefaults
 }
 
 // templateDef holds an index template definition.
@@ -477,11 +477,30 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 			continue
 		}
 
-		// Index does not exist — create with explicit mapping if available
+		// Index does not exist — create with explicit mapping or single-node defaults.
+		// Q4: Always include number_of_replicas:0 to prevent yellow status on
+		// single-node clusters where replica shards can never be allocated.
 		var putBody io.Reader
 		if idx.Mapping != nil {
+			// Ensure settings include replicas:0 even for explicit mappings
+			if _, hasSettings := idx.Mapping["settings"]; !hasSettings {
+				idx.Mapping["settings"] = map[string]interface{}{
+					"number_of_shards":   1,
+					"number_of_replicas": 0,
+				}
+			}
 			mappingBytes, _ := json.Marshal(idx.Mapping)
 			putBody = bytes.NewReader(mappingBytes)
+		} else {
+			// No mapping — use single-node defaults
+			defaultBody := map[string]interface{}{
+				"settings": map[string]interface{}{
+					"number_of_shards":   1,
+					"number_of_replicas": 0,
+				},
+			}
+			defaultBytes, _ := json.Marshal(defaultBody)
+			putBody = bytes.NewReader(defaultBytes)
 		}
 		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, putBody)
 		if err != nil {

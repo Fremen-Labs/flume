@@ -69,24 +69,43 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_key = os.environ.get('ES_API_KEY', '')
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+
+        # S2: Only disable TLS verification for non-TLS endpoints
+        ssl_ctx = None
+        if es_url.startswith('https'):
+            ssl_ctx = ssl.create_default_context()
+            if os.environ.get('ES_VERIFY_TLS', 'true').lower() == 'false':
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        # P4: Ollama returns prompt_eval_count/eval_count, OpenAI uses
+        # prompt_tokens/completion_tokens. Accept both key conventions.
+        input_tokens = (
+            usage.get('prompt_tokens')
+            or usage.get('prompt_eval_count')
+            or 0
+        )
+        output_tokens = (
+            usage.get('completion_tokens')
+            or usage.get('eval_count')
+            or 0
+        )
         doc = {
             'worker_name': task.get('active_worker') or task.get('assigned_agent') or 'unknown-worker',
             'worker_role': task.get('assigned_agent_role') or task.get('owner') or 'generic',
             'provider': task.get('preferred_llm_provider') or task.get('llm_provider') or 'ollama',
             'model': task.get('preferred_model') or task.get('llm_model') or 'unknown',
-            'input_tokens': usage.get('prompt_tokens', 0),
-            'output_tokens': usage.get('completion_tokens', 0),
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
             'savings': 0,
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         hdrs = {'Content-Type': 'application/json'}
+        # S1: Only send Authorization header when an API key is present
         if es_key:
             hdrs['Authorization'] = f'ApiKey {es_key}'
         req = urllib.request.Request(f"{es_url}/agent-token-telemetry/_doc", data=json.dumps(doc).encode(), headers=hdrs, method='POST')
-        with urllib.request.urlopen(req, timeout=2, context=ctx):
+        with urllib.request.urlopen(req, timeout=2, context=ssl_ctx):
             pass
     except Exception as e:
         logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
@@ -163,8 +182,17 @@ def _call_ollama(
         content = content.strip()
         try:
             val = content
-            if val.startswith('`' * 3):
-                val = val.strip('`').replace('json\n', '', 1).strip()
+            # P3: Robust JSON fence extraction — handle trailing prose after
+            # closing fence, case-insensitive language tags, and nested fences.
+            if val.startswith('```'):
+                # Find the opening fence line and skip it
+                first_nl = val.index('\n') if '\n' in val else len(val)
+                inner = val[first_nl + 1:]
+                # Find the LAST closing fence
+                last_fence = inner.rfind('```')
+                if last_fence != -1:
+                    inner = inner[:last_fence]
+                val = inner.strip()
             return json.loads(val)
         except json.JSONDecodeError as de:
             logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
@@ -356,6 +384,7 @@ def _exec_read_file(args: dict, repo_path: Optional[str]) -> str:
 
 
 def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
+    # B1: Fixed duplicate except block that silently swallowed write errors.
     try:
         p = _resolve_path(args.get('path', ''), repo_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -366,9 +395,6 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
             except SyntaxError as e:
                 return f'ERROR writing file: Meta-Critic Python Syntax Check Failed at line {e.lineno}: {e.msg}'
         p.write_text(content)
-        
-        return f'OK: wrote {len(content)} chars to {p}'
-    except Exception:
         return f'OK: wrote {len(content)} chars to {p}'
     except Exception as e:
         return f'ERROR writing file: {e}'
@@ -564,7 +590,10 @@ def _exec_memory_write(args: dict) -> str:
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
-        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        # S1: Only send Authorization header when an API key is present
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'ApiKey {api_key}'
         
         import time
         doc = {'key': key, 'value': val, 'updated_at': time.time()}
@@ -574,14 +603,19 @@ def _exec_memory_write(args: dict) -> str:
         payload = json.dumps(doc).encode()
         # ensure no local shadow
         safe_key = urllib.parse.quote(key, safe='')
-        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='POST')
+        # Q3: Use PUT for idempotent upsert with explicit _id
+        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='PUT')
         
+        # S2: Only disable TLS verification when explicitly configured
         import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ssl_ctx = None
+        if es_url.startswith('https'):
+            ssl_ctx = ssl.create_default_context()
+            if os.environ.get('ES_VERIFY_TLS', 'true').lower() == 'false':
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
         
-        with urllib.request.urlopen(req, context=ctx, timeout=5):
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5):
             logger.info({
                 "event": "memory_write",
                 "status": "success",
@@ -676,7 +710,8 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
                 return json.dumps({"status": "error", "message": "Empty command provided after cd."})
                 
         executable = cmd_list[0]
-        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find'}
+        # Q2: Added 'git' for validation commands (git diff, git status, git log)
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git'}
         
         if executable not in allow_list:
             logger.warning({

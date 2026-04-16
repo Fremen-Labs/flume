@@ -353,11 +353,25 @@ func (r *ProviderRouter) ollamaNonStream(
 		content, _ = msg["content"].(string)
 	}
 
+	// P4: Extract token usage from Ollama response. Ollama uses
+	// prompt_eval_count / eval_count instead of OpenAI's prompt_tokens /
+	// completion_tokens. Populate both in our Usage struct so downstream
+	// telemetry works regardless of key convention.
+	var usage Usage
+	if v, ok := data["prompt_eval_count"].(float64); ok {
+		usage.PromptTokens = int(v)
+	}
+	if v, ok := data["eval_count"].(float64); ok {
+		usage.CompletionTokens = int(v)
+	}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+
 	return &ChatResponse{
 		Message: ResponseMessage{
 			Role:    "assistant",
 			Content: strings.TrimSpace(content),
 		},
+		Usage: usage,
 	}, nil
 }
 
