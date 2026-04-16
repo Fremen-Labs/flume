@@ -227,6 +227,29 @@ func (r *NodeRegistry) UpdateHealth(nodeID string, health NodeHealth) {
 	}
 }
 
+// UpdateCapabilities merges auto-discovered capabilities into a node.
+// Only zero/empty fields are overwritten — user-supplied values are preserved.
+func (r *NodeRegistry) UpdateCapabilities(nodeID string, discovered NodeCapabilities) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.nodes[nodeID]
+	if !ok {
+		return
+	}
+	if n.Capabilities.MemoryGB <= 0 && discovered.MemoryGB > 0 {
+		n.Capabilities.MemoryGB = discovered.MemoryGB
+	}
+	if n.Capabilities.EstimatedTPS <= 0 && discovered.EstimatedTPS > 0 {
+		n.Capabilities.EstimatedTPS = discovered.EstimatedTPS
+	}
+	if n.Capabilities.Quantization == "" && discovered.Quantization != "" {
+		n.Capabilities.Quantization = discovered.Quantization
+	}
+	if n.Capabilities.MaxContext <= 0 && discovered.MaxContext > 0 {
+		n.Capabilities.MaxContext = discovered.MaxContext
+	}
+}
+
 // SelectNode picks the best available node for a given task type using weighted scoring.
 //
 // Score = (model_fit × 0.4) + (load_inverse × 0.3) + (latency_inverse × 0.2) + (ensemble_eligible × 0.1)

@@ -150,7 +150,7 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 
 	// ── Probe 1: GET /api/tags → alive check + model discovery ──────────
 	start := time.Now()
-	models, err := hc.probeTags(ctx, baseURL, node)
+	tagsResult, err := hc.probeTags(ctx, baseURL, node)
 	latencyMs := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -158,15 +158,52 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		return
 	}
 
-	// ── Probe 2: GET /api/ps → load measurement ─────────────────────────
-	load := hc.probeLoad(ctx, baseURL, node)
+	// ── Probe 2: GET /api/ps → load measurement + VRAM discovery ────────
+	load, totalVRAMBytes := hc.probeLoad(ctx, baseURL, node)
+
+	// ── Auto-discover capabilities from live Ollama responses ───────────
+	discovered := NodeCapabilities{}
+
+	// Memory: if the node reports loaded model VRAM and we have no memory
+	// figure, use total system memory discovered from /api/ps model sizes.
+	// As a conservative estimate, assume loaded models use ~70% of total.
+	if totalVRAMBytes > 0 && node.Capabilities.MemoryGB <= 0 {
+		// Use the larger of: VRAM in use / 0.7, or raw VRAM. This gives
+		// a reasonable estimate of total available memory.
+		estimatedTotalGB := float64(totalVRAMBytes) / (1 << 30) / 0.7
+		if estimatedTotalGB < 8 {
+			estimatedTotalGB = 8 // Floor: smallest useful inference node
+		}
+		discovered.MemoryGB = estimatedTotalGB
+	}
+
+	// Quantization: extracted from /api/tags details for the primary model.
+	if tagsResult.quantization != "" {
+		discovered.Quantization = tagsResult.quantization
+	}
+
+	// TPS estimate: rough heuristic from probe latency. A fast-responding
+	// node on /api/tags typically correlates with inference speed. We use
+	// a simple mapping: <100ms → ~60 TPS, 100-500ms → ~30 TPS, >500ms → ~10 TPS.
+	if latencyMs > 0 && node.Capabilities.EstimatedTPS <= 0 {
+		switch {
+		case latencyMs < 100:
+			discovered.EstimatedTPS = 60
+		case latencyMs < 500:
+			discovered.EstimatedTPS = 30
+		default:
+			discovered.EstimatedTPS = 10
+		}
+	}
+
+	hc.registry.UpdateCapabilities(node.ID, discovered)
 
 	// ── Success: update health ───────────────────────────────────────────
 	health := NodeHealth{
 		Status:       NodeStatusHealthy,
 		LastSeen:     time.Now(),
 		CurrentLoad:  load,
-		LoadedModels: models,
+		LoadedModels: tagsResult.models,
 		LatencyMs:    latencyMs,
 	}
 
@@ -180,16 +217,24 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		slog.String("node_id", node.ID),
 		slog.Int64("latency_ms", latencyMs),
 		slog.Float64("load", load),
-		slog.Int("models", len(models)),
+		slog.Int("models", len(tagsResult.models)),
+		slog.String("quantization", tagsResult.quantization),
 	)
 }
 
-// probeTags calls GET /api/tags on the node and returns model names.
-func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *Node) ([]string, error) {
+// tagsProbeResult holds model names and discovered metadata from /api/tags.
+type tagsProbeResult struct {
+	models       []string
+	quantization string // from details.quantization_level of primary model
+}
+
+// probeTags calls GET /api/tags on the node and returns model names plus
+// metadata details (quantization, etc.) for the primary assigned model.
+func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *Node) (tagsProbeResult, error) {
 	url := strings.TrimRight(baseURL, "/") + "/api/tags"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build tags request: %w", err)
+		return tagsProbeResult{}, fmt.Errorf("build tags request: %w", err)
 	}
 	if node.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+node.AuthToken)
@@ -197,43 +242,63 @@ func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *No
 
 	resp, err := hc.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("tags probe failed: %w", err)
+		return tagsProbeResult{}, fmt.Errorf("tags probe failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tags probe HTTP %d", resp.StatusCode)
+		return tagsProbeResult{}, fmt.Errorf("tags probe HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return nil, fmt.Errorf("tags probe read: %w", err)
+		return tagsProbeResult{}, fmt.Errorf("tags probe read: %w", err)
 	}
 
 	var tagsResp struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name    string `json:"name"`
+			Size    int64  `json:"size"`
+			Details struct {
+				QuantizationLevel string `json:"quantization_level"`
+				ParameterSize     string `json:"parameter_size"`
+				Family            string `json:"family"`
+			} `json:"details"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &tagsResp); err != nil {
-		return nil, fmt.Errorf("tags probe parse: %w", err)
+		return tagsProbeResult{}, fmt.Errorf("tags probe parse: %w", err)
 	}
 
-	names := make([]string, len(tagsResp.Models))
+	result := tagsProbeResult{}
+	result.models = make([]string, len(tagsResp.Models))
 	for i, m := range tagsResp.Models {
-		names[i] = m.Name
+		result.models[i] = m.Name
+
+		// Extract quantization from the primary model or the first model with details.
+		if result.quantization == "" && m.Details.QuantizationLevel != "" {
+			// Prefer matching the node's assigned model_tag.
+			if node.ModelTag == "" || strings.HasPrefix(m.Name, strings.Split(node.ModelTag, ":")[0]) {
+				result.quantization = m.Details.QuantizationLevel
+			}
+		}
 	}
-	return names, nil
+	// Fallback: if no primary match, use the first model's quantization.
+	if result.quantization == "" && len(tagsResp.Models) > 0 {
+		result.quantization = tagsResp.Models[0].Details.QuantizationLevel
+	}
+	return result, nil
 }
 
-// probeLoad calls GET /api/ps on the node and returns a load factor 0.0-1.0.
-func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *Node) float64 {
+// probeLoad calls GET /api/ps on the node and returns a load factor 0.0-1.0
+// plus the raw total VRAM bytes consumed by loaded models (used for memory auto-discovery).
+func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *Node) (float64, int64) {
 	log := WithContext(ctx)
 	url := strings.TrimRight(baseURL, "/") + "/api/ps"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		log.Warn("load probe failed: build request", slog.String("node_id", node.ID), slog.String("error", err.Error()))
-		return 0
+		return 0, 0
 	}
 	if node.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+node.AuthToken)
@@ -242,45 +307,49 @@ func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *No
 	resp, err := hc.httpClient.Do(req)
 	if err != nil {
 		log.Warn("load probe failed: http request", slog.String("node_id", node.ID), slog.String("error", err.Error()))
-		return 0
+		return 0, 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Warn("load probe failed: non-200 status", slog.String("node_id", node.ID), slog.Int("status", resp.StatusCode))
-		return 0
+		return 0, 0
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err != nil {
 		log.Warn("load probe failed: read body", slog.String("node_id", node.ID), slog.String("error", err.Error()))
-		return 0
+		return 0, 0
 	}
 
 	var psResp struct {
 		Models []struct {
+			Size     int64 `json:"size"`
 			SizeVRAM int64 `json:"size_vram"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &psResp); err != nil {
 		log.Warn("load probe failed: json unmarshal", slog.String("node_id", node.ID), slog.String("error", err.Error()))
-		return 0
+		return 0, 0
+	}
+
+	var totalVRAMBytes int64
+	for _, m := range psResp.Models {
+		totalVRAMBytes += m.SizeVRAM
 	}
 
 	// Estimate load as fraction of node memory consumed by loaded models.
 	if node.Capabilities.MemoryGB <= 0 {
-		return 0
-	}
-	var totalVRAMBytes int64
-	for _, m := range psResp.Models {
-		totalVRAMBytes += m.SizeVRAM
+		// Can't compute load without a memory baseline, but still return
+		// the raw VRAM for auto-discovery by callers.
+		return 0, totalVRAMBytes
 	}
 	usedGB := float64(totalVRAMBytes) / (1 << 30)
 	load := usedGB / node.Capabilities.MemoryGB
 	if load > 1.0 {
 		load = 1.0
 	}
-	return load
+	return load, totalVRAMBytes
 }
 
 // recordFailure handles a probe failure, advancing the circuit breaker.
