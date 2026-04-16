@@ -165,8 +165,14 @@ var StartCmd = &cobra.Command{
 			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
 			generatedEnv = append(generatedEnv, "OPENBAO_TOKEN="+rootToken)
 
-			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
+			// Bootstrap ALL ES indices before any application containers start.
+			// Must run after OpenBao is deployed (some indices store credential metadata).
 			esUrl := "http://localhost:" + esPort
+			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
+				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
+			}
+
+			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
 				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
 			}
@@ -251,9 +257,15 @@ var StartCmd = &cobra.Command{
 			// subprocess env for the variable substitution to resolve correctly.
 			fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
 
-			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
+			// Bootstrap ALL ES indices before any application containers start.
+			// Must run after OpenBao is deployed (some indices store credential metadata).
 			// Use localhost since we're still on the host machine at this point in boot.
 			esUrl := "http://localhost:" + esPort
+			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
+				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
+			}
+
+			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
 				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
 			}

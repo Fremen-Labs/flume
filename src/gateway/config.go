@@ -477,7 +477,11 @@ func extractSource(body map[string]interface{}) (map[string]interface{}, bool) {
 	return src, ok
 }
 
-// EnsureAgentModelsIndex creates the flume-agent-models index if it doesn't exist.
+// EnsureAgentModelsIndex verifies the flume-agent-models index exists.
+//
+// Index creation is centralized in the CLI `flume start` orchestrator.
+// This function only performs a HEAD check and logs a warning if the index
+// is missing, allowing operators to diagnose boot sequence issues.
 func (c *Config) EnsureAgentModelsIndex(ctx context.Context) error {
 	url := c.esURL + "/flume-agent-models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
@@ -491,34 +495,9 @@ func (c *Config) EnsureAgentModelsIndex(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		return nil // already exists
+		return nil // index exists
 	}
 
-	// Create index with mapping
-	mapping := `{
-		"mappings": {
-			"properties": {
-				"roles": {
-					"type": "object",
-					"enabled": false
-				},
-				"updated_at": {
-					"type": "date"
-				}
-			}
-		}
-	}`
-	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(mapping))
-	if err != nil {
-		return err
-	}
-	putReq.Header.Set("Content-Type", "application/json")
-	putResp, err := c.httpClient.Do(putReq)
-	if err != nil {
-		return err
-	}
-	putResp.Body.Close()
-
-	Log().Info("created flume-agent-models index")
-	return nil
+	Log().Warn("flume-agent-models index not found — expected to be pre-created by `flume start`")
+	return fmt.Errorf("flume-agent-models index missing — run `flume start` to bootstrap")
 }

@@ -146,21 +146,21 @@ def _index_exists(index: str, timeout: int = 5) -> bool:
 # ---------------------------------------------------------------------------
 
 def ensure_credential_indices() -> None:
-    """Create the three credential metadata indices if they don't already exist.
+    """Verify that credential metadata indices exist (created by CLI `flume start`).
 
-    es_bootstrap.py also registers these indices in REQUIRED_INDICES, so they
-    may already exist before this function runs. The _index_exists() HEAD check
-    avoids the spurious 400 resource_already_exists_exception warnings.
+    Index creation is centralized in the CLI orchestrator. This function only
+    performs HEAD checks and logs warnings for any missing indices so operators
+    can diagnose boot sequence issues.
     """
-    for index, mapping in _INDEX_MAPPINGS.items():
+    for index in _INDEX_MAPPINGS:
         if _index_exists(index):
-            logger.debug(f"ES credential index already exists, skipping: {index}")
-            continue
-        result = _request("PUT", f"/{index}", mapping)
-        if result is not None:
-            logger.info(f"Created ES credential index: {index}")
+            logger.debug(f"ES credential index verified: {index}")
         else:
-            logger.warning(f"Failed to create ES credential index: {index}")
+            logger.warning(
+                f"ES credential index missing: {index} — "
+                "expected to be pre-created by `flume start`. "
+                "Run `flume start` to bootstrap all indices."
+            )
 
 
 # ---------------------------------------------------------------------------

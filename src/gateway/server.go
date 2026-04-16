@@ -391,7 +391,7 @@ func StartGateway(addr string) error {
 
 	// Ensure agent-models index exists
 	if err := config.EnsureAgentModelsIndex(ctx); err != nil {
-		log.Warn("failed to ensure agent-models index",
+		log.Warn("flume-agent-models index verification failed — index should be pre-created by `flume start`",
 			slog.String("error", err.Error()),
 		)
 	}

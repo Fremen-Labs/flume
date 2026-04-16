@@ -381,7 +381,11 @@ func (r *NodeRegistry) DeleteNodeFromES(ctx context.Context, nodeID string) erro
 	return nil
 }
 
-// EnsureIndex creates the flume-node-registry ES index if it doesn't exist.
+// EnsureIndex verifies the flume-node-registry ES index exists.
+//
+// Index creation is centralized in the CLI `flume start` orchestrator.
+// This function only performs a HEAD check and logs a warning if the index
+// is missing, allowing operators to diagnose boot sequence issues.
 func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 	log := WithContext(ctx)
 
@@ -396,34 +400,9 @@ func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		return nil // already exists
+		return nil // index exists
 	}
 
-	mapping := `{
-		"mappings": {
-			"properties": {
-				"id":              {"type": "keyword"},
-				"host":            {"type": "keyword"},
-				"model_tag":       {"type": "keyword"},
-				"capabilities":    {"type": "object", "enabled": true},
-				"health":          {"type": "object", "enabled": true},
-				"auth_secret_path":{"type": "keyword"},
-				"updated_at":      {"type": "date"}
-			}
-		}
-	}`
-
-	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(mapping))
-	if err != nil {
-		return err
-	}
-	putReq.Header.Set("Content-Type", "application/json")
-	putResp, err := r.httpClient.Do(putReq)
-	if err != nil {
-		return err
-	}
-	putResp.Body.Close()
-
-	log.Info("node_registry: created flume-node-registry ES index")
-	return nil
+	log.Warn("flume-node-registry index not found — expected to be pre-created by `flume start`")
+	return fmt.Errorf("flume-node-registry index missing — run `flume start` to bootstrap")
 }
