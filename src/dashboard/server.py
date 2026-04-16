@@ -4715,24 +4715,24 @@ async def get_system_telemetry():
                     val = parts[1]
                     
                     if key_with_tags == "go_goroutines":
-                        results["go_goroutines"] = int(val)
+                        results["go_goroutines"] = int(float(val))
                     elif key_with_tags == "go_memstats_alloc_bytes":
-                        results["go_memstats_alloc_bytes"] = int(val)
+                        results["go_memstats_alloc_bytes"] = int(float(val))
                     elif key_with_tags == "go_memstats_sys_bytes":
-                        results["go_memstats_sys_bytes"] = int(val)
+                        results["go_memstats_sys_bytes"] = int(float(val))
                     elif key_with_tags == "flume_up":
-                        results["flume_up"] = int(val)
+                        results["flume_up"] = int(float(val))
                     elif key_with_tags == "flume_escalation_total":
-                        results["flume_escalation_total"] = int(val)
+                        results["flume_escalation_total"] = int(float(val))
                     elif key_with_tags == "flume_vram_pressure_events_total":
-                        results["flume_vram_pressure_events_total"] = int(val)
+                        results["flume_vram_pressure_events_total"] = int(float(val))
                     elif key_with_tags.startswith("flume_build_info{"):
                         m = re.search(r'version="([^"]+)"', key_with_tags)
                         if m:
                             results["flume_build_info"] = m.group(1)
                     elif key_with_tags.startswith("flume_active_models{"):
                         m = re.search(r'model="([^"]+)"', key_with_tags)
-                        if m and int(val) == 1:
+                        if m and int(float(val)) == 1:
                             results["flume_active_models"].append(m.group(1))
                     elif key_with_tags.startswith("flume_ensemble_requests_total{"):
                         # flume_ensemble_requests_total{model_family="qwen",size="2",task_type="chat"} 1
@@ -4740,7 +4740,7 @@ async def get_system_telemetry():
                         tag_dict = {k: v for k, v in tags}
                         results["flume_ensemble_requests_total"].append({
                             "tags": tag_dict,
-                            "count": int(val)
+                            "count": int(float(val))
                         })
 
             return results

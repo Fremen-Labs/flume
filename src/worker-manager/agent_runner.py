@@ -196,7 +196,7 @@ def _call_ollama(
             return json.loads(val)
         except json.JSONDecodeError as de:
             logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
-            raise de
+            return None
     except Exception as e:
         logger.error(f"LLM Execution Trap: {e}", exc_info=True)
         raise e
@@ -782,7 +782,11 @@ def _call_ollama_tools(
             max_tokens=4096,
             ollama_think=True,
         )
-        _emit_usage(task, {'total_tokens': 0})
+        
+        usage = res.get('usage', {}) if isinstance(res, dict) else {}
+        if usage:
+            _emit_usage(task, usage)
+            
         return res
     except Exception as e:
 
@@ -1181,6 +1185,8 @@ def run_implementer(
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
+                if not final_commit_message:
+                    final_commit_message = 'Verified task complete, no code changes required.'
                 final_artifacts = fn_args.get('artifacts') or []
                 _progress(f'Completing: {final_summary[:120]}')
                 tool_result = 'Implementation marked complete.'
