@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -8,6 +9,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 )
+
+type NodeEntry struct {
+	ID       string
+	Host     string // IP or DNS name (without port)
+	Port     string // custom port override; blank = "11434"
+	ModelTag string
+	MemoryGB string
+}
 
 type PromptConfig struct {
 	Provider string
@@ -26,6 +35,8 @@ type PromptConfig struct {
 	// It is retained in the struct for forward-compatibility only.
 	ADOProject string
 	ADOToken   string
+
+	Nodes []NodeEntry // Collected during node mesh wizard
 }
 
 const (
@@ -35,6 +46,13 @@ const (
 	StepOllamaScope
 	StepOllamaIP
 	StepAPIKey
+	StepNodeMesh    // "Add more Ollama nodes?" yes/no
+	StepNodeID      // Node ID entry
+	StepNodeHost    // Node host (IP/DNS, no port)
+	StepNodePort    // "Custom port? (blank = 11434)"
+	StepNodeModel   // Model tag for this node
+	StepNodeMemory  // Memory (GB)
+	StepNodeMore    // "Add another node?" yes/no
 	StepElasticMenu
 	StepElasticURL
 	StepRepoMenu
@@ -57,11 +75,12 @@ var providerLabel = map[string]string{
 }
 
 type promptModel struct {
-	step     int
-	cfg      *PromptConfig
-	inputs   map[int]textinput.Model
+	step      int
+	cfg       *PromptConfig
+	inputs    map[int]textinput.Model
 	exoActive bool
-	errMsg   string // validation error shown inline; cleared on next keypress
+	errMsg    string // validation error shown inline; cleared on next keypress
+	curNode   NodeEntry // node currently being collected
 }
 
 // errStyle renders inline validation errors in a distinctive amber/red colour.
@@ -195,12 +214,45 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if val == "" || val == "1" {
 					m.cfg.Host = "127.0.0.1"
 					m.cfg.APIKey = ""
-					return m.next(StepElasticMenu)
+					return m.next(StepNodeMesh)
 				}
 				return m.next(StepOllamaIP)
 			case StepOllamaIP:
 				if val != "" {
 					m.cfg.Host = val
+				}
+				return m.next(StepNodeMesh)
+			case StepNodeMesh:
+				if val == "1" || val == "y" || val == "Y" || val == "" {
+					m.curNode = NodeEntry{}
+					return m.next(StepNodeID)
+				}
+				return m.next(StepElasticMenu)
+			case StepNodeID:
+				m.curNode.ID = val
+				return m.next(StepNodeHost)
+			case StepNodeHost:
+				m.curNode.Host = val
+				return m.next(StepNodePort)
+			case StepNodePort:
+				if val == "" {
+					m.curNode.Port = "11434"
+				} else {
+					m.curNode.Port = val
+				}
+				return m.next(StepNodeModel)
+			case StepNodeModel:
+				m.curNode.ModelTag = val
+				return m.next(StepNodeMemory)
+			case StepNodeMemory:
+				m.curNode.MemoryGB = val
+				// Save completed node
+				m.cfg.Nodes = append(m.cfg.Nodes, m.curNode)
+				return m.next(StepNodeMore)
+			case StepNodeMore:
+				if val == "1" || val == "y" || val == "Y" || val == "" {
+					m.curNode = NodeEntry{}
+					return m.next(StepNodeID)
 				}
 				return m.next(StepElasticMenu)
 			case StepAPIKey:
@@ -265,6 +317,21 @@ func (m promptModel) View() string {
 		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaIP:
 		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodeMesh:
+		return NeonGreen("Would you like to add more Ollama nodes to the mesh?\n") + "\n1. Yes, add a node\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodeID:
+		return NeonGreen("Enter a unique Node ID (e.g. mac-mini-1):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodeHost:
+		return NeonGreen("Enter the node IP address or hostname (e.g. 192.168.1.50):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodePort:
+		return NeonGreen("Custom Ollama port? (blank = 11434):\n") + "\n" + ti.View() + err + "\n(Press enter to use default)\n"
+	case StepNodeModel:
+		return NeonGreen("Primary model tag for this node (e.g. qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodeMemory:
+		return NeonGreen("Total memory (GB) on this node (e.g. 64):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepNodeMore:
+		count := len(m.cfg.Nodes)
+		return NeonGreen(fmt.Sprintf("%d node(s) registered. Add another?\n", count)) + "\n1. Yes\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepAPIKey:
 		return NeonGreen("Enter " + pLabel + " API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticMenu:
