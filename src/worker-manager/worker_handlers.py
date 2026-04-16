@@ -386,9 +386,13 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
     task_id  = task.get('id') or 'task'
     repo_id  = task.get('repo')
 
-    item_type = (task.get('item_type') or '').lower()
-    prefix    = 'bugfix' if (item_type == 'bug' or task_id.startswith('bug-')) else 'feature'
-    branch    = f"{prefix}/{task_id}"
+    if task.get('branch'):
+        branch = task.get('branch')
+    else:
+        import uuid
+        item_type = (task.get('item_type') or '').lower()
+        prefix    = 'bugfix' if (item_type == 'bug' or task_id.startswith('bug-')) else 'feature'
+        branch    = f"{prefix}/{task_id}-{uuid.uuid4().hex[:6]}"
 
     # ── Local repo path: retain legacy worktree-free behaviour ──────────────
     # For locally-mounted repos (clone_status='local') we still check out a
@@ -1160,6 +1164,9 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
 def handle_implementer_worker(task, es_id):
     # Guarantee absolute node isolation immediately via Worktree Sandboxing
     branch, worktree_path = ensure_task_branch(task)
+    if branch and not task.get('branch'):
+        update_task_doc(es_id, {'branch': branch})
+        task['branch'] = branch
 
     # Early-exit re-queue when the clone fails for a remote repo.
     # Without this guard the agent runs against an empty/missing worktree,
@@ -1355,7 +1362,7 @@ def handle_implementer_worker(task, es_id):
                 # This task *should* result in code edits, but the agent wrote nothing.
                 # Treat as LLM error to block gracefully instead of looping indefinitely.
                 _implementer_handle_llm_failure(es_id, task, task_id)
-                logger.warning(f"[implementer] task={task_id} expected code edits but wrote nothing; handled as LLM failure")
+                log(f"implementer: task={task_id} expected code edits but wrote nothing; handled as LLM failure")
                 released = True
                 return True
 
@@ -1677,18 +1684,21 @@ def run_worker(worker):
             log(f"{worker['role']} worker heartbeat")
             return True
     except Exception as e:
+        import traceback
         # Q1: Log full stack trace and clear any stale claim so tasks recover
-        logger.error(f"worker {worker.get('name', 'unknown')} error: {e}", exc_info=True)
+        log(f"worker {worker.get('name', 'unknown')} error: {e}\n{traceback.format_exc()}")
         task_id = worker.get('current_task_id')
         if task_id:
             try:
                 es_id, _ = fetch_task_doc(task_id)
                 if es_id:
+                    role = worker.get('role', '')
+                    fallback_status = 'review' if role in ('tester', 'reviewer') else 'ready'
                     update_task_doc(es_id, {
-                        'status': 'ready',
+                        'status': fallback_status,
                         **_implementer_clear_claim_fields(),
                     })
-                    log(f"cleared stale claim on task={task_id} after worker crash")
+                    log(f"cleared stale claim on task={task_id} after worker crash — resetting status to {fallback_status}")
             except Exception:
                 pass  # Best-effort cleanup
         return False

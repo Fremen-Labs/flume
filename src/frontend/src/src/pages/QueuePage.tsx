@@ -20,6 +20,7 @@ const stages: { id: string; label: string }[] = [
   { id: 'planned', label: 'Planned' },
   { id: 'ready', label: 'Ready' },
   { id: 'running', label: 'Running' },
+  { id: 'review', label: 'In Review' },
   { id: 'done', label: 'Done' },
   { id: 'blocked', label: 'Blocked' },
 ];

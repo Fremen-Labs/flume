@@ -12,6 +12,60 @@ import (
 	"strings"
 )
 
+// CleanJSONResponse heuristically strips conversational wrapper text or markdown
+// fences from raw LLM strings to expose the underlying JSON structured object.
+func CleanJSONResponse(raw string) string {
+	s := strings.TrimSpace(raw)
+
+	// 1. Check for exact code fences anywhere
+	if strings.Contains(s, "```json") {
+		first := strings.Index(s, "```json")
+		after := s[first+7:]
+		if end := strings.LastIndex(after, "```"); end != -1 {
+			return strings.TrimSpace(after[:end])
+		}
+	}
+	
+	// Optional fallback code fence if they used ``` without json
+	if strings.HasPrefix(s, "```") && strings.HasSuffix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+		s = strings.TrimSuffix(s, "```")
+		return strings.TrimSpace(s)
+	}
+
+	// 2. Direct bracket wrapping (already valid or close to it)
+	if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+	   (strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+		return s
+	}
+
+	// 3. Fallback: Find the largest bounding box of { ... } or [ ... ]
+	firstBrace := strings.Index(s, "{")
+	lastBrace := strings.LastIndex(s, "}")
+	
+	firstBracket := strings.Index(s, "[")
+	lastBracket := strings.LastIndex(s, "]")
+	
+	hasObj := firstBrace != -1 && lastBrace != -1 && lastBrace > firstBrace
+	hasArr := firstBracket != -1 && lastBracket != -1 && lastBracket > firstBracket
+	
+	if hasObj && hasArr {
+		if firstBrace < firstBracket && lastBrace > lastBracket {
+			return strings.TrimSpace(s[firstBrace : lastBrace+1])
+		}
+		if firstBracket < firstBrace && lastBracket > lastBrace {
+			return strings.TrimSpace(s[firstBracket : lastBracket+1])
+		}
+	} else if hasObj {
+		return strings.TrimSpace(s[firstBrace : lastBrace+1])
+	} else if hasArr {
+		return strings.TrimSpace(s[firstBracket : lastBracket+1])
+	}
+	
+	// If all else fails, return the original string
+	return s
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool Stream — the core fix for agent blockages.
 //
@@ -262,5 +316,5 @@ func StreamOllamaChat(
 		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
-	return mill.Visible(), mill.Thoughts(), usage, nil
+	return CleanJSONResponse(mill.Visible()), mill.Thoughts(), usage, nil
 }

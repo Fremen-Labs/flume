@@ -17,6 +17,7 @@ const statusConfig: Record<string, { color: string; label: string; dotClass: str
   planned: { color: 'text-muted-foreground', label: 'Planned', dotClass: 'bg-muted-foreground' },
   ready: { color: 'text-primary', label: 'Ready', dotClass: 'bg-primary' },
   running: { color: 'text-primary', label: 'Running', dotClass: 'bg-primary' },
+  review: { color: 'text-amber-400', label: 'In Review', dotClass: 'bg-amber-400' },
   // Agent / worker statuses
   idle: { color: 'text-muted-foreground', label: 'Idle', dotClass: 'bg-muted-foreground' },
   active: { color: 'text-success', label: 'Active', dotClass: 'bg-success' },
