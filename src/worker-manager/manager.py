@@ -174,13 +174,15 @@ def load_agent_role_defs():
 
 
 def get_dynamic_worker_limit() -> int:
-    try:
-        cores = os.cpu_count() or 4
-        # Reserve ~20% overhead for macOS Desktop & Elasticsearch buffers natively
-        available = max(1, int(cores * 0.8))
-        return available
-    except BaseException:
-        return 4
+    """Return the default number of workers per agent role.
+
+    P1: Capped to 2 to match realistic Ollama concurrency. The previous
+    CPU_COUNT * 0.8 formula produced 6 workers/role on an 8-core Mac,
+    spawning ~72 virtual workers across 2 replicas for only 2 Ollama slots.
+    Override with WORKERS_PER_ROLE env var for higher concurrency with
+    frontier providers that support many parallel requests.
+    """
+    return 2
 
 
 def build_workers():

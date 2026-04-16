@@ -1445,10 +1445,12 @@ def handle_tester_worker(task, es_id):
         }]
         for idx, bug in enumerate(bugs, start=1):
             create_bug_task(task, bug, idx)
+        # B2: Clear claim fields so the task is re-claimable by another worker
         update_task_doc(es_id, {
             'status': 'ready',
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
         write_doc(FAILURE_INDEX, {
             'id': f"failure-{task.get('id')}-{int(time.time())}",
@@ -1595,10 +1597,12 @@ def handle_reviewer_worker(task, es_id):
         return True
 
     if verdict == 'changes_requested':
+        # B3: Clear claim fields so the task is re-claimable by another worker
         update_task_doc(es_id, {
             'status': 'ready',
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            **_implementer_clear_claim_fields(),
         })
         write_doc(FAILURE_INDEX, {
             'id': f"failure-review-{task_id}-{int(time.time())}",
@@ -1679,7 +1683,20 @@ def run_worker(worker):
             log(f"{worker['role']} worker heartbeat")
             return True
     except Exception as e:
-        log(f"worker {worker['name']} error: {e}")
+        # Q1: Log full stack trace and clear any stale claim so tasks recover
+        logger.error(f"worker {worker.get('name', 'unknown')} error: {e}", exc_info=True)
+        task_id = worker.get('current_task_id')
+        if task_id:
+            try:
+                es_id, _ = fetch_task_doc(task_id)
+                if es_id:
+                    update_task_doc(es_id, {
+                        'status': 'ready',
+                        **_implementer_clear_claim_fields(),
+                    })
+                    log(f"cleared stale claim on task={task_id} after worker crash")
+            except Exception:
+                pass  # Best-effort cleanup
         return False
     return True
 
