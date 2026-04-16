@@ -432,6 +432,7 @@ func StartGateway(addr string) error {
 	// Register node mesh API endpoints.
 	server.mux.HandleFunc("GET /api/nodes", server.handleGetNodes)
 	server.mux.HandleFunc("POST /api/nodes", server.handleAddNode)
+	server.mux.HandleFunc("POST /api/nodes/{id}/test", server.handleTestNode)
 	server.mux.HandleFunc("DELETE /api/nodes/{id}", server.handleDeleteNode)
 
 	// Initialize Inception Skill Registry
@@ -574,6 +575,68 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": nodeID})
 }
 
+// handleTestNode probes an Ollama node endpoint and returns connectivity + discovered models.
+func (s *Server) handleTestNode(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+
+	nodeID := r.PathValue("id")
+	if nodeID == "" || !isValidNodeID(nodeID) {
+		http.Error(w, `{"error":"invalid or missing node ID"}`, http.StatusBadRequest)
+		return
+	}
+
+	node := s.nodeRegistry.GetNode(nodeID)
+	if node == nil {
+		http.Error(w, `{"error":"node not found"}`, http.StatusNotFound)
+		return
+	}
+
+	log.Info("node_api: testing connection",
+		slog.String("node_id", nodeID),
+		slog.String("host", node.Host),
+	)
+
+	hc := NewHealthChecker(s.nodeRegistry)
+	baseURL := fmt.Sprintf("http://%s", node.Host)
+
+	// Probe /api/tags for model discovery.
+	start := time.Now()
+	models, err := hc.probeTags(r.Context(), baseURL, node)
+	latencyMs := time.Since(start).Milliseconds()
+
+	result := map[string]interface{}{
+		"node_id":    nodeID,
+		"host":       node.Host,
+		"latency_ms": latencyMs,
+	}
+
+	if err != nil {
+		log.Warn("node_api: connection test failed",
+			slog.String("node_id", nodeID),
+			slog.String("error", err.Error()),
+		)
+		result["reachable"] = false
+		result["models"] = []string{}
+		result["current_load"] = 0.0
+		result["error"] = err.Error()
+	} else {
+		load := hc.probeLoad(r.Context(), baseURL, node)
+		log.Info("node_api: connection test succeeded",
+			slog.String("node_id", nodeID),
+			slog.Int64("latency_ms", latencyMs),
+			slog.Int("models_found", len(models)),
+			slog.Float64("load", load),
+		)
+		result["reachable"] = true
+		result["models"] = models
+		result["current_load"] = load
+		result["error"] = nil
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // isValidNodeID validates node IDs against ^[a-z0-9\-]+$ (1-64 chars).
 func isValidNodeID(id string) bool {
 	if len(id) == 0 || len(id) > 64 {
@@ -618,9 +681,9 @@ func isValidNodeHost(host string) bool {
 		}
 	}
 
-	// Basic SSRF restrictions against internal loopback or cloud metadata services
-	if lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "::1" ||
-		strings.Contains(lowerHost, "metadata.google.internal") || strings.Contains(lowerHost, "169.254.169.254") {
+	// SSRF restrictions: block cloud metadata endpoints but ALLOW localhost/loopback
+	// so users running Flume + Ollama on the same machine can register local nodes.
+	if strings.Contains(lowerHost, "metadata.google.internal") || strings.Contains(lowerHost, "169.254.169.254") {
 		return false
 	}
 

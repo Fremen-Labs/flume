@@ -245,6 +245,49 @@ func validateForStep(step int, val string) string {
 	case StepOllamaIP:
 		return validateHost(val)
 
+	case StepNodeMesh, StepNodeMore:
+		if val == "" || val == "1" || val == "2" || val == "y" || val == "Y" || val == "n" || val == "N" {
+			return ""
+		}
+		return "Please enter 1 (Yes) or 2 (No)"
+
+	case StepNodeID:
+		if val == "" {
+			return "Node ID is required"
+		}
+		nodeIDRe := regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,62}[a-z0-9]$|^[a-z0-9]$`)
+		if !nodeIDRe.MatchString(val) {
+			return "Node ID must be lowercase letters, numbers, and hyphens (1-64 chars)"
+		}
+		return ""
+
+	case StepNodeHost:
+		return validateHost(val)
+
+	case StepNodePort:
+		// Empty = default. Otherwise must be a valid port number.
+		if val == "" {
+			return ""
+		}
+		portRe := regexp.MustCompile(`^[0-9]{1,5}$`)
+		if !portRe.MatchString(val) {
+			return "Port must be a number (1-65535)"
+		}
+		return ""
+
+	case StepNodeModel:
+		return validateModel(val)
+
+	case StepNodeMemory:
+		if val == "" {
+			return "Memory (GB) is required"
+		}
+		memRe := regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+		if !memRe.MatchString(val) {
+			return "Enter a numeric value (e.g. 64 or 16.5)"
+		}
+		return ""
+
 	case StepAPIKey:
 		return validateAPIKey(val)
 

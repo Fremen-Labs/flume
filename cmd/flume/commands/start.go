@@ -126,6 +126,27 @@ var StartCmd = &cobra.Command{
 				envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
 				envCfg.APIKey = ""
 			}
+
+			// Map wizard-collected nodes to EnvConfig.
+			for _, n := range promptCfg.Nodes {
+				mem := 0.0
+				if n.MemoryGB != "" {
+					if v, err := strconv.ParseFloat(n.MemoryGB, 64); err == nil {
+						mem = v
+					}
+				}
+				port := n.Port
+				if port == "" {
+					port = "11434"
+				}
+				envCfg.Nodes = append(envCfg.Nodes, orchestrator.NodeConfigEntry{
+					ID:       n.ID,
+					Host:     n.Host,
+					Port:     port,
+					ModelTag: n.ModelTag,
+					MemoryGB: mem,
+				})
+			}
 		}
 
 		generatedEnv := orchestrator.GenerateEnv(envCfg)
@@ -295,6 +316,33 @@ var StartCmd = &cobra.Command{
 
 		if err := orchestrator.AwaitOrchestration(); err != nil {
 			return err
+		}
+
+		// ── Seed node mesh from CLI wizard entries ───────────────────────────
+		if len(envCfg.Nodes) > 0 {
+			gatewayPort := "8090" // default gateway port
+			gatewayURL := fmt.Sprintf("http://localhost:%s", gatewayPort)
+
+			var seedEntries []orchestrator.NodeSeedEntry
+			for _, n := range envCfg.Nodes {
+				entry := orchestrator.NodeSeedEntry{
+					ID:       n.ID,
+					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
+					ModelTag: n.ModelTag,
+				}
+				entry.Capabilities.ReasoningScore = 5
+				entry.Capabilities.MaxContext = 32768
+				if n.MemoryGB > 0 {
+					entry.Capabilities.MemoryGB = n.MemoryGB
+				}
+				seedEntries = append(seedEntries, entry)
+			}
+
+			if err := orchestrator.SeedNodes(ctx, gatewayURL, seedEntries); err != nil {
+				log.Warn("Node mesh seeding encountered errors (non-fatal)", "error", err)
+			} else {
+				log.Info("Node mesh seeded successfully", "count", len(seedEntries))
+			}
 		}
 
 		// ── Deployment summary ────────────────────────────────────────────────

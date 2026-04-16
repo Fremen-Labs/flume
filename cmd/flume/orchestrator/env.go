@@ -1,12 +1,27 @@
 package orchestrator
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/log"
 )
+
+// NodeConfigEntry is a node collected during the CLI interactive wizard.
+type NodeConfigEntry struct {
+	ID       string
+	Host     string  // IP or DNS name (without port)
+	Port     string  // default "11434"
+	ModelTag string
+	MemoryGB float64
+}
 
 type EnvConfig struct {
 	Provider           string
@@ -26,6 +41,8 @@ type EnvConfig struct {
 	ADOOrg      string
 	ADOProject  string
 	ADOToken    string
+
+	Nodes []NodeConfigEntry // Collected during node mesh wizard
 }
 
 // GenerateAdminToken creates a 256-bit cryptographically secure token.
@@ -106,3 +123,48 @@ func GenerateEnv(config EnvConfig) []string {
 	return env
 }
 
+// NodeSeedEntry represents a node to register with the Gateway API.
+type NodeSeedEntry struct {
+	ID       string  `json:"id"`
+	Host     string  `json:"host"`
+	ModelTag string  `json:"model_tag"`
+	Capabilities struct {
+		MemoryGB       float64 `json:"memory_gb"`
+		ReasoningScore int     `json:"reasoning_score"`
+		MaxContext     int     `json:"max_context"`
+	} `json:"capabilities"`
+}
+
+// SeedNodes registers a batch of Ollama nodes with the Gateway REST API.
+// Called from `flume start` after the gateway container is healthy.
+func SeedNodes(ctx context.Context, gatewayURL string, nodes []NodeSeedEntry) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	for _, node := range nodes {
+		body, err := json.Marshal(node)
+		if err != nil {
+			log.Warn("node_seed: failed to marshal node", "node_id", node.ID, "error", err)
+			continue
+		}
+		url := fmt.Sprintf("%s/api/nodes", strings.TrimRight(gatewayURL, "/"))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			log.Warn("node_seed: failed to build request", "node_id", node.ID, "error", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Warn("node_seed: gateway unreachable", "node_id", node.ID, "error", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			log.Warn("node_seed: gateway rejected node", "node_id", node.ID, "status", resp.StatusCode)
+		} else {
+			log.Info("node_seed: registered node", "node_id", node.ID, "host", node.Host, "model", node.ModelTag)
+		}
+	}
+	return nil
+}

@@ -4614,6 +4614,35 @@ async def api_nodes_delete(node_id: str, request: Request):
             extra={"component": "node_mesh_api", "node_id": node_id, "error": str(e)}
         )
         return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
+@app.post('/api/nodes/{node_id}/test')
+async def api_nodes_test(node_id: str, request: Request):
+    """Probe an Ollama node's connectivity and discover available models via the Go Gateway."""
+    import re
+    if not re.fullmatch(r'[a-z0-9\-]{1,64}', node_id):
+        logger.warning(
+            "node_mesh: rejected test for invalid node_id",
+            extra={"component": "node_mesh_api", "node_id": node_id}
+        )
+        return JSONResponse(status_code=400, content={"error": "Invalid node ID format"})
+
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{gw_url}/api/nodes/{node_id}/test", timeout=15.0)
+        logger.info(
+            "node_mesh: tested node via gateway",
+            extra={"component": "node_mesh_api", "node_id": node_id, "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "node_mesh: failed to test node",
+            extra={"component": "node_mesh_api", "node_id": node_id, "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):

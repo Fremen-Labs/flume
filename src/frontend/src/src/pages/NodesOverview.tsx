@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Server, Plus, Trash2, RefreshCw, CheckCircle2, AlertTriangle,
-  XCircle, Cpu, MemoryStick, Gauge, Clock, Zap, ChevronDown, ChevronUp,
+  XCircle, Cpu, MemoryStick, Gauge, Clock, Zap, ChevronDown, ChevronUp, Wifi,
 } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 
@@ -38,6 +38,16 @@ interface OllamaNode {
 interface NodesResponse {
   nodes: OllamaNode[];
   count: number;
+}
+
+interface TestResult {
+  node_id: string;
+  host: string;
+  reachable: boolean;
+  latency_ms: number;
+  models: string[];
+  current_load: number;
+  error: string | null;
 }
 
 interface AddNodeForm {
@@ -75,6 +85,15 @@ async function deleteNode(nodeId: string): Promise<void> {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error ?? `DELETE /api/nodes → ${res.status}`);
   }
+}
+
+async function testNode(nodeId: string): Promise<TestResult> {
+  const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/test`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `POST /api/nodes/${nodeId}/test → ${res.status}`);
+  }
+  return res.json();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,10 +138,25 @@ function LoadBar({ load }: { load: number }) {
 
 function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [testing, setTesting] = useState(false);
   const status = node.health?.status ?? '';
   const lastSeen = node.health?.last_seen
     ? new Date(node.health.last_seen).toLocaleTimeString()
     : '—';
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await testNode(node.id);
+      setTestResult(result);
+    } catch {
+      setTestResult({ node_id: node.id, host: node.host, reachable: false, latency_ms: 0, models: [], current_load: 0, error: 'Connection test failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   return (
     <motion.div
@@ -146,6 +180,15 @@ function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string)
         <div className="flex items-center gap-2 flex-shrink-0">
           <StatusBadge status={status} />
           <button
+            id={`node-test-${node.id}`}
+            onClick={handleTest}
+            disabled={testing}
+            className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-cyan-400 hover:bg-cyan-400/10 transition-colors disabled:opacity-50"
+            title="Test connection"
+          >
+            <Wifi className={`w-3.5 h-3.5 ${testing ? 'animate-pulse' : ''}`} />
+          </button>
+          <button
             id={`node-delete-${node.id}`}
             onClick={() => onDelete(node.id)}
             className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors"
@@ -155,6 +198,32 @@ function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string)
           </button>
         </div>
       </div>
+
+      {/* Test result banner */}
+      {testResult && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          className={`rounded-lg px-3 py-2 text-xs border ${
+            testResult.reachable
+              ? 'bg-emerald-400/10 border-emerald-400/20 text-emerald-400'
+              : 'bg-red-400/10 border-red-400/20 text-red-400'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            {testResult.reachable ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+            <span className="font-medium">{testResult.reachable ? `Reachable — ${testResult.latency_ms}ms` : 'Unreachable'}</span>
+          </div>
+          {testResult.reachable && testResult.models.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {testResult.models.map(m => (
+                <span key={m} className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-300 font-mono">{m}</span>
+              ))}
+            </div>
+          )}
+          {testResult.error && <p className="mt-1 text-[10px]">{testResult.error}</p>}
+        </motion.div>
+      )}
 
       {/* Model tag */}
       <div className="flex items-center gap-2">
