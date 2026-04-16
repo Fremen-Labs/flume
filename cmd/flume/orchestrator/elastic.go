@@ -58,6 +58,472 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	return respBody, resp.StatusCode, nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Centralized ES Index Bootstrap
+//
+// ALL Elasticsearch index creation is owned by the CLI. This function runs
+// during `flume start` after ES + OpenBao are healthy but BEFORE any
+// application containers (dashboard, worker, gateway) are started.
+//
+// This eliminates the boot-race where workers hit 404s because indices
+// haven't been created yet by the dashboard.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// indexDef holds the name and optional explicit mapping for an ES index.
+type indexDef struct {
+	Name    string
+	Mapping map[string]interface{} // nil = create with default dynamic mapping
+}
+
+// templateDef holds an index template definition.
+type templateDef struct {
+	Name string
+	Body map[string]interface{}
+}
+
+// ── Shared mapping fragments ────────────────────────────────────────────────
+
+// eventRecordMapping is the shared mapping for lifecycle-event indices (reviews,
+// failures, provenance, handoffs, memory entries, settings, telemetry).
+var eventRecordMapping = map[string]interface{}{
+	"settings": map[string]interface{}{
+		"number_of_shards":   1,
+		"number_of_replicas": 0,
+	},
+	"mappings": map[string]interface{}{
+		"properties": map[string]interface{}{
+			"task_id":    map[string]interface{}{"type": "keyword"},
+			"repo":       map[string]interface{}{"type": "keyword"},
+			"status":     map[string]interface{}{"type": "keyword"},
+			"worker":     map[string]interface{}{"type": "keyword"},
+			"created_at": map[string]interface{}{"type": "date"},
+			"updated_at": map[string]interface{}{"type": "date"},
+			"message":    map[string]interface{}{"type": "text"},
+		},
+	},
+}
+
+// ── Index definitions ───────────────────────────────────────────────────────
+
+// allIndices is the authoritative list of every ES index Flume requires.
+// Ported from: es_bootstrap.py REQUIRED_INDICES + EXPLICIT_INDEX_MAPPINGS,
+// es_credential_store.py _INDEX_MAPPINGS, config.go EnsureAgentModelsIndex,
+// node_registry.go EnsureIndex.
+var allIndices = []indexDef{
+	// ── Core project & task indices ──────────────────────────────────────
+	{Name: "flume-projects", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"id":          map[string]interface{}{"type": "keyword"},
+				"name":        map[string]interface{}{"type": "keyword"},
+				"repoUrl":     map[string]interface{}{"type": "keyword"},
+				"localPath":   map[string]interface{}{"type": "keyword"},
+				"cloneStatus": map[string]interface{}{"type": "keyword"},
+				"cloneError":  map[string]interface{}{"type": "text"},
+				"repoType":    map[string]interface{}{"type": "keyword"},
+				"gitflow":     map[string]interface{}{"type": "object", "enabled": false},
+				"created_at":  map[string]interface{}{"type": "date"},
+				"updated_at":  map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+	{Name: "flume-tasks", Mapping: nil},
+	{Name: "flume-workers", Mapping: nil},
+
+	// ── AP-1: Atomic monotonic counters (replaces sequence_counters.json) ─
+	{Name: "flume-counters", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"prefix":     map[string]interface{}{"type": "keyword"},
+				"value":      map[string]interface{}{"type": "long"},
+				"updated_at": map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+
+	// ── AP-8: Per-role LLM model overrides (replaces agent_models.json) ──
+	{Name: "flume-config", Mapping: nil},
+
+	// ── AP-10: Non-sensitive LLM settings (provider/model/baseUrl) ───────
+	{Name: "flume-llm-config", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"LLM_PROVIDER":   map[string]interface{}{"type": "keyword"},
+				"LLM_MODEL":      map[string]interface{}{"type": "keyword"},
+				"LLM_BASE_URL":   map[string]interface{}{"type": "keyword"},
+				"LLM_ROUTE_TYPE": map[string]interface{}{"type": "keyword"},
+			},
+		},
+	}},
+
+	// ── System-level runtime config ──────────────────────────────────────
+	{Name: "flume-settings", Mapping: eventRecordMapping},
+
+	// ── Worker-manager heartbeat telemetry ───────────────────────────────
+	{Name: "flume-telemetry", Mapping: eventRecordMapping},
+
+	// ── Core task records ────────────────────────────────────────────────
+	{Name: "agent-task-records", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"id":                          map[string]interface{}{"type": "keyword"},
+				"title":                       map[string]interface{}{"type": "text"},
+				"objective":                   map[string]interface{}{"type": "text"},
+				"acceptance_criteria":         map[string]interface{}{"type": "text"},
+				"artifacts":                   map[string]interface{}{"type": "text"},
+				"agent_log": map[string]interface{}{
+					"type": "nested",
+					"properties": map[string]interface{}{
+						"ts":   map[string]interface{}{"type": "date"},
+						"note": map[string]interface{}{"type": "text"},
+					},
+				},
+				"execution_thoughts": map[string]interface{}{
+					"type": "nested",
+					"properties": map[string]interface{}{
+						"ts":      map[string]interface{}{"type": "date"},
+						"thought": map[string]interface{}{"type": "text"},
+					},
+				},
+				"item_type":                   map[string]interface{}{"type": "keyword"},
+				"repo":                        map[string]interface{}{"type": "keyword"},
+				"worktree":                    map[string]interface{}{"type": "keyword"},
+				"priority":                    map[string]interface{}{"type": "keyword"},
+				"risk":                        map[string]interface{}{"type": "keyword"},
+				"depends_on":                  map[string]interface{}{"type": "keyword"},
+				"owner":                       map[string]interface{}{"type": "keyword"},
+				"assigned_agent_role":         map[string]interface{}{"type": "keyword"},
+				"active_worker":               map[string]interface{}{"type": "keyword"},
+				"execution_host":              map[string]interface{}{"type": "keyword"},
+				"status":                      map[string]interface{}{"type": "keyword"},
+				"queue_state":                 map[string]interface{}{"type": "keyword"},
+				"ast_sync_status":             map[string]interface{}{"type": "keyword"},
+				"ast_synced":                  map[string]interface{}{"type": "boolean"},
+				"ast_sync_attempts":           map[string]interface{}{"type": "integer"},
+				"needs_human":                 map[string]interface{}{"type": "boolean"},
+				"preferred_model":             map[string]interface{}{"type": "keyword"},
+				"preferred_llm_provider":      map[string]interface{}{"type": "keyword"},
+				"preferred_llm_credential_id": map[string]interface{}{"type": "keyword"},
+				"commit_sha":                  map[string]interface{}{"type": "keyword"},
+				"branch":                      map[string]interface{}{"type": "keyword"},
+				"created_at":                  map[string]interface{}{"type": "date"},
+				"updated_at":                  map[string]interface{}{"type": "date"},
+				"last_update":                 map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+
+	// ── Lifecycle-event indices (shared mapping) ─────────────────────────
+	{Name: "agent-review-records", Mapping: eventRecordMapping},
+	{Name: "agent-failure-records", Mapping: eventRecordMapping},
+	{Name: "agent-provenance-records", Mapping: eventRecordMapping},
+	{Name: "agent-handoff-records", Mapping: eventRecordMapping},
+	{Name: "agent-memory-entries", Mapping: eventRecordMapping},
+
+	// ── Token telemetry ──────────────────────────────────────────────────
+	{Name: "agent-token-telemetry", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"worker_name":  map[string]interface{}{"type": "keyword"},
+				"worker_role":  map[string]interface{}{"type": "keyword"},
+				"provider":     map[string]interface{}{"type": "keyword"},
+				"model":        map[string]interface{}{"type": "keyword"},
+				"input_tokens": map[string]interface{}{"type": "long"},
+				"output_tokens": map[string]interface{}{"type": "long"},
+				"savings":      map[string]interface{}{"type": "long"},
+				"created_at":   map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+
+	// ── Security audit index ─────────────────────────────────────────────
+	{Name: "agent-security-audits", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards": 1, "number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"@timestamp":     map[string]interface{}{"type": "date"},
+				"message":        map[string]interface{}{"type": "text"},
+				"agent_roles":    map[string]interface{}{"type": "keyword"},
+				"worker_name":    map[string]interface{}{"type": "keyword"},
+				"secret_path":    map[string]interface{}{"type": "keyword"},
+				"keys_retrieved": map[string]interface{}{"type": "keyword"},
+			},
+		},
+	}},
+
+	// ── System state / orchestration ─────────────────────────────────────
+	{Name: "agent-checkpoints", Mapping: nil},
+	{Name: "agent-plan-sessions", Mapping: nil},
+	{Name: "agent-system-cluster", Mapping: nil},
+	{Name: "agent-system-workers", Mapping: nil},
+
+	// ── AST / knowledge / memory ─────────────────────────────────────────
+	{Name: "flume-elastro-graph", Mapping: nil},
+	{Name: "agent_semantic_memory", Mapping: nil},
+	{Name: "flow_tools", Mapping: nil},
+	{Name: "agent_knowledge", Mapping: nil},
+
+	// ── Task events ──────────────────────────────────────────────────────
+	{Name: "flume-task-events", Mapping: nil},
+
+	// ── Kubernetes-grade credential metadata stores (secrets in OpenBao) ─
+	{Name: "flume-llm-credentials", Mapping: map[string]interface{}{
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"store_key":          map[string]interface{}{"type": "keyword"},
+				"version":            map[string]interface{}{"type": "integer"},
+				"activeCredentialId": map[string]interface{}{"type": "keyword"},
+				"defaultCredentialId": map[string]interface{}{"type": "keyword"},
+				"credentials":        map[string]interface{}{"type": "object", "enabled": false},
+			},
+		},
+	}},
+	{Name: "flume-ado-tokens", Mapping: map[string]interface{}{
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"store_key":          map[string]interface{}{"type": "keyword"},
+				"version":            map[string]interface{}{"type": "integer"},
+				"activeCredentialId": map[string]interface{}{"type": "keyword"},
+				"credentials":        map[string]interface{}{"type": "object", "enabled": false},
+			},
+		},
+	}},
+	{Name: "flume-github-tokens", Mapping: map[string]interface{}{
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"store_key":          map[string]interface{}{"type": "keyword"},
+				"version":            map[string]interface{}{"type": "integer"},
+				"activeTokenId":      map[string]interface{}{"type": "keyword"},
+				"tokens":             map[string]interface{}{"type": "object", "enabled": false},
+			},
+		},
+	}},
+
+	// ── Gateway: per-role model overrides (ported from config.go) ────────
+	{Name: "flume-agent-models", Mapping: map[string]interface{}{
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"roles":      map[string]interface{}{"type": "object", "enabled": false},
+				"updated_at": map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+
+	// ── Gateway: distributed Ollama node mesh (ported from node_registry.go)
+	{Name: "flume-node-registry", Mapping: map[string]interface{}{
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"id":               map[string]interface{}{"type": "keyword"},
+				"host":             map[string]interface{}{"type": "keyword"},
+				"model_tag":        map[string]interface{}{"type": "keyword"},
+				"capabilities":     map[string]interface{}{"type": "object", "enabled": true},
+				"health":           map[string]interface{}{"type": "object", "enabled": true},
+				"auth_secret_path": map[string]interface{}{"type": "keyword"},
+				"updated_at":       map[string]interface{}{"type": "date"},
+			},
+		},
+	}},
+}
+
+// allTemplates is the authoritative list of ES index templates.
+// Ported from: es_bootstrap.py INDEX_TEMPLATES.
+var allTemplates = []templateDef{
+	{
+		Name: "agent-system-state-tpl",
+		Body: map[string]interface{}{
+			"index_patterns": []string{"agent-system-workers*", "agent-system-cluster*", "agent-plan-sessions*"},
+			"template": map[string]interface{}{
+				"settings": map[string]interface{}{
+					"number_of_shards":   1,
+					"number_of_replicas": 0,
+				},
+				"mappings": map[string]interface{}{
+					"dynamic_templates": []map[string]interface{}{
+						{
+							"strings_as_keywords": map[string]interface{}{
+								"match_mapping_type": "string",
+								"mapping": map[string]interface{}{
+									"type": "text",
+									"fields": map[string]interface{}{
+										"keyword": map[string]interface{}{
+											"type":         "keyword",
+											"ignore_above": 512,
+										},
+									},
+								},
+							},
+						},
+					},
+					"properties": map[string]interface{}{
+						"updated_at":   map[string]interface{}{"type": "date"},
+						"created_at":   map[string]interface{}{"type": "date"},
+						"heartbeat_at": map[string]interface{}{"type": "date"},
+						"status":       map[string]interface{}{"type": "keyword"},
+					},
+				},
+			},
+		},
+	},
+}
+
+// EnsureAllIndices creates every ES index and template Flume requires.
+//
+// This is the single source of truth for all Elasticsearch schema. It runs
+// from `flume start` after ES is healthy and OpenBao is deployed, but BEFORE
+// any application containers (dashboard, worker, gateway) are brought up.
+//
+// Each index uses an idempotent HEAD→PUT pattern: skip if the index already
+// exists, create with the explicit mapping if it doesn't.
+func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
+	log.Info("[ES INDEX BOOTSTRAP] Creating all Elasticsearch indices", "url", esURL, "indices", len(allIndices), "templates", len(allTemplates))
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. Apply index templates first (they govern indices matching patterns)
+	for _, tpl := range allTemplates {
+		endpoint := fmt.Sprintf("%s/_index_template/%s", strings.TrimRight(esURL, "/"), tpl.Name)
+		body, err := json.Marshal(tpl.Body)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to marshal template", "template", tpl.Name, "error", err)
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to build template request", "template", tpl.Name, "error", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "ApiKey "+apiKey)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to apply template", "template", tpl.Name, "error", err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			log.Info("[ES INDEX BOOTSTRAP] ✅ Applied index template", "template", tpl.Name)
+		} else {
+			log.Warn("[ES INDEX BOOTSTRAP] Template apply returned non-success", "template", tpl.Name, "status", resp.StatusCode)
+		}
+	}
+
+	// 2. Create each index (HEAD check → skip if exists → PUT if not)
+	created := 0
+	skipped := 0
+	failed := 0
+
+	for _, idx := range allIndices {
+		url := fmt.Sprintf("%s/%s", strings.TrimRight(esURL, "/"), idx.Name)
+
+		// HEAD check
+		headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to build HEAD request", "index", idx.Name, "error", err)
+			failed++
+			continue
+		}
+		headReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			headReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		}
+		headResp, err := client.Do(headReq)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Cannot reach Elasticsearch", "index", idx.Name, "error", err)
+			failed++
+			continue
+		}
+		headResp.Body.Close()
+
+		if headResp.StatusCode == 200 {
+			// Index already exists — update mapping if we have one (idempotent)
+			if idx.Mapping != nil {
+				mappingBody, ok := idx.Mapping["mappings"]
+				if ok {
+					mappingURL := fmt.Sprintf("%s/%s/_mapping", strings.TrimRight(esURL, "/"), idx.Name)
+					mBody, _ := json.Marshal(mappingBody)
+					mReq, _ := http.NewRequestWithContext(ctx, http.MethodPut, mappingURL, bytes.NewReader(mBody))
+					if mReq != nil {
+						mReq.Header.Set("Content-Type", "application/json")
+						if apiKey != "" {
+							mReq.Header.Set("Authorization", "ApiKey "+apiKey)
+						}
+						mResp, mErr := client.Do(mReq)
+						if mErr == nil {
+							mResp.Body.Close()
+						}
+					}
+				}
+			}
+			skipped++
+			continue
+		}
+
+		// Index does not exist — create with explicit mapping if available
+		var putBody io.Reader
+		if idx.Mapping != nil {
+			mappingBytes, _ := json.Marshal(idx.Mapping)
+			putBody = bytes.NewReader(mappingBytes)
+		}
+		putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, putBody)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to build PUT request", "index", idx.Name, "error", err)
+			failed++
+			continue
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			putReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		}
+		putResp, err := client.Do(putReq)
+		if err != nil {
+			log.Error("[ES INDEX BOOTSTRAP] Failed to create index", "index", idx.Name, "error", err)
+			failed++
+			continue
+		}
+		putResp.Body.Close()
+
+		if putResp.StatusCode < 400 {
+			log.Info("[ES INDEX BOOTSTRAP] ✅ Created index", "index", idx.Name)
+			created++
+		} else {
+			log.Warn("[ES INDEX BOOTSTRAP] Index creation returned non-success", "index", idx.Name, "status", putResp.StatusCode)
+			failed++
+		}
+	}
+
+	log.Info("[ES INDEX BOOTSTRAP] Index bootstrap complete", "created", created, "skipped_existing", skipped, "failed", failed, "total", len(allIndices))
+
+	if failed > 0 {
+		return fmt.Errorf("failed to create %d indices", failed)
+	}
+	return nil
+}
+
+// BootstrapElasticsearch runs all ES infrastructure setup: ILM policies,
+// index templates, the full index catalogue, and seed data.
+//
+// Call sequence during `flume start`:
+//
+//	ES healthy → OpenBao deployed → BootstrapElasticsearch() → SeedLLMConfig() → containers
 func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 	log.Info("[ELASTICSEARCH BOOTSTRAP] Bootstrapping Kubernetes-Grade Integration", "url", esURL)
 
@@ -93,7 +559,7 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ ILM Policy 'flume-task-records-policy' created")
 	}
 
-	// 2. Create Index Template mapping pattern to ILM policy (Enforcing STRICT keyword matching to avoid token splits)
+	// 2. Create Index Template mapping pattern to ILM policy
 	template := map[string]interface{}{
 		"index_patterns": []string{"agent-task-records-*"},
 		"template": map[string]interface{}{
@@ -135,24 +601,10 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-records-template' created")
 	}
 
-	// 3. Bootstrap Initial Index for the Alias
-	_, status, _ := esRequest(ctx, esURL, apiKey, "_alias/agent-task-records", "GET", nil)
-	if status == 404 {
-		initialIndex := map[string]interface{}{
-			"aliases": map[string]interface{}{
-				"agent-task-records": map[string]interface{}{
-					"is_write_index": true,
-				},
-			},
-		}
-		_, _, err = esRequest(ctx, esURL, apiKey, "agent-task-records-000001", "PUT", initialIndex)
-		if err != nil {
-			log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to bootstrap initial write index", "error", err)
-		} else {
-			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Bootstrapped initial write index 'agent-task-records-000001' attached to alias 'agent-task-records'")
-		}
-	} else {
-		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Alias 'agent-task-records' already exists. ILM handling ongoing rotations.")
+	// 3. Create ALL indices (centralized — replaces es_bootstrap.py, config.go, node_registry.go)
+	if err := EnsureAllIndices(ctx, esURL, apiKey); err != nil {
+		log.Warn("[ELASTICSEARCH BOOTSTRAP] Some indices failed to create", "error", err)
+		// Non-fatal: continue boot — existing indices will work
 	}
 
 	return nil

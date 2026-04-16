@@ -53,9 +53,24 @@ apply_runtime_config(_SRC_ROOT)
 # Hydrate OpenBao Secrets Natively
 hydrate_secrets_from_openbao()
 
-# Execute Elasticsearch Index Bootstrapping natively now that auth is fully populated
-from es_bootstrap import ensure_es_indices
-ensure_es_indices()
+# ES index creation is centralized in the CLI `flume start` orchestrator.
+# The dashboard only verifies indices exist at startup — it does NOT create them.
+# This eliminates the boot-race where workers hit 404s before the dashboard finishes bootstrapping.
+from utils.logger import get_logger as _get_startup_logger
+_startup_logger = _get_startup_logger('es_bootstrap')
+try:
+    import urllib.request as _ur
+    import urllib.error as _ue
+    _es_check_url = os.environ.get('ES_URL', 'http://elasticsearch:9200' if os.environ.get('FLUME_NATIVE_MODE') != '1' else 'http://localhost:9200')
+    _check_req = _ur.Request(f"{_es_check_url}/agent-task-records", method='HEAD')
+    with _ur.urlopen(_check_req, timeout=3) as _r:
+        if _r.status == 200:
+            _startup_logger.info("ES index verification passed — agent-task-records exists")
+except _ue.HTTPError as _e:
+    if _e.code == 404:
+        _startup_logger.warning("ES index 'agent-task-records' not found — was `flume start` used to boot?")
+except Exception as _e:
+    _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
 
 from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # noqa: E402
 
