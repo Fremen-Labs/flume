@@ -1181,6 +1181,8 @@ def run_implementer(
             elif fn_name == 'implementation_complete':
                 final_summary = fn_args.get('summary', 'Implementation completed.')
                 final_commit_message = fn_args.get('commit_message', '')
+                if not final_commit_message:
+                    final_commit_message = 'Verified task complete, no code changes required.'
                 final_artifacts = fn_args.get('artifacts') or []
                 _progress(f'Completing: {final_summary[:120]}')
                 tool_result = 'Implementation marked complete.'

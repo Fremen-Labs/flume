@@ -33,8 +33,10 @@ type ollamaStreamChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done  bool   `json:"done"`
-	Error string `json:"error,omitempty"`
+	Done            bool   `json:"done"`
+	Error           string `json:"error,omitempty"`
+	PromptEvalCount int    `json:"prompt_eval_count,omitempty"`
+	EvalCount       int    `json:"eval_count,omitempty"`
 }
 
 // StreamOllamaToolCall sends a tool-call request to Ollama using stream:true
@@ -89,6 +91,7 @@ func StreamOllamaToolCall(
 	// Process the NDJSON stream
 	mill := NewThinkMill()
 	var toolCalls []ToolCall
+	var usage Usage
 	chunkCount := 0
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -126,6 +129,13 @@ func StreamOllamaToolCall(
 			toolCalls = chunk.Message.ToolCalls
 		}
 
+		if chunk.PromptEvalCount > 0 {
+			usage.PromptTokens = chunk.PromptEvalCount
+		}
+		if chunk.EvalCount > 0 {
+			usage.CompletionTokens = chunk.EvalCount
+		}
+
 		if chunk.Done {
 			break
 		}
@@ -135,10 +145,14 @@ func StreamOllamaToolCall(
 		return nil, fmt.Errorf("stream read: %w", err)
 	}
 
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+
 	log.Info("ollama tool stream completed",
 		slog.Int("chunks", chunkCount),
 		slog.Int("tool_calls", len(toolCalls)),
 		slog.Int("visible_chars", len(mill.Visible())),
+		slog.Int("prompt_tokens", usage.PromptTokens),
+		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
 	return &ChatResponse{
@@ -148,6 +162,7 @@ func StreamOllamaToolCall(
 			ToolCalls: toolCalls,
 			Thoughts:  mill.Thoughts(),
 		},
+		Usage: usage,
 	}, nil
 }
 
@@ -159,7 +174,7 @@ func StreamOllamaChat(
 	messages []Message,
 	model string,
 	options map[string]interface{},
-) (string, string, error) {
+) (string, string, Usage, error) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "ollama_chat_stream")()
 
@@ -172,29 +187,30 @@ func StreamOllamaChat(
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal payload: %w", err)
+		return "", "", Usage{}, fmt.Errorf("marshal payload: %w", err)
 	}
 
 	url := strings.TrimRight(baseURL, "/") + "/api/chat"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", "", fmt.Errorf("build request: %w", err)
+		return "", "", Usage{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("ollama request: %w", err)
+		return "", "", Usage{}, fmt.Errorf("ollama request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(errBody))
+		return "", "", Usage{}, fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	mill := NewThinkMill()
+	var usage Usage
 	chunkCount := 0
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -213,11 +229,18 @@ func StreamOllamaChat(
 		chunkCount++
 
 		if chunk.Error != "" {
-			return "", "", fmt.Errorf("ollama error: %s", chunk.Error)
+			return "", "", Usage{}, fmt.Errorf("ollama error: %s", chunk.Error)
 		}
 
 		if chunk.Message.Content != "" {
 			mill.Process([]byte(chunk.Message.Content))
+		}
+
+		if chunk.PromptEvalCount > 0 {
+			usage.PromptTokens = chunk.PromptEvalCount
+		}
+		if chunk.EvalCount > 0 {
+			usage.CompletionTokens = chunk.EvalCount
 		}
 
 		if chunk.Done {
@@ -226,14 +249,18 @@ func StreamOllamaChat(
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", "", fmt.Errorf("stream read: %w", err)
+		return "", "", Usage{}, fmt.Errorf("stream read: %w", err)
 	}
+
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	log.Debug("ollama chat stream completed",
 		slog.Int("chunks", chunkCount),
 		slog.Int("visible_chars", len(mill.Visible())),
 		slog.Int("thought_chars", len(mill.Thoughts())),
+		slog.Int("prompt_tokens", usage.PromptTokens),
+		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
-	return mill.Visible(), mill.Thoughts(), nil
+	return mill.Visible(), mill.Thoughts(), usage, nil
 }

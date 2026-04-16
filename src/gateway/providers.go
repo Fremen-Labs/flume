@@ -178,7 +178,7 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	}
 
 	if suppressThink {
-		content, thoughts, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
 		if err != nil {
 			return nil, err
 		}
@@ -188,6 +188,7 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 				Content:  content,
 				Thoughts: thoughts,
 			},
+			Usage: usage,
 		}, nil
 	}
 
@@ -304,7 +305,7 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 
 	if suppressThink {
 		// Use streaming + think milling for thinking models
-		content, thoughts, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
 		if err != nil {
 			return nil, err
 		}
@@ -314,6 +315,7 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 				Content:  content,
 				Thoughts: thoughts,
 			},
+			Usage: usage,
 		}, nil
 	}
 

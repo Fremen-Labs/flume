@@ -1353,15 +1353,9 @@ def handle_implementer_worker(task, es_id):
         if agent_completed and not has_changes:
             if task_requires_code(task):
                 # This task *should* result in code edits, but the agent wrote nothing.
-                # Re-queue rather than incorrectly marking the task done.
-                update_task_doc(es_id, {
-                    'status': 'ready',
-                    'owner': 'implementer',
-                    'assigned_agent_role': 'implementer',
-                    'needs_human': False,
-                    **_implementer_clear_claim_fields(),
-                })
-                log(f"implementer: task={task_id} expected code edits but wrote nothing; re-queued")
+                # Treat as LLM error to block gracefully instead of looping indefinitely.
+                _implementer_handle_llm_failure(es_id, task, task_id)
+                logger.warning(f"[implementer] task={task_id} expected code edits but wrote nothing; handled as LLM failure")
                 released = True
                 return True
 
