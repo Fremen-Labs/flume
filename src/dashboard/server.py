@@ -2381,11 +2381,33 @@ def load_snapshot():
             try:
                 agg_res = es_search('agent-token-telemetry', {
                     'size': 0,
-                    'aggs': {'total_elastro_savings': {'sum': {'field': 'savings'}}}
+                    'aggs': {
+                        'total_elastro_savings': {'sum': {'field': 'savings'}},
+                        'total_baseline_tokens': {'sum': {'field': 'baseline_tokens'}},
+                        'total_baseline_full_context': {'sum': {'field': 'baseline_full_context_tokens'}},
+                        'total_actual_tokens': {'sum': {'field': 'actual_tokens_sent'}},
+                        'total_input_tokens': {'sum': {'field': 'input_tokens'}},
+                        'total_output_tokens': {'sum': {'field': 'output_tokens'}},
+                    }
                 })
-                return int(agg_res.get('aggregations', {}).get('total_elastro_savings', {}).get('value', 0))
+                aggs = agg_res.get('aggregations', {})
+                return {
+                    'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
+                    'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
+                    'baseline_full_context_tokens': int(aggs.get('total_baseline_full_context', {}).get('value', 0)),
+                    'actual_tokens_sent': int(aggs.get('total_actual_tokens', {}).get('value', 0)),
+                    'total_input_tokens': int(aggs.get('total_input_tokens', {}).get('value', 0)),
+                    'total_output_tokens': int(aggs.get('total_output_tokens', {}).get('value', 0)),
+                }
             except Exception:
-                return 0
+                return {
+                    'savings': 0,
+                    'baseline_tokens': 0,
+                    'baseline_full_context_tokens': 0,
+                    'actual_tokens_sent': 0,
+                    'total_input_tokens': 0,
+                    'total_output_tokens': 0,
+                }
         f_savings = pool.submit(fetch_savings)
         f_workers = pool.submit(load_workers)
         f_projects = pool.submit(load_projects_registry)
@@ -2394,7 +2416,7 @@ def load_snapshot():
         reviews_res = f_reviews.result().get('hits', {}).get('hits', [])
         failures_res = f_failures.result().get('hits', {}).get('hits', [])
         provenance_res = f_provenance.result().get('hits', {}).get('hits', [])
-        elastro_savings = f_savings.result()
+        token_metrics = f_savings.result()
         workers_res = f_workers.result()
         projects_res = f_projects.result()
 
@@ -2408,7 +2430,8 @@ def load_snapshot():
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance_res],
         'repos': repos_res,
         'projects': projects_res,
-        'elastro_savings': elastro_savings,
+        'elastro_savings': token_metrics['savings'],
+        'token_metrics': token_metrics,
     }
     
     _SNAPSHOT_CACHE_DATA = result

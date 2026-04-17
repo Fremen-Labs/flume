@@ -58,7 +58,25 @@ class AgentResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
+def _emit_usage(
+    task: Optional[dict[str, Any]],
+    usage: dict,
+    *,
+    baseline_tokens: int = 0,
+    baseline_full_context_tokens: int = 0,
+    actual_tokens_sent: int = 0,
+    savings: int = 0,
+):
+    """Emit a token-usage telemetry document to agent-token-telemetry.
+
+    Args:
+        task: The active task dict (source of worker/role/model metadata).
+        usage: Raw usage dict from the LLM response (prompt_tokens, completion_tokens, etc.).
+        baseline_tokens: Tokens a Naive RAG approach would have consumed.
+        baseline_full_context_tokens: Tokens if the LLM received all blast-radius files.
+        actual_tokens_sent: Tokens actually consumed via Elastro's targeted results.
+        savings: Honest delta: baseline_tokens - actual_tokens_sent (>= 0).
+    """
     if not task or not usage:
         return
     try:
@@ -90,16 +108,20 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
             or usage.get('eval_count')
             or 0
         )
+        ts = datetime.now(timezone.utc).isoformat()
         doc = {
-            '@timestamp': datetime.now(timezone.utc).isoformat(),
+            '@timestamp': ts,
             'worker_name': task.get('active_worker') or task.get('assigned_agent') or 'unknown-worker',
             'worker_role': task.get('assigned_agent_role') or task.get('owner') or 'generic',
             'provider': task.get('preferred_llm_provider') or task.get('llm_provider') or 'ollama',
             'model': task.get('preferred_model') or task.get('llm_model') or 'unknown',
             'input_tokens': input_tokens,
             'output_tokens': output_tokens,
-            'savings': 0,
-            'created_at': datetime.now(timezone.utc).isoformat()
+            'savings': savings,
+            'baseline_tokens': baseline_tokens,
+            'baseline_full_context_tokens': baseline_full_context_tokens,
+            'actual_tokens_sent': actual_tokens_sent,
+            'created_at': ts
         }
         hdrs = {'Content-Type': 'application/json'}
         # S1: Only send Authorization header when an API key is present
@@ -439,15 +461,22 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
             method='POST'
         )
 
+        # ── Token accounting defaults ──────────────────────────────────────
+        actual_tokens_sent = 0
+        baseline_tokens = 0
+        baseline_full_context_tokens = 0
+        savings = 0
+
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
                 hits = data.get('hits', {}).get('hits', [])
                 if not hits:
                     output = f"AST Search: No matching nodes found for '{query}' in index '{elastro_index}'. Try a broader search term or fall back to list_directory + grep."
-                    savings = 0
                 else:
                     output_chunks = []
+                    blast_radius_files: set[str] = set()
+                    total_stored_bytes = 0
                     for h in hits:
                         src = h.get('_source', {})
                         fp = src.get('file_path', 'unknown')
@@ -465,10 +494,41 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                             entry += f"\n  Calls: {', '.join(fns_called[:10])}"
                         entry += f"\n  Content:\n{content}"
                         output_chunks.append(entry)
+
+                        # Track unique files for full-context baseline
+                        if fp and fp not in blast_radius_files:
+                            blast_radius_files.add(fp)
+                            total_stored_bytes += len(content.encode('utf-8'))
+
                     output = f"AST Search Results ({len(hits)} hits):\n\n" + "\n\n".join(output_chunks)
-                    # Estimate tokens saved: AST cache returns targeted results vs reading entire files.
-                    # Token estimate: output bytes / 4 (standard ~4 bytes/token approximation).
-                    savings = len(output.encode('utf-8')) // 4
+
+                    # ── Realistic Token Savings Accounting ─────────────────
+                    # 1. actual_tokens_sent: what the agent actually received
+                    actual_tokens_sent = len(output.encode('utf-8')) // 4
+
+                    # 2. baseline_tokens (Naive RAG): conservative estimate of
+                    #    what a conventional RAG pipeline would send.
+                    #    Formula: prompt + (chunks × avg_chunk_size) + summaries
+                    task_prompt_tokens = len(json.dumps(args).encode('utf-8')) // 4
+                    num_chunks = min(max(len(hits), 6), 8)  # RAG retrieves 6-8 chunks
+                    avg_chunk_tokens = 768                    # midpoint of 512-1024
+                    summary_tokens = 512                      # file-level summaries
+                    baseline_tokens = task_prompt_tokens + (num_chunks * avg_chunk_tokens) + summary_tokens
+
+                    # 3. baseline_full_context_tokens: all files in the blast radius.
+                    #    AST stores content[:800] per chunk; 5× heuristic (v1) to
+                    #    approximate full file sizes.
+                    baseline_full_context_tokens = max(total_stored_bytes * 5 // 4, baseline_tokens)
+
+                    # Honest savings: how many tokens Elastro saved vs Naive RAG
+                    savings = max(baseline_tokens - actual_tokens_sent, 0)
+
+                    logger.debug(
+                        f"[ast_telemetry] query='{query}' hits={len(hits)} "
+                        f"actual={actual_tokens_sent} baseline_rag={baseline_tokens} "
+                        f"baseline_full={baseline_full_context_tokens} savings={savings}"
+                    )
+
         except urllib.error.HTTPError as he:
             if he.code == 404:
                 return f"AST Search Failed: Index '{elastro_index}' not found. The codebase AST has not been ingested yet. Please fall back to manual recursive file search via list_directory and grep."
@@ -486,7 +546,10 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                 'input_tokens': 0,
                 'output_tokens': 0,
                 'savings': savings,
-                'created_at': ts
+                'baseline_tokens': baseline_tokens,
+                'baseline_full_context_tokens': baseline_full_context_tokens,
+                'actual_tokens_sent': actual_tokens_sent,
+                'created_at': ts,
             }
             tel_hdrs = {'Content-Type': 'application/json'}
             es_api_key = os.environ.get('ES_API_KEY', '')
