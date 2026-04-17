@@ -130,6 +130,7 @@ func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, nod
 	// Override the Ollama base URL for this request.
 	cloned := cloneChatRequest(req)
 	cloned.Provider = ProviderOllama
+	cloned.Model = node.ModelTag
 
 	// Use the node-specific routing path.
 	return m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)

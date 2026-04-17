@@ -1236,9 +1236,9 @@ def commit_plan(repo: str, plan: dict):
     if routing_model:
         logger.info(f"Adaptive Routing: complexity={complexity_score}, routing tasks to {routing_model}")
 
-    # ── Fast path: ≤2 tasks → skip hierarchy, create tasks directly ────────
+    # ── Fast path: ≤3 tasks → skip hierarchy, create tasks directly ────────
     total_tasks = _count_plan_tasks(plan)
-    if 0 < total_tasks <= 2:
+    if 0 < total_tasks <= 3:
         task_seq = get_next_id_sequence('task')
         prev_task_id = None
         for epic in plan.get('epics') or []:
@@ -1257,10 +1257,10 @@ def commit_plan(repo: str, plan: dict):
                             'item_type': 'task',
                             'owner': 'implementer',
                             'assigned_agent_role': 'implementer',
-                            'status': 'ready' if prev_task_id is None else 'planned',
+                            'status': 'ready',
                             'priority': 'normal',
                             'parent_id': None,
-                            'depends_on': [prev_task_id] if prev_task_id else [],
+                            'depends_on': [],
                             'acceptance_criteria': ac,
                             'artifacts': [],
                             'last_update': now,

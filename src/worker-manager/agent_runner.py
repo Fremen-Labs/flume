@@ -191,6 +191,7 @@ def _call_ollama(
     ]
     try:
         kw = _task_llm_kw(task)
+        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
         content, usage = llm_client.chat(
             messages,
             model=model or _current_llm_model(),
@@ -199,6 +200,7 @@ def _call_ollama(
             return_usage=True,
             timeout_seconds=300,
             ollama_think=False,
+            agent_role=role,
             **kw,
         )
         _emit_usage(task, usage)
@@ -844,6 +846,7 @@ def _call_ollama_tools(
     try:
         llm_client = _load_llm_client()
         _task_llm_kw(task)  # resolve creds into env side-effects
+        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
         res = llm_client.chat_with_tools(
             messages,
             tools,
@@ -851,6 +854,7 @@ def _call_ollama_tools(
             temperature=0.2,
             max_tokens=4096,
             ollama_think=True,
+            agent_role=role,
         )
         
         usage = res.get('usage', {}) if isinstance(res, dict) else {}

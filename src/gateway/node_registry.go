@@ -299,11 +299,23 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int) *Node 
 
 		// Task-type affinity boost.
 		switch taskType {
-		case "reasoning", "planning", "pm":
+		case "implementer", "reasoning", "planning", "pm":
 			modelFit = math.Min(1.0, modelFit*1.2)
+			// Harder work: prioritize more RAM and coding-specific models.
+			if n.Capabilities.MemoryGB >= 16 {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
+			tagLower := strings.ToLower(n.ModelTag)
+			if strings.Contains(tagLower, "coder") || strings.Contains(tagLower, "code") {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
 		case "review", "test", "fast", "evaluation":
 			// Prefer speed over reasoning power for lightweight analysis roles.
 			modelFit = math.Min(1.0, modelFit*0.8+float64(n.Capabilities.EstimatedTPS)/100.0*0.2)
+			// Simpler work: prioritize smaller nodes.
+			if n.Capabilities.MemoryGB < 16 {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
 		}
 
 		// Load inverse: lower load = higher score.
