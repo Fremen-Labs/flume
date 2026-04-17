@@ -4770,6 +4770,10 @@ async def get_system_telemetry():
                 "flume_active_models": [],
                 "flume_ensemble_requests_total": [],
                 "flume_vram_pressure_events_total": 0,
+                "flume_worker_tokens_total": [],
+                "flume_node_requests_total": [],
+                "flume_routing_decision": [],
+                "flume_node_load": [],
             }
             
             for line in lines:
@@ -4810,6 +4814,34 @@ async def get_system_telemetry():
                         results["flume_ensemble_requests_total"].append({
                             "tags": tag_dict,
                             "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_worker_tokens_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_worker_tokens_total"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_node_requests_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_node_requests_total"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_routing_decision{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_routing_decision"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_node_load{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_node_load"].append({
+                            "tags": tag_dict,
+                            "value": float(val)
                         })
 
             return results

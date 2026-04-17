@@ -58,7 +58,10 @@ def _post_gateway(path: str, payload: dict, timeout: int = 180) -> dict:
     req = urllib.request.Request(
         url,
         data=data,
-        headers={'Content-Type': 'application/json'},
+        headers={
+            'Content-Type': 'application/json',
+            'X-Worker-Name': os.environ.get('FLUME_WORKER_NAME', 'unknown')
+        },
         method='POST',
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:

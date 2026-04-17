@@ -191,12 +191,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var resp *ChatResponse
 	var err error
 
-	// ── Fix 1 continued: /chat also benefits from ensemble when enabled ────
-	// withTools=false keeps text-only semantics in each jury member call.
-	if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
-		// Route through the node mesh for intelligent multi-node distribution.
-		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, agentRoleToTaskType(req.AgentRole), false)
+	taskType := agentRoleToTaskType(req.AgentRole)
+	isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
+
+	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
+		// Complex tasks get distributed Ensembles across the Node Mesh!
+		resp, err = s.ExecuteEnsemble(ctx, &req, false)
+	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+		// Standard tasks get Smart Routing across the mesh
+		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, false)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+		// Legacy single-node Ensemble fallback
 		resp, err = s.ExecuteEnsemble(ctx, &req, false)
 	} else {
 		resp, err = s.router.Route(ctx, &req, false)
@@ -218,6 +223,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		slog.Int("content_len", len(resp.Message.Content)),
 		slog.Float64("duration_ms", msElapsed(start)),
 	)
+
+	workerName := r.Header.Get("X-Worker-Name")
+	if workerName != "" {
+		Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
 
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -281,8 +291,13 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	var resp *ChatResponse
 	var err error
 
-	if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
-		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, agentRoleToTaskType(req.AgentRole), true)
+	taskType := agentRoleToTaskType(req.AgentRole)
+	isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
+
+	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
+		resp, err = s.ExecuteEnsemble(ctx, &req, true)
+	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, true)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
 	} else {
@@ -306,9 +321,14 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("tool-call completed",
 		slog.Int("content_len", len(resp.Message.Content)),
-		slog.Int("tool_calls", len(resp.Message.ToolCalls)),
+		slog.Int("tools_used", len(resp.Message.ToolCalls)),
 		slog.Float64("duration_ms", msElapsed(start)),
 	)
+
+	workerName := r.Header.Get("X-Worker-Name")
+	if workerName != "" {
+		Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
 
 	s.writeJSON(w, http.StatusOK, resp)
 }
