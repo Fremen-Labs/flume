@@ -98,6 +98,14 @@ export interface Snapshot {
   repos: ApiRepo[];
   projects: ApiProject[];
   elastro_savings?: number;
+  token_metrics?: {
+    savings: number;
+    baseline_tokens: number;
+    baseline_full_context_tokens: number;
+    actual_tokens_sent: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+  };
 }
 
 // ─── LLM Settings API ──────────────────────────────────────────────────────────

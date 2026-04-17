@@ -47,6 +47,16 @@ export default function AnalyticsPage() {
   const passRate = reviews.length > 0 ? Math.round((approvedReviews / reviews.length) * 100) : 0;
   
   const savings = snapshot?.elastro_savings ?? 0;
+  const tm = snapshot?.token_metrics;
+  // Honest metrics when available; fall back to legacy savings field
+  const baselineTokens = tm?.baseline_tokens ?? 0;
+  const actualTokensSent = tm?.actual_tokens_sent ?? 0;
+  const realSavings = tm ? Math.max(baselineTokens - actualTokensSent, 0) : savings;
+  const savingsPercent = baselineTokens > 0 ? Math.round((realSavings / baselineTokens) * 100) : 0;
+  const totalInput = tm?.total_input_tokens ?? 0;
+  const totalOutput = tm?.total_output_tokens ?? 0;
+
+  const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
@@ -65,12 +75,13 @@ export default function AnalyticsPage() {
       {!isLoading && (
         <>
           {/* Top metrics */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 relative z-10">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 relative z-10">
             <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
             <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
             <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
-            <GlassMetricCard title="AST Tokens Saved" value={savings > 1000000 ? `${(savings / 1000000).toFixed(1)}M` : (savings > 1000 ? `${(savings / 1000).toFixed(1)}K` : String(savings))} icon={TrendingUp} trend={{ value: Math.round(savings / 4), label: 'est. tokens via Elastro', suffix: '' }} />
+            <GlassMetricCard title="Token Efficiency" value={fmtTokens(realSavings)} icon={TrendingUp} trend={{ value: savingsPercent, label: baselineTokens > 0 ? `${fmtTokens(actualTokensSent)} actual vs ${fmtTokens(baselineTokens)} RAG baseline` : 'awaiting AST queries', suffix: '%' }} />
+            <GlassMetricCard title="LLM Usage" value={fmtTokens(totalInput + totalOutput)} icon={Zap} trend={{ value: totalOutput > 0 ? Math.round((totalInput / (totalInput + totalOutput)) * 100) : 0, label: `${fmtTokens(totalInput)} in / ${fmtTokens(totalOutput)} out`, suffix: '%' }} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 relative z-10">

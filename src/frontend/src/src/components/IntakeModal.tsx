@@ -348,7 +348,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     };
 
     poll();
-    const id = window.setInterval(poll, 1000);
+    const id = window.setInterval(poll, 5000);
     return () => {
       cancelled = true;
       window.clearInterval(id);

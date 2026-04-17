@@ -60,7 +60,6 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 
 	log := WithContext(ctx)
 	log.Info("routing request",
-		slog.String("provider", provider),
 		slog.String("model", model),
 		slog.String("agent_role", req.AgentRole),
 		slog.Bool("with_tools", withTools),

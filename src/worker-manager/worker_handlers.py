@@ -1435,6 +1435,33 @@ def handle_tester_worker(task, es_id):
         log(f"tester: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
+    # ── Tester retry loop cap ─────────────────────────────────────────────
+    # Prevents infinite tester→reviewer loops when the reviewer never claims
+    # (e.g. handoff bug, reviewer crash, or persistent LLM failures).
+    # Mirrors the FLUME_REVIEWER_BLOCK_CAP pattern.
+    _TESTER_RETRY_CAP = int(os.environ.get('FLUME_TESTER_RETRY_CAP', '5'))
+    prev_retries = int(task.get('tester_retry_count', 0))
+    next_retries = prev_retries + 1
+    task_id = task.get('id')
+
+    if _TESTER_RETRY_CAP > 0 and next_retries > _TESTER_RETRY_CAP:
+        append_agent_note(
+            es_id,
+            f'Blocked: tester has looped {next_retries} times without the reviewer completing '
+            f'(cap={_TESTER_RETRY_CAP}, FLUME_TESTER_RETRY_CAP). '
+            'This usually indicates a handoff or reviewer claim issue. '
+            'Manually review and reset this task to **ready** or **done** after inspection.',
+        )
+        update_task_doc(es_id, {
+            'status': 'blocked',
+            'needs_human': True,
+            'owner': 'tester',
+            'tester_retry_count': next_retries,
+            **_implementer_clear_claim_fields(),
+        })
+        log(f"tester: task={task_id} blocked after {next_retries} retry loops (cap={_TESTER_RETRY_CAP})")
+        return True
+
     result = run_tester(task)
     tester_model = task.get('preferred_model') or _get_active_llm_model()
 
@@ -1472,7 +1499,7 @@ def handle_tester_worker(task, es_id):
         return True
 
     write_doc(HANDOFF_INDEX, {
-        'task_id': task.get('id'),
+        'task_id': task_id,
         'from_role': 'tester',
         'to_role': 'reviewer',
         'reason': result.summary,
@@ -1483,12 +1510,19 @@ def handle_tester_worker(task, es_id):
         'model_used': tester_model,
         'created_at': now_iso(),
     })
+    # FIX: Clear active_worker and queue_state so the reviewer's atomic claim
+    # can pick up the task. Previously these fields were left set, causing
+    # the Painless guard (active_worker == null) to noop every reviewer claim
+    # and creating an infinite tester→reviewer loop.
     update_task_doc(es_id, {
         'status': 'review',
         'owner': 'reviewer',
         'assigned_agent_role': 'reviewer',
+        'active_worker': None,
+        'queue_state': 'queued',
+        'tester_retry_count': next_retries,
     })
-    log(f"tester passed task={task.get('id')} -> reviewer")
+    log(f"tester passed task={task_id} -> reviewer (attempt {next_retries}/{_TESTER_RETRY_CAP if _TESTER_RETRY_CAP > 0 else '∞'})")
     return True
 
 
