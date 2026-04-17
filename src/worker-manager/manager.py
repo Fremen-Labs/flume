@@ -711,6 +711,63 @@ def requeue_stuck_review_tasks() -> int:
     return n
 
 
+def promote_planned_tasks() -> int:
+    """
+    Find tasks in status=planned. If all their depends_on tasks are status=done,
+    transition them to status=ready.
+    """
+    body = {
+        'size': 100,
+        'query': {
+            'term': {'status': 'planned'}
+        }
+    }
+    try:
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+    except Exception:
+        return 0
+    n = 0
+    for h in res.get('hits', {}).get('hits', []):
+        src = h.get('_source', {})
+        deps = src.get('depends_on', [])
+        es_doc_id = h.get('_id')
+        if not deps:
+            # If no dependencies, promote it immediately
+            try:
+                es_request(
+                    f'/{TASK_INDEX}/_update/{es_doc_id}',
+                    {'doc': {'status': 'ready', 'updated_at': now_iso(), 'last_update': now_iso(), 'queue_state': 'queued'}},
+                    method='POST',
+                )
+                log(f"promoted planned task {src.get('id', es_doc_id)} to ready (no dependencies)")
+                n += 1
+            except Exception as e:
+                log(f"failed to promote planned task {es_doc_id}: {e}")
+            continue
+        
+        # Check if all deps are done
+        try:
+            dep_res = es_request(f'/{TASK_INDEX}/_mget', {'ids': deps}, method='POST')
+            docs = dep_res.get('docs', [])
+            all_done = False
+            if docs and all(d.get('found', False) and d.get('_source', {}).get('status') == 'done' for d in docs):
+                all_done = True
+                
+            if all_done:
+                es_request(
+                    f'/{TASK_INDEX}/_update/{es_doc_id}',
+                    {'doc': {'status': 'ready', 'updated_at': now_iso(), 'last_update': now_iso(), 'queue_state': 'queued'}},
+                    method='POST',
+                )
+                log(f"promoted planned task {src.get('id', es_doc_id)} to ready (dependencies resolved)")
+                n += 1
+        except Exception as e:
+            log(f"dependency sweep error for task {es_doc_id}: {e}")
+            continue
+            
+    return n
+
+
 def cycle():
     # 1. Check Global Cluster Paused state
     is_paused = False
@@ -734,6 +791,13 @@ def cycle():
             log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
     except Exception as e:
         log(f"stuck-review sweep error: {e}")
+        
+    try:
+        promoted = promote_planned_tasks()
+        if promoted:
+            log(f"dependency sweep: promoted {promoted} task(s) to ready")
+    except Exception as e:
+        log(f"dependency sweep error: {e}")
     busy_workers = {}
     try:
         res = es_request(

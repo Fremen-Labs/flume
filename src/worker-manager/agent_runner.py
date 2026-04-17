@@ -1407,6 +1407,9 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             "- When decomposing, create the MINIMUM number of subtasks needed. Each subtask must "
             "modify different files or components. Never create separate tasks for 'locate file' "
             "and 'make change'.\n"
+            "- CRITICAL: You must explicitly map sequential dependencies using the `depends_on` array. "
+            "If a testing or verification task depends on an implementation task, place the implementation task's ID "
+            "in the verification task's `depends_on` array.\n"
             "- Never create subtasks that assume artifacts exist without evidence (e.g., "
             "'replace icon asset' when no SVG files were mentioned).\n\n"
         )

@@ -55,6 +55,7 @@ export default function AnalyticsPage() {
   const savingsPercent = baselineTokens > 0 ? Math.round((realSavings / baselineTokens) * 100) : 0;
   const totalInput = tm?.total_input_tokens ?? 0;
   const totalOutput = tm?.total_output_tokens ?? 0;
+  const estimatedCost = tm?.estimated_cost_usd ?? 0;
 
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
@@ -81,7 +82,7 @@ export default function AnalyticsPage() {
             <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
             <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
             <GlassMetricCard title="Token Efficiency" value={fmtTokens(realSavings)} icon={TrendingUp} trend={{ value: savingsPercent, label: baselineTokens > 0 ? `${fmtTokens(actualTokensSent)} actual vs ${fmtTokens(baselineTokens)} RAG baseline` : 'awaiting AST queries', suffix: '%' }} />
-            <GlassMetricCard title="LLM Usage" value={fmtTokens(totalInput + totalOutput)} icon={Zap} trend={{ value: totalOutput > 0 ? Math.round((totalInput / (totalInput + totalOutput)) * 100) : 0, label: `${fmtTokens(totalInput)} in / ${fmtTokens(totalOutput)} out`, suffix: '%' }} />
+            <GlassMetricCard title="LLM Usage" value={fmtTokens(totalInput + totalOutput)} icon={Zap} trend={{ value: totalOutput > 0 ? Math.round((totalInput / (totalInput + totalOutput)) * 100) : 0, label: `${fmtTokens(totalInput)} in / ${fmtTokens(totalOutput)} out ($${estimatedCost.toFixed(2)})`, suffix: '%' }} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 relative z-10">

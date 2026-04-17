@@ -1257,10 +1257,10 @@ def commit_plan(repo: str, plan: dict):
                             'item_type': 'task',
                             'owner': 'implementer',
                             'assigned_agent_role': 'implementer',
-                            'status': 'ready',
+                            'status': 'ready' if prev_task_id is None else 'planned',
                             'priority': 'normal',
                             'parent_id': None,
-                            'depends_on': [],
+                            'depends_on': [prev_task_id] if prev_task_id else [],
                             'acceptance_criteria': ac,
                             'artifacts': [],
                             'last_update': now,
@@ -2391,13 +2391,18 @@ def load_snapshot():
                     }
                 })
                 aggs = agg_res.get('aggregations', {})
+                cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', '0.002'))
+                cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
+                t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
+                t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
                 return {
                     'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
                     'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
                     'baseline_full_context_tokens': int(aggs.get('total_baseline_full_context', {}).get('value', 0)),
                     'actual_tokens_sent': int(aggs.get('total_actual_tokens', {}).get('value', 0)),
-                    'total_input_tokens': int(aggs.get('total_input_tokens', {}).get('value', 0)),
-                    'total_output_tokens': int(aggs.get('total_output_tokens', {}).get('value', 0)),
+                    'total_input_tokens': t_in,
+                    'total_output_tokens': t_out,
+                    'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
                 }
             except Exception:
                 return {
@@ -2407,6 +2412,7 @@ def load_snapshot():
                     'actual_tokens_sent': 0,
                     'total_input_tokens': 0,
                     'total_output_tokens': 0,
+                    'estimated_cost_usd': 0.0,
                 }
         f_savings = pool.submit(fetch_savings)
         f_workers = pool.submit(load_workers)
@@ -2422,9 +2428,18 @@ def load_snapshot():
 
     repos_res = load_repos(registry=projects_res)
 
+    def map_task(h):
+        s = h.get('_source', {})
+        res = {'_id': h.get('_id'), **s}
+        thoughts = s.get('execution_thoughts', [])
+        res['execution_thoughts_count'] = len(thoughts) if isinstance(thoughts, list) else 0
+        if 'execution_thoughts' in res:
+            del res['execution_thoughts']
+        return res
+
     result = {
         'workers': workers_res,
-        'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks_res],
+        'tasks': [map_task(h) for h in tasks_res],
         'reviews': [{'_id': h.get('_id'), **h.get('_source', {})} for h in reviews_res],
         'failures': [{'_id': h.get('_id'), **h.get('_source', {})} for h in failures_res],
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance_res],
