@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,16 +180,19 @@ func fetchOllamaModels(host string) []string {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
+		log.Debug("fetchOllamaModels: network error while fetching tags", "host", host, "error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Debug("fetchOllamaModels: non-200 status code", "host", host, "status", resp.StatusCode)
 		return nil
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
+		log.Debug("fetchOllamaModels: error reading response body", "host", host, "error", err)
 		return nil
 	}
 
@@ -197,6 +202,7 @@ func fetchOllamaModels(host string) []string {
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &tagsResp); err != nil {
+		log.Debug("fetchOllamaModels: JSON parse failure", "host", host, "error", err)
 		return nil
 	}
 
