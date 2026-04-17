@@ -601,7 +601,7 @@ func (s *Server) handleTestNode(w http.ResponseWriter, r *http.Request) {
 
 	// Probe /api/tags for model discovery.
 	start := time.Now()
-	models, err := hc.probeTags(r.Context(), baseURL, node)
+	tagsResult, err := hc.probeTags(r.Context(), baseURL, node)
 	latencyMs := time.Since(start).Milliseconds()
 
 	result := map[string]interface{}{
@@ -620,15 +620,15 @@ func (s *Server) handleTestNode(w http.ResponseWriter, r *http.Request) {
 		result["current_load"] = 0.0
 		result["error"] = err.Error()
 	} else {
-		load := hc.probeLoad(r.Context(), baseURL, node)
+		load, _, _ := hc.probeLoad(r.Context(), baseURL, node)
 		log.Info("node_api: connection test succeeded",
 			slog.String("node_id", nodeID),
 			slog.Int64("latency_ms", latencyMs),
-			slog.Int("models_found", len(models)),
+			slog.Int("models_found", len(tagsResult.models)),
 			slog.Float64("load", load),
 		)
 		result["reachable"] = true
-		result["models"] = models
+		result["models"] = tagsResult.models
 		result["current_load"] = load
 		result["error"] = nil
 	}

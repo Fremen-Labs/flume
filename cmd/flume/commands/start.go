@@ -318,20 +318,41 @@ var StartCmd = &cobra.Command{
 			return err
 		}
 
-		// ── Seed node mesh from CLI wizard entries ───────────────────────────
-		if len(envCfg.Nodes) > 0 {
+		// ── Seed node mesh from primary Ollama host + wizard entries ────────
+		if envCfg.Provider == "ollama" || envCfg.Provider == "exo" {
 			gatewayPort := "8090" // default gateway port
 			gatewayURL := fmt.Sprintf("http://localhost:%s", gatewayPort)
 
 			var seedEntries []orchestrator.NodeSeedEntry
+
+			// Always register the primary Ollama host so it appears on the Node Mesh page.
+			primaryHost := envCfg.Host
+			if primaryHost == "" {
+				primaryHost = "127.0.0.1"
+			}
+			// In Docker mode, the HealthChecker runs inside the gateway container
+			// where 127.0.0.1 is the container's own loopback — not the host.
+			// Rewrite local addresses to host.docker.internal so probes reach
+			// the host machine's Ollama instance.
+			if !envCfg.IsNative && (primaryHost == "127.0.0.1" || primaryHost == "localhost") {
+				primaryHost = "host.docker.internal"
+			}
+			primaryEntry := orchestrator.NodeSeedEntry{
+				ID:       "primary",
+				Host:     fmt.Sprintf("%s:11434", primaryHost),
+				ModelTag: envCfg.Model,
+			}
+			// ReasoningScore and MaxContext are left at zero — the health checker
+			// dynamically derives them from POST /api/show within 15 seconds.
+			seedEntries = append(seedEntries, primaryEntry)
+
+			// Append any additional nodes collected during the interactive wizard.
 			for _, n := range envCfg.Nodes {
 				entry := orchestrator.NodeSeedEntry{
 					ID:       n.ID,
 					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
 					ModelTag: n.ModelTag,
 				}
-				entry.Capabilities.ReasoningScore = 5
-				entry.Capabilities.MaxContext = 32768
 				if n.MemoryGB > 0 {
 					entry.Capabilities.MemoryGB = n.MemoryGB
 				}

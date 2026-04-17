@@ -157,11 +157,14 @@ func (r *NodeRegistry) RefreshFromES(ctx context.Context) {
 	newNodes := make(map[string]*Node, len(esResp.Hits.Hits))
 	for _, hit := range esResp.Hits.Hits {
 		node := hit.Source
-		// Preserve existing health state if node was already tracked
+		// Preserve runtime state that is not persisted to ES:
+		// Health (updated by HealthChecker), AuthToken (from OpenBao),
+		// and Capabilities (dynamically discovered from live Ollama probes).
 		r.mu.RLock()
 		if existing, ok := r.nodes[node.ID]; ok {
 			node.Health = existing.Health
 			node.AuthToken = existing.AuthToken
+			node.Capabilities = existing.Capabilities
 		}
 		r.mu.RUnlock()
 		newNodes[node.ID] = &node
@@ -191,6 +194,7 @@ func (r *NodeRegistry) HealthyNodes() []*Node {
 }
 
 // AllNodes returns a snapshot of all registered nodes (with AuthToken redacted).
+// Nodes are sorted by ID for stable ordering in API responses and UI rendering.
 func (r *NodeRegistry) AllNodes() []Node {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -201,6 +205,13 @@ func (r *NodeRegistry) AllNodes() []Node {
 		safe.AuthToken = "" // Security: never expose tokens in API responses
 		out = append(out, safe)
 	}
+
+	// Deterministic sort by ID — prevents UI card position jitter caused
+	// by Go's randomized map iteration order.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
+
 	return out
 }
 
@@ -224,6 +235,33 @@ func (r *NodeRegistry) UpdateHealth(nodeID string, health NodeHealth) {
 	defer r.mu.Unlock()
 	if n, ok := r.nodes[nodeID]; ok {
 		n.Health = health
+	}
+}
+
+// UpdateCapabilities writes auto-discovered capabilities into a node.
+// All capability fields are dynamically derived from live Ollama probes
+// and are always updated when the health checker discovers a value.
+func (r *NodeRegistry) UpdateCapabilities(nodeID string, discovered NodeCapabilities) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.nodes[nodeID]
+	if !ok {
+		return
+	}
+	if discovered.MemoryGB > 0 {
+		n.Capabilities.MemoryGB = discovered.MemoryGB
+	}
+	if discovered.EstimatedTPS > 0 {
+		n.Capabilities.EstimatedTPS = discovered.EstimatedTPS
+	}
+	if discovered.Quantization != "" {
+		n.Capabilities.Quantization = discovered.Quantization
+	}
+	if discovered.MaxContext > 0 {
+		n.Capabilities.MaxContext = discovered.MaxContext
+	}
+	if discovered.ReasoningScore > 0 {
+		n.Capabilities.ReasoningScore = discovered.ReasoningScore
 	}
 }
 
