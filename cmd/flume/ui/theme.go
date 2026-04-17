@@ -69,6 +69,11 @@ func ErrorRed(str string) string {
 	return styleError.Render("✖ " + str)
 }
 
+// Dim renders muted hint text (e.g. "(Tab to autocomplete)").
+func Dim(str string) string {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7A89")).Render(str)
+}
+
 // StatusBadge returns a lipgloss-coloured badge for a task/worker/infra status string.
 func StatusBadge(status string) string {
 	s := strings.ToLower(status)

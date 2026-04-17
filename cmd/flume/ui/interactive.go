@@ -79,7 +79,7 @@ type promptModel struct {
 	cfg       *PromptConfig
 	inputs    map[int]textinput.Model
 	exoActive bool
-	errMsg    string // validation error shown inline; cleared on next keypress
+	errMsg    string    // validation error shown inline; cleared on next keypress
 	curNode   NodeEntry // node currently being collected
 }
 
@@ -145,12 +145,26 @@ func (m promptModel) Init() tea.Cmd {
 func (m promptModel) next(nextStep int) (tea.Model, tea.Cmd) {
 	ti := m.inputs[m.step]
 	ti.Blur()
+	ti.ShowSuggestions = false
 	m.inputs[m.step] = ti
 
 	m.step = nextStep
 	if m.step != StepDone {
 		tiNext := m.inputs[m.step]
 		tiNext.Focus()
+		tiNext.SetValue("")
+
+		// Enable tab-autocomplete on model entry steps.
+		if m.step == StepModel || m.step == StepNodeModel {
+			ollamaHost := m.cfg.Host
+			if ollamaHost == "" {
+				ollamaHost = "127.0.0.1"
+			}
+			suggestions := ModelSuggestionsForProvider(m.cfg.Provider, ollamaHost)
+			tiNext.SetSuggestions(suggestions)
+			tiNext.ShowSuggestions = true
+		}
+
 		m.inputs[m.step] = tiNext
 		return m, textinput.Blink
 	}
@@ -312,7 +326,7 @@ func (m promptModel) View() string {
 	case StepProvider:
 		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
-		return NeonGreen("Enter " + pLabel + " model constraint (e.g. gpt-4o, claude-opus-4-5, qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter "+pLabel+" model constraint (e.g. gpt-4o, claude-opus-4-5, qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n" + Dim("(Tab to autocomplete · Enter to confirm)") + "\n"
 	case StepOllamaScope:
 		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaIP:
@@ -326,7 +340,7 @@ func (m promptModel) View() string {
 	case StepNodePort:
 		return NeonGreen("Custom Ollama port? (blank = 11434):\n") + "\n" + ti.View() + err + "\n(Press enter to use default)\n"
 	case StepNodeModel:
-		return NeonGreen("Primary model tag for this node (e.g. qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Primary model tag for this node (e.g. qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n" + Dim("(Tab to autocomplete · Enter to confirm)") + "\n"
 	case StepNodeMemory:
 		return NeonGreen("Total memory (GB) on this node (e.g. 64):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepNodeMore:

@@ -620,7 +620,7 @@ func (s *Server) handleTestNode(w http.ResponseWriter, r *http.Request) {
 		result["current_load"] = 0.0
 		result["error"] = err.Error()
 	} else {
-		load, _ := hc.probeLoad(r.Context(), baseURL, node)
+		load, _, _ := hc.probeLoad(r.Context(), baseURL, node)
 		log.Info("node_api: connection test succeeded",
 			slog.String("node_id", nodeID),
 			slog.Int64("latency_ms", latencyMs),

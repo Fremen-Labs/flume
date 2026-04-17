@@ -342,8 +342,8 @@ var StartCmd = &cobra.Command{
 				Host:     fmt.Sprintf("%s:11434", primaryHost),
 				ModelTag: envCfg.Model,
 			}
-			primaryEntry.Capabilities.ReasoningScore = 5
-			primaryEntry.Capabilities.MaxContext = 32768
+			// ReasoningScore and MaxContext are left at zero — the health checker
+			// dynamically derives them from POST /api/show within 15 seconds.
 			seedEntries = append(seedEntries, primaryEntry)
 
 			// Append any additional nodes collected during the interactive wizard.
@@ -353,8 +353,6 @@ var StartCmd = &cobra.Command{
 					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
 					ModelTag: n.ModelTag,
 				}
-				entry.Capabilities.ReasoningScore = 5
-				entry.Capabilities.MaxContext = 32768
 				if n.MemoryGB > 0 {
 					entry.Capabilities.MemoryGB = n.MemoryGB
 				}
