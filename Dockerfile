@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pre-install common lint/check tools globally so agents can verify code
 # in ephemeral worktrees without depending on project-local node_modules.
-RUN npm install -g typescript eslint prettier 2>/dev/null || true
+RUN npm install -g typescript@5.4.5 eslint@8.57.0 prettier@3.2.5 2>/dev/null || true
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
