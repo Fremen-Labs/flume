@@ -88,7 +88,7 @@ export default function AnalyticsPage() {
             <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
             
             {/* Live Telemetry Migrated from Telemetry Page */}
-            <GlassMetricCard title="Gateway Engine" value={telemetry?.flume_build_info ?? 'unknown'} icon={Activity} />
+            <GlassMetricCard title="Gateway Engines" value={String(telemetry?.flume_active_models?.length ?? 0)} icon={Activity} trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(", ") || 'No models loaded' }} />
             <GlassMetricCard title="System Memory" value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'} icon={Cpu} />
             <GlassMetricCard title="Go Goroutines" value={String(telemetry?.go_goroutines ?? 0)} icon={Cpu} />
             <GlassMetricCard title="VRAM Pressure" value={String(telemetry?.flume_vram_pressure_events_total ?? 0)} icon={ServerCrash} trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }} />
