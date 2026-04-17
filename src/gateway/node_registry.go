@@ -301,8 +301,8 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int) *Node 
 		switch taskType {
 		case "reasoning", "planning", "pm":
 			modelFit = math.Min(1.0, modelFit*1.2)
-		case "review", "test", "fast":
-			// Prefer speed over reasoning power.
+		case "review", "test", "fast", "evaluation":
+			// Prefer speed over reasoning power for lightweight analysis roles.
 			modelFit = math.Min(1.0, modelFit*0.8+float64(n.Capabilities.EstimatedTPS)/100.0*0.2)
 		}
 

@@ -81,8 +81,10 @@ def log(msg, **kwargs):
         _manager_logger.info(str(msg))
 
 def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
+    ts = now_iso()
     doc = {
-        "timestamp": now_iso(),
+        "@timestamp": ts,
+        "timestamp": ts,
         "worker_name": worker_name,
         "event_type": event_type,
         "message": details,
@@ -641,6 +643,74 @@ def requeue_stuck_implementer_tasks() -> int:
     return n
 
 
+def requeue_stuck_review_tasks() -> int:
+    """
+    Tester/reviewer tasks stuck in status=review with a stale updated_at are
+    reset with active_worker cleared so a reviewer can reclaim them.
+
+    This catches tasks where:
+    - The tester passed to reviewer but the worker crashed before completing.
+    - A reviewer worker died mid-evaluation.
+    - The now-fixed active_worker bug left a phantom lock (defense in depth).
+
+    Disabled when FLUME_STUCK_REVIEW_SECONDS is 0. Default 300 (5 minutes).
+    Review evaluations are typically faster than implementations.
+    """
+    sec = int(os.environ.get('FLUME_STUCK_REVIEW_SECONDS', '300'))
+    if sec <= 0:
+        return 0
+    body = {
+        'size': 30,
+        'query': {
+            'bool': {
+                'must': [
+                    {'term': {'status': 'review'}},
+                ],
+            },
+        },
+    }
+    try:
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+    except Exception:
+        return 0
+    n = 0
+    for h in res.get('hits', {}).get('hits', []):
+        src = h.get('_source', {})
+        stale = _task_stale_seconds(src)
+        if stale is None or stale < sec:
+            continue
+        # Only requeue if someone is holding the lock (phantom active_worker)
+        active = (src.get('active_worker') or '').strip()
+        if not active:
+            continue
+        es_doc_id = h.get('_id')
+        if not es_doc_id:
+            continue
+        try:
+            es_request(
+                f'/{TASK_INDEX}/_update/{es_doc_id}',
+                {
+                    'doc': {
+                        'active_worker': None,
+                        'queue_state': 'queued',
+                        'updated_at': now_iso(),
+                        'last_update': now_iso(),
+                    }
+                },
+                method='POST',
+            )
+            tid = src.get('id', es_doc_id)
+            log(
+                f"requeued stuck review task {tid} (stale for {stale:.0f}s, "
+                f"active_worker was '{active}'; "
+                f"threshold={sec}s, set FLUME_STUCK_REVIEW_SECONDS=0 to disable)"
+            )
+            n += 1
+        except Exception as e:
+            log(f"failed to requeue stuck review task {src.get('id')}: {e}")
+    return n
+
+
 def cycle():
     # 1. Check Global Cluster Paused state
     is_paused = False
@@ -658,6 +728,12 @@ def cycle():
             log(f"stuck-implementer sweep: requeued {rq} task(s)")
     except Exception as e:
         log(f"stuck-implementer sweep error: {e}")
+    try:
+        rq_rev = requeue_stuck_review_tasks()
+        if rq_rev:
+            log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
+    except Exception as e:
+        log(f"stuck-review sweep error: {e}")
     busy_workers = {}
     try:
         res = es_request(

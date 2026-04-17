@@ -91,6 +91,7 @@ def _emit_usage(task: Optional[dict[str, Any]], usage: dict):
             or 0
         )
         doc = {
+            '@timestamp': datetime.now(timezone.utc).isoformat(),
             'worker_name': task.get('active_worker') or task.get('assigned_agent') or 'unknown-worker',
             'worker_role': task.get('assigned_agent_role') or task.get('owner') or 'generic',
             'provider': task.get('preferred_llm_provider') or task.get('llm_provider') or 'ollama',
@@ -475,7 +476,9 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
 
         # Submit agent telemetry metric
         if es_url:
+            ts = datetime.now(timezone.utc).isoformat()
             doc = {
+                '@timestamp': ts,
                 'worker_name': 'implementer',
                 'worker_role': 'system',
                 'provider': 'elastro-cache',
@@ -483,12 +486,16 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                 'input_tokens': 0,
                 'output_tokens': 0,
                 'savings': savings,
-                'created_at': datetime.now(timezone.utc).isoformat()
+                'created_at': ts
             }
+            tel_hdrs = {'Content-Type': 'application/json'}
+            es_api_key = os.environ.get('ES_API_KEY', '')
+            if es_api_key:
+                tel_hdrs['Authorization'] = f'ApiKey {es_api_key}'
             req = urllib.request.Request(
                 f"{es_url}/agent-token-telemetry/_doc",
                 data=json.dumps(doc).encode(),
-                headers={'Content-Type': 'application/json'},
+                headers=tel_hdrs,
                 method='POST'
             )
             try:

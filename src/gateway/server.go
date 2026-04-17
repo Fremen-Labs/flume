@@ -193,7 +193,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// ── Fix 1 continued: /chat also benefits from ensemble when enabled ────
 	// withTools=false keeps text-only semantics in each jury member call.
-	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+	if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+		// Route through the node mesh for intelligent multi-node distribution.
+		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, agentRoleToTaskType(req.AgentRole), false)
+	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		resp, err = s.ExecuteEnsemble(ctx, &req, false)
 	} else {
 		resp, err = s.router.Route(ctx, &req, false)
@@ -278,7 +281,9 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	var resp *ChatResponse
 	var err error
 
-	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+	if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, agentRoleToTaskType(req.AgentRole), true)
+	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
 	} else {
 		resp, err = s.router.Route(ctx, &req, true)
@@ -465,6 +470,26 @@ func DefaultAddr() string {
 
 func msElapsed(start time.Time) float64 {
 	return float64(time.Since(start).Microseconds()) / 1000.0
+}
+
+// agentRoleToTaskType maps ChatRequest.AgentRole to the MultiNodeRouter's
+// task-type taxonomy for capability-based node selection.
+//
+//	pm, planner → "reasoning"  (high reasoning score → primary node)
+//	implementer → "code"       (moderate reasoning → primary or secondary)
+//	tester, reviewer → "evaluation"  (lightweight → can use secondary nodes)
+//	other/empty → "generic"
+func agentRoleToTaskType(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "pm", "planner", "intake":
+		return "reasoning"
+	case "implementer":
+		return "code"
+	case "tester", "reviewer", "critic":
+		return "evaluation"
+	default:
+		return "generic"
+	}
 }
 
 // shortID generates a short request ID without external deps.
