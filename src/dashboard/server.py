@@ -1256,6 +1256,7 @@ def commit_plan(repo: str, plan: dict):
                             'worktree': None,
                             'item_type': 'task',
                             'owner': 'implementer',
+                            'assigned_agent_role': 'implementer',
                             'status': 'ready' if prev_task_id is None else 'planned',
                             'priority': 'normal',
                             'parent_id': None,
@@ -1380,6 +1381,7 @@ def commit_plan(repo: str, plan: dict):
                         'worktree': None,
                         'item_type': 'task',
                         'owner': 'implementer',
+                        'assigned_agent_role': 'implementer',
                         # First task in the story starts ready; subsequent ones
                         # are planned and get promoted after the previous task is done.
                         'status': 'ready' if prev_task_id is None else 'planned',

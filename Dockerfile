@@ -17,6 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Pre-install common lint/check tools globally so agents can verify code
+# in ephemeral worktrees without depending on project-local node_modules.
+RUN npm install -g typescript eslint prettier 2>/dev/null || true
+
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 WORKDIR /app
