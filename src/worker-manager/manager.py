@@ -74,6 +74,52 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
+def _fetch_adaptive_max_concurrency(active_mesh_count: int) -> int:
+    """Dynamically determine MAX_CONCURRENT_TASKS based on cluster VRAM constraints."""
+    try:
+        ceiling_gb = 12  # Default fallback
+        res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
+        if res:
+            nodes = res.get('hits', {}).get('hits', [])
+            sum_gb = 0
+            for n in nodes:
+                c = n.get('_source', {}).get('capabilities', {})
+                mem = c.get('memory_gb', 0)
+                if mem:
+                    sum_gb += float(mem)
+            if sum_gb > 0:
+                ceiling_gb = sum_gb
+                
+        ceiling_bytes = ceiling_gb * (1024**3)
+        
+        current_vram_bytes = 0
+        try:
+            import urllib.request
+            import json
+            req = urllib.request.Request('http://host.docker.internal:11434/api/ps', method='GET')
+            with urllib.request.urlopen(req, timeout=1.0) as ps_resp:
+                ps_data = json.loads(ps_resp.read().decode())
+                for m in ps_data.get('models', []):
+                    current_vram_bytes += float(m.get('size_vram', 0))
+        except Exception:
+            pass
+            
+        # Context Floor Constraint (approx 1.5GB KV cache allowance per active local agent)
+        projected_total = current_vram_bytes + (active_mesh_count * 1.5 * (1024**3))
+        
+        # Adaptive Threshold Formula
+        max_parallel = int(os.environ.get('FLUME_MAX_PARALLEL', '4'))
+        if projected_total > ceiling_bytes:
+            return 1 # Choked VRAM, clamp to strictly 1 task execution
+        elif projected_total > ceiling_bytes * 0.75:
+            return 2 # 75% Utilized, Throttle partially 
+        else:
+            return max_parallel # Sub-ceiling, run at maximum capacity!
+            
+    except Exception as e:
+        _manager_logger.error(f"Failed calculating adaptive concurrency: {e}")
+        return 2
+
 def log(msg, **kwargs):
     if kwargs:
         _manager_logger.info(str(msg), extra={'structured_data': kwargs})
@@ -809,11 +855,29 @@ def cycle():
             s = h.get('_source', {})
             wn = s.get('active_worker')
             if wn:
-                busy_workers[wn] = {'task_id': s.get('id', h.get('_id')), 'task_title': s.get('title')}
+                busy_workers[wn] = {
+                    'task_id': s.get('id', h.get('_id')), 
+                    'task_title': s.get('title'),
+                    'execution_host': s.get('execution_host')
+                }
     except Exception as e:
         log(f"error fetching busy workers: {e}")
 
     workers = build_workers()
+    
+    cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
+    active_mesh_count = 0
+    
+    # Pre-calculate active non-cloud nodes
+    for wn, wdat in busy_workers.items():
+        matching_worker = next((w for w in workers if w['name'] == wn), None)
+        if matching_worker:
+            w_prov = (matching_worker.get('llm_provider') or 'ollama').lower()
+            if w_prov not in cloud_providers:
+                active_mesh_count += 1
+                
+    max_concurrent = _fetch_adaptive_max_concurrency(active_mesh_count)
+    
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
@@ -823,6 +887,11 @@ def cycle():
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = busy_workers[worker['name']]['task_id']
             snapshot['current_task_title'] = busy_workers[worker['name']]['task_title']
+            
+            # Adopt the dynamic execution host provided by Gateway / Node Mesh
+            if busy_workers[worker['name']].get('execution_host'):
+                snapshot['execution_host'] = busy_workers[worker['name']]['execution_host']
+                
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
@@ -843,6 +912,16 @@ def cycle():
         pref_prov = worker.get('llm_provider')
         pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
 
+        check_prov = (pref_prov or 'ollama').lower()
+        if check_prov not in cloud_providers and active_mesh_count >= max_concurrent:
+            snapshot['status'] = 'idle'
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            log(f"{worker['name']} throttled from claiming task to protect local Node Mesh. (MAX_CONCURRENT_TASKS={max_concurrent})")
+            continue
+
         claimed_task = try_atomic_claim(
             worker['role'],
             worker['name'],
@@ -852,6 +931,8 @@ def cycle():
             pref_cred,
         )
         if claimed_task:
+            if check_prov not in cloud_providers:
+                active_mesh_count += 1
             src = claimed_task.get('_source', {})
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = src.get('id', claimed_task.get('_id'))
@@ -920,7 +1001,7 @@ def main():
 
 
 if __name__ == '__main__':
-    from ast_poller import start_poller_thread
+    from ast_poller import start_poller_thread  # type: ignore
     start_health_server()
     start_poller_thread()
     main()

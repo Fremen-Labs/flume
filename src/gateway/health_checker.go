@@ -160,6 +160,39 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		return
 	}
 
+	// ── Auto-Repair Misconfigured Model Tags ────────────────────────────
+	// If the user's configured model tag is missing or not loaded on the hardware,
+	// self-heal the configuration to securely match reality.
+	modelMatches := false
+	if node.ModelTag != "" {
+		tagLower := strings.ToLower(node.ModelTag)
+		for _, m := range tagsResult.models {
+			mLower := strings.ToLower(m)
+			if mLower == tagLower || strings.HasPrefix(mLower, tagLower+":") || strings.HasPrefix(tagLower, mLower+":") {
+				modelMatches = true
+				break
+			}
+		}
+	}
+
+	if !modelMatches && len(tagsResult.models) > 0 {
+		fallbackTag := tagsResult.models[0]
+		log.Warn("health_checker: node model tag mismatch, auto-repairing",
+			slog.String("node_id", node.ID),
+			slog.String("expected_tag", node.ModelTag),
+			slog.String("repaired_tag", fallbackTag),
+		)
+		if err := hc.registry.AutoRepairModelTag(ctx, node.ID, fallbackTag); err != nil {
+			log.Error("health_checker: failed to persist repaired model tag",
+				slog.String("node_id", node.ID),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			// Mutate local struct so subsequent probes (ReasoningScore) use the correct tag
+			node.ModelTag = fallbackTag
+		}
+	}
+
 	// ── Probe 2: GET /api/ps → load measurement + VRAM discovery ────────
 	load, totalVRAMBytes, totalModelSizeBytes := hc.probeLoad(ctx, baseURL, node)
 

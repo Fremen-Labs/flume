@@ -45,7 +45,7 @@ if str(BASE) not in sys.path:
 from utils.logger import get_logger, set_global_log_level
 logger = get_logger(__name__)
 
-from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # noqa: E402
+from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # type: ignore  # noqa: E402
 
 # Merge .env config
 apply_runtime_config(_SRC_ROOT)
@@ -72,7 +72,7 @@ except _ue.HTTPError as _e:
 except Exception as _e:
     _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
 
-from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # noqa: E402
+from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # type: ignore  # noqa: E402
 
 _DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
@@ -161,7 +161,7 @@ from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 
 # Module-level paths are bounded to block AppSec Path Traversals seamlessly isolating the host
 WORKSPACE_ROOT = resolve_safe_workspace()
-from config import AppConfig, get_settings
+from config import AppConfig, get_settings  # type: ignore
 
 # AP-2 resolved: WORKER_STATE removed — worker lifecycle state belongs in ES (flume-workers index).
 # AP-9 resolved: SESSIONS_DIR removed — plan sessions already fully migrated to agent-plan-sessions ES index.
@@ -504,7 +504,7 @@ def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
 def _sync_llm_runtime_env():
     load_legacy_dotenv_into_environ(_SRC_ROOT)
     try:
-        from workspace_llm_env import sync_llm_env_from_workspace
+        from workspace_llm_env import sync_llm_env_from_workspace  # type: ignore
 
         sync_llm_env_from_workspace(WORKSPACE_ROOT)
     except Exception:
@@ -541,7 +541,7 @@ def _planner_runtime_config() -> dict:
         # When base_url is empty for a managed provider, resolve the provider's
         # default URL from the catalog rather than falling back to localhost:11434.
         if not base_url and provider != 'ollama':
-            from llm_settings import PROVIDER_CATALOG
+            from llm_settings import PROVIDER_CATALOG  # type: ignore
             for entry in PROVIDER_CATALOG:
                 if entry.get('id') == provider:
                     base_url = (entry.get('baseUrlDefault') or '').rstrip('/')
@@ -831,7 +831,7 @@ def _planner_should_use_codex_app_server() -> bool:
     if api_key.startswith('sk-') or api_key.startswith('sk_'):
         return False
     try:
-        import codex_app_server
+        import codex_app_server  # type: ignore
 
         st = codex_app_server.status()
         return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
@@ -854,7 +854,7 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         messageCount=len(messages or []),
     )
     if cfg.get('usingCodexAppServer'):
-        import codex_app_server_client
+        import codex_app_server_client  # type: ignore
 
         return codex_app_server_client.planner_chat(
             messages,
@@ -893,6 +893,9 @@ def parse_llm_response(raw_text):
     Always strips any embedded JSON/code blocks from the message text.
     """
     cleaned = raw_text.strip()
+    # Strip <think> reasoning blocks that disrupt JSON parsers
+    cleaned = re.sub(r'<think>[\s\S]*?</think>', '', cleaned).strip()
+    
     # Unwrap outer markdown fence if the entire response is wrapped
     if cleaned.startswith('```'):
         cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
@@ -3370,8 +3373,8 @@ async def _clone_and_setup_project(
 @app.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
     from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url  # noqa
-    import ado_tokens_store
-    import github_tokens_store
+    import ado_tokens_store  # type: ignore
+    import github_tokens_store  # type: ignore
 
     name = (payload.get("name") or "").strip()
     if not name:
@@ -3441,7 +3444,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
             _DELEGATED = "OPENBAO_DELEGATED"
             if not pat:
                 try:
-                    from llm_settings import _openbao_get_all  # noqa: PLC0415
+                    from llm_settings import _openbao_get_all  # type: ignore  # noqa: PLC0415
                     _bao_vals = _openbao_get_all(WORKSPACE_ROOT)
                     _bao_ado = str(_bao_vals.get("ADO_TOKEN") or "").strip()
                     if _bao_ado and _DELEGATED not in _bao_ado:
@@ -4365,7 +4368,7 @@ def api_repo_diff(project_id: str, base: str = "", head: str = ""):
 
 @app.get("/api/codex-app-server/status")
 def api_codex_status():
-    from codex_app_server import status
+    from codex_app_server import status  # type: ignore
     return status()
 
 @app.get("/api/codex-app-server/proxy-config")
@@ -4375,12 +4378,12 @@ def api_codex_proxy_config():
 
 @app.get("/api/settings/llm")
 def api_settings_llm():
-    from llm_settings import get_llm_settings_response
+    from llm_settings import get_llm_settings_response  # type: ignore
     return get_llm_settings_response(WORKSPACE_ROOT)
 
 @app.post("/api/settings/llm")
 def api_settings_llm_update(payload: dict):
-    from llm_settings import validate_llm_settings, _update_env_keys
+    from llm_settings import validate_llm_settings, _update_env_keys  # type: ignore
     ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
@@ -4389,7 +4392,7 @@ def api_settings_llm_update(payload: dict):
 
 @app.put("/api/settings/llm/credentials")
 def api_settings_llm_credentials(payload: dict):
-    from llm_settings import validate_llm_settings, _update_env_keys
+    from llm_settings import validate_llm_settings, _update_env_keys  # type: ignore
     ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
@@ -4398,8 +4401,8 @@ def api_settings_llm_credentials(payload: dict):
 
 @app.post("/api/settings/llm/credentials")
 def api_settings_llm_credentials_post(payload: dict):
-    from llm_credentials_store import apply_credentials_action
-    from llm_settings import _update_env_keys
+    from llm_credentials_store import apply_credentials_action  # type: ignore
+    from llm_settings import _update_env_keys  # type: ignore
     workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
     
     ok, msg, updates = apply_credentials_action(workspace, payload)
@@ -4413,7 +4416,7 @@ def api_settings_llm_credentials_post(payload: dict):
 
 @app.post("/api/settings/llm/oauth/refresh")
 def api_settings_llm_oauth_refresh():
-    from llm_settings import do_oauth_refresh
+    from llm_settings import do_oauth_refresh  # type: ignore
     ok, msg, token = do_oauth_refresh(WORKSPACE_ROOT)
     if ok:
         return {"success": True, "message": msg, "token": token}
@@ -4485,14 +4488,14 @@ def update_system_settings(settings: SystemSettingsRequest):
 
 @app.get("/api/settings/agent-models")
 def api_settings_agent_models():
-    from agent_models_settings import get_agent_models_response
+    from agent_models_settings import get_agent_models_response  # type: ignore
     return get_agent_models_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/agent-models")
 @app.post("/api/settings/agent-models")
 def api_settings_agent_models_update(payload: dict):
-    from agent_models_settings import validate_save_agent_models, save_agent_models
-    import llm_credentials_store as _lcs
+    from agent_models_settings import validate_save_agent_models, save_agent_models  # type: ignore
+    import llm_credentials_store as _lcs  # type: ignore
     # Map useGlobal flag from the new frontend to Settings default credential.
     roles = payload.get("roles") or {}
     for role_id, spec in list(roles.items()):
@@ -4518,7 +4521,7 @@ def api_settings_restart_services():
 @app.get('/api/security')
 def api_security():
     try:
-        from llm_settings import is_openbao_installed, _openbao_enabled, _openbao_secret_ref
+        from llm_settings import is_openbao_installed, _openbao_enabled, _openbao_secret_ref  # type: ignore
         vault_active = is_openbao_installed()
         
         openbao_keys = {}

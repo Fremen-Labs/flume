@@ -20,6 +20,7 @@ type ChatRequest struct {
 	CredentialID string    `json:"credential_id,omitempty"`
 	AgentRole    string    `json:"agent_role,omitempty"`
 	Stream       bool      `json:"stream,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
 }
 
 // Message represents a single chat message.
@@ -48,8 +49,16 @@ type ToolFunction struct {
 
 // ChatResponse is the unified outbound response (Ollama-compatible).
 type ChatResponse struct {
-	Message ResponseMessage `json:"message"`
-	Usage   Usage           `json:"usage,omitempty"`
+	Message   ResponseMessage `json:"message"`
+	Usage     Usage           `json:"usage,omitempty"`
+	Telemetry *Telemetry      `json:"telemetry,omitempty"`
+}
+
+// Telemetry captures mesh routing execution details for the client.
+type Telemetry struct {
+	NodeID   string `json:"node_id,omitempty"`
+	NodeHost string `json:"node_host,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // ResponseMessage holds the assistant's reply.

@@ -306,6 +306,21 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requir
 		}
 	}
 
+	// Assess Mesh Saturation: if all high-param nodes are severely backlogged
+	// disable the strict penalization against small nodes to allow horizontal task spilling.
+	meshSaturated := true
+	for _, n := range healthy {
+		if extractModelParamSize(n.ModelTag) >= 30.0 {
+			if n.Health.CurrentLoad < 1.0 && n.Health.LatencyMs < 15000 {
+				meshSaturated = false
+				break
+			}
+		}
+	}
+	if meshSaturated && requiresHighParam {
+		Log().Warn("node_registry: high-param capacity exhausted; bypassing strict model barriers to allow mesh horizontal spillover", slog.String("task_type", taskType))
+	}
+
 	candidates := make([]scored, 0, len(healthy))
 	for _, n := range healthy {
 		// Model fit: reasoning score normalized to 0-1, filtered by minimum.
@@ -338,8 +353,14 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requir
 		// Heavy Task Penality Check: Enforce high-param requirement.
 		size := extractModelParamSize(n.ModelTag)
 		if requiresHighParam && size > 0 && size < 30.0 {
-			// Brutally penalize models < 30b if task requires heavy lifting (like tools/complex code)
-			modelFit *= 0.1
+			if meshSaturated {
+				// Relax the penalty significantly during severe mesh congestion to allow horizontal spilling.
+				// Still penalize slightly so if a big node frees up, it organically reclaims the load.
+				modelFit *= 0.8
+			} else {
+				// Brutally penalize models < 30b if task requires heavy lifting (like tools/complex code)
+				modelFit *= 0.1
+			}
 		}
 
 		// Load inverse: lower load = higher score.
@@ -479,4 +500,25 @@ func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 
 	log.Warn("flume-node-registry index not found — expected to be pre-created by `flume start`")
 	return fmt.Errorf("flume-node-registry index missing — run `flume start` to bootstrap")
+}
+
+// AutoRepairModelTag atomically corrects the primary model tag of a node
+// if it was erroneously entered or found to be missing by the health checker.
+func (r *NodeRegistry) AutoRepairModelTag(ctx context.Context, nodeID, newTag string) error {
+	r.mu.Lock()
+	node, ok := r.nodes[nodeID]
+	if !ok || node.ModelTag == newTag {
+		r.mu.Unlock()
+		return nil // No op
+	}
+	
+	// Update in-memory state
+	node.ModelTag = newTag
+	
+	// Copy node context to avoid race conditions during ES network call
+	clone := *node
+	r.mu.Unlock()
+
+	// Persist corrected state
+	return r.UpsertNodeToES(ctx, &clone)
 }

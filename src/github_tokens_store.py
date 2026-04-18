@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import json
 import uuid
 from pathlib import Path
@@ -21,6 +22,16 @@ ENV_GH_TOKEN = "GH_TOKEN"
 def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeTokenId": "", "tokens": []}
 
+def validate_github_token(token: str) -> bool:
+    """Ensure the GitHub token adheres strictly to standard secure prefixes (e.g. ghp_, github_pat_)."""
+    t = (token or "").strip()
+    if not t:
+        return False
+    # GitHub officially shifted to prefixed token patterns on April 5, 2021.
+    if re.match(r"^(ghp|github_pat|ghs|gho|ghu)_[a-zA-Z0-9_]{10,}$", t):
+        return True
+    return False
+
 
 
 def load_document(workspace_root=None) -> dict[str, Any]:
@@ -30,7 +41,7 @@ def load_document(workspace_root=None) -> dict[str, Any]:
     but is intentionally unused — all token metadata lives in Elasticsearch.
     """
     try:
-        from es_credential_store import load_gh_tokens
+        from es_credential_store import load_gh_tokens  # type: ignore
         doc = load_gh_tokens(_default_doc)
         if doc and (doc.get("tokens") or doc.get("activeTokenId")):
             doc.setdefault("version", 1)
@@ -49,7 +60,7 @@ def save_document(workspace_root: Path, doc: dict[str, Any]) -> None:
         if tok.get("token") and tok["token"] not in ("", MASK, "***OPENBAO_DELEGATED***"):
             tok["token"] = "***OPENBAO_DELEGATED***"
     try:
-        from es_credential_store import save_gh_tokens
+        from es_credential_store import save_gh_tokens  # type: ignore
         save_gh_tokens(masked_doc)
     except Exception as e:
         logger.error("Failed to persist GitHub tokens to ES", extra={"structured_data": {"error": str(e)}})
@@ -78,7 +89,7 @@ def ensure_migrated_from_env(workspace_root: Path) -> None:
     doc = load_document(workspace_root)
     if doc.get("tokens"):
         return
-    from llm_settings import load_effective_pairs
+    from llm_settings import load_effective_pairs  # type: ignore
 
     raw = _strip_env_quotes(load_effective_pairs(workspace_root).get(ENV_GH_TOKEN, "") or "")
     if not raw:
@@ -111,7 +122,7 @@ def get_active_token_plain(workspace_root: Path) -> str:
         token = str(c.get("token") or "").strip()
         if token == "***OPENBAO_DELEGATED***":
             try:
-                from llm_settings import _openbao_get_all
+                from llm_settings import _openbao_get_all  # type: ignore
                 bao_vals = _openbao_get_all(workspace_root)
                 delegated_token = str(bao_vals.get(f"FLUME_GH_{aid}") or "").strip()
                 if delegated_token:
@@ -175,7 +186,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
         if str(doc.get("activeTokenId") or "") == cid:
             doc["activeTokenId"] = str(new_toks[0].get("id") or "").strip() if new_toks else ""
         try:
-            from llm_settings import _openbao_put_many
+            from llm_settings import _openbao_put_many  # type: ignore
             _openbao_put_many(workspace_root, {f"FLUME_GH_{cid}": ""})
         except ImportError:
             logger.debug("OpenBao delegation import unavailable during GitHub token delete")
@@ -211,13 +222,15 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
                     return False, f'Another token is already labeled "{label}"'
                 row["label"] = label
             if token_in and token_in != MASK:
+                if not validate_github_token(token_in):
+                    return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
                 row["token"] = token_in
             doc["tokens"] = tokens
             if not str(doc.get("activeTokenId") or "").strip() and str(row.get("token") or "").strip():
                 doc["activeTokenId"] = cred_id
             if token_in and token_in != MASK:
                 try:
-                    from llm_settings import _openbao_put_many
+                    from llm_settings import _openbao_put_many  # type: ignore
                     _openbao_put_many(workspace_root, {f"FLUME_GH_{cred_id}": token_in})
                 except ImportError:
                     logger.debug("OpenBao put unavailable during GitHub token upsert (update)")
@@ -232,6 +245,8 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             return False, f'Another token is already labeled "{label}"'
         if not token_in or token_in == MASK:
             return False, "token is required for new GitHub PATs"
+        if not validate_github_token(token_in):
+            return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
         new_id = uuid.uuid4().hex[:12]
         tokens.append({"id": new_id, "label": label, "token": token_in})
         doc["tokens"] = tokens
@@ -239,7 +254,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             doc["activeTokenId"] = new_id
         if token_in and token_in != MASK:
             try:
-                from llm_settings import _openbao_put_many
+                from llm_settings import _openbao_put_many  # type: ignore
                 _openbao_put_many(workspace_root, {f"FLUME_GH_{new_id}": token_in})
             except ImportError:
                 logger.debug("OpenBao put unavailable during GitHub token upsert (new)")
@@ -259,11 +274,13 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
     if aid:
         for c in tokens:
             if str(c.get("id")) == aid:
+                if token and token != MASK and not validate_github_token(token):
+                    return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
                 c["token"] = token
                 doc["tokens"] = tokens
                 if token and token != MASK:
                     try:
-                        from llm_settings import _openbao_put_many
+                        from llm_settings import _openbao_put_many  # type: ignore
                         _openbao_put_many(workspace_root, {f"FLUME_GH_{aid}": token})
                     except ImportError:
                         logger.debug("OpenBao put unavailable during GitHub legacy value (active)")
@@ -271,11 +288,13 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
                 _sync_active_to_env(workspace_root)
                 return True, ""
     new_id = uuid.uuid4().hex[:12]
+    if token and token != MASK and not validate_github_token(token):
+        return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
     doc["tokens"] = tokens + [{"id": new_id, "label": "Default", "token": token}]
     doc["activeTokenId"] = new_id
     if token and token != MASK:
         try:
-            from llm_settings import _openbao_put_many
+            from llm_settings import _openbao_put_many  # type: ignore
             _openbao_put_many(workspace_root, {f"FLUME_GH_{new_id}": token})
         except ImportError:
             logger.debug("OpenBao put unavailable during GitHub legacy value (new)")

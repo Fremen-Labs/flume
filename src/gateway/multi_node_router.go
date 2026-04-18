@@ -1,10 +1,15 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,6 +108,45 @@ func (m *MultiNodeRouter) ExecuteSmartRoute(ctx context.Context, req *ChatReques
 	Metrics.RecordNodeRequest(node.ID, node.ModelTag)
 	Metrics.SetNodeLoad(node.ID, node.Health.CurrentLoad)
 
+	// Inject asynchronous Kanban telemetry back out to Elasticsearch natively
+	if req.TaskID != "" {
+		go func(taskID, host, model string) {
+			esURL := os.Getenv("ES_URL")
+			if esURL == "" {
+				esURL = "http://elasticsearch:9200"
+			}
+			esURL = strings.TrimRight(esURL, "/")
+			index := os.Getenv("ES_INDEX_TASKS")
+			if index == "" {
+				index = "agent-task-records"
+			}
+			payload := map[string]interface{}{
+				"doc": map[string]string{
+					"execution_host": host,
+					"model":          model,
+				},
+			}
+			body, _ := json.Marshal(payload)
+			reqES, _ := http.NewRequest("POST", fmt.Sprintf("%s/%s/_update/%s", esURL, index, taskID), bytes.NewReader(body))
+			reqES.Header.Set("Content-Type", "application/json")
+			if apiKey := os.Getenv("ES_API_KEY"); apiKey != "" {
+				reqES.Header.Set("Authorization", "ApiKey "+apiKey)
+			}
+			client := &http.Client{Timeout: 3 * time.Second}
+			resp, err := client.Do(reqES)
+			if err != nil {
+				Log().Warn("failed to update execution telemetry on ES", slog.String("task_id", taskID), slog.String("error", err.Error()))
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				Log().Warn("non-200 response updating execution telemetry", slog.String("task_id", taskID), slog.Int("status", resp.StatusCode))
+			} else {
+				Log().Info("synchronized execution telemetry to ES dynamically", slog.String("task_id", taskID), slog.String("host", host), slog.String("model", model))
+			}
+		}(req.TaskID, node.Host, node.ModelTag)
+	}
+
 	resp, err := m.routeToNode(ctx, req, node, withTools)
 	if err == nil {
 		return resp, nil
@@ -138,7 +182,17 @@ func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, nod
 	cloned.Model = node.ModelTag
 
 	// Use the node-specific routing path.
-	return m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)
+	resp, err := m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)
+	if err == nil && resp != nil {
+		resp.Telemetry = &Telemetry{
+			NodeID:   node.ID,
+			NodeHost: node.Host,
+			Model:    node.ModelTag,
+		}
+		log := WithContext(ctx)
+		log.Info("telemetry payload attached", slog.String("node_id", node.ID))
+	}
+	return resp, err
 }
 
 // tryFallbackNodes attempts to route to any other healthy node besides the failed one.
