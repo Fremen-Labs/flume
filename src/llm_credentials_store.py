@@ -67,7 +67,7 @@ def load_document(workspace_root=None) -> dict[str, Any]:
     but is intentionally unused — all credential metadata lives in Elasticsearch.
     """
     try:
-        from es_credential_store import load_llm_credentials
+        from es_credential_store import load_llm_credentials  # type: ignore
         doc = load_llm_credentials(_default_doc)
         if doc and (doc.get("credentials") or doc.get("activeCredentialId") or doc.get("defaultCredentialId")):
             doc.setdefault("version", 1)
@@ -95,7 +95,7 @@ def save_document(workspace_root=None, doc: dict[str, Any] = None) -> None:
         if cred.get("apiKey") and cred["apiKey"] not in ("", "***OPENBAO_DELEGATED***"):
             cred["apiKey"] = "***OPENBAO_DELEGATED***"
     try:
-        from es_credential_store import save_llm_credentials
+        from es_credential_store import save_llm_credentials  # type: ignore
         save_llm_credentials(masked_doc)
     except Exception as e:
         logger.error("Failed to persist LLM credentials to ES", extra={"structured_data": {"error": str(e)}})
@@ -180,7 +180,7 @@ def get_resolved_for_worker(workspace_root: Path, cred_id: str) -> Optional[dict
         return None
     if key == "***OPENBAO_DELEGATED***":
         try:
-            from llm_settings import _openbao_get_all
+            from llm_settings import _openbao_get_all  # type: ignore
             bao_vals = _openbao_get_all(workspace_root)
             delegated_key = str(bao_vals.get(f"FLUME_CRED_{cid}") or "").strip()
             if delegated_key:
@@ -254,7 +254,7 @@ def upsert_credential(
     doc["credentials"] = creds
     if key and key != "***OPENBAO_DELEGATED***":
         try:
-            from llm_settings import _openbao_put_many
+            from llm_settings import _openbao_put_many  # type: ignore
             _openbao_put_many(workspace_root, {f"FLUME_CRED_{new_id}": key})
         except ImportError:
             logger.debug("OpenBao delegation import unavailable during credential upsert")
@@ -304,7 +304,7 @@ def delete_credential(workspace_root: Path, cred_id: str) -> bool:
     if str(doc.get("defaultCredentialId") or "") == cred_id:
         doc["defaultCredentialId"] = ""
     try:
-        from llm_settings import _openbao_put_many
+        from llm_settings import _openbao_put_many  # type: ignore
         _openbao_put_many(workspace_root, {f"FLUME_CRED_{cred_id}": ""})
     except ImportError:
         logger.debug("OpenBao delegation import unavailable during credential delete")
@@ -331,12 +331,12 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
     """
     LLM_* env updates when user activates a saved credential (or Ollama).
     """
-    from llm_settings import load_effective_pairs
+    from llm_settings import load_effective_pairs  # type: ignore
 
     pairs = load_effective_pairs(workspace_root)
     cid = (cred_id or "").strip()
     if cid == OLLAMA_CREDENTIAL_ID:
-        from llm_settings import resolve_effective_ollama_base_url
+        from llm_settings import resolve_effective_ollama_base_url  # type: ignore
         base = resolve_effective_ollama_base_url(pairs)
         return {
             "LLM_PROVIDER": "ollama",
@@ -352,7 +352,7 @@ def build_activation_env_updates(workspace_root: Path, cred_id: str) -> dict[str
         raise ValueError("Credential has no API key")
     if key == "***OPENBAO_DELEGATED***":
         try:
-            from llm_settings import _openbao_get_all
+            from llm_settings import _openbao_get_all  # type: ignore
             bao_vals = _openbao_get_all(workspace_root)
             delegated_key = str(bao_vals.get(f"FLUME_CRED_{cid}") or "").strip()
             if delegated_key:
@@ -422,7 +422,7 @@ def apply_credentials_action(
         return True, "", None
 
     if action == "upsert":
-        from llm_settings import VALID_PROVIDERS
+        from llm_settings import VALID_PROVIDERS  # type: ignore
 
         label = str(payload.get("label") or "").strip()
         provider = str(payload.get("provider") or "").strip().lower()
