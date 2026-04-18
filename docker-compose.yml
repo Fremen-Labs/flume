@@ -62,6 +62,11 @@ services:
       - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - FLUME_GATEWAY_LOG_LEVEL=${FLUME_GATEWAY_LOG_LEVEL:-info}
+      # Adaptive ensemble / Ollama slots — Linux defaults are server-class; override on Mac laptops if needed.
+      - FLUME_OLLAMA_MAX_CONCURRENT
+      - FLUME_SYSTEM_MEMORY_GB
+      - FLUME_SYSTEM_RESERVED_FRACTION
+      - FLUME_ENSEMBLE_NO_ADAPTIVE
       - FLUME_OLLAMA_NUM_CTX
       - LLM_PROVIDER
       - LLM_BASE_URL
@@ -212,6 +217,9 @@ services:
       # worker_handlers.py, agent_runner.py, and es_credential_store.py all
       # read ES_URL; without it they fall back to 127.0.0.1:9200 (broken inside Docker).
       - ES_URL=http://elasticsearch:9200
+      # Shared branch per story + single auto-PR when the story completes (override with task to restore per-task behavior)
+      - FLUME_BRANCH_SCOPE=${FLUME_BRANCH_SCOPE:-story}
+      - FLUME_AUTO_PR_SCOPE=${FLUME_AUTO_PR_SCOPE:-story}
     command: ["/opt/venv/bin/python", "src/worker-manager/manager.py"]
     deploy:
       mode: replicated

@@ -15,6 +15,13 @@ import (
 	"time"
 )
 
+// isNonMacWorkstation returns true for OSes where Flume typically runs on
+// discrete-GPU hosts (Linux/Windows). macOS builds use tighter concurrency
+// defaults tuned for unified-memory Apple Silicon.
+func isNonMacWorkstation() bool {
+	return runtime.GOOS != "darwin"
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Adaptive Ollama Concurrency Limiter
 //
@@ -51,8 +58,8 @@ func NewNodeSemaphoreMap() *NodeSemaphoreMap {
 
 // SlotsForNode returns or lazily creates a semaphore for the given node.
 // The slot count is derived from the node's MemoryGB: 1 slot per 8 GB,
-// clamped to [1, 8]. For example, a 64 GB Mac Pro gets 8 slots; a 16 GB
-// Mac Mini gets 2 slots.
+// clamped to [1, maxSlots]. Mac builds cap at 8; Linux/Windows node mesh
+// (discrete GPUs) allow up to 16 so multi-GPU hosts are not artificially idle.
 func (m *NodeSemaphoreMap) SlotsForNode(node *Node) *OllamaSemaphore {
 	m.mu.RLock()
 	if sem, ok := m.sems[node.ID]; ok {
@@ -65,8 +72,12 @@ func (m *NodeSemaphoreMap) SlotsForNode(node *Node) *OllamaSemaphore {
 	if slots < 1 {
 		slots = 1
 	}
-	if slots > 8 {
-		slots = 8
+	maxSlots := 8
+	if isNonMacWorkstation() {
+		maxSlots = 16
+	}
+	if slots > maxSlots {
+		slots = maxSlots
 	}
 
 	log := Log()
@@ -193,8 +204,12 @@ func DetectOllamaCapacity(ollamaBaseURL string) int {
 	if maxFromCPU < 1 {
 		maxFromCPU = 1
 	}
-	if maxFromCPU > 4 {
-		maxFromCPU = 4 // Cap at 4 even on beefy machines
+	cpuCap := 4
+	if isNonMacWorkstation() {
+		cpuCap = 8
+	}
+	if maxFromCPU > cpuCap {
+		maxFromCPU = cpuCap
 	}
 
 	log.Info("ollama concurrency from CPU heuristic",
@@ -241,22 +256,30 @@ func detectFromOllamaPS(baseURL string) int {
 	}
 
 	if len(psResp.Models) == 0 {
-		// No models loaded yet — use conservative default
+		// No models loaded yet — conservative on Mac; higher on Linux/Windows where
+		// Ollama often backs multi-GPU or high-memory discrete cards.
+		if isNonMacWorkstation() {
+			return 6
+		}
 		return 2
 	}
 
 	// Ollama serializes inference for a single model. With one model loaded,
-	// true parallelism is 1, but we allow 2-3 to keep the pipeline fed
-	// (context switching between requests has minimal overhead for queueing).
+	// true parallelism is 1, but we allow multiple in-flight HTTP requests so
+	// the pipeline stays fed (Ollama may batch or schedule across GPUs).
 	//
 	// With multiple models loaded (rare in local dev), each can run concurrently.
 	modelCount := len(psResp.Models)
 
-	// For a single model: allow 2 concurrent requests (one active, one pre-queued)
-	// For multiple models: allow up to modelCount * 2
-	maxConcurrent := modelCount * 2
-	if maxConcurrent > 8 {
-		maxConcurrent = 8
+	perModelMult := 2
+	maxCap := 8
+	if isNonMacWorkstation() {
+		perModelMult = 4
+		maxCap = 16
+	}
+	maxConcurrent := modelCount * perModelMult
+	if maxConcurrent > maxCap {
+		maxConcurrent = maxCap
 	}
 
 	Log().Info("ollama model detection",
