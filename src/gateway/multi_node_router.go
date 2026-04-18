@@ -72,13 +72,17 @@ func (m *MultiNodeRouter) ExecuteSmartRoute(ctx context.Context, req *ChatReques
 		minScore = 3
 	}
 
+	// Determine if this task warrants a high-parameter backend.
+	requiresHighParam := taskType == "code" || withTools
+
 	// Select the best node.
-	node := m.registry.SelectNode(taskType, minScore)
+	node := m.registry.SelectNode(taskType, minScore, requiresHighParam)
 	if node == nil {
 		// No healthy nodes meeting criteria → frontier fallback.
 		log.Warn("multi_node_router: no suitable nodes — escalating to frontier",
 			slog.String("task_type", taskType),
 			slog.Int("min_reasoning", minScore),
+			slog.Bool("requires_high_param", requiresHighParam),
 		)
 		Metrics.RecordRoutingDecision("frontier_no_nodes", taskType)
 		return m.routeFrontierFallback(ctx, req, withTools)
@@ -90,6 +94,7 @@ func (m *MultiNodeRouter) ExecuteSmartRoute(ctx context.Context, req *ChatReques
 		slog.String("host", node.Host),
 		slog.String("model", node.ModelTag),
 		slog.String("task_type", taskType),
+		slog.Bool("with_tools", withTools),
 		slog.Float64("load", node.Health.CurrentLoad),
 		slog.Int64("latency_ms", node.Health.LatencyMs),
 	)

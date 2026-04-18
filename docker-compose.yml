@@ -138,8 +138,9 @@ services:
       - -c
       - |
         set -euo pipefail
-        if [ ! -d /app/src/frontend/dist ] || [ ! -f /app/src/frontend/dist/index.html ]; then
-          echo "Flume UI dist missing; restoring from multi-stage Docker cache..."
+        if [ -d /dist-cache ]; then
+          echo "Flume UI: forcefully syncing dist from multi-stage Docker cache to host mount..."
+          rm -rf /app/src/frontend/dist/*
           mkdir -p /app/src/frontend/dist
           cp -R /dist-cache/* /app/src/frontend/dist/
         fi
