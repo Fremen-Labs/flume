@@ -251,9 +251,12 @@ var Metrics = &metricsRegistry{
 	NodeRequests:         newCounterVec(),
 	RoutingDecisions:     newCounterVec(),
 	NodeLoad:             newGaugeVec(),
-	NodeHealthGauge:      newGaugeVec(),
 	LocalOffloadPct:      newGaugeVec(),
 	WorkerTokens:         newCounterVec(),
+	
+	ConcurrencyThrottledTotal: &simpleCounter{},
+	BackoffEventsTotal:        &simpleCounter{},
+	TasksBlockedTotal:         &simpleCounter{},
 }
 
 type metricsRegistry struct {
@@ -300,6 +303,15 @@ type metricsRegistry struct {
 
 	// flume_worker_tokens_total{worker_name, direction}
 	WorkerTokens *counterVec
+	
+	// flume_concurrency_throttled_total
+	ConcurrencyThrottledTotal *simpleCounter
+	
+	// flume_backoff_events_total
+	BackoffEventsTotal *simpleCounter
+	
+	// flume_tasks_blocked_total
+	TasksBlockedTotal *simpleCounter
 }
 
 // RecordRequest records a completed request's duration and success state.
@@ -635,6 +647,25 @@ func HandleMetrics() http.HandlerFunc {
 			buf = strconv.AppendUint(buf, count, 10)
 			buf = append(buf, '\n')
 		}
+
+		// ── Capacity Overload Counters ─────────────────────────────────
+		buf = append(buf, "# HELP flume_concurrency_throttled_total Total times a worker was throttled from claiming a task.\n"...)
+		buf = append(buf, "# TYPE flume_concurrency_throttled_total counter\n"...)
+		buf = append(buf, "flume_concurrency_throttled_total "...)
+		buf = strconv.AppendUint(buf, Metrics.ConcurrencyThrottledTotal.get(), 10)
+		buf = append(buf, '\n')
+
+		buf = append(buf, "# HELP flume_backoff_events_total Total LLM failure events triggering an exponential backoff.\n"...)
+		buf = append(buf, "# TYPE flume_backoff_events_total counter\n"...)
+		buf = append(buf, "flume_backoff_events_total "...)
+		buf = strconv.AppendUint(buf, Metrics.BackoffEventsTotal.get(), 10)
+		buf = append(buf, '\n')
+
+		buf = append(buf, "# HELP flume_tasks_blocked_total Total tasks pushed to the blocked state.\n"...)
+		buf = append(buf, "# TYPE flume_tasks_blocked_total counter\n"...)
+		buf = append(buf, "flume_tasks_blocked_total "...)
+		buf = strconv.AppendUint(buf, Metrics.TasksBlockedTotal.get(), 10)
+		buf = append(buf, '\n')
 
 		_, err := w.Write(buf)
 		if err != nil {

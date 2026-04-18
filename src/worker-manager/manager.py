@@ -79,16 +79,38 @@ def _fetch_adaptive_max_concurrency(active_mesh_count: int) -> int:
     try:
         ceiling_gb = 12  # Default fallback
         res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
+        
+        max_parallel = 4
+        global_gridlock = False
+        
         if res:
             nodes = res.get('hits', {}).get('hits', [])
             sum_gb = 0
+            congestion_count = 0
+            
             for n in nodes:
-                c = n.get('_source', {}).get('capabilities', {})
+                src = n.get('_source', {})
+                c = src.get('capabilities', {})
+                health = src.get('health', {})
+                
                 mem = c.get('memory_gb', 0)
                 if mem:
                     sum_gb += float(mem)
+                    
+                node_cap = src.get('concurrency_cap', 4)
+                if node_cap > max_parallel:
+                    max_parallel = node_cap
+                    
+                latency = health.get('latency_ms', 0)
+                if latency > 20000:
+                    congestion_count += 1
+            
             if sum_gb > 0:
                 ceiling_gb = sum_gb
+            
+            # Emergency Brake Evaluation
+            if len(nodes) > 0 and congestion_count == len(nodes):
+                global_gridlock = True
                 
         ceiling_bytes = ceiling_gb * (1024**3)
         
@@ -108,13 +130,16 @@ def _fetch_adaptive_max_concurrency(active_mesh_count: int) -> int:
         projected_total = current_vram_bytes + (active_mesh_count * 1.5 * (1024**3))
         
         # Adaptive Threshold Formula
-        max_parallel = int(os.environ.get('FLUME_MAX_PARALLEL', '4'))
+        if global_gridlock:
+            _manager_logger.critical(f"EMERGENCY BRAKE: Severe gridlock detected across all {congestion_count} nodes (Latency > 20s). Collapsing concurrency cap to 1.")
+            return 1
+            
         if projected_total > ceiling_bytes:
             return 1 # Choked VRAM, clamp to strictly 1 task execution
         elif projected_total > ceiling_bytes * 0.75:
-            return 2 # 75% Utilized, Throttle partially 
+            return max(1, int(max_parallel * 0.5)) # partial throttle natively
         else:
-            return max_parallel # Sub-ceiling, run at maximum capacity!
+            return max_parallel # Sub-ceiling, run at declarative capacity!
             
     except Exception as e:
         _manager_logger.error(f"Failed calculating adaptive concurrency: {e}")
@@ -511,6 +536,10 @@ def try_atomic_claim(
         'query': query,
         'script': script,
         'max_docs': 1,
+        'sort': [
+            {'priority': {'order': 'desc', 'unmapped_type': 'keyword'}},
+            {'_score': {'order': 'desc'}}
+        ]
     }
 
     try:
@@ -814,7 +843,63 @@ def promote_planned_tasks() -> int:
     return n
 
 
+import time
+last_resume_timestamp = 0
+
+def _execute_block_sweep(active_mesh_count: int, max_concurrent: int):
+    """Pushes stalled ready tasks to the Blocked column to provide explicit Kanban feedback when cluster is saturated"""
+    if active_mesh_count < max_concurrent:
+        return
+    try:
+        body = {
+            'query': {'term': {'status': 'ready'}},
+            'script': {
+                'source': (
+                    'ctx._source.status = "blocked";'
+                    'ctx._source.queue_state = "idle";'
+                    'ctx._source.message = "Task paused due to local capacity limits (node overload). Will automatically resume when resources are available.";'
+                ),
+                'lang': 'painless'
+            }
+        }
+        res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
+        updated = res.get('updated', 0)
+        if updated > 0:
+            log(f"Pushed {updated} capacity-stalled tasks to block queue", metric_id="flume_tasks_blocked_total", counter=updated)
+    except Exception as e:
+        _manager_logger.error(f"Failed to execute block sweep: {e}")
+
+def _execute_resume_sweep(active_mesh_count: int, max_concurrent: int):
+    global last_resume_timestamp
+    if active_mesh_count >= max_concurrent:
+        return
+        
+    now = time.time()
+    if now - last_resume_timestamp < 60:
+        return
+        
+    try:
+        body = {
+            'query': {'term': {'status': 'blocked'}},
+            'script': {
+                'source': (
+                    'ctx._source.status = "ready";'
+                    'ctx._source.queue_state = "idle";'
+                    'ctx._source.active_worker = null;'
+                ),
+                'lang': 'painless'
+            }
+        }
+        res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
+        updated = res.get('updated', 0)
+        if updated > 0:
+            last_resume_timestamp = now
+            _manager_logger.info(f"Auto-Resumed {updated} blocked tasks safely due to cleared mesh capacity.")
+    except Exception as e:
+        _manager_logger.error(f"Failed to execute resume sweep: {e}")
+
 def cycle():
+    """Main orchestration heartbeat tick"""
     # 1. Check Global Cluster Paused state
     is_paused = False
     try:
@@ -878,6 +963,10 @@ def cycle():
                 
     max_concurrent = _fetch_adaptive_max_concurrency(active_mesh_count)
     
+    # Auto-resume sweep to recover Blocked tasks when capacity allows securely
+    _execute_resume_sweep(active_mesh_count, max_concurrent)
+    _execute_block_sweep(active_mesh_count, max_concurrent)
+    
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
@@ -919,7 +1008,7 @@ def cycle():
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
             state['workers'].append(snapshot)
-            log(f"{worker['name']} throttled from claiming task to protect local Node Mesh. (MAX_CONCURRENT_TASKS={max_concurrent})")
+            log(f"{worker['name']} throttled from claiming task to protect local Node Mesh. (MAX_CONCURRENT_TASKS={max_concurrent})", metric_id="flume_concurrency_throttled_total")
             continue
 
         claimed_task = try_atomic_claim(
