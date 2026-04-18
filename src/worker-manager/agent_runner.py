@@ -1401,7 +1401,7 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
 
 
 def _get_cluster_topology() -> dict[str, Any]:
-    from worker_handlers import es_request
+    from worker_handlers import es_request  # type: ignore
     try:
         res = es_request('/agent-system-workers/_search', {'size': 100}, method='GET')
         implementers = []

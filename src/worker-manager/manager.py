@@ -1001,7 +1001,7 @@ def main():
 
 
 if __name__ == '__main__':
-    from ast_poller import start_poller_thread
+    from ast_poller import start_poller_thread  # type: ignore
     start_health_server()
     start_poller_thread()
     main()
