@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import json
 import uuid
 from pathlib import Path
@@ -20,6 +21,16 @@ ENV_GH_TOKEN = "GH_TOKEN"
 
 def _default_doc() -> dict[str, Any]:
     return {"version": 1, "activeTokenId": "", "tokens": []}
+
+def validate_github_token(token: str) -> bool:
+    """Ensure the GitHub token adheres strictly to standard secure prefixes (e.g. ghp_, github_pat_)."""
+    t = (token or "").strip()
+    if not t:
+        return False
+    # GitHub officially shifted to prefixed token patterns on April 5, 2021.
+    if re.match(r"^(ghp|github_pat|ghs|gho|ghu)_[a-zA-Z0-9_]{10,}$", t):
+        return True
+    return False
 
 
 
@@ -211,6 +222,8 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
                     return False, f'Another token is already labeled "{label}"'
                 row["label"] = label
             if token_in and token_in != MASK:
+                if not validate_github_token(token_in):
+                    return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
                 row["token"] = token_in
             doc["tokens"] = tokens
             if not str(doc.get("activeTokenId") or "").strip() and str(row.get("token") or "").strip():
@@ -232,6 +245,8 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             return False, f'Another token is already labeled "{label}"'
         if not token_in or token_in == MASK:
             return False, "token is required for new GitHub PATs"
+        if not validate_github_token(token_in):
+            return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
         new_id = uuid.uuid4().hex[:12]
         tokens.append({"id": new_id, "label": label, "token": token_in})
         doc["tokens"] = tokens
@@ -259,6 +274,8 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
     if aid:
         for c in tokens:
             if str(c.get("id")) == aid:
+                if token and token != MASK and not validate_github_token(token):
+                    return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
                 c["token"] = token
                 doc["tokens"] = tokens
                 if token and token != MASK:
@@ -271,6 +288,8 @@ def apply_legacy_gh_token_value(workspace_root: Path, token: str) -> tuple[bool,
                 _sync_active_to_env(workspace_root)
                 return True, ""
     new_id = uuid.uuid4().hex[:12]
+    if token and token != MASK and not validate_github_token(token):
+        return False, "Invalid GitHub token format. Must begin with ghp_, github_pat_, ghs_, gho_, or ghu_."
     doc["tokens"] = tokens + [{"id": new_id, "label": "Default", "token": token}]
     doc["activeTokenId"] = new_id
     if token and token != MASK:
