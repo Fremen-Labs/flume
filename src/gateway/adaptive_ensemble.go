@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,10 +26,25 @@ import (
 // FLUME_ENSEMBLE_NO_ADAPTIVE=1 disables this entirely and uses the configured size.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// systemReservedMemoryFactor is the fraction of total unified memory reserved
-// for the operating system, non-model processes, and GPU driver overhead.
-// Empirically tuned for Apple Silicon (macOS uses ~15-20% for OS footprint).
-const systemReservedMemoryFactor = 0.20
+// systemReservedMemoryFraction returns the fraction of total memory reserved for
+// the OS, non-model processes, and GPU driver overhead. macOS unified-memory
+// laptops need a larger reserve; Linux/Windows workstations with discrete GPUs
+// typically have more headroom — a smaller reserve avoids starving parallel slots.
+func systemReservedMemoryFraction() float64 {
+	if v := strings.TrimSpace(os.Getenv("FLUME_SYSTEM_RESERVED_FRACTION")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil && f >= 0 && f <= 0.5 {
+			return f
+		}
+		Log().Warn("adaptive_ensemble: FLUME_SYSTEM_RESERVED_FRACTION invalid — using default",
+			slog.String("provided_value", v),
+		)
+	}
+	if runtime.GOOS == "darwin" {
+		return 0.20
+	}
+	return 0.10
+}
 
 // perSlotKVShareFactor is the fraction of a model's estimated VRAM footprint
 // that each additional parallel inference slot requires beyond the first.
@@ -55,6 +71,9 @@ var modelParamBrackets = []struct {
 	{":14b", 9.0},
 	{":26b", 14.0},
 	{":27b", 14.5},
+	// MoE / mid-size coding models (e.g. qwen3-coder:30b) — active params << nameplate;
+	// keep below :32b so parallel slots are not over-penalized on multi-GPU hosts.
+	{":30b", 10.0},
 	{":32b", 20.0},
 	{":34b", 20.0},
 	{":70b", 40.0},
@@ -159,7 +178,15 @@ func QueryOllamaVRAM(ollamaBaseURL string) OllamaVRAMInfo {
 // Logs a warning when FLUME_SYSTEM_MEMORY_GB is set but cannot be parsed so
 // that operators are immediately aware of configuration typos (e.g. "16G").
 func systemMemoryGB() float64 {
-	const defaultGB = 16.0
+	// Default when FLUME_SYSTEM_MEMORY_GB is unset: conservative for Apple Silicon
+	// laptops (unified memory); higher for Linux/Windows where Flume usually runs
+	// on discrete-GPU workstations — the old 16 GB default made adaptive ensemble
+	// collapse to a single Ollama call on multi-GPU servers when operators did not
+	// set the env var.
+	defaultGB := 64.0
+	if runtime.GOOS == "darwin" {
+		defaultGB = 16.0
+	}
 	if v := strings.TrimSpace(os.Getenv("FLUME_SYSTEM_MEMORY_GB")); v != "" {
 		gb, err := strconv.ParseFloat(v, 64)
 		if err != nil || gb <= 0 {
@@ -198,7 +225,7 @@ func AdaptiveEnsembleSize(model string, configuredSize int, ollamaBaseURL string
 
 	info := QueryOllamaVRAM(ollamaBaseURL)
 	// Reserve a fraction of total memory for OS and non-model overhead.
-	reservedGB := totalMemGB * systemReservedMemoryFactor
+	reservedGB := totalMemGB * systemReservedMemoryFraction()
 	alreadyUsedGB := info.TotalUsedGB
 	// The running model's weights are shared by Ollama; each additional parallel
 	// call only needs its own KV cache and compute buffers (perSlotKVShareFactor).
@@ -271,7 +298,7 @@ func AdaptiveEnsembleSizeForNode(model string, configuredSize int, node *Node) i
 	nodeBaseURL := "http://" + node.Host
 	info := QueryOllamaVRAM(nodeBaseURL)
 
-	reservedGB := totalMemGB * systemReservedMemoryFactor
+	reservedGB := totalMemGB * systemReservedMemoryFraction()
 	alreadyUsedGB := info.TotalUsedGB
 	perExtraSlotGB := perCallGB * perSlotKVShareFactor
 

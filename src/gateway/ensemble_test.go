@@ -354,6 +354,7 @@ func TestModelVRAMEstimateGB(t *testing.T) {
 		maxVRAM  float64
 	}{
 		{"qwen2.5-coder:7b", 4.0, 5.5},
+		{"qwen3-coder:30b", 9.0, 11.0},
 		{"llama3.2:3b", 1.5, 2.5},
 		{"gemma4:27b", 13.0, 16.0},
 		{"deepseek-r1:14b", 8.0, 10.0},
