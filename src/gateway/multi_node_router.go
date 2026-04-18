@@ -138,7 +138,17 @@ func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, nod
 	cloned.Model = node.ModelTag
 
 	// Use the node-specific routing path.
-	return m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)
+	resp, err := m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)
+	if err == nil && resp != nil {
+		resp.Telemetry = &Telemetry{
+			NodeID:   node.ID,
+			NodeHost: node.Host,
+			Model:    node.ModelTag,
+		}
+		log := WithContext(ctx)
+		log.Info("telemetry payload attached", slog.String("node_id", node.ID))
+	}
+	return resp, err
 }
 
 // tryFallbackNodes attempts to route to any other healthy node besides the failed one.

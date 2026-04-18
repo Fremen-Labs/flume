@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { appLogger } from '@/utils/logger';
 
 const stages: { id: string; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
@@ -79,7 +80,7 @@ export default function QueuePage() {
         toast({ title: "Operation Failed", description, variant: "destructive" });
       }
     } catch (e) {
-      console.error('Swarms request failed:', e);
+      appLogger.error('Swarms request failed:', e);
       toast({ title: "System Exception", description: "Exception occurred triggering Swarm operation bounds.", variant: "destructive" });
     } finally {
       setIsHalting(false);

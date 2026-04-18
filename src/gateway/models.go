@@ -48,8 +48,16 @@ type ToolFunction struct {
 
 // ChatResponse is the unified outbound response (Ollama-compatible).
 type ChatResponse struct {
-	Message ResponseMessage `json:"message"`
-	Usage   Usage           `json:"usage,omitempty"`
+	Message   ResponseMessage `json:"message"`
+	Usage     Usage           `json:"usage,omitempty"`
+	Telemetry *Telemetry      `json:"telemetry,omitempty"`
+}
+
+// Telemetry captures mesh routing execution details for the client.
+type Telemetry struct {
+	NodeID   string `json:"node_id,omitempty"`
+	NodeHost string `json:"node_host,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // ResponseMessage holds the assistant's reply.

@@ -396,6 +396,7 @@ function Field({
       <label htmlFor={id} className="block text-[11px] text-muted-foreground mb-1">{label}</label>
       <input
         id={id} type={type} placeholder={placeholder} value={value} onChange={onChange}
+        autoComplete="off"
         className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
       />
       {hint && <p className="text-[10px] text-muted-foreground/60 mt-0.5">{hint}</p>}

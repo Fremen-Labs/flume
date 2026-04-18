@@ -51,21 +51,44 @@ _gateway_ok = False
 _gateway_checked_at = 0.0
 
 
-def _post_gateway(path: str, payload: dict, timeout: int = 180) -> dict:
+def _post_gateway(path: str, payload: dict, timeout: int = 180, max_retries: int = 3) -> dict:
     """POST JSON to the gateway and return the parsed response."""
+    import random
+    import socket
     url = f'{_gateway_url()}{path}'
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            'Content-Type': 'application/json',
-            'X-Worker-Name': os.environ.get('FLUME_WORKER_NAME', 'unknown')
-        },
-        method='POST',
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    worker_name = os.environ.get('FLUME_WORKER_NAME', 'unknown')
+    
+    # Backoff sequence: 30s, 60s, 120s
+    backoffs = [30, 60, 120]
+    
+    for attempt in range(max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-Worker-Name': worker_name
+                },
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            if attempt < max_retries:
+                base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
+                # Jitter: +/- 10%
+                jitter = base_sleep * 0.1 * (random.random() * 2 - 1)
+                sleep_time = max(1.0, base_sleep + jitter)
+                logger.warning(
+                    f"Gateway connection issue logic bounds (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Applying intelligent backoff for {sleep_time:.1f}s to relieve Node Mesh gridlock."
+                )
+                time.sleep(sleep_time)
+            else:
+                logger.error(f"Gateway connection permanently failed after {max_retries} retries: {e}")
+                raise e
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +133,7 @@ def chat(
     base_url_override=None,
     timeout_seconds=120,
     return_usage=False,
+    return_telemetry=False,
     ollama_think=False,
     agent_role='',
 ):
@@ -138,7 +162,17 @@ def chat(
                 'agent_role': agent_role,
             }
             resp = _post_gateway('/v1/chat', payload, timeout=timeout_seconds)
+            
+            telemetry = resp.get('telemetry', {})
+            if telemetry:
+                logger.info("Gateway telemetry retrieved: node_id=%s, node_host=%s", 
+                            telemetry.get('node_id'), telemetry.get('node_host'))
+            
             content = resp.get('message', {}).get('content', '')
+            if return_telemetry and return_usage:
+                return content, resp.get('usage', {}), resp.get('telemetry', {})
+            if return_telemetry:
+                return content, resp.get('telemetry', {})
             if return_usage:
                 return content, resp.get('usage', {})
             return content
@@ -192,6 +226,7 @@ def chat_with_tools(
     max_tokens=4096,
     provider_override=None,
     base_url_override=None,
+    return_telemetry=False,
     ollama_think=False,
     agent_role='',
 ):
@@ -228,7 +263,16 @@ def chat_with_tools(
                 'think': ollama_think,
                 'agent_role': agent_role,
             }
-            return _post_gateway('/v1/chat/tools', payload, timeout=180)
+            resp = _post_gateway('/v1/chat/tools', payload, timeout=180)
+            
+            telemetry = resp.get('telemetry', {})
+            if telemetry:
+                logger.info("Gateway telemetry retrieved (tools): node_id=%s, node_host=%s", 
+                            telemetry.get('node_id'), telemetry.get('node_host'))
+            
+            if return_telemetry:
+                return resp, resp.get('telemetry', {})
+            return resp
         except Exception as e:
             leg = _legacy()
             p = provider_override or leg._provider()

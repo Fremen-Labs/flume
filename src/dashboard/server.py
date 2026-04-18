@@ -893,6 +893,9 @@ def parse_llm_response(raw_text):
     Always strips any embedded JSON/code blocks from the message text.
     """
     cleaned = raw_text.strip()
+    # Strip <think> reasoning blocks that disrupt JSON parsers
+    cleaned = re.sub(r'<think>[\s\S]*?</think>', '', cleaned).strip()
+    
     # Unwrap outer markdown fence if the entire response is wrapped
     if cleaned.startswith('```'):
         cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)

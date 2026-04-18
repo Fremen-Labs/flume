@@ -480,3 +480,24 @@ func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 	log.Warn("flume-node-registry index not found — expected to be pre-created by `flume start`")
 	return fmt.Errorf("flume-node-registry index missing — run `flume start` to bootstrap")
 }
+
+// AutoRepairModelTag atomically corrects the primary model tag of a node
+// if it was erroneously entered or found to be missing by the health checker.
+func (r *NodeRegistry) AutoRepairModelTag(ctx context.Context, nodeID, newTag string) error {
+	r.mu.Lock()
+	node, ok := r.nodes[nodeID]
+	if !ok || node.ModelTag == newTag {
+		r.mu.Unlock()
+		return nil // No op
+	}
+	
+	// Update in-memory state
+	node.ModelTag = newTag
+	
+	// Copy node context to avoid race conditions during ES network call
+	clone := *node
+	r.mu.Unlock()
+
+	// Persist corrected state
+	return r.UpsertNodeToES(ctx, &clone)
+}

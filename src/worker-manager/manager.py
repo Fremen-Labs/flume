@@ -809,11 +809,28 @@ def cycle():
             s = h.get('_source', {})
             wn = s.get('active_worker')
             if wn:
-                busy_workers[wn] = {'task_id': s.get('id', h.get('_id')), 'task_title': s.get('title')}
+                busy_workers[wn] = {
+                    'task_id': s.get('id', h.get('_id')), 
+                    'task_title': s.get('title'),
+                    'execution_host': s.get('execution_host')
+                }
     except Exception as e:
         log(f"error fetching busy workers: {e}")
 
     workers = build_workers()
+    
+    max_concurrent = int(os.environ.get('MAX_CONCURRENT_TASKS', '2'))
+    cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
+    active_mesh_count = 0
+    
+    # Pre-calculate active non-cloud nodes
+    for wn, wdat in busy_workers.items():
+        matching_worker = next((w for w in workers if w['name'] == wn), None)
+        if matching_worker:
+            w_prov = (matching_worker.get('llm_provider') or 'ollama').lower()
+            if w_prov not in cloud_providers:
+                active_mesh_count += 1
+                
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
@@ -823,6 +840,11 @@ def cycle():
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = busy_workers[worker['name']]['task_id']
             snapshot['current_task_title'] = busy_workers[worker['name']]['task_title']
+            
+            # Adopt the dynamic execution host provided by Gateway / Node Mesh
+            if busy_workers[worker['name']].get('execution_host'):
+                snapshot['execution_host'] = busy_workers[worker['name']]['execution_host']
+                
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
@@ -843,6 +865,16 @@ def cycle():
         pref_prov = worker.get('llm_provider')
         pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
 
+        check_prov = (pref_prov or 'ollama').lower()
+        if check_prov not in cloud_providers and active_mesh_count >= max_concurrent:
+            snapshot['status'] = 'idle'
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            log(f"{worker['name']} throttled from claiming task to protect local Node Mesh. (MAX_CONCURRENT_TASKS={max_concurrent})")
+            continue
+
         claimed_task = try_atomic_claim(
             worker['role'],
             worker['name'],
@@ -852,6 +884,8 @@ def cycle():
             pref_cred,
         )
         if claimed_task:
+            if check_prov not in cloud_providers:
+                active_mesh_count += 1
             src = claimed_task.get('_source', {})
             snapshot['status'] = 'claimed'
             snapshot['current_task_id'] = src.get('id', claimed_task.get('_id'))
