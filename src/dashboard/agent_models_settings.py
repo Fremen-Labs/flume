@@ -8,9 +8,9 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-import llm_credentials_store as lcs
-from llm_settings import load_effective_pairs, get_oauth_status, provider_catalog_for_workspace
-from workspace_llm_env import normalize_gemini_model_id, resolve_cloud_agent_model
+import llm_credentials_store as lcs  # type: ignore
+from llm_settings import load_effective_pairs, get_oauth_status, provider_catalog_for_workspace  # type: ignore
+from workspace_llm_env import normalize_gemini_model_id, resolve_cloud_agent_model  # type: ignore
 
 AGENT_ROLE_IDS = (
     "intake",
