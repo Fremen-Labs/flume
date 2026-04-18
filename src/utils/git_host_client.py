@@ -249,6 +249,24 @@ class GitHubClient(GitHostClient):
             extra_headers={"X-GitHub-Api-Version": "2022-11-28"},
         )
 
+    def _put(self, path: str, body: dict) -> Any:
+        return _http_json(
+            self._url(path),
+            token=self.token,
+            method="PUT",
+            body=body,
+            extra_headers={"X-GitHub-Api-Version": "2022-11-28"},
+        )
+
+    def _delete(self, path: str) -> Any:
+        return _http_json(
+            self._url(path),
+            token=self.token,
+            method="DELETE",
+            body=None,
+            extra_headers={"X-GitHub-Api-Version": "2022-11-28"},
+        )
+
     def get_default_branch(self) -> str:
         if self._default_branch:
             return self._default_branch
@@ -376,6 +394,23 @@ class GitHubClient(GitHostClient):
         pr_url = data.get("html_url", "")
         pr_number = data.get("number")
         return {"pr_url": pr_url, "pr_number": pr_number}
+
+    def merge_pull_request(self, pull_number: int, merge_method: str = "merge") -> dict:
+        """Merge a pull request (e.g. auto-merge feature → develop)."""
+        return self._put(
+            f"pulls/{pull_number}/merge",
+            {"merge_method": merge_method},
+        )
+
+    def delete_remote_branch(self, branch: str) -> None:
+        """
+        Delete a branch on the remote (e.g. after merging its PR into develop).
+        Branch names with slashes are URL-encoded per GitHub API rules.
+        """
+        b = urllib.parse.quote((branch or "").strip(), safe="")
+        if not b:
+            raise GitHostError("delete_remote_branch: empty branch name")
+        self._delete(f"git/refs/heads/{b}")
 
 
 # ---------------------------------------------------------------------------

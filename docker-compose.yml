@@ -213,6 +213,10 @@ services:
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
       - FLUME_GATEWAY_URL=http://gateway:8090
+      # Per-task PR into develop (default task); set to story for one PR per story branch.
+      - FLUME_AUTO_PR_SCOPE
+      # After merge into develop, delete the remote feature branch (default on).
+      - FLUME_DELETE_REMOTE_BRANCH_AFTER_MERGE
       # ES_URL: must match the service name in this compose file.
       # worker_handlers.py, agent_runner.py, and es_credential_store.py all
       # read ES_URL; without it they fall back to 127.0.0.1:9200 (broken inside Docker).
