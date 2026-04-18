@@ -53,6 +53,15 @@ export default function AnalyticsPage() {
   const approvedReviews = reviews.filter(r => r.verdict === 'approved').length;
   const passRate = reviews.length > 0 ? Math.round((approvedReviews / reviews.length) * 100) : 0;
   
+  const tm = snapshot?.token_metrics;
+  const realSavings = tm?.savings ?? 0;
+  const baselineTokens = tm?.baseline_tokens ?? 0;
+  const actualTokensSent = tm?.actual_tokens_sent ?? 0;
+  const savingsPercent = baselineTokens > 0 ? Math.round((realSavings / baselineTokens) * 100) : 0;
+  const estimatedCost = tm?.estimated_cost_usd ?? 0;
+  const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
+  const historicalBurn = tm?.historical_burn ?? [];
+  
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
   const nodeLoads = (telemetry?.flume_node_load ?? []).map(l => ({
@@ -90,7 +99,7 @@ export default function AnalyticsPage() {
             {/* Live Telemetry Migrated from Telemetry Page */}
             <GlassMetricCard title="Gateway Engines" value={String(telemetry?.flume_active_models?.length ?? 0)} icon={Activity} trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(", ") || 'No models loaded' }} />
             <GlassMetricCard title="System Memory" value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'} icon={Cpu} />
-            <GlassMetricCard title="Go Goroutines" value={String(telemetry?.go_goroutines ?? 0)} icon={Cpu} />
+            <GlassMetricCard title="AST Savings" value={fmtTokens(realSavings)} icon={TrendingUp} trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }} />
             <GlassMetricCard title="VRAM Pressure" value={String(telemetry?.flume_vram_pressure_events_total ?? 0)} icon={ServerCrash} trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }} />
           </div>
 
@@ -201,6 +210,44 @@ export default function AnalyticsPage() {
                           </td>
                         </tr>
                       )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </motion.div>
+
+            {/* Historical Token Usage by Worker via Elasticsearch Telemetry */}
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }} className="glass-card p-5">
+              <h3 className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> Historical Worker Token Burn</h3>
+              <p className="text-xs text-muted-foreground mb-4">Total tokens burned persistently retrieved from Elasticsearch telemetry</p>
+              {historicalBurn.length === 0 ? (
+                <div className="text-xs text-muted-foreground text-center py-8">No historical worker data</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead className="text-xs text-muted-foreground border-b border-border/30">
+                      <tr>
+                        <th className="pb-2 font-medium">Worker Name</th>
+                        <th className="pb-2 font-medium">Role</th>
+                        <th className="pb-2 font-medium text-right">Lifetime Input Tokens</th>
+                        <th className="pb-2 font-medium text-right">Lifetime Output Tokens</th>
+                        <th className="pb-2 font-medium text-right">Total Tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/20">
+                      {historicalBurn
+                        .sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens))
+                        .map((b) => (
+                          <tr key={b.worker_name}>
+                            <td className="py-2.5 font-medium text-foreground">{b.worker_name}</td>
+                            <td className="py-2.5 text-muted-foreground capitalize">{b.role}</td>
+                            <td className="py-2.5 text-right font-mono text-xs">{b.input_tokens.toLocaleString()}</td>
+                            <td className="py-2.5 text-right font-mono text-xs">{b.output_tokens.toLocaleString()}</td>
+                            <td className="py-2.5 text-right font-mono text-xs text-primary font-bold w-32">
+                              {(b.input_tokens + b.output_tokens).toLocaleString()}
+                            </td>
+                          </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>

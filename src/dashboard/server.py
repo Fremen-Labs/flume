@@ -2388,6 +2388,14 @@ def load_snapshot():
                         'total_actual_tokens': {'sum': {'field': 'actual_tokens_sent'}},
                         'total_input_tokens': {'sum': {'field': 'input_tokens'}},
                         'total_output_tokens': {'sum': {'field': 'output_tokens'}},
+                        'by_worker': {
+                            'terms': {'field': 'worker_name', 'size': 100},
+                            'aggs': {
+                                'input': {'sum': {'field': 'input_tokens'}},
+                                'output': {'sum': {'field': 'output_tokens'}},
+                                'role': {'terms': {'field': 'worker_role'}}
+                            }
+                        }
                     }
                 })
                 aggs = agg_res.get('aggregations', {})
@@ -2395,6 +2403,16 @@ def load_snapshot():
                 cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
                 t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
                 t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
+                
+                historical_burn = []
+                for b in aggs.get('by_worker', {}).get('buckets', []):
+                    historical_burn.append({
+                        'worker_name': b['key'],
+                        'input_tokens': int(b.get('input', {}).get('value', 0)),
+                        'output_tokens': int(b.get('output', {}).get('value', 0)),
+                        'role': b.get('role', {}).get('buckets', [{'key': 'unknown'}])[0]['key'] if len(b.get('role', {}).get('buckets', [])) > 0 else 'unknown'
+                    })
+
                 return {
                     'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
                     'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
@@ -2403,6 +2421,7 @@ def load_snapshot():
                     'total_input_tokens': t_in,
                     'total_output_tokens': t_out,
                     'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
+                    'historical_burn': historical_burn,
                 }
             except Exception:
                 return {
@@ -2413,6 +2432,7 @@ def load_snapshot():
                     'total_input_tokens': 0,
                     'total_output_tokens': 0,
                     'estimated_cost_usd': 0.0,
+                    'historical_burn': [],
                 }
         f_savings = pool.submit(fetch_savings)
         f_workers = pool.submit(load_workers)
