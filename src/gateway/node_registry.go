@@ -52,6 +52,7 @@ type Node struct {
 	ModelTag     string           `json:"model_tag"`      // primary model: "qwen2.5-coder:32b"
 	Capabilities NodeCapabilities `json:"capabilities"`
 	Health       NodeHealth       `json:"health"`
+	ConcurrencyCap int              `json:"concurrency_cap"`
 	// AuthToken is resolved from OpenBao at runtime — never persisted to ES or logged.
 	AuthToken    string           `json:"-"`
 	// AuthSecretPath is the OpenBao path for this node's bearer token.

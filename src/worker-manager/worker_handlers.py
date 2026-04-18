@@ -50,6 +50,9 @@ FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
 REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
 PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
+BACKOFF_BASE_DELAY = float(os.environ.get('FLUME_BACKOFF_BASE_DELAY', '2.0'))
+BACKOFF_MAX_DELAY = float(os.environ.get('FLUME_BACKOFF_MAX_DELAY', '30.0'))
+BACKOFF_JITTER_FACTOR = float(os.environ.get('FLUME_BACKOFF_JITTER_FACTOR', '0.2'))
 # AP-3 cleanup: PROJECTS_REGISTRY (projects.json) removed — gitflow config read from ES flume-projects index.
 
 ctx = None
