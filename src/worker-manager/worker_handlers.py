@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 import uuid
@@ -368,6 +371,149 @@ def _configure_git_identity(repo_path: Path) -> None:
             )
 
 
+def _flume_branch_scope() -> str:
+    """task = legacy per-leaf branch; story = one shared branch per story (long-running work)."""
+    return os.environ.get('FLUME_BRANCH_SCOPE', 'story').strip().lower() or 'story'
+
+
+def _flume_auto_pr_scope() -> str:
+    """task = open PR when each task is approved; story = one PR when the last task under the story completes."""
+    return os.environ.get('FLUME_AUTO_PR_SCOPE', 'task').strip().lower() or 'task'
+
+
+def _sanitize_git_branch_segment(s: str) -> str:
+    out = re.sub(r'[^a-zA-Z0-9._-]+', '-', (s or '').strip())
+    return (out.strip('-')[:80] or 'scope')
+
+
+def _stable_scope_hash(scope_id: str) -> str:
+    return hashlib.sha256(scope_id.encode('utf-8')).hexdigest()[:6]
+
+
+def _resolve_branch_scope_id(task: dict) -> str | None:
+    """
+    Return a stable grouping id for branch naming (usually parent story id).
+    None => fall back to per-task branch (legacy).
+    """
+    it = (task.get('item_type') or '').lower()
+    pid = task.get('parent_id')
+    if not pid:
+        return None
+    ps = str(pid)
+    if it == 'task' and ps.startswith('story-'):
+        return ps
+    if it == 'bug' and ps.startswith('story-'):
+        return ps
+    return None
+
+
+def _iter_repo_tasks_for_repo(repo_id: str):
+    """Yield (es_id, _source) for non-archived tasks in a repo."""
+    hits = []
+    if repo_id:
+        try:
+            res = es_request(
+                f'/{TASK_INDEX}/_search',
+                {'size': 500, 'query': {'bool': {'must_not': [{'term': {'status': 'archived'}}]}}},
+                method='POST',
+            )
+            hits = res.get('hits', {}).get('hits', []) or []
+        except Exception:
+            hits = []
+    for h in hits:
+        src = h.get('_source') or {}
+        if src.get('repo') != repo_id:
+            continue
+        yield h.get('_id'), src
+
+
+def _fetch_repo_task_map(repo_id: str) -> dict[str, dict]:
+    """In-memory map id -> task _source for one repo (same pattern as compute_ready_for_repo)."""
+    out: dict[str, dict] = {}
+    for _es_id, src in _iter_repo_tasks_for_repo(repo_id):
+        tid = src.get('id')
+        if tid:
+            out[str(tid)] = src
+    return out
+
+
+def _should_defer_auto_pr_until_story_complete(task: dict) -> bool:
+    """
+    When FLUME_AUTO_PR_SCOPE=story, skip opening a PR until every task under the
+    same story has reached a terminal state, so one branch can accumulate commits.
+    """
+    if _flume_auto_pr_scope() != 'story':
+        return False
+    if (task.get('item_type') or '').lower() != 'task':
+        return False
+    story_id = task.get('parent_id')
+    if not story_id or not str(story_id).startswith('story-'):
+        return False
+    repo_id = task.get('repo')
+    by_id = _fetch_repo_task_map(repo_id)
+    siblings = [
+        t for t in by_id.values()
+        if t.get('parent_id') == story_id and (t.get('item_type') or '').lower() == 'task'
+    ]
+    if len(siblings) <= 1:
+        return False
+
+    def _terminal(x: dict) -> bool:
+        if not x:
+            return False
+        if x.get('status') in ('done', 'archived'):
+            return True
+        if x.get('queue_state') == 'skipped':
+            return True
+        return False
+
+    this_id = task.get('id')
+    for s in siblings:
+        sid = s.get('id')
+        if sid == this_id:
+            continue  # current task is being approved now — treat as terminal
+        if not _terminal(s):
+            log(
+                f"auto_pr: defer PR for task={this_id} — sibling {sid} not terminal "
+                f"(status={s.get('status')})"
+            )
+            return True
+    return False
+
+
+def _backfill_story_pr_to_sibling_tasks(
+    task: dict, pr_url: str, pr_number: int | None, target_branch: str,
+) -> None:
+    """Copy pr_url to all tasks on the same story branch when opening one story-level PR."""
+    if _flume_auto_pr_scope() != 'story':
+        return
+    repo_id = task.get('repo')
+    story_id = task.get('parent_id')
+    branch = task.get('branch')
+    if not repo_id or not story_id or not branch:
+        return
+    if not str(story_id).startswith('story-'):
+        return
+    try:
+        for es_id, src in _iter_repo_tasks_for_repo(repo_id):
+            if src.get('parent_id') != story_id:
+                continue
+            if (src.get('item_type') or '').lower() != 'task':
+                continue
+            if src.get('branch') != branch:
+                continue
+            if src.get('pr_url'):
+                continue
+            update_task_doc(es_id, {
+                'pr_url': pr_url,
+                'pr_number': pr_number,
+                'pr_status': 'open',
+                'target_branch': target_branch,
+            })
+    except Exception as e:
+        log(f"backfill story PR metadata failed: {e}")
+
+
 def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
     """
     AP-5C: Ephemeral shallow clone — K8s-native task isolation.
@@ -389,10 +535,15 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
     if task.get('branch'):
         branch = task.get('branch')
     else:
-        import uuid
         item_type = (task.get('item_type') or '').lower()
         prefix    = 'bugfix' if (item_type == 'bug' or task_id.startswith('bug-')) else 'feature'
-        branch    = f"{prefix}/{task_id}-{uuid.uuid4().hex[:6]}"
+        scope_id = _resolve_branch_scope_id(task) if _flume_branch_scope() == 'story' else None
+        if scope_id:
+            seg = _sanitize_git_branch_segment(scope_id)
+            h = _stable_scope_hash(scope_id)
+            branch = f"{prefix}/{seg}-{h}"
+        else:
+            branch = f"{prefix}/{task_id}-{uuid.uuid4().hex[:6]}"
 
     # ── Local repo path: retain legacy worktree-free behaviour ──────────────
     # For locally-mounted repos (clone_status='local') we still check out a
@@ -467,6 +618,29 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
         except Exception:
             pass  # best-effort shallow unshallow
 
+        gf = load_project_gitflow(repo_id)
+        ib = (gf.get('integrationBranch') or 'develop').strip()
+        try:
+            subprocess.run(
+                ["git", "-C", str(tmp), "fetch", "--depth=50", "origin", ib],
+                capture_output=True, timeout=90,
+            )
+        except Exception:
+            pass
+        ib_ref = f"refs/remotes/origin/{ib}"
+        ib_ok = subprocess.run(
+            ["git", "-C", str(tmp), "show-ref", "--verify", "--quiet", ib_ref],
+            capture_output=True,
+        ).returncode == 0
+        if ib_ok:
+            integration_base = f"origin/{ib}"
+        else:
+            integration_base = "HEAD"
+            log(
+                f"ensure_task_branch: integration branch origin/{ib} not found — "
+                f"branching from default HEAD (create {ib} on remote for gitflow)"
+            )
+
         # Check whether the task branch already exists remotely (crash recovery)
         remote_branch_check = subprocess.run(
             ["git", "-C", str(tmp), "ls-remote", "--heads", "origin", branch],
@@ -490,10 +664,13 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
             log(f"ensure_task_branch: resumed existing remote branch={branch} for task={task_id}")
         else:
             subprocess.run(
-                ["git", "-C", str(tmp), "checkout", "-b", branch],
+                ["git", "-C", str(tmp), "checkout", "-b", branch, integration_base],
                 check=True, capture_output=True,
             )
-            log(f"ensure_task_branch: created new branch={branch} for task={task_id}")
+            log(
+                f"ensure_task_branch: created new branch={branch} from {integration_base} "
+                f"for task={task_id}"
+            )
 
         return branch, str(tmp)
 
@@ -578,18 +755,121 @@ def resolve_default_branch(repo_path, override=None):
 
 def load_project_gitflow(repo_id):
     """Load gitflow config for a project from the ES flume-projects index."""
-    default = {'autoPrOnApprove': True, 'defaultBranch': None}
+    default = {
+        'autoPrOnApprove': True,
+        'defaultBranch': None,
+        # Integration: feature branches merge here; clone worktrees from this ref.
+        'integrationBranch': 'develop',
+        # Production: final release PR targets this branch (human merge).
+        'releaseBranch': 'main',
+        'autoMergeIntegrationPr': True,
+    }
     if not repo_id:
         return default
     try:
         res = _es_projects_request_worker(f"/flume-projects/_doc/{repo_id}")
         src = res.get('_source') or {}
-        return src.get('gitflow') or default
+        gf = dict(default)
+        gf.update(src.get('gitflow') or {})
+        return gf
     except Exception:
         return default
 
 
-def create_pr_for_task(task, reviewer_model):
+def resolve_pr_base_branch(repo_id: str) -> str:
+    """Base branch for feature/story PRs (typically develop)."""
+    gf = load_project_gitflow(repo_id)
+    if gf.get('integrationBranch'):
+        return str(gf['integrationBranch'])
+    if gf.get('defaultBranch'):
+        return str(gf['defaultBranch'])
+    rp = load_project_repo_path(repo_id)
+    return resolve_default_branch(str(rp or ''), override=None)
+
+
+def resolve_release_branch(repo_id: str) -> str:
+    """Production branch for the final develop → main promotion PR."""
+    gf = load_project_gitflow(repo_id)
+    if gf.get('releaseBranch'):
+        return str(gf['releaseBranch'])
+    if gf.get('defaultBranch'):
+        return str(gf['defaultBranch'])
+    return 'main'
+
+
+def _should_delete_remote_branch_after_merge() -> bool:
+    """After merging into the integration branch, remove the feature branch on the remote."""
+    v = os.environ.get('FLUME_DELETE_REMOTE_BRANCH_AFTER_MERGE', '1').strip().lower()
+    return v not in ('0', 'false', 'no', 'off')
+
+
+def _delete_remote_branch_after_merge(
+    task: dict,
+    *,
+    client: object | None = None,
+    repo_path: Path | str | None = None,
+) -> bool:
+    """
+    Delete the task's remote branch after its PR was merged into develop.
+    Returns True if the ref was removed or already absent.
+    """
+    branch = (task.get('branch') or '').strip()
+    if not branch:
+        return False
+    if client is not None and type(client).__name__ == 'GitHubClient':
+        try:
+            from utils.git_host_client import GitHostError, GitHostNotFoundError  # noqa
+
+            client.delete_remote_branch(branch)
+            log(f"delete_remote_branch: removed {branch!r} via GitHub API")
+            return True
+        except GitHostNotFoundError:
+            log(f"delete_remote_branch: branch {branch!r} already absent (ok)")
+            return True
+        except GitHostError as e:
+            log(f"delete_remote_branch: GitHub API failed for {branch!r}: {e}")
+            return False
+        except Exception as e:
+            log(f"delete_remote_branch: unexpected error for {branch!r}: {e}")
+            return False
+    if repo_path:
+        try:
+            vr = subprocess.run(
+                ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if vr.returncode != 0 or not (vr.stdout or '').strip():
+                log(f"delete_remote_branch: gh repo view failed: {(vr.stderr or '')[:200]}")
+                return False
+            nwo = vr.stdout.strip()
+            enc = urllib.parse.quote(branch, safe='')
+            dr = subprocess.run(
+                ['gh', 'api', '-X', 'DELETE', f'/repos/{nwo}/git/refs/heads/{enc}'],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if dr.returncode != 0:
+                err = (dr.stderr or dr.stdout or '')[:400]
+                if 'not found' in err.lower() or '404' in err:
+                    log(f"delete_remote_branch: branch {branch!r} already absent (ok)")
+                    return True
+                log(f"delete_remote_branch: gh api DELETE failed: {err}")
+                return False
+            log(f"delete_remote_branch: removed {branch!r} via gh api")
+            return True
+        except Exception as e:
+            log(f"delete_remote_branch: gh exception for {branch!r}: {e}")
+            return False
+    log(f"delete_remote_branch: no client/repo_path for branch {branch!r}")
+    return False
+
+
+def create_pr_for_task(task, reviewer_model, es_id: str | None = None):
     """
     Create a pull request via the GitHostClient REST API (AP-4B: no local clone required).
     Falls back to `gh pr create` for local repos or when the API client is unavailable.
@@ -603,7 +883,8 @@ def create_pr_for_task(task, reviewer_model):
 
     repo_id = task.get('repo')
     src     = _get_project_source(repo_id) or {}
-    gitflow = src.get('gitflow') or {'autoPrOnApprove': True, 'defaultBranch': None}
+    gitflow = load_project_gitflow(repo_id)
+    target_branch = resolve_pr_base_branch(repo_id)
 
     title = task.get('title') or f"Task {task_id}"
     ac    = task.get('acceptance_criteria') or []
@@ -619,7 +900,30 @@ def create_pr_for_task(task, reviewer_model):
         try:
             from utils.git_host_client import get_git_client, GitHostError  # noqa
             client = get_git_client(src)
-            target_branch = gitflow.get('defaultBranch') or client.get_default_branch()
+
+            # Idempotency for story-scoped branches: reuse an existing open PR for this head.
+            if hasattr(client, 'owner') and hasattr(client, '_get'):
+                try:
+                    pulls = client._get(
+                        'pulls',
+                        {
+                            'state': 'open',
+                            'head': f'{client.owner}:{branch}',
+                            'base': target_branch,
+                            'per_page': '5',
+                        },
+                    )
+                    if isinstance(pulls, list) and pulls:
+                        p0 = pulls[0]
+                        pr_url = p0.get('html_url', '')
+                        pr_number = p0.get('number')
+                        log(f"create_pr: existing open PR for head={branch} -> {pr_url}")
+                        _maybe_auto_merge_integration_pr(
+                            task, pr_number, client=client, es_id=es_id,
+                        )
+                        return pr_url, pr_number, None
+                except Exception as ex:
+                    log(f"create_pr: list open PRs failed (non-fatal) task={task_id}: {ex}")
 
             body = (
                 f"## {title}\n\n"
@@ -637,6 +941,7 @@ def create_pr_for_task(task, reviewer_model):
             pr_url    = result.get('pr_url', '')
             pr_number = result.get('pr_number')
             log(f"create_pr: REST API PR created task={task_id} -> {pr_url}")
+            _maybe_auto_merge_integration_pr(task, pr_number, client=client, es_id=es_id)
             return pr_url, pr_number, None
         except Exception as e:
             log(f"create_pr: REST API attempt failed task={task_id}: {e}; falling back to gh CLI")
@@ -646,10 +951,6 @@ def create_pr_for_task(task, reviewer_model):
     if not repo_path or not (repo_path / '.git').exists():
         log(f"create_pr: no local repo path available for task={task_id}")
         return None, None, 'no_repo'
-
-    target_branch = resolve_default_branch(
-        str(repo_path), override=gitflow.get('defaultBranch'),
-    )
 
     # Idempotency: reuse existing open PR
     try:
@@ -661,7 +962,12 @@ def create_pr_for_task(task, reviewer_model):
         if list_res.returncode == 0 and list_res.stdout.strip():
             arr = json.loads(list_res.stdout)
             if arr:
-                return arr[0].get('url'), arr[0].get('number'), None
+                pr_url = arr[0].get('url')
+                pr_number = arr[0].get('number')
+                _maybe_auto_merge_integration_pr(
+                    task, pr_number, repo_path=repo_path, es_id=es_id,
+                )
+                return pr_url, pr_number, None
     except Exception:
         pass
 
@@ -703,7 +1009,189 @@ def create_pr_for_task(task, reviewer_model):
         pr_number = int(url_parts[-1])
 
     log(f"create_pr: PR created task={task_id} -> {pr_url}")
+    _maybe_auto_merge_integration_pr(task, pr_number, repo_path=repo_path, es_id=es_id)
     return pr_url, pr_number, None
+
+
+def _maybe_auto_merge_integration_pr(
+    task: dict,
+    pr_number: int | None,
+    *,
+    client: object = None,
+    repo_path: Path | str | None = None,
+    es_id: str | None = None,
+) -> None:
+    """
+    Merge feature PR into the integration branch (develop) when enabled, then
+    optionally delete the remote task branch so develop is the single line of integration.
+    Never runs for release-promotion tasks.
+    """
+    if not pr_number or task.get('release_promotion_task'):
+        return
+    repo_id = task.get('repo')
+    gf = load_project_gitflow(repo_id)
+    if not gf.get('autoMergeIntegrationPr', True):
+        return
+    merged_ok = False
+    if client is not None and type(client).__name__ == 'GitHubClient':
+        try:
+            client.merge_pull_request(int(pr_number))
+            merged_ok = True
+            log(f"auto-merge: merged PR #{pr_number} for task={task.get('id')}")
+        except Exception as e:
+            err = str(e).lower()
+            if 'already merged' in err or 'pull request is already merged' in err:
+                merged_ok = True
+                log(f"auto-merge: PR #{pr_number} already merged for task={task.get('id')}")
+            else:
+                log(f"auto-merge GitHub API failed (non-fatal) task={task.get('id')}: {e}")
+        if merged_ok:
+            deleted = False
+            if _should_delete_remote_branch_after_merge():
+                deleted = _delete_remote_branch_after_merge(task, client=client)
+            if es_id:
+                try:
+                    doc = {'pr_status': 'merged'}
+                    if deleted:
+                        doc['remote_branch_deleted'] = True
+                    update_task_doc(es_id, doc)
+                except Exception as ex:
+                    log(f"auto-merge: update_task_doc after merge failed task={task.get('id')}: {ex}")
+        return
+    if repo_path:
+        try:
+            mr = subprocess.run(
+                ['gh', 'pr', 'merge', str(pr_number), '--merge'],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if mr.returncode != 0:
+                err = (mr.stderr or mr.stdout or '').lower()
+                if 'already merged' in err or 'nothing to merge' in err:
+                    merged_ok = True
+                    log(f"auto-merge: PR #{pr_number} already merged (gh) for task={task.get('id')}")
+                else:
+                    log(f"auto-merge gh failed task={task.get('id')}: {(mr.stderr or mr.stdout or '')[:400]}")
+            else:
+                merged_ok = True
+                log(f"auto-merge: gh merged PR #{pr_number} for task={task.get('id')}")
+        except Exception as e:
+            log(f"auto-merge gh exception task={task.get('id')}: {e}")
+        if merged_ok:
+            deleted = False
+            if _should_delete_remote_branch_after_merge():
+                deleted = _delete_remote_branch_after_merge(task, repo_path=repo_path)
+            if es_id:
+                try:
+                    doc = {'pr_status': 'merged'}
+                    if deleted:
+                        doc['remote_branch_deleted'] = True
+                    update_task_doc(es_id, doc)
+                except Exception as ex:
+                    log(f"auto-merge: update_task_doc after gh merge failed task={task.get('id')}: {ex}")
+
+
+def create_release_promotion_pr(task: dict) -> tuple[str | None, int | None, str | None]:
+    """
+    Open develop → main (or configured integration → release) for human merge.
+    No local clone required (GitHub REST).
+    """
+    repo_id = task.get('repo')
+    src = _get_project_source(repo_id) or {}
+    clone_status = src.get('clone_status') or src.get('cloneStatus') or ''
+    if clone_status in ('local',):
+        return None, None, 'release_pr_requires_remote_api'
+
+    gf = load_project_gitflow(repo_id)
+    ib = (gf.get('integrationBranch') or 'develop').strip()
+    rb = resolve_release_branch(repo_id)
+
+    try:
+        from utils.git_host_client import get_git_client  # noqa
+        client = get_git_client(src)
+    except Exception as e:
+        return None, None, str(e)
+
+    title = f"Release: merge {ib} → {rb}"
+    body = (
+        f"## Release promotion\n\n"
+        f"**Repo:** `{repo_id}`\n"
+        f"**Integration:** `{ib}` → **Release:** `{rb}`\n\n"
+        f"Flume opened this PR automatically when all epics in the plan completed. "
+        f"**Merge manually** after review — Flume does not auto-merge this PR.\n"
+    )
+
+    if hasattr(client, 'owner') and hasattr(client, '_get'):
+        try:
+            pulls = client._get(
+                'pulls',
+                {
+                    'state': 'open',
+                    'head': f'{client.owner}:{ib}',
+                    'base': rb,
+                    'per_page': '5',
+                },
+            )
+            if isinstance(pulls, list) and pulls:
+                p0 = pulls[0]
+                return p0.get('html_url'), p0.get('number'), None
+        except Exception as ex:
+            log(f"create_release_promotion_pr: list pulls failed: {ex}")
+
+    try:
+        result = client.create_pull_request(title=title, body=body, head=ib, base=rb)
+        return result.get('pr_url'), result.get('pr_number'), None
+    except Exception as e:
+        return None, None, str(e)
+
+
+def _handle_release_promotion_task(task: dict, es_id: str) -> bool:
+    """No clone: open the final integration→release PR via API."""
+    task_id = task.get('id', '')
+    append_agent_note(es_id, 'Opening release promotion PR (integration → release branch)…')
+    try:
+        pr_url, pr_number, err = create_release_promotion_pr(task)
+        if err:
+            append_agent_note(es_id, f'Release PR failed: {err}')
+            update_task_doc(
+                es_id,
+                {
+                    'status': 'blocked',
+                    'needs_human': True,
+                    **_implementer_clear_claim_fields(),
+                },
+            )
+            log(f"release_promotion_task={task_id} failed: {err}")
+            return True
+        update_task_doc(
+            es_id,
+            {
+                'status': 'done',
+                'pr_url': pr_url,
+                'pr_number': pr_number,
+                'pr_status': 'open',
+                'target_branch': resolve_release_branch(task.get('repo') or ''),
+                'needs_human': True,
+                'owner': 'implementer',
+                'assigned_agent_role': 'implementer',
+                **_implementer_clear_claim_fields(),
+            },
+        )
+        append_agent_note(
+            es_id,
+            'Release PR is open. Merge it manually when you are ready (Flume never auto-merges this PR).',
+        )
+        log(f"release_promotion_task={task_id} opened PR {pr_url}")
+    except Exception as e:
+        log(f"release_promotion_task={task_id} exception: {e}")
+        append_agent_note(es_id, f'Release PR error: {e}')
+        update_task_doc(
+            es_id,
+            {'status': 'blocked', 'needs_human': True, **_implementer_clear_claim_fields()},
+        )
+    return True
 
 
 def create_bug_task(parent_task, bug, idx):
@@ -853,7 +1341,57 @@ def compute_ready_for_repo(repo):
             changed += 1
             log(f"compute_ready: marked parent {parent_id} ({src.get('item_type')}) done — all children terminal")
 
-    return changed
+    extra = _maybe_enqueue_release_promotion_task(repo, by_id)
+    return changed + extra
+
+
+def _maybe_enqueue_release_promotion_task(repo: str, by_id: dict) -> int:
+    """
+    When every epic in the repo is done, enqueue a single task to open
+    integration → release PR (human merge only).
+    """
+    epic_ids = [eid for eid, src in by_id.items() if src.get('item_type') == 'epic']
+    if not epic_ids:
+        return 0
+    if not all(by_id[e].get('status') in ('done', 'archived') for e in epic_ids):
+        return 0
+    rid = f"release-d2m-{repo}"
+    if rid in by_id:
+        return 0
+    doc = {
+        'id': rid,
+        'repo': repo,
+        'parent_id': None,
+        'title': 'Release: open PR to merge develop → main (human merge)',
+        'objective': (
+            'All epics for this plan are complete. Open one pull request from the integration branch '
+            '(develop) to the release branch (main). Flume does not auto-merge this PR — merge manually after review.'
+        ),
+        'item_type': 'task',
+        'status': 'ready',
+        'owner': 'implementer',
+        'assigned_agent_role': 'implementer',
+        'release_promotion_task': True,
+        'requires_code': False,
+        'depends_on': [],
+        'acceptance_criteria': [
+            'Pull request exists from integration branch to release branch',
+            'PR is left open for human review and merge',
+        ],
+        'artifacts': [],
+        'needs_human': True,
+        'risk': 'low',
+        'created_at': now_iso(),
+        'updated_at': now_iso(),
+        'last_update': now_iso(),
+    }
+    try:
+        write_doc(TASK_INDEX, doc)
+        log(f"compute_ready: enqueued release promotion task {rid} for repo={repo}")
+        return 1
+    except Exception as e:
+        log(f"compute_ready: failed to enqueue release task: {e}")
+        return 0
 
 
 def handle_pm_dispatcher_worker(task):
@@ -1037,7 +1575,7 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
 
 def _branch_has_new_commits(repo_path: str, branch: str) -> bool:
     """Return True only if branch has at least one commit that is not on origin/main (or main)."""
-    for base in ('origin/main', 'origin/master', 'main', 'master'):
+    for base in ('origin/develop', 'origin/main', 'origin/master', 'main', 'master'):
         try:
             out = subprocess.run(
                 ['git', '-C', repo_path, 'log', f'{base}..{branch}', '--oneline', '--max-count=1'],
@@ -1056,26 +1594,45 @@ def task_requires_code(task: dict) -> bool:
     We use it to avoid marking code-changing tasks as "done" when the agent
     only did analysis/context and didn't actually edit the repo.
     """
-    # Non-code overrides evaluated first — if the task is explicitly analytical,
-    # documentation-oriented, or exploratory, it must NOT be re-queued just
-    # because its title contains a code-sounding verb (e.g. "Research and update").
-    non_code_overrides = [
-        'document', 'documentation', 'research', 'investigate', 'analyze', 'analyse',
-        'explore', 'plan ', 'design', 'discuss', 'assess', 'report', 'summarize',
-        'summarise', 'audit', 'verify', 'validate', 'review ', 'test '
-    ]
+    if task.get('requires_code') is False:
+        return False
+    if task.get('release_promotion_task'):
+        return False
     # Key off both title AND objective for better signal (title alone is sometimes
     # too generic when inherited from a parent story).
     full_text = f"{task.get('title', '')} {task.get('objective', '')}".lower()
+
+    # Repo-deliverable docs (README, markdown) must produce git commits. Do not treat as
+    # analysis-only: handle_implementer discards file writes when requires_code is False,
+    # which left "done" tasks with nothing pushed to GitHub.
+    if any(
+        m in full_text
+        for m in (
+            'readme',
+            'readme.md',
+            '.md',
+            'markdown',
+        )
+    ):
+        return True
+
+    # Non-code overrides — analytical / exploratory work without a repo artifact.
+    # NOTE: Do not use the bare substring 'document' here: planner story titles often
+    # start with "Document …" (meaning write that section into the repo) and would
+    # incorrectly classify those as analysis-only.
+    non_code_overrides = [
+        'documentation', 'research', 'investigate', 'analyze', 'analyse',
+        'explore', 'plan ', 'design', 'discuss', 'assess', 'report', 'summarize',
+        'summarise', 'audit', 'verify', 'validate', 'review ', 'test '
+    ]
     if any(t in full_text for t in non_code_overrides):
         return False
 
     # Code-edit / content-edit verbs. Keep this list conservative to avoid
     # flagging pure validation tasks ("verify"/"validate"/"test").
-    # Documentation tasks use verbs like "reorganize", "convert", "restructure",
-    # "migrate", "rewrite", and "move" which must be included so doc-update
-    # tasks produce commits rather than being silently classified as analysis-only.
+    # "document " catches Flume planner phrasing: "Document application architecture …"
     code_triggers = [
+        'document ',
         'replace', 'update', 'modify', 'implement', 'write', 'add ', 'remove ',
         'create', 'change', 'set ', 'edit ', 'reorganize', 'convert', 'restructure',
         'migrate', 'rewrite', 'move ', 'rename', 'refactor', 'format', 'reformat',
@@ -1162,6 +1719,9 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
 
 
 def handle_implementer_worker(task, es_id):
+    if task.get('release_promotion_task'):
+        return _handle_release_promotion_task(task, es_id)
+
     # Guarantee absolute node isolation immediately via Worktree Sandboxing
     branch, worktree_path = ensure_task_branch(task)
     if branch and not task.get('branch'):
@@ -1527,6 +2087,13 @@ def handle_tester_worker(task, es_id):
 
 
 def handle_reviewer_worker(task, es_id):
+    # Terminal tasks should never run reviewer LLM again (avoids tight loops + wasted Ollama calls).
+    st = (task.get('status') or '').strip().lower()
+    if st in ('done', 'cancelled', 'archived'):
+        log(f"reviewer: task={task.get('id')} already {st} — skipping reviewer run")
+        update_task_doc(es_id, {**_implementer_clear_claim_fields()})
+        return True
+
     # Gate: don't approve if no real commit was recorded by the implementer
     if not task.get('commit_sha'):
         note = ('Blocked: no commit_sha recorded. The implementer did not push any code changes. '
@@ -1560,7 +2127,11 @@ def handle_reviewer_worker(task, es_id):
         'created_at': now_iso(),
     })
     if verdict == 'approved':
-        update_task_doc(es_id, {'status': 'done', 'owner': 'reviewer'})
+        update_task_doc(es_id, {
+            'status': 'done',
+            'owner': 'reviewer',
+            **_implementer_clear_claim_fields(),
+        })
         write_doc(PROVENANCE_INDEX, {
             'id': f"prov-{task_id}-{int(time.time())}",
             'task_id': task_id,
@@ -1584,49 +2155,62 @@ def handle_reviewer_worker(task, es_id):
         if gitflow.get('autoPrOnApprove', True) and task.get('branch'):
             # Check idempotency — don't create a second PR
             if not task.get('pr_url'):
-                pr_url, pr_number, pr_error = create_pr_for_task(task, reviewer_model)
-                if pr_url:
-                    update_task_doc(es_id, {
-                        'pr_url': pr_url,
-                        'pr_number': pr_number,
-                        'pr_status': 'open',
-                        'target_branch': resolve_default_branch(
-                            str(load_project_repo_path(task.get('repo')) or ''),
-                            override=gitflow.get('defaultBranch'),
-                        ),
-                    })
-                    write_doc(HANDOFF_INDEX, {
-                        'task_id': task_id,
-                        'from_role': 'reviewer',
-                        'to_role': 'done',
-                        'reason': f'PR created: {pr_url}',
-                        'objective': task.get('objective', ''),
-                        'inputs': [],
-                        'constraints': f'branch={task.get("branch")} pr={pr_url}',
-                        'status_hint': 'done',
-                        'model_used': reviewer_model,
-                        'created_at': now_iso(),
-                    })
-                    log(f"auto-PR created for task={task_id}: {pr_url}")
-                elif pr_error:
-                    # Log failure but don't block task completion
-                    write_doc(FAILURE_INDEX, {
-                        'id': f"failure-pr-{task_id}-{int(time.time())}",
-                        'task_id': task_id,
-                        'project': task.get('repo'),
-                        'repo': task.get('repo'),
-                        'error_class': 'pr_creation_failed',
-                        'summary': f'Auto-PR creation failed: {pr_error}',
-                        'root_cause': pr_error,
-                        'fix_applied': 'Task marked done; PR can be created manually.',
-                        'model_used': reviewer_model,
-                        'confidence': 'high',
-                        'recurrence_count': 1,
-                        'created_at': now_iso(),
-                        'updated_at': now_iso(),
-                    })
-                    update_task_doc(es_id, {'pr_status': 'failed', 'pr_error': pr_error})
-                    log(f"auto-PR failed for task={task_id}: {pr_error}")
+                if _should_defer_auto_pr_until_story_complete(task):
+                    append_agent_note(
+                        es_id,
+                        'Auto-PR deferred: other tasks under this story are still in progress. '
+                        'Flume will open one PR when the last story task is approved '
+                        '(FLUME_AUTO_PR_SCOPE=story).',
+                    )
+                    log(f"auto-PR deferred for task={task_id} — story still has open sibling tasks")
+                else:
+                    pr_url, pr_number, pr_error = create_pr_for_task(task, reviewer_model, es_id=es_id)
+                    if pr_url:
+                        tb = resolve_pr_base_branch(task.get('repo') or '')
+                        _, src_after_pr = fetch_task_doc(task_id)
+                        pr_patch = {
+                            'pr_url': pr_url,
+                            'pr_number': pr_number,
+                            'target_branch': tb,
+                        }
+                        # create_pr_for_task → _maybe_auto_merge may have already merged into develop
+                        # and set pr_status / remote_branch_deleted — do not overwrite with 'open'.
+                        if not (src_after_pr and str(src_after_pr.get('pr_status') or '') == 'merged'):
+                            pr_patch['pr_status'] = 'open'
+                        update_task_doc(es_id, pr_patch)
+                        _backfill_story_pr_to_sibling_tasks(task, pr_url, pr_number, tb)
+                        write_doc(HANDOFF_INDEX, {
+                            'task_id': task_id,
+                            'from_role': 'reviewer',
+                            'to_role': 'done',
+                            'reason': f'PR created: {pr_url}',
+                            'objective': task.get('objective', ''),
+                            'inputs': [],
+                            'constraints': f'branch={task.get("branch")} pr={pr_url}',
+                            'status_hint': 'done',
+                            'model_used': reviewer_model,
+                            'created_at': now_iso(),
+                        })
+                        log(f"auto-PR created for task={task_id}: {pr_url}")
+                    elif pr_error:
+                        # Log failure but don't block task completion
+                        write_doc(FAILURE_INDEX, {
+                            'id': f"failure-pr-{task_id}-{int(time.time())}",
+                            'task_id': task_id,
+                            'project': task.get('repo'),
+                            'repo': task.get('repo'),
+                            'error_class': 'pr_creation_failed',
+                            'summary': f'Auto-PR creation failed: {pr_error}',
+                            'root_cause': pr_error,
+                            'fix_applied': 'Task marked done; PR can be created manually.',
+                            'model_used': reviewer_model,
+                            'confidence': 'high',
+                            'recurrence_count': 1,
+                            'created_at': now_iso(),
+                            'updated_at': now_iso(),
+                        })
+                        update_task_doc(es_id, {'pr_status': 'failed', 'pr_error': pr_error})
+                        log(f"auto-PR failed for task={task_id}: {pr_error}")
             else:
                 log(f"PR already exists for task={task_id}, skipping auto-PR")
         return True
