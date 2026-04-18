@@ -13,6 +13,22 @@ export interface TelemetryData {
     tags: Record<string, string>;
     count: number;
   }[];
+  flume_worker_tokens_total: {
+    tags: Record<string, string>;
+    count: number;
+  }[];
+  flume_node_requests_total: {
+    tags: Record<string, string>;
+    count: number;
+  }[];
+  flume_routing_decision: {
+    tags: Record<string, string>;
+    count: number;
+  }[];
+  flume_node_load: {
+    tags: Record<string, string>;
+    value: number;
+  }[];
 }
 
 export function useTelemetry() {

@@ -21,6 +21,7 @@ export function useSnapshot() {
     queryKey: ['snapshot'],
     queryFn: fetchSnapshot,
     refetchInterval: (query) => (query.state.status === 'error' ? false : 5_000),
+    refetchIntervalInBackground: false,
     staleTime: 3_000,
     retry: false,
   });

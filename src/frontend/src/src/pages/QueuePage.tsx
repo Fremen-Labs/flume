@@ -207,10 +207,14 @@ export default function QueuePage() {
                           <StatusBadge status={item.priority} />
                         </div>
                         <p className="text-xs text-foreground font-medium truncate">{item.title}</p>
-                        <div className="flex items-center justify-between mt-2">
+                        <div className="flex items-start justify-between mt-2">
                           <span className="text-[10px] text-muted-foreground truncate">{item.repo}</span>
                           {worker && (
-                            <span className="text-[10px] text-primary truncate ml-2">{worker.name}</span>
+                            <div className="flex flex-col items-end shrink-0 ml-2">
+                              <span className="text-[10px] font-medium text-primary truncate">{worker.name}</span>
+                              <span className="text-[9px] text-muted-foreground truncate mt-0.5" title="Execution Node">{worker.execution_host || 'localhost'}</span>
+                              <span className="text-[9px] text-muted-foreground truncate" title="Model">{worker.model || worker.preferred_model}</span>
+                            </div>
                           )}
                         </div>
                         {item.branch && (

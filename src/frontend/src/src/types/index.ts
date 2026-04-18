@@ -36,6 +36,7 @@ export interface ApiTask {
   execution_host?: string;
   active_worker?: string;
   worktree?: string | null;
+  execution_thoughts_count?: number;
 }
 
 export interface ApiWorker {

@@ -191,6 +191,7 @@ def _call_ollama(
     ]
     try:
         kw = _task_llm_kw(task)
+        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
         content, usage = llm_client.chat(
             messages,
             model=model or _current_llm_model(),
@@ -199,6 +200,7 @@ def _call_ollama(
             return_usage=True,
             timeout_seconds=300,
             ollama_think=False,
+            agent_role=role,
             **kw,
         )
         _emit_usage(task, usage)
@@ -844,6 +846,7 @@ def _call_ollama_tools(
     try:
         llm_client = _load_llm_client()
         _task_llm_kw(task)  # resolve creds into env side-effects
+        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
         res = llm_client.chat_with_tools(
             messages,
             tools,
@@ -851,6 +854,7 @@ def _call_ollama_tools(
             temperature=0.2,
             max_tokens=4096,
             ollama_think=True,
+            agent_role=role,
         )
         
         usage = res.get('usage', {}) if isinstance(res, dict) else {}
@@ -1403,6 +1407,9 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             "- When decomposing, create the MINIMUM number of subtasks needed. Each subtask must "
             "modify different files or components. Never create separate tasks for 'locate file' "
             "and 'make change'.\n"
+            "- CRITICAL: You must explicitly map sequential dependencies using the `depends_on` array. "
+            "If a testing or verification task depends on an implementation task, place the implementation task's ID "
+            "in the verification task's `depends_on` array.\n"
             "- Never create subtasks that assume artifacts exist without evidence (e.g., "
             "'replace icon asset' when no SVG files were mentioned).\n\n"
         )

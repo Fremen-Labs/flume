@@ -18,7 +18,7 @@ const navItems = [
   { to: '/agents', icon: Bot, label: 'Agents' },
   { to: '/activity', icon: Activity, label: 'Activity' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
-  { to: '/telemetry', icon: ServerCog, label: 'Telemetry' },
+
   { to: '/nodes', icon: Server, label: 'Node Mesh' },
   { to: '/security', icon: Shield, label: 'Security' },
 ];

@@ -5,7 +5,7 @@ import {
   X, Send, Loader2, CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Plus, Trash2, Pencil, Check, Bot, User, Rocket,
 } from 'lucide-react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 
 // ─── Plan types ───────────────────────────────────────────────────────────────
@@ -322,38 +322,36 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const { data: pollData, error: pollError } = useQuery({
+    queryKey: ['intake-session', sessionId],
+    enabled: !!(open && sessionId && phase === 'planning'),
+    queryFn: async () => {
+      const res = await fetch(`/api/intake/session/${sessionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load planning status');
+      return data;
+    },
+    refetchInterval: 5000,
+  });
+
   useEffect(() => {
-    if (!open || !sessionId || phase !== 'planning') return undefined;
-
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/intake/session/${sessionId}`);
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? 'Failed to load planning status');
-        if (cancelled) return;
-        setPlanningStatus(data.planningStatus ?? null);
-        setMessages(data.messages ?? []);
-        setPlan(data.plan ?? { epics: [] });
-        setPlanSource(data.planSource === 'placeholder' || data.planSource === 'llm' ? data.planSource : null);
-        if (data.status === 'ready' || data.status === 'failed') {
-          setPhase('chat');
-        }
-      } catch (e: unknown) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'Failed to load planning status');
-          setPhase('prompt');
-        }
+    if (pollData && phase === 'planning') {
+      setPlanningStatus(pollData.planningStatus ?? null);
+      setMessages(pollData.messages ?? []);
+      setPlan(pollData.plan ?? { epics: [] });
+      setPlanSource(pollData.planSource === 'placeholder' || pollData.planSource === 'llm' ? pollData.planSource : null);
+      if (pollData.status === 'ready' || pollData.status === 'failed') {
+        setPhase('chat');
       }
-    };
+    }
+  }, [pollData, phase]);
 
-    poll();
-    const id = window.setInterval(poll, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [open, sessionId, phase]);
+  useEffect(() => {
+    if (pollError && phase === 'planning') {
+      setError(pollError instanceof Error ? pollError.message : 'Failed to load planning status');
+      setPhase('prompt');
+    }
+  }, [pollError, phase]);
 
 
   async function startSession() {

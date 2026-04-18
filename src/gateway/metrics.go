@@ -253,6 +253,7 @@ var Metrics = &metricsRegistry{
 	NodeLoad:             newGaugeVec(),
 	NodeHealthGauge:      newGaugeVec(),
 	LocalOffloadPct:      newGaugeVec(),
+	WorkerTokens:         newCounterVec(),
 }
 
 type metricsRegistry struct {
@@ -296,6 +297,9 @@ type metricsRegistry struct {
 
 	// flume_local_offload_percentage
 	LocalOffloadPct *gaugeVec
+
+	// flume_worker_tokens_total{worker_name, direction}
+	WorkerTokens *counterVec
 }
 
 // RecordRequest records a completed request's duration and success state.
@@ -393,6 +397,37 @@ func (m *metricsRegistry) SetNodeLoad(nodeID string, load float64) {
 }
 
 // SetNodeHealth sets the health status gauge for a node.
+// RecordWorkerTokens records usage for a specific worker.
+func (m *metricsRegistry) RecordWorkerTokens(workerName string, input, output int) {
+	if workerName == "" {
+		workerName = "unknown"
+	}
+	m.WorkerTokens.Inc(formatLabels([]Label{{"worker_name", workerName}, {"direction", "input"}}))
+	for i := 1; i < input; i++ {
+		m.WorkerTokens.Inc(formatLabels([]Label{{"worker_name", workerName}, {"direction", "input"}}))
+	}
+	m.WorkerTokens.Inc(formatLabels([]Label{{"worker_name", workerName}, {"direction", "output"}}))
+	for i := 1; i < output; i++ {
+		m.WorkerTokens.Inc(formatLabels([]Label{{"worker_name", workerName}, {"direction", "output"}}))
+	}
+}
+
+// RecordWorkerTokensAdd is a much more efficient way to add N tokens using a custom method
+func (c *counterVec) Add(labels string, val uint64) {
+	c.mu.Lock()
+	c.counts[labels] += val
+	c.mu.Unlock()
+}
+
+// RecordWorkerTokensBatch directly adds instead of looping
+func (m *metricsRegistry) RecordWorkerTokensBatch(workerName string, input, output int) {
+	if workerName == "" {
+		workerName = "unknown"
+	}
+	m.WorkerTokens.Add(formatLabels([]Label{{"worker_name", workerName}, {"direction", "input"}}), uint64(input))
+	m.WorkerTokens.Add(formatLabels([]Label{{"worker_name", workerName}, {"direction", "output"}}), uint64(output))
+}
+
 func (m *metricsRegistry) SetNodeHealth(nodeID, model, status string) {
 	// Reset all status values for this node, then set current.
 	for _, s := range []string{"healthy", "degraded", "offline"} {
@@ -587,6 +622,17 @@ func HandleMetrics() http.HandlerFunc {
 			}
 			buf = append(buf, ' ')
 			buf = strconv.AppendFloat(buf, val, 'f', 1, 64)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_worker_tokens_total ──────────────────────────────────
+		buf = append(buf, "# HELP flume_worker_tokens_total Total tokens streamed per worker.\n"...)
+		buf = append(buf, "# TYPE flume_worker_tokens_total counter\n"...)
+		for labels, count := range Metrics.WorkerTokens.snapshot() {
+			buf = append(buf, "flume_worker_tokens_total{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendUint(buf, count, 10)
 			buf = append(buf, '\n')
 		}
 

@@ -119,9 +119,9 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 func (r *ProviderRouter) RouteToNode(ctx context.Context, req *ChatRequest, nodeURL, authToken string, withTools bool) (*ChatResponse, error) {
 	log := WithContext(ctx)
 	log.Info("routing to mesh node",
-		slog.String("provider", ProviderOllama),
+		slog.String("routing_provider", ProviderOllama),
 		slog.String("node_url", nodeURL),
-		slog.String("model", req.Model),
+		slog.String("target_model", req.Model),
 		slog.Bool("with_tools", withTools),
 		slog.Bool("has_auth", authToken != ""),
 	)

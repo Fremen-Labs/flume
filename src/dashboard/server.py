@@ -1236,9 +1236,9 @@ def commit_plan(repo: str, plan: dict):
     if routing_model:
         logger.info(f"Adaptive Routing: complexity={complexity_score}, routing tasks to {routing_model}")
 
-    # ── Fast path: ≤2 tasks → skip hierarchy, create tasks directly ────────
+    # ── Fast path: ≤3 tasks → skip hierarchy, create tasks directly ────────
     total_tasks = _count_plan_tasks(plan)
-    if 0 < total_tasks <= 2:
+    if 0 < total_tasks <= 3:
         task_seq = get_next_id_sequence('task')
         prev_task_id = None
         for epic in plan.get('epics') or []:
@@ -2388,16 +2388,40 @@ def load_snapshot():
                         'total_actual_tokens': {'sum': {'field': 'actual_tokens_sent'}},
                         'total_input_tokens': {'sum': {'field': 'input_tokens'}},
                         'total_output_tokens': {'sum': {'field': 'output_tokens'}},
+                        'by_worker': {
+                            'terms': {'field': 'worker_name', 'size': 100},
+                            'aggs': {
+                                'input': {'sum': {'field': 'input_tokens'}},
+                                'output': {'sum': {'field': 'output_tokens'}},
+                                'role': {'terms': {'field': 'worker_role'}}
+                            }
+                        }
                     }
                 })
                 aggs = agg_res.get('aggregations', {})
+                cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', '0.002'))
+                cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
+                t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
+                t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
+                
+                historical_burn = []
+                for b in aggs.get('by_worker', {}).get('buckets', []):
+                    historical_burn.append({
+                        'worker_name': b['key'],
+                        'input_tokens': int(b.get('input', {}).get('value', 0)),
+                        'output_tokens': int(b.get('output', {}).get('value', 0)),
+                        'role': b.get('role', {}).get('buckets', [{'key': 'unknown'}])[0]['key'] if len(b.get('role', {}).get('buckets', [])) > 0 else 'unknown'
+                    })
+
                 return {
                     'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
                     'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
                     'baseline_full_context_tokens': int(aggs.get('total_baseline_full_context', {}).get('value', 0)),
                     'actual_tokens_sent': int(aggs.get('total_actual_tokens', {}).get('value', 0)),
-                    'total_input_tokens': int(aggs.get('total_input_tokens', {}).get('value', 0)),
-                    'total_output_tokens': int(aggs.get('total_output_tokens', {}).get('value', 0)),
+                    'total_input_tokens': t_in,
+                    'total_output_tokens': t_out,
+                    'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
+                    'historical_burn': historical_burn,
                 }
             except Exception:
                 return {
@@ -2407,6 +2431,8 @@ def load_snapshot():
                     'actual_tokens_sent': 0,
                     'total_input_tokens': 0,
                     'total_output_tokens': 0,
+                    'estimated_cost_usd': 0.0,
+                    'historical_burn': [],
                 }
         f_savings = pool.submit(fetch_savings)
         f_workers = pool.submit(load_workers)
@@ -2422,9 +2448,18 @@ def load_snapshot():
 
     repos_res = load_repos(registry=projects_res)
 
+    def map_task(h):
+        s = h.get('_source', {})
+        res = {'_id': h.get('_id'), **s}
+        thoughts = s.get('execution_thoughts', [])
+        res['execution_thoughts_count'] = len(thoughts) if isinstance(thoughts, list) else 0
+        if 'execution_thoughts' in res:
+            del res['execution_thoughts']
+        return res
+
     result = {
         'workers': workers_res,
-        'tasks': [{'_id': h.get('_id'), **h.get('_source', {})} for h in tasks_res],
+        'tasks': [map_task(h) for h in tasks_res],
         'reviews': [{'_id': h.get('_id'), **h.get('_source', {})} for h in reviews_res],
         'failures': [{'_id': h.get('_id'), **h.get('_source', {})} for h in failures_res],
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance_res],
@@ -4755,6 +4790,10 @@ async def get_system_telemetry():
                 "flume_active_models": [],
                 "flume_ensemble_requests_total": [],
                 "flume_vram_pressure_events_total": 0,
+                "flume_worker_tokens_total": [],
+                "flume_node_requests_total": [],
+                "flume_routing_decision": [],
+                "flume_node_load": [],
             }
             
             for line in lines:
@@ -4795,6 +4834,34 @@ async def get_system_telemetry():
                         results["flume_ensemble_requests_total"].append({
                             "tags": tag_dict,
                             "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_worker_tokens_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_worker_tokens_total"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_node_requests_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_node_requests_total"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_routing_decision{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_routing_decision"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
+                        })
+                    elif key_with_tags.startswith("flume_node_load{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_node_load"].append({
+                            "tags": tag_dict,
+                            "value": float(val)
                         })
 
             return results

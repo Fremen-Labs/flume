@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -265,12 +267,27 @@ func (r *NodeRegistry) UpdateCapabilities(nodeID string, discovered NodeCapabili
 	}
 }
 
+// extractModelParamSize parses parameter size out of a model tag (e.g. "35b" returns 35.0).
+var paramCountRegex = regexp.MustCompile(`(\d+(?:\.\d+)?)b`)
+
+func extractModelParamSize(modelTag string) float64 {
+	tagLower := strings.ToLower(modelTag)
+	matches := paramCountRegex.FindStringSubmatch(tagLower)
+	if len(matches) > 1 {
+		val, err := strconv.ParseFloat(matches[1], 64)
+		if err == nil {
+			return val
+		}
+	}
+	return 0.0
+}
+
 // SelectNode picks the best available node for a given task type using weighted scoring.
 //
 // Score = (model_fit × 0.4) + (load_inverse × 0.3) + (latency_inverse × 0.2) + (ensemble_eligible × 0.1)
 //
 // Returns nil if no healthy nodes are available.
-func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int) *Node {
+func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requiresHighParam bool) *Node {
 	healthy := r.HealthyNodes()
 	if len(healthy) == 0 {
 		return nil
@@ -299,11 +316,30 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int) *Node 
 
 		// Task-type affinity boost.
 		switch taskType {
-		case "reasoning", "planning", "pm":
+		case "implementer", "code", "reasoning", "planning", "pm":
 			modelFit = math.Min(1.0, modelFit*1.2)
+			// Harder work: prioritize more RAM and coding-specific models.
+			if n.Capabilities.MemoryGB >= 16 {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
+			tagLower := strings.ToLower(n.ModelTag)
+			if strings.Contains(tagLower, "coder") || strings.Contains(tagLower, "code") {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
 		case "review", "test", "fast", "evaluation":
 			// Prefer speed over reasoning power for lightweight analysis roles.
 			modelFit = math.Min(1.0, modelFit*0.8+float64(n.Capabilities.EstimatedTPS)/100.0*0.2)
+			// Simpler work: prioritize smaller nodes.
+			if n.Capabilities.MemoryGB < 16 {
+				modelFit = math.Min(1.0, modelFit*1.2)
+			}
+		}
+
+		// Heavy Task Penality Check: Enforce high-param requirement.
+		size := extractModelParamSize(n.ModelTag)
+		if requiresHighParam && size > 0 && size < 30.0 {
+			// Brutally penalize models < 30b if task requires heavy lifting (like tools/complex code)
+			modelFit *= 0.1
 		}
 
 		// Load inverse: lower load = higher score.

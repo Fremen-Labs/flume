@@ -1155,6 +1155,12 @@ function HierarchyNode({
         <span className="text-[10px] font-mono text-muted-foreground/50 shrink-0">#{node.id}</span>
         <span className="text-xs font-medium text-foreground flex-1 truncate">{node.title}</span>
         <div className="flex items-center gap-2 shrink-0">
+          {node.status === 'running' && node.execution_thoughts_count != null && node.execution_thoughts_count > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/10 text-[10px] font-medium text-primary border border-primary/20" title={`${node.execution_thoughts_count} reasoning steps executed`}>
+               <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shadow-[0_0_8px_currentColor]" />
+               {node.execution_thoughts_count} steps
+            </span>
+          )}
           <StatusBadge status={node.status} pulse />
           {node.branch && <GitBranch className="w-3 h-3 text-primary/60" />}
           {node.pr_status === 'failed' && <AlertCircle className="w-3 h-3 text-destructive" />}
