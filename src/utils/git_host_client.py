@@ -223,7 +223,12 @@ class GitHubClient(GitHostClient):
         self._default_branch: str | None = None
 
     def _url(self, path: str) -> str:
-        return f"{self.BASE}/repos/{self.owner}/{self.repo}/{path.lstrip('/')}"
+        # GitHub's REST API returns 404 for the repo root with a trailing slash
+        # (e.g. /repos/owner/repo/), so only append the separator + path when
+        # the caller actually provided a sub-path.
+        clean = path.lstrip("/")
+        base = f"{self.BASE}/repos/{self.owner}/{self.repo}"
+        return f"{base}/{clean}" if clean else base
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         url = self._url(path)
