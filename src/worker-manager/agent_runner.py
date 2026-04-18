@@ -245,6 +245,7 @@ def _call_ollama(
             timeout_seconds=300,
             ollama_think=False,
             agent_role=role,
+            task_id=task.get('id', task.get('_id')) if task else None,
             **kw,
         )
         _emit_usage(task, usage)
@@ -901,6 +902,7 @@ def _call_ollama_tools(
             return_telemetry=True,
             ollama_think=True,
             agent_role=role,
+            task_id=task.get('id', task.get('_id')) if task else None,
         )
         
         usage = res.get('usage', {}) if isinstance(res, dict) else {}

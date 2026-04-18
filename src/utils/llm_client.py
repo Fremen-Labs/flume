@@ -136,6 +136,7 @@ def chat(
     return_telemetry=False,
     ollama_think=False,
     agent_role='',
+    task_id=None,
 ):
     """Call the configured LLM and return the assistant's text response.
 
@@ -161,6 +162,8 @@ def chat(
                 'think': ollama_think,
                 'agent_role': agent_role,
             }
+            if task_id:
+                payload['task_id'] = task_id
             resp = _post_gateway('/v1/chat', payload, timeout=timeout_seconds)
             
             telemetry = resp.get('telemetry', {})
@@ -229,6 +232,7 @@ def chat_with_tools(
     return_telemetry=False,
     ollama_think=False,
     agent_role='',
+    task_id=None,
 ):
     """Call the configured LLM with tool definitions.
 
@@ -263,6 +267,8 @@ def chat_with_tools(
                 'think': ollama_think,
                 'agent_role': agent_role,
             }
+            if task_id:
+                payload['task_id'] = task_id
             resp = _post_gateway('/v1/chat/tools', payload, timeout=180)
             
             telemetry = resp.get('telemetry', {})

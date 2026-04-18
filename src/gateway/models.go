@@ -20,6 +20,7 @@ type ChatRequest struct {
 	CredentialID string    `json:"credential_id,omitempty"`
 	AgentRole    string    `json:"agent_role,omitempty"`
 	Stream       bool      `json:"stream,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
 }
 
 // Message represents a single chat message.
