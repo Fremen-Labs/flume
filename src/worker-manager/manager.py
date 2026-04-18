@@ -74,6 +74,52 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
+def _fetch_adaptive_max_concurrency(active_mesh_count: int) -> int:
+    """Dynamically determine MAX_CONCURRENT_TASKS based on cluster VRAM constraints."""
+    try:
+        ceiling_gb = 12  # Default fallback
+        res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
+        if res:
+            nodes = res.get('hits', {}).get('hits', [])
+            sum_gb = 0
+            for n in nodes:
+                c = n.get('_source', {}).get('capabilities', {})
+                mem = c.get('memory_gb', 0)
+                if mem:
+                    sum_gb += float(mem)
+            if sum_gb > 0:
+                ceiling_gb = sum_gb
+                
+        ceiling_bytes = ceiling_gb * (1024**3)
+        
+        current_vram_bytes = 0
+        try:
+            import urllib.request
+            import json
+            req = urllib.request.Request('http://host.docker.internal:11434/api/ps', method='GET')
+            with urllib.request.urlopen(req, timeout=1.0) as ps_resp:
+                ps_data = json.loads(ps_resp.read().decode())
+                for m in ps_data.get('models', []):
+                    current_vram_bytes += float(m.get('size_vram', 0))
+        except Exception:
+            pass
+            
+        # Context Floor Constraint (approx 1.5GB KV cache allowance per active local agent)
+        projected_total = current_vram_bytes + (active_mesh_count * 1.5 * (1024**3))
+        
+        # Adaptive Threshold Formula
+        max_parallel = int(os.environ.get('FLUME_MAX_PARALLEL', '4'))
+        if projected_total > ceiling_bytes:
+            return 1 # Choked VRAM, clamp to strictly 1 task execution
+        elif projected_total > ceiling_bytes * 0.75:
+            return 2 # 75% Utilized, Throttle partially 
+        else:
+            return max_parallel # Sub-ceiling, run at maximum capacity!
+            
+    except Exception as e:
+        _manager_logger.error(f"Failed calculating adaptive concurrency: {e}")
+        return 2
+
 def log(msg, **kwargs):
     if kwargs:
         _manager_logger.info(str(msg), extra={'structured_data': kwargs})
@@ -819,7 +865,6 @@ def cycle():
 
     workers = build_workers()
     
-    max_concurrent = int(os.environ.get('MAX_CONCURRENT_TASKS', '2'))
     cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
     active_mesh_count = 0
     
@@ -831,6 +876,8 @@ def cycle():
             if w_prov not in cloud_providers:
                 active_mesh_count += 1
                 
+    max_concurrent = _fetch_adaptive_max_concurrency(active_mesh_count)
+    
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
         snapshot = dict(worker)
