@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any, Optional
+from pathlib import Path
 
 from utils.logger import get_logger
 
@@ -78,7 +79,7 @@ def ensure_migrated_from_env(workspace_root: Path) -> None:
     doc = load_document(workspace_root)
     if doc.get("credentials"):
         return
-    from llm_settings import load_effective_pairs
+    from llm_settings import load_effective_pairs  # type: ignore
 
     pairs = load_effective_pairs(workspace_root)
     raw_tok = _strip_env_quotes(pairs.get(ENV_ADO_TOKEN, "") or "")
@@ -113,7 +114,7 @@ def get_active_token_plain(workspace_root: Path) -> str:
         token = str(c.get("token") or "").strip()
         if token == "***OPENBAO_DELEGATED***":
             try:
-                from llm_settings import _openbao_get_all
+                from llm_settings import _openbao_get_all  # type: ignore
                 bao_vals = _openbao_get_all(workspace_root)
                 delegated_token = str(bao_vals.get(f"FLUME_ADO_{aid}") or "").strip()
                 if delegated_token:
@@ -190,7 +191,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
         if str(doc.get("activeCredentialId") or "") == cid:
             doc["activeCredentialId"] = str(new_c[0].get("id") or "").strip() if new_c else ""
         try:
-            from llm_settings import _openbao_put_many
+            from llm_settings import _openbao_put_many  # type: ignore
             _openbao_put_many(workspace_root, {f"FLUME_ADO_{cid}": ""})
         except ImportError:
             logger.debug("OpenBao delegation import unavailable during ADO token delete")
@@ -241,7 +242,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
                 doc["activeCredentialId"] = cred_id
             if has_token_key and token_in and token_in != MASK:
                 try:
-                    from llm_settings import _openbao_put_many
+                    from llm_settings import _openbao_put_many  # type: ignore
                     _openbao_put_many(workspace_root, {f"FLUME_ADO_{cred_id}": token_in})
                 except ImportError:
                     logger.debug("OpenBao put unavailable during ADO token upsert (update)")
@@ -265,7 +266,7 @@ def apply_action(workspace_root: Path, body: dict[str, Any]) -> tuple[bool, str]
             doc["activeCredentialId"] = new_id
         if token_in and token_in != MASK:
             try:
-                from llm_settings import _openbao_put_many
+                from llm_settings import _openbao_put_many  # type: ignore
                 _openbao_put_many(workspace_root, {f"FLUME_ADO_{new_id}": token_in})
             except ImportError:
                 logger.debug("OpenBao put unavailable during ADO token upsert (new)")
@@ -305,7 +306,7 @@ def apply_legacy_patch(
                 doc["credentials"] = creds
                 if update_token and token and token != MASK:
                     try:
-                        from llm_settings import _openbao_put_many
+                        from llm_settings import _openbao_put_many  # type: ignore
                         _openbao_put_many(workspace_root, {f"FLUME_ADO_{aid}": token})
                     except ImportError:
                         logger.debug("OpenBao put unavailable during ADO legacy patch (active)")
@@ -321,7 +322,7 @@ def apply_legacy_patch(
     doc["activeCredentialId"] = new_id if str(row.get("token") or "").strip() else ""
     if update_token and token and token != MASK:
         try:
-            from llm_settings import _openbao_put_many
+            from llm_settings import _openbao_put_many  # type: ignore
             _openbao_put_many(workspace_root, {f"FLUME_ADO_{new_id}": token})
         except ImportError:
             logger.debug("OpenBao put unavailable during ADO legacy patch (new)")

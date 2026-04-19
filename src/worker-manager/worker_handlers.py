@@ -39,7 +39,7 @@ from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
-from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402
+from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402  # type: ignore
 
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace  # noqa: E402

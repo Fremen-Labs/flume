@@ -133,6 +133,49 @@ def _emit_usage(
     except Exception as e:
         logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
 
+def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict):
+    if not task or not telemetry:
+        return
+    tid = task.get('id', task.get('_id'))
+    if not tid:
+        return
+    host = telemetry.get('node_host')
+    model = telemetry.get('model')
+    if not host:
+        return
+    try:
+        import urllib.request
+        import json
+        import ssl
+        import os
+        es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
+        es_key = os.environ.get('ES_API_KEY', '')
+        hdrs = {'Content-Type': 'application/json'}
+        if es_key:
+            hdrs['Authorization'] = f'ApiKey {es_key}'
+            
+        doc = {'execution_host': host}
+        if model:
+            doc['model'] = model
+            
+        req = urllib.request.Request(
+            f"{es_url}/{os.environ.get('ES_INDEX_TASKS', 'agent-task-records')}/_update/{tid}", 
+            data=json.dumps({'doc': doc}).encode(), 
+            headers=hdrs, 
+            method='POST'
+        )
+        ctx = None
+        if es_url.startswith('https'):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+        with urllib.request.urlopen(req, context=ctx, timeout=2):
+            pass
+        logger.info(f"Synchronized execution telemetry to core worker registry for task {tid}")
+    except Exception as e:
+        logger.warning(f"Failed to sync execution host to task: {e}")
+
 def _load_system_prompt(role: str) -> str:
     prompt_path = AGENTS_ROOT / role / 'SYSTEM_PROMPT.md'
     if prompt_path.exists():
@@ -192,18 +235,21 @@ def _call_ollama(
     try:
         kw = _task_llm_kw(task)
         role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        content, usage = llm_client.chat(
+        content, usage, telemetry = llm_client.chat(
             messages,
             model=model or _current_llm_model(),
             temperature=0.2,
             max_tokens=8192,
             return_usage=True,
+            return_telemetry=True,
             timeout_seconds=300,
             ollama_think=False,
             agent_role=role,
+            task_id=task.get('id', task.get('_id')) if task else None,
             **kw,
         )
         _emit_usage(task, usage)
+        _sync_task_execution_host(task, telemetry)
         content = content.strip()
         try:
             val = content
@@ -848,19 +894,22 @@ def _call_ollama_tools(
         llm_client = _load_llm_client()
         _task_llm_kw(task)  # resolve creds into env side-effects
         role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        res = llm_client.chat_with_tools(
+        res, telemetry = llm_client.chat_with_tools(
             messages,
             tools,
             model=model,
             temperature=0.2,
             max_tokens=4096,
+            return_telemetry=True,
             ollama_think=True,
             agent_role=role,
+            task_id=task.get('id', task.get('_id')) if task else None,
         )
         
         usage = res.get('usage', {}) if isinstance(res, dict) else {}
         if usage:
             _emit_usage(task, usage)
+        _sync_task_execution_host(task, telemetry)
             
         return res
     except Exception as e:
@@ -1439,7 +1488,7 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
 
 
 def _get_cluster_topology() -> dict[str, Any]:
-    from worker_handlers import es_request
+    from worker_handlers import es_request  # type: ignore
     try:
         res = es_request('/agent-system-workers/_search', {'size': 100}, method='GET')
         implementers = []

@@ -64,7 +64,7 @@ def _client_hostname_from_host_header(host_header: str | None) -> str:
 
 def get_proxy_config(host_header: str | None = None) -> dict[str, Any]:
     """JSON for GET /api/codex-app-server/proxy-config."""
-    import codex_app_server
+    import codex_app_server  # type: ignore
 
     upstream = codex_app_server.codex_listen_url()
     port = proxy_port()
@@ -174,7 +174,7 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
 
 
 async def _one_client(browser_ws: Any) -> None:
-    import codex_app_server
+    import codex_app_server  # type: ignore
 
     upstream_uri = codex_app_server.codex_listen_url()
     await _relay(browser_ws, upstream_uri)
@@ -184,7 +184,7 @@ async def _async_main() -> None:
     global _proxy_listen_error
     assert websockets is not None
 
-    import codex_app_server
+    import codex_app_server  # type: ignore
 
     host = proxy_bind_host()
     port = proxy_port()

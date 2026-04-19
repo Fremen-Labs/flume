@@ -879,7 +879,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
         state["expires"] = now_ms + (expires_in * 1000)
     saved_to, saved_path = save_state_to_env_or_file(state, state_path)
 
-    save_env_key(workspace_root, "LLM_PROVIDER", "openai")
+    _update_env_keys(workspace_root, {"LLM_PROVIDER": "openai"})
     ob_enabled, _ = _openbao_enabled(workspace_root)
     if ob_enabled:
         kv_updates = {"LLM_PROVIDER": "openai", "OPENAI_OAUTH_STATE_JSON": json.dumps(state)}
@@ -887,7 +887,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
             kv_updates["OPENAI_OAUTH_STATE_FILE"] = saved_path
         _openbao_put_many(workspace_root, kv_updates)
     else:
-        save_env_key(workspace_root, "LLM_API_KEY", new_access)
+        _update_env_keys(workspace_root, {"LLM_API_KEY": new_access})
 
     return True, "Token refreshed", {
         "access": new_access[:20] + "...",
