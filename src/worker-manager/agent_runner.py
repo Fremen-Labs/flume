@@ -1311,7 +1311,7 @@ def run_implementer(
                 except Exception:
                     pass
             
-            if _iteration == 39:
+            if _iteration == max_iter - 1:
                 _progress('LLM returned no response after max retries — stopping.')
                 return AgentResult(
                     action='implementer_failed',

@@ -251,7 +251,6 @@ var Metrics = &metricsRegistry{
 	NodeRequests:         newCounterVec(),
 	RoutingDecisions:     newCounterVec(),
 	NodeLoad:             newGaugeVec(),
-	NodeHealthGauge:      newGaugeVec(),
 	LocalOffloadPct:      newGaugeVec(),
 	WorkerTokens:         newCounterVec(),
 	FrontierSpend:        newCounterVec(),
@@ -713,7 +712,6 @@ func HandleMetrics() http.HandlerFunc {
 			buf = strconv.AppendUint(buf, count, 10)
 			buf = append(buf, '\n')
 		}
-
 		_, err := w.Write(buf)
 		if err != nil {
 			log.Error("failed to write metrics",

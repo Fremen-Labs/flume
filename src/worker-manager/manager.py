@@ -652,6 +652,25 @@ def _compute_saturated_scopes(force: bool = False) -> tuple:
 # The raw Painless claim script is now pre-compiled into Elasticsearch natively
 # during cluster bootstrap by the Flume Orchestrator, mapped to 'flume-task-claim'.
 # This eliminates massive JSON payload wire overhead on every single _update loop.
+PAINLESS_CLAIM_SCRIPT = (
+    'if (ctx._source.status == params.expected_status '
+    '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
+    '  ctx._source.status = params.new_status;'
+    '  ctx._source.queue_state = "active";'
+    '  ctx._source.active_worker = params.worker_name;'
+    '  ctx._source.assigned_agent_role = params.role;'
+    '  ctx._source.owner = params.role;'
+    '  ctx._source.updated_at = params.now;'
+    '  ctx._source.last_update = params.now;'
+    '  if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }'
+    '  if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }'
+    '  if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }'
+    '  if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }'
+    '} else {'
+    '  ctx.op = "noop";'
+    '}'
+)
+>>>>>>> 4e6fac51 (Implement Adaptive Concurrency Management and More (#227))
 
 def try_atomic_claim(
     role: str,
