@@ -1239,7 +1239,31 @@ def run_implementer(
                 "iteration": _iteration
             })
             
-            time.sleep(delay + random.uniform(0, jitter))
+            final_delay = delay + random.uniform(0, jitter)
+            _slept = 0.0
+            
+            # Context-Aware chunked sleep polling for immediate human/mesh Abort logic
+            while _slept < final_delay:
+                chunk = min(5.0, final_delay - _slept)
+                time.sleep(chunk)
+                _slept += chunk
+                
+                # Verify Context State dynamically mid-sleep to free zombie threads on blocked gridlocks
+                try:
+                    from worker_handlers import check_kill_switch, KillSwitchAbortError
+                    task_id = task.get('id', task.get('_id', ''))
+                    if task_id:
+                        check_kill_switch(task_id)
+                except KillSwitchAbortError:
+                    _progress('Task blocked mid-backoff — aborting context.')
+                    return AgentResult(
+                        action='implementer_failed',
+                        summary='Task halted via Kill Switch (node overload or user intervention) during exponential backoff execution.',
+                        artifacts=[],
+                        metadata={'source': 'kill_switch', 'commit_sha': '', 'commit_message': ''}
+                    )
+                except Exception:
+                    pass
             
             if _iteration == 14:
                 _progress('LLM returned no response after max retries — stopping.')
