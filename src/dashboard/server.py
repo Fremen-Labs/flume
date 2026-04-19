@@ -186,13 +186,28 @@ if not ES_VERIFY_TLS:
 def _ensure_gitflow_defaults(entry: dict) -> dict:
     """Backfill gitflow config with defaults if missing."""
     if 'gitflow' not in entry:
-        entry['gitflow'] = {'autoPrOnApprove': True, 'defaultBranch': None}
+        entry['gitflow'] = {
+            'autoPrOnApprove': True,
+            'defaultBranch': None,
+            'integrationBranch': 'develop',
+            'releaseBranch': 'main',
+            'autoMergeIntegrationPr': True,
+            'ensureIntegrationBranch': True,
+        }
     else:
         gf = entry['gitflow']
         if 'autoPrOnApprove' not in gf:
             gf['autoPrOnApprove'] = True
         if 'defaultBranch' not in gf:
             gf['defaultBranch'] = None
+        if 'integrationBranch' not in gf:
+            gf['integrationBranch'] = 'develop'
+        if 'releaseBranch' not in gf:
+            gf['releaseBranch'] = 'main'
+        if 'autoMergeIntegrationPr' not in gf:
+            gf['autoMergeIntegrationPr'] = True
+        if 'ensureIntegrationBranch' not in gf:
+            gf['ensureIntegrationBranch'] = True
     return entry
 
 
@@ -467,6 +482,26 @@ def es_post(path, body, method='POST'):
     )
     with urllib.request.urlopen(req, context=ctx) as resp:
         return json.loads(resp.read().decode())
+
+
+def es_delete_doc(index: str, doc_id: str) -> bool:
+    """DELETE a document by id from Elasticsearch. Returns True if removed (2xx). False if 404."""
+    safe_id = urllib.parse.quote(str(doc_id), safe='')
+    req = urllib.request.Request(
+        f'{ES_URL}/{index}/_doc/{safe_id}',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+        },
+        method='DELETE',
+    )
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise
 
 
 def load_session(session_id):
@@ -2345,6 +2380,36 @@ def load_repos(registry=None):
 _SNAPSHOT_CACHE_DATA = None
 _SNAPSHOT_CACHE_TIME = 0.0
 
+
+def _merge_recent_task_hits_with_blocked(recent_hits: list, blocked_hits: list) -> list:
+    """
+    Snapshot caps recent activity (300) for performance. Blocked tasks must always be
+    visible for triage — merge in any blocked docs not already in the recent slice.
+    """
+    by_id: dict = {}
+    order: list = []
+    for h in recent_hits:
+        src = h.get('_source') or {}
+        tid = src.get('id') or h.get('_id')
+        if not tid:
+            continue
+        k = str(tid)
+        if k not in by_id:
+            order.append(k)
+        by_id[k] = h
+    for h in blocked_hits:
+        src = h.get('_source') or {}
+        tid = src.get('id') or h.get('_id')
+        if not tid:
+            continue
+        k = str(tid)
+        if k in by_id:
+            continue
+        order.append(k)
+        by_id[k] = h
+    return [by_id[k] for k in order]
+
+
 def load_snapshot():
     global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
     now = time.time()
@@ -2354,13 +2419,23 @@ def load_snapshot():
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         pass
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         f_tasks = pool.submit(lambda: es_search('agent-task-records', {
             'size': 300,
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': {
                 'bool': {
                     'must': [{'match_all': {}}],
+                    'must_not': [{'term': {'status': 'archived'}}],
+                }
+            },
+        }))
+        f_blocked_tasks = pool.submit(lambda: es_search('agent-task-records', {
+            'size': 500,
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {
+                'bool': {
+                    'must': [{'term': {'status': 'blocked'}}],
                     'must_not': [{'term': {'status': 'archived'}}],
                 }
             },
@@ -2441,7 +2516,9 @@ def load_snapshot():
         f_workers = pool.submit(load_workers)
         f_projects = pool.submit(load_projects_registry)
 
-        tasks_res = f_tasks.result().get('hits', {}).get('hits', [])
+        tasks_recent = f_tasks.result().get('hits', {}).get('hits', [])
+        tasks_blocked_extra = f_blocked_tasks.result().get('hits', {}).get('hits', [])
+        tasks_res = _merge_recent_task_hits_with_blocked(tasks_recent, tasks_blocked_extra)
         reviews_res = f_reviews.result().get('hits', {}).get('hits', [])
         failures_res = f_failures.result().get('hits', {}).get('hits', [])
         provenance_res = f_provenance.result().get('hits', {}).get('hits', [])
@@ -2451,18 +2528,9 @@ def load_snapshot():
 
     repos_res = load_repos(registry=projects_res)
 
-    def map_task(h):
-        s = h.get('_source', {})
-        res = {'_id': h.get('_id'), **s}
-        thoughts = s.get('execution_thoughts', [])
-        res['execution_thoughts_count'] = len(thoughts) if isinstance(thoughts, list) else 0
-        if 'execution_thoughts' in res:
-            del res['execution_thoughts']
-        return res
-
     result = {
         'workers': workers_res,
-        'tasks': [map_task(h) for h in tasks_res],
+        'tasks': [_map_task_hit_for_api(h) for h in tasks_res],
         'reviews': [{'_id': h.get('_id'), **h.get('_source', {})} for h in reviews_res],
         'failures': [{'_id': h.get('_id'), **h.get('_source', {})} for h in failures_res],
         'provenance': [{'_id': h.get('_id'), **h.get('_source', {})} for h in provenance_res],
@@ -2738,7 +2806,7 @@ def _count_plan_tasks(plan: Optional[dict]) -> int:
     return total
 
 
-from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header
+from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -2780,6 +2848,34 @@ async def lifespan(app: FastAPI):
 
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
+
+    # Start the auto-unblocker daemon. Self-contained background thread; no-op
+    # when FLUME_AUTO_UNBLOCK_ENABLED=0. See src/dashboard/auto_unblock.py.
+    try:
+        import auto_unblock as _auto_unblock
+        _auto_unblock.maybe_start(
+            es_search=es_search,
+            es_post=es_post,
+            append_note=_append_task_agent_log_note,
+            logger=logger,
+        )
+    except Exception as _exc:
+        logger.warning(f'auto_unblock.start_failed: {_exc}')
+
+    # Start the autonomy sweeps (parent-revival + stuck-worker watchdog +
+    # plan-progress scanner). See src/dashboard/autonomy_sweeps.py.
+    try:
+        import autonomy_sweeps as _autonomy
+        _autonomy.maybe_start(
+            es_search=es_search,
+            es_post=es_post,
+            es_upsert=es_upsert,
+            append_note=_append_task_agent_log_note,
+            list_projects=load_projects_registry,
+            logger=logger,
+        )
+    except Exception as _exc:
+        logger.warning(f'autonomy_sweeps.start_failed: {_exc}')
 
     app.state.http_client = httpx.AsyncClient()
     yield
@@ -3534,7 +3630,14 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         "clone_status": clone_status,
         "clone_error": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "gitflow": {"autoPrOnApprove": True, "defaultBranch": None},
+        "gitflow": {
+            "autoPrOnApprove": True,
+            "defaultBranch": None,
+            "integrationBranch": "develop",
+            "releaseBranch": "main",
+            "autoMergeIntegrationPr": True,
+            "ensureIntegrationBranch": True,
+        },
     }
 
     # Single consistent write with ?refresh=wait_for — prevents the name
@@ -3572,6 +3675,201 @@ def api_project_clone_status(project_id: str):
         'path': proj.get('path'),
         'is_git': (Path(proj.get('path', '')) / '.git').exists() if proj.get('path') else False,
     }
+
+
+def _map_task_hit_for_api(h: dict) -> dict:
+    """Same shape as tasks in /api/snapshot (strip heavy execution_thoughts)."""
+    s = h.get('_source', {})
+    res = {'_id': h.get('_id'), **s}
+    thoughts = s.get('execution_thoughts', [])
+    res['execution_thoughts_count'] = len(thoughts) if isinstance(thoughts, list) else 0
+    if 'execution_thoughts' in res:
+        del res['execution_thoughts']
+    return res
+
+
+@app.get("/api/projects/{project_id}/tasks")
+def api_project_tasks(
+    project_id: str,
+    archived: str = Query(
+        'exclude',
+        description='exclude=active only (default); include=all statuses; only=archived items only',
+    ),
+):
+    """
+    Work items for one project (up to 5000).
+
+    Query `archived`:
+      - exclude (default): hide archived tasks
+      - include: active + archived (full history in one list)
+      - only: archived tasks only
+
+    The global /api/snapshot only includes the N most recently updated tasks
+    across the whole cluster; project pages must not rely on that cap or tasks
+    for a repo disappear from the UI even though they exist in Elasticsearch.
+    """
+    registry = load_projects_registry()
+    if not any(p.get('id') == project_id for p in registry):
+        return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
+    mode = (archived or 'exclude').strip().lower()
+    if mode not in ('exclude', 'include', 'only'):
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'archived must be one of: exclude, include, only'},
+        )
+    try:
+        if mode == 'include':
+            query = {'bool': {'must': [{'term': {'repo': project_id}}]}}
+        elif mode == 'only':
+            query = {
+                'bool': {
+                    'must': [
+                        {'term': {'repo': project_id}},
+                        {'term': {'status': 'archived'}},
+                    ],
+                },
+            }
+        else:
+            query = {
+                'bool': {
+                    'must': [{'term': {'repo': project_id}}],
+                    'must_not': [{'term': {'status': 'archived'}}],
+                },
+            }
+        res = es_search('agent-task-records', {
+            'size': 5000,
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': query,
+        })
+    except Exception as e:
+        logger.warning(json.dumps({'event': 'project_tasks_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
+        return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+    hits = res.get('hits', {}).get('hits', [])
+    return {
+        'projectId': project_id,
+        'archived': mode,
+        'tasks': [_map_task_hit_for_api(h) for h in hits],
+    }
+
+
+def _project_task_ids_for_repo(project_id: str) -> list[str]:
+    """Logical task ids for all task records in this repo (any status)."""
+    try:
+        res = es_search('agent-task-records', {
+            'size': 5000,
+            '_source': ['id'],
+            'query': {'term': {'repo': project_id}},
+        })
+    except Exception:
+        return []
+    out = []
+    for h in res.get('hits', {}).get('hits', []) or []:
+        tid = (h.get('_source') or {}).get('id')
+        if tid:
+            out.append(str(tid))
+    return out
+
+
+@app.get("/api/projects/{project_id}/activity")
+def api_project_activity(project_id: str, limit: int = Query(250, ge=10, le=1000)):
+    """
+    Recent cross-task activity for a project: handoffs, reviews, failures,
+    provenance, and task doc-update events (when indexed).
+    """
+    registry = load_projects_registry()
+    if not any(p.get('id') == project_id for p in registry):
+        return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
+    task_ids = _project_task_ids_for_repo(project_id)
+    if not task_ids:
+        return {'projectId': project_id, 'events': [], 'taskCount': 0}
+
+    q_terms = {'terms': {'task_id': task_ids}}
+    events: list[dict] = []
+
+    def add_batch(index: str, hits: list, typ: str, ts_key: str, summary_fn, detail_fn):
+        for h in hits:
+            src = h.get('_source') or {}
+            tid = src.get('task_id') or src.get('taskId')
+            ts = src.get(ts_key) or src.get('created_at') or src.get('updated_at')
+            events.append({
+                'type': typ,
+                'task_id': tid,
+                'timestamp': ts,
+                'summary': summary_fn(src),
+                'details': detail_fn(src),
+            })
+
+    try:
+        hand = es_search('agent-handoff-records', {
+            'size': min(limit, 500),
+            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': q_terms,
+        }).get('hits', {}).get('hits', [])
+        add_batch(
+            'agent-handoff-records', hand, 'handoff', 'created_at',
+            lambda s: f"{s.get('from_role', '?')} → {s.get('to_role', '?')}",
+            lambda s: (s.get('reason') or '')[:500],
+        )
+        rev = es_search('agent-review-records', {
+            'size': min(limit, 500),
+            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': q_terms,
+        }).get('hits', {}).get('hits', [])
+        add_batch(
+            'agent-review-records', rev, 'review', 'created_at',
+            lambda s: f"Review: {s.get('verdict', '?')}",
+            lambda s: (s.get('summary') or '')[:500],
+        )
+        fail = es_search('agent-failure-records', {
+            'size': min(limit, 500),
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': q_terms,
+        }).get('hits', {}).get('hits', [])
+        add_batch(
+            'agent-failure-records', fail, 'failure', 'updated_at',
+            lambda s: str(s.get('error_class') or 'failure'),
+            lambda s: (s.get('summary') or '')[:500],
+        )
+        prov = es_search('agent-provenance-records', {
+            'size': min(limit, 500),
+            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': q_terms,
+        }).get('hits', {}).get('hits', [])
+        add_batch(
+            'agent-provenance-records', prov, 'provenance', 'created_at',
+            lambda s: f"Provenance ({s.get('agent_role', 'agent')})",
+            lambda s: (s.get('review_verdict') or '')[:300],
+        )
+    except Exception as e:
+        logger.warning(json.dumps({'event': 'project_activity_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
+
+    try:
+        te = es_search('flume-task-events', {
+            'size': min(limit, 500),
+            'sort': [{'timestamp': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': q_terms,
+        }).get('hits', {}).get('hits', [])
+        for h in te:
+            src = h.get('_source') or {}
+            tid = src.get('task_id')
+            ts = src.get('timestamp')
+            et = src.get('event_type') or 'event'
+            det = src.get('details') if isinstance(src.get('details'), dict) else {}
+            summary = det.get('status') or det.get('pr_status') or et
+            events.append({
+                'type': 'task_event',
+                'task_id': tid,
+                'timestamp': ts,
+                'summary': str(summary)[:200],
+                'details': json.dumps(det)[:500] if det else '',
+            })
+    except Exception:
+        pass
+
+    events = [e for e in events if e.get('timestamp')]
+    events.sort(key=lambda e: e.get('timestamp') or '', reverse=True)
+    events = events[:limit]
+    return {'projectId': project_id, 'taskCount': len(task_ids), 'events': events}
 
 
 @app.post("/api/projects/{project_id}/delete")
@@ -3626,7 +3924,10 @@ def api_delete_project(project_id: str):
 
 @app.get("/api/tasks/{task_id}/history")
 def api_task_history(task_id: str):
-    return []
+    data = task_history(task_id)
+    if not data:
+        return JSONResponse(status_code=404, content={'error': 'Task not found'})
+    return data
 
 @app.get("/api/tasks/{task_id}/diff")
 def api_task_diff(task_id: str):
@@ -3746,6 +4047,39 @@ def api_task_commits(task_id: str):
         pass
     return []
 
+def _append_task_agent_log_note(es_id: str, note: str) -> bool:
+    """
+    Append one entry to task.agent_log (same shape as worker append_agent_note).
+    Used for human guidance when unblocking from the dashboard.
+    """
+    note = (note or '').strip()
+    if not note:
+        return False
+    ts = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    safe_id = urllib.parse.quote(str(es_id), safe='')
+    try:
+        es_post(
+            f'agent-task-records/_update/{safe_id}',
+            {
+                'script': {
+                    'source': (
+                        'if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }'
+                        'ctx._source.agent_log.add(params.entry);'
+                        'if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }'
+                        'ctx._source.updated_at = params.touch;'
+                        'ctx._source.last_update = params.touch;'
+                    ),
+                    'lang': 'painless',
+                    'params': {'entry': {'ts': ts, 'note': note}, 'touch': ts},
+                },
+            },
+        )
+        return True
+    except Exception as e:
+        logger.warning(json.dumps({'event': 'append_task_agent_log_failed', 'error': str(e)[:300]}))
+        return False
+
+
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
     """
@@ -3755,6 +4089,11 @@ def api_task_transition(task_id: str, payload: dict):
       - ready   → re-queues the task from the same role it blocked on
       - planned → demotes back to planning phase
       - inbox   → returns to the intake queue
+
+    Optional:
+      - instruction: human guidance appended to agent_log before transition (implementer sees full task JSON).
+      - auto_recovery_prompt: when true (default) and transitioning blocked → ready without instruction,
+        append a standard recovery hint so the agent re-tests and fixes root cause.
 
     History (agent_log, commit_sha, execution_thoughts) is preserved so
     engineers can read why the task blocked before retrying.
@@ -3770,6 +4109,27 @@ def api_task_transition(task_id: str, payload: dict):
     es_id, src = find_task_doc_by_logical_id(task_id)
     if not es_id or src is None:
         return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
+
+    instruction = (payload.get('instruction') or '').strip()
+    if len(instruction) > 8000:
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'instruction exceeds 8000 characters'},
+        )
+
+    prev_status = (src.get('status') or '').strip().lower()
+    auto_recovery = payload.get('auto_recovery_prompt', True)
+    if isinstance(auto_recovery, str):
+        auto_recovery = auto_recovery.strip().lower() not in ('0', 'false', 'no', 'off')
+
+    if instruction:
+        _append_task_agent_log_note(es_id, f'[Human guidance] {instruction}')
+    elif status == 'ready' and prev_status == 'blocked' and auto_recovery:
+        _append_task_agent_log_note(
+            es_id,
+            '[Recovery] Re-queued after blocked. Read prior agent_log and execution_thoughts; '
+            'fix the root cause, run or add tests, and iterate until acceptance criteria are met.',
+        )
 
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
@@ -3818,6 +4178,13 @@ def api_tasks_bulk_requeue(payload: dict):
             if not es_id or src is None:
                 failed.append({'task_id': task_id, 'error': 'not found'})
                 continue
+            prev = (src.get('status') or '').strip().lower()
+            if prev == 'blocked':
+                _append_task_agent_log_note(
+                    es_id,
+                    '[Recovery] Bulk re-queue after blocked. Read prior agent_log and execution_thoughts; '
+                    'fix root cause, run tests, and iterate until done.',
+                )
             owner = src.get('owner') or src.get('assigned_agent_role')
             doc = {
                 'status': 'ready',
@@ -3840,6 +4207,178 @@ def api_tasks_bulk_requeue(payload: dict):
     logger.info(f'bulk-requeue: requeued={len(requeued)} failed={len(failed)}')
     return {'requeued': requeued, 'failed': failed}
 
+
+@app.get('/api/autonomy/status')
+def api_autonomy_status():
+    """Aggregate status for all autonomy background sweeps."""
+    out: dict = {}
+    try:
+        import auto_unblock as _auto_unblock
+        out['auto_unblock'] = _auto_unblock.get_status()
+    except Exception as e:
+        out['auto_unblock'] = {'error': str(e)[:200]}
+    try:
+        import autonomy_sweeps as _autonomy
+        out['sweeps'] = _autonomy.get_status()
+    except Exception as e:
+        out['sweeps'] = {'error': str(e)[:200]}
+    return out
+
+
+@app.post('/api/autonomy/sweep/{sweep_name}')
+def api_autonomy_sweep_now(sweep_name: str):
+    """
+    Force-run an autonomy sweep on demand.
+
+    Valid names:
+      - auto_unblock            — LLM-guided re-queue for blocked tasks
+      - parent_revival          — re-queue blocked parents when bug children close
+      - stuck_worker_watchdog   — release stale claims past the idle threshold
+    """
+    try:
+        if sweep_name == 'auto_unblock':
+            import auto_unblock as _auto_unblock
+            summary = _auto_unblock._sweep_once({
+                'es_search': es_search,
+                'es_post': es_post,
+                'append_note': _append_task_agent_log_note,
+                'logger': logger,
+            })
+            return {'ok': True, 'sweep': 'auto_unblock', 'summary': summary}
+
+        import autonomy_sweeps as _autonomy
+        result = _autonomy.run_sweep_now(
+            sweep_name,
+            es_search=es_search,
+            es_post=es_post,
+            es_upsert=es_upsert,
+            append_note=_append_task_agent_log_note,
+            list_projects=load_projects_registry,
+            logger=logger,
+        )
+        return {'ok': True, **result}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={'error': str(e)})
+    except Exception as e:
+        logger.exception(f'autonomy.sweep_failed: {e}')
+        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
+
+
+@app.get('/api/auto-unblock/status')
+def api_auto_unblock_status():
+    """Current auto-unblocker daemon state + last sweep summary."""
+    try:
+        import auto_unblock as _auto_unblock
+        return _auto_unblock.get_status()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)[:200]})
+
+
+@app.post('/api/auto-unblock/sweep')
+def api_auto_unblock_sweep_now():
+    """Manually trigger one auto-unblock sweep and return its summary.
+
+    Useful for operators who want to drain the blocked queue immediately
+    without waiting for the next scheduled tick.
+    """
+    try:
+        import auto_unblock as _auto_unblock
+        summary = _auto_unblock._sweep_once({
+            'es_search': es_search,
+            'es_post': es_post,
+            'append_note': _append_task_agent_log_note,
+            'logger': logger,
+        })
+        return {'ok': True, 'summary': summary}
+    except Exception as e:
+        logger.exception(f'auto_unblock.manual_sweep_failed: {e}')
+        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
+
+
+@app.post('/api/tasks/bulk-update')
+def api_tasks_bulk_update(payload: dict):
+    """
+    Bulk archive or delete tasks from the project task list.
+
+    Body: { "ids": ["task-1", ...], "action": "archive" | "delete", "repo": "<project id>" }
+    When `repo` is set, tasks whose `repo` field does not match are skipped (failed).
+    """
+    _MAX_BULK = 200
+    ids = payload.get('ids') or []
+    action = (payload.get('action') or '').strip().lower()
+    repo = (payload.get('repo') or '').strip()
+
+    if action not in ('archive', 'delete'):
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'action must be "archive" or "delete", got {action!r}'},
+        )
+    if not isinstance(ids, list):
+        return JSONResponse(status_code=400, content={'error': 'ids must be a list'})
+    if not ids:
+        return JSONResponse(status_code=400, content={'error': 'ids must not be empty'})
+    if len(ids) > _MAX_BULK:
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'bulk limit is {_MAX_BULK} tasks per call'},
+        )
+
+    str_ids = [str(i) for i in ids]
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    ok, failed = [], []
+
+    if action == 'archive':
+        for task_id in str_ids:
+            try:
+                es_id, src = find_task_doc_by_logical_id(task_id)
+                if not es_id or src is None:
+                    failed.append({'task_id': task_id, 'error': 'not found'})
+                    continue
+                logical_repo = (src.get('repo') or '').strip()
+                if repo and logical_repo != repo:
+                    failed.append({'task_id': task_id, 'error': 'repo mismatch'})
+                    continue
+                doc = {
+                    'status': 'archived',
+                    'active_worker': None,
+                    'needs_human': False,
+                    'updated_at': now,
+                    'last_update': now,
+                }
+                es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+                ok.append({'task_id': task_id})
+            except Exception as exc:
+                logger.error(f'bulk-update archive: task {task_id} failed: {exc}')
+                failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+        logger.info(f'bulk-update archive: ok={len(ok)} failed={len(failed)}')
+        return {'archived': ok, 'failed': failed}
+
+    # delete — clean up git branches while ES rows still exist, then remove docs
+    try:
+        delete_task_branches(str_ids, repo)
+    except Exception as exc:
+        logger.warning(f'bulk-update delete: delete_task_branches: {exc}')
+
+    for task_id in str_ids:
+        try:
+            es_id, src = find_task_doc_by_logical_id(task_id)
+            if not es_id or src is None:
+                failed.append({'task_id': task_id, 'error': 'not found'})
+                continue
+            logical_repo = (src.get('repo') or '').strip()
+            if repo and logical_repo != repo:
+                failed.append({'task_id': task_id, 'error': 'repo mismatch'})
+                continue
+            if es_delete_doc('agent-task-records', es_id):
+                ok.append({'task_id': task_id})
+            else:
+                failed.append({'task_id': task_id, 'error': 'not found in index'})
+        except Exception as exc:
+            logger.error(f'bulk-update delete: task {task_id} failed: {exc}')
+            failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+
+    logger.info(f'bulk-update delete: deleted={len(ok)} failed={len(failed)}')
+    return {'deleted': ok, 'failed': failed}
 
 
 from fastapi import Depends, Request, Header

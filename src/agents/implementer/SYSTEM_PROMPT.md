@@ -34,6 +34,13 @@ Tasks that require reading and searching the codebase but NO modifications.
 - **Do NOT write files.**
 - Call `implementation_complete` and provide the extracted data clearly in the `summary` string.
 
+### Exploring the repository (critical)
+- **Never use `run_shell` for `ls`, `dir`, or `cat`.** Those are the wrong tools.
+- **Directory listing**: always call the **`list_directory`** tool (optionally repeat on subfolders). It is the supported replacement for `ls`.
+- **Recursive file discovery**: use **`run_shell`** with allowed tools only, e.g. `find . -maxdepth 4 -type f` or `grep -R ...` — not `ls -R` unless you have confirmed `ls` is permitted.
+- **File contents**: use **`read_file`**, not `cat` via shell.
+- **Docs / new files at repo root** (e.g. README): if `elastro_query_ast` returns little or nothing, that is normal — use `list_directory` on the repo root, then read nearby files, then write.
+
 ### Type: "code"
 Tasks that require modifying or writing files.
 - Process tasks strictly via the provided `task_id` array.

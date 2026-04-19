@@ -6,6 +6,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { AgentThoughtDrawer } from '@/components/AgentThoughtDrawer';
 import { useToast } from '@/hooks/use-toast';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
   DialogContent,
@@ -14,6 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import type { ApiTask } from '@/types';
 import { appLogger } from '@/utils/logger';
 
 const stages: { id: string; label: string }[] = [
@@ -45,7 +47,9 @@ function timeAgo(ts?: string) {
 }
 
 export default function QueuePage() {
-  const { data: snapshot, isLoading, error, mutate } = useSnapshot();
+  // `useSnapshot` wraps `useQuery`, which exposes `refetch` (not `mutate`).
+  // Alias it so existing callsites keep working.
+  const { data: snapshot, isLoading, error, refetch: mutate } = useSnapshot();
   const { toast } = useToast();
   const [isHalting, setIsHalting] = useState(false);
   const [dialogAction, setDialogAction] = useState<'halt' | 'resume' | null>(null);
@@ -54,8 +58,45 @@ export default function QueuePage() {
   const [thoughtTaskTitle, setThoughtTaskTitle] = useState<string | undefined>(undefined);
   const [thoughtTaskStatus, setThoughtTaskStatus] = useState<string | undefined>(undefined);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [unblockTarget, setUnblockTarget] = useState<ApiTask | null>(null);
+  const [unblockQueueNote, setUnblockQueueNote] = useState('');
+  const [unblockQueueBusy, setUnblockQueueBusy] = useState(false);
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
+
+  async function submitQueueUnblock() {
+    if (!unblockTarget?.id) return;
+    setUnblockQueueBusy(true);
+    try {
+      const body: Record<string, unknown> = { status: 'ready' };
+      const ins = unblockQueueNote.trim();
+      if (ins) body.instruction = ins;
+      const r = await fetch(`/api/tasks/${encodeURIComponent(unblockTarget.id)}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data: { error?: string } = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data?.error || 'Unblock failed');
+      }
+      toast({
+        title: 'Task unblocked',
+        description: ins ? 'Guidance saved; task re-queued.' : 'Recovery hint added; task re-queued.',
+      });
+      setUnblockTarget(null);
+      setUnblockQueueNote('');
+      mutate();
+    } catch (e) {
+      toast({
+        title: 'Unblock failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setUnblockQueueBusy(false);
+    }
+  }
 
   const handleConfirmAction = async () => {
     if (!dialogAction) return;
@@ -127,6 +168,41 @@ export default function QueuePage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={unblockTarget !== null} onOpenChange={(open) => { if (!open) { setUnblockTarget(null); setUnblockQueueNote(''); } }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Unblock blocked task</DialogTitle>
+            <DialogDescription>
+              Re-queues as <strong>ready</strong> for the same agent. Optional notes go to <code className="text-xs">agent_log</code>.
+              Leave empty to use Flume&apos;s default recovery hint (re-test, fix root cause, iterate).
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            placeholder="Optional: concrete steps or constraints for the agent…"
+            value={unblockQueueNote}
+            onChange={e => setUnblockQueueNote(e.target.value)}
+            className="min-h-[100px] text-sm"
+          />
+          <DialogFooter className="gap-2 sm:gap-0">
+            <button
+              type="button"
+              className="text-sm px-3 py-2 rounded-md border border-border text-muted-foreground hover:bg-muted/30"
+              onClick={() => { setUnblockTarget(null); setUnblockQueueNote(''); }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="text-sm px-4 py-2 rounded-md bg-primary text-primary-foreground font-medium disabled:opacity-50"
+              disabled={unblockQueueBusy}
+              onClick={() => void submitQueueUnblock()}
+            >
+              {unblockQueueBusy ? 'Saving…' : 'Unblock & resume'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <AgentThoughtDrawer taskId={thoughtTaskId} taskTitle={thoughtTaskTitle} taskStatus={thoughtTaskStatus} isOpen={drawerOpen} onOpenChange={setDrawerOpen} />
 
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10 flex items-center justify-between">
@@ -191,16 +267,14 @@ export default function QueuePage() {
                 <div className="space-y-2 min-h-[200px]">
                   {items.map((item, i) => {
                     const worker = workers.find(w => w.current_task_id === item.id);
-                    return (
-                      <motion.div
-                        key={item._id}
-                        initial={{ opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: stageIdx * 0.05 + i * 0.03 }}
-                        whileHover={{ y: -2, transition: { duration: 0.15 } }}
-                        onClick={() => { setThoughtTaskId(item.id); setThoughtTaskTitle(item.title); setThoughtTaskStatus(item.status); setDrawerOpen(true); }}
-                        className="glass-card p-3 hover-lift cursor-pointer"
-                      >
+                    const openThoughts = () => {
+                      setThoughtTaskId(item.id);
+                      setThoughtTaskTitle(item.title);
+                      setThoughtTaskStatus(item.status);
+                      setDrawerOpen(true);
+                    };
+                    const cardInner = (
+                      <>
                         <div className="flex items-center gap-2 mb-1.5">
                           <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.work_item_type ?? item.item_type ?? 'task']}`}>
                             {(item.work_item_type ?? item.item_type ?? 'task').toUpperCase()}
@@ -225,6 +299,41 @@ export default function QueuePage() {
                           </div>
                         )}
                         <div className="text-[9px] text-muted-foreground/50 mt-1">{timeAgo(item.last_update || item.updated_at)}</div>
+                      </>
+                    );
+                    return (
+                      <motion.div
+                        key={item._id}
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: stageIdx * 0.05 + i * 0.03 }}
+                        whileHover={{ y: -2, transition: { duration: 0.15 } }}
+                        className={`glass-card overflow-hidden flex flex-col ${stage.id === 'blocked' ? 'p-0' : 'p-3 hover-lift cursor-pointer'}`}
+                        onClick={stage.id === 'blocked' ? undefined : openThoughts}
+                      >
+                        {stage.id === 'blocked' ? (
+                          <>
+                            <button
+                              type="button"
+                              className="p-3 text-left w-full hover:bg-muted/10 transition-colors"
+                              onClick={openThoughts}
+                            >
+                              {cardInner}
+                            </button>
+                            <div className="flex gap-2 px-3 py-2 border-t border-border/30 bg-destructive/[0.03]">
+                              <button
+                                type="button"
+                                className="text-[10px] px-2.5 py-1 rounded-md bg-warning/15 border border-warning/25 text-warning font-medium hover:bg-warning/25 transition-colors"
+                                onClick={() => { setUnblockTarget(item); setUnblockQueueNote(''); }}
+                              >
+                                Unblock…
+                              </button>
+                              <span className="text-[9px] text-muted-foreground self-center flex-1">Add guidance, then resume the same role</span>
+                            </div>
+                          </>
+                        ) : (
+                          cardInner
+                        )}
                       </motion.div>
                     );
                   })}
