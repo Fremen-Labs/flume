@@ -6,6 +6,7 @@ import {
   GitBranch, GitCommit, GitPullRequest, Loader2, AlertCircle,
   ExternalLink, Play, Square, RefreshCw, Plus, Unlink,
   CheckSquare, Trash2, Archive, X as XIcon, Sparkles, Code2,
+  History,
 } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useAgentStatus, useAgentControls } from '@/hooks/useAgentStatus';
@@ -50,6 +51,86 @@ async function fetchTaskApiJson<T>(url: string): Promise<T> {
   return data as T;
 }
 
+/** archived: exclude (active only) | include (all) | only (archived items) */
+type ProjectWorkView = 'active' | 'archived' | 'all';
+
+function archivedQueryParam(view: ProjectWorkView): 'exclude' | 'include' | 'only' {
+  if (view === 'archived') return 'only';
+  if (view === 'all') return 'include';
+  return 'exclude';
+}
+
+/** Project-scoped list (not capped like global /api/snapshot). */
+async function fetchProjectTasks(
+  projectId: string,
+  workView: ProjectWorkView,
+): Promise<{ tasks: ApiTask[] }> {
+  const a = archivedQueryParam(workView);
+  const q = a === 'exclude' ? '' : `?archived=${encodeURIComponent(a)}`;
+  const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tasks${q}`);
+  const data: unknown = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg =
+      typeof data === 'object' &&
+      data !== null &&
+      'error' in data &&
+      typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : `Failed to load project tasks (${r.status})`;
+    throw new Error(msg);
+  }
+  return data as { tasks: ApiTask[] };
+}
+
+type ProjectActivityEvent = {
+  type: string;
+  task_id?: string;
+  timestamp?: string;
+  summary?: string;
+  details?: string;
+};
+
+async function fetchProjectActivity(projectId: string): Promise<{
+  events: ProjectActivityEvent[];
+  taskCount: number;
+}> {
+  const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/activity?limit=300`);
+  const data: unknown = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg =
+      typeof data === 'object' &&
+      data !== null &&
+      'error' in data &&
+      typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : `Failed to load activity (${r.status})`;
+    throw new Error(msg);
+  }
+  return data as { events: ProjectActivityEvent[]; taskCount: number };
+}
+
+/**
+ * Elasticsearch can return multiple hits per logical task id (reindexes / duplicates).
+ * Building a Map from a list with duplicates causes the same node to be attached
+ * multiple times or split — the tree looks flat or wrong. Keep the newest revision.
+ */
+function dedupeTasksByLogicalId(tasks: ApiTask[]): ApiTask[] {
+  const m = new Map<string, ApiTask>();
+  for (const t of tasks) {
+    const id = t.id || t._id;
+    if (!id) continue;
+    const prev = m.get(id);
+    if (!prev) {
+      m.set(id, t);
+      continue;
+    }
+    const pt = new Date(prev.updated_at || prev.last_update || 0).getTime();
+    const ct = new Date(t.updated_at || t.last_update || 0).getTime();
+    if (ct >= pt) m.set(id, t);
+  }
+  return [...m.values()];
+}
+
 // Build epic > feature > story > task hierarchy from flat list
 interface TaskNode extends ApiTask { children: TaskNode[]; }
 
@@ -74,6 +155,9 @@ function buildHierarchy(tasks: ApiTask[]): TaskNode[] {
     // Legacy fallback: use depends_on to infer the parent by type
     if (!t.item_type || !t.depends_on?.length) {
       if (t.item_type === 'epic' || !t.item_type) roots.push(node);
+      // Standalone planner items (e.g. compound single task with no parent_id / empty depends_on)
+      // must still appear; otherwise the Work Hierarchy is empty while tasks exist in ES.
+      else if (['feature', 'story', 'task'].includes(String(t.item_type))) roots.push(node);
       continue;
     }
     const typeIdx = typeOrder.indexOf(t.item_type as typeof typeOrder[number]);
@@ -99,7 +183,7 @@ function collectIds(node: TaskNode): string[] {
 
 // ─── Agent Controls strip ─────────────────────────────────────────────────────
 
-function AgentControls() {
+function AgentControls({ projectId }: { projectId?: string }) {
   const { data: status, isLoading } = useAgentStatus();
   const { start, stop } = useAgentControls();
   const qc = useQueryClient();
@@ -140,6 +224,9 @@ function AgentControls() {
             onClick={() => {
               qc.invalidateQueries({ queryKey: ['agent-status'] });
               qc.invalidateQueries({ queryKey: ['snapshot'] });
+              if (projectId) qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
+              else qc.invalidateQueries({ queryKey: ['project-tasks'] });
+              qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
             }}
             className="p-1 text-muted-foreground/50 hover:text-muted-foreground rounded transition-colors"
             title="Refresh"
@@ -467,6 +554,8 @@ export default function ProjectDetailPage() {
   const [historyTab, setHistoryTab] = useState<'history' | 'diff' | 'commits'>('history');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState(new Set<string>());
+  const [workView, setWorkView] = useState<ProjectWorkView>('active');
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
@@ -476,7 +565,24 @@ export default function ProjectDetailPage() {
   const allTasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
 
-  const projectTasks = allTasks.filter(t => t.repo === projectId);
+  const { data: projectTasksPayload } = useQuery({
+    queryKey: ['project-tasks', projectId, workView],
+    queryFn: () => fetchProjectTasks(projectId, workView),
+    enabled: !!projectId,
+    refetchInterval: 5_000,
+    staleTime: 3_000,
+    retry: 1,
+  });
+
+  const activityQuery = useQuery({
+    queryKey: ['project-activity', projectId],
+    queryFn: () => fetchProjectActivity(projectId),
+    enabled: !!projectId && historyOpen,
+    staleTime: 15_000,
+  });
+  const projectTasks = dedupeTasksByLogicalId(
+    projectTasksPayload?.tasks ?? allTasks.filter(t => t.repo === projectId),
+  );
   const hierarchy = buildHierarchy(projectTasks);
 
   // Stats
@@ -488,7 +594,9 @@ export default function ProjectDetailPage() {
     w.current_task_id && projectTasks.some(t => t.id === w.current_task_id),
   ).length;
 
-  const selectedTask = selectedTaskId ? allTasks.find(t => t.id === selectedTaskId) : null;
+  const selectedTask = selectedTaskId
+    ? projectTasks.find(t => t.id === selectedTaskId) ?? allTasks.find(t => t.id === selectedTaskId)
+    : null;
   const qc = useQueryClient();
 
   // Task history query — polls every 3s while the agent is actively working
@@ -517,8 +625,20 @@ export default function ProjectDetailPage() {
     if (!selectedTaskId || liveTaskStatus === undefined || snapshotTaskStatus === undefined) return;
     if (liveTaskStatus !== snapshotTaskStatus) {
       qc.invalidateQueries({ queryKey: ['snapshot'] });
+      qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
+      qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
     }
-  }, [selectedTaskId, liveTaskStatus, snapshotTaskStatus, qc]);
+  }, [selectedTaskId, liveTaskStatus, snapshotTaskStatus, qc, projectId]);
+
+  useEffect(() => {
+    if (
+      selectedTask &&
+      !selectedTask.branch &&
+      (historyTab === 'diff' || historyTab === 'commits')
+    ) {
+      setHistoryTab('history');
+    }
+  }, [selectedTask?.branch, selectedTask?.id, historyTab]);
 
   const diffQuery = useQuery({
     queryKey: ['task-diff', selectedTaskId],
@@ -546,6 +666,8 @@ export default function ProjectDetailPage() {
       body: JSON.stringify({ status: 'ready' }),
     });
     qc.invalidateQueries({ queryKey: ['snapshot'] });
+    qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
+    qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
   }
 
   function toggleSelect(node: TaskNode) {
@@ -570,6 +692,8 @@ export default function ProjectDetailPage() {
     setSelectionMode(false);
     setConfirmDelete(false);
     qc.invalidateQueries({ queryKey: ['snapshot'] });
+    qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
+    qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
   }
 
   async function deleteProject() {
@@ -653,7 +777,7 @@ export default function ProjectDetailPage() {
 
             {/* Right side: actions */}
             <div className="flex flex-col items-end gap-3 shrink-0">
-              <AgentControls />
+              <AgentControls projectId={projectId} />
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setExplorerOpen(true)}
@@ -743,16 +867,120 @@ export default function ProjectDetailPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
         {/* Hierarchy tree */}
         <div>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-foreground">Work Hierarchy</h2>
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">Work Hierarchy</h2>
+              <p className="text-[10px] text-muted-foreground/80 mt-0.5">
+                {workView === 'active' && 'Showing active work (excludes archived)'}
+                {workView === 'archived' && 'Showing archived items only'}
+                {workView === 'all' && 'Showing active and archived together'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 justify-end">
+              <div
+                className="flex rounded-lg border border-white/10 overflow-hidden bg-black/20"
+                title="Choose which work items appear in the tree"
+              >
+                {([
+                  { v: 'active' as const, label: 'Active' },
+                  { v: 'archived' as const, label: 'Archived' },
+                  { v: 'all' as const, label: 'All' },
+                ]).map(({ v, label }) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => {
+                      setWorkView(v);
+                      setSelectedTaskId(null);
+                    }}
+                    className={`text-[10px] px-2.5 py-1.5 font-medium transition-colors ${
+                      workView === v
+                        ? 'bg-primary/20 text-primary border-x border-primary/30 first:border-l-0 last:border-r-0'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-white/5'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+                <DialogTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md bg-violet-500/10 border border-violet-500/25 text-violet-300 hover:bg-violet-500/20 transition-all font-medium"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    History
+                  </button>
+                </DialogTrigger>
+                <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+                  <DialogHeader>
+                    <DialogTitle>Project activity</DialogTitle>
+                    <DialogDescription>
+                      Recent handoffs, reviews, failures, and updates across all work items in this project.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="flex-1 overflow-y-auto min-h-0 space-y-2 pr-1">
+                    {activityQuery.isLoading && (
+                      <div className="flex items-center gap-2 text-muted-foreground text-xs py-4">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+                      </div>
+                    )}
+                    {activityQuery.isError && (
+                      <p className="text-xs text-destructive">
+                        {activityQuery.error instanceof Error
+                          ? activityQuery.error.message
+                          : 'Failed to load activity'}
+                      </p>
+                    )}
+                    {!activityQuery.isLoading &&
+                      activityQuery.data?.events?.length === 0 && (
+                        <p className="text-xs text-muted-foreground py-4">No activity recorded yet.</p>
+                      )}
+                    {activityQuery.data?.events?.map((ev, i) => (
+                      <div
+                        key={`${ev.timestamp}-${ev.task_id}-${i}`}
+                        className="border-l-2 border-violet-500/30 pl-3 py-1.5 text-xs"
+                      >
+                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground mb-0.5 flex-wrap">
+                          <span className="text-violet-400/90 font-medium uppercase tracking-wide">
+                            {ev.type}
+                          </span>
+                          {ev.task_id && (
+                            <button
+                              type="button"
+                              className="font-mono text-primary/80 hover:underline"
+                              onClick={() => {
+                                setSelectedTaskId(ev.task_id!);
+                                setHistoryOpen(false);
+                              }}
+                            >
+                              {ev.task_id}
+                            </button>
+                          )}
+                          {ev.timestamp && (
+                            <span>{timeAgo(ev.timestamp)}</span>
+                          )}
+                        </div>
+                        <p className="text-foreground/90">{ev.summary}</p>
+                        {ev.details && (
+                          <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-3">
+                            {ev.details}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </DialogContent>
+              </Dialog>
               <button
-                onClick={() => selectionMode ? exitSelection() : setSelectionMode(true)}
+                onClick={() => (selectionMode ? exitSelection() : setSelectionMode(true))}
                 className={`flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md border transition-all ${
                   selectionMode
                     ? 'bg-primary/15 border-primary/30 text-primary'
                     : 'bg-white/5 border-white/10 text-muted-foreground hover:text-primary hover:border-primary/30'
                 }`}
+                title="Select items, then use Archive or Delete below"
               >
                 <CheckSquare className="w-3 h-3" />
                 {selectionMode ? `Cancel${selected.size > 0 ? ` (${selected.size})` : ''}` : 'Select'}
@@ -798,7 +1026,7 @@ export default function ProjectDetailPage() {
             <div className="space-y-2">
               {hierarchy.map(node => (
                 <HierarchyNode
-                  key={node._id}
+                  key={node._id || node.id}
                   node={node}
                   depth={0}
                   selectedTaskId={selectedTaskId}
@@ -921,22 +1149,46 @@ export default function ProjectDetailPage() {
               </div>
             )}
 
-            {/* History / Diff / Commits tabs */}
-            {selectedTask.branch && (
-              <div className="flex border-b border-border shrink-0">
-                {(['history', 'diff', 'commits'] as const).map(tab => (
-                  <button key={tab} onClick={() => setHistoryTab(tab)}
+            {/* History / Diff / Commits tabs — history always available; git tabs need a branch */}
+            <div className="flex border-b border-border shrink-0">
+              <button
+                type="button"
+                onClick={() => setHistoryTab('history')}
+                className={`flex-1 text-[11px] py-2 capitalize transition-colors ${
+                  historyTab === 'history'
+                    ? 'text-primary border-b-2 border-primary -mb-px bg-primary/5'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                history
+              </button>
+              {selectedTask.branch && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryTab('diff')}
                     className={`flex-1 text-[11px] py-2 capitalize transition-colors ${
-                      historyTab === tab
+                      historyTab === 'diff'
                         ? 'text-primary border-b-2 border-primary -mb-px bg-primary/5'
                         : 'text-muted-foreground hover:text-foreground'
                     }`}
                   >
-                    {tab}
+                    diff
                   </button>
-                ))}
-              </div>
-            )}
+                  <button
+                    type="button"
+                    onClick={() => setHistoryTab('commits')}
+                    className={`flex-1 text-[11px] py-2 capitalize transition-colors ${
+                      historyTab === 'commits'
+                        ? 'text-primary border-b-2 border-primary -mb-px bg-primary/5'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    commits
+                  </button>
+                </>
+              )}
+            </div>
 
             {/* Tab content */}
             <div className="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
@@ -1098,7 +1350,9 @@ function HierarchyNode({
   selected: Set<string>;
   onToggleSelect: (node: TaskNode) => void;
 }) {
-  const [open, setOpen] = useState(depth < 2);
+  // Expand all levels by default so epic → feature → story → task stays visible
+  // (depth < 2 hid everything below story and looked like “only a few tasks”).
+  const [open, setOpen] = useState(true);
   const hasChildren = node.children.length > 0;
   const isSelected = selectedTaskId === node.id;
   const isBlocked = node.status === 'blocked';
@@ -1190,7 +1444,7 @@ function HierarchyNode({
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="border-t border-border/50">
           {node.children.map(child => (
             <HierarchyNode
-              key={child._id}
+              key={child._id || child.id}
               node={child}
               depth={depth + 1}
               selectedTaskId={selectedTaskId}
