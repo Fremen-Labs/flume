@@ -354,6 +354,80 @@ def _build_auth_clone_url(repo_url: str, repo_id: str) -> str:
     return clean_url
 
 
+def _flume_ensure_integration_branch_enabled() -> bool:
+    """When true (default), create the integration branch on the remote if missing before branching."""
+    v = os.environ.get("FLUME_ENSURE_INTEGRATION_BRANCH", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _maybe_ensure_integration_branch(
+    repo_id: str,
+    src: dict,
+    *,
+    local_repo_path: Path | None = None,
+) -> None:
+    """
+    Ensure gitflow integration branch (usually ``develop``) exists at the default-branch tip
+    so new feature branches stack on it. Uses Git host API first, then a local ``git push``
+    fallback when a local repo path is provided.
+    """
+    if not repo_id or not _flume_ensure_integration_branch_enabled():
+        return
+    gf = load_project_gitflow(repo_id)
+    if not gf.get("ensureIntegrationBranch", True):
+        return
+    ib = (gf.get("integrationBranch") or "develop").strip()
+    if not ib:
+        return
+    try:
+        from utils.git_host_client import ensure_integration_branch_for_project  # noqa: PLC0415
+
+        if ensure_integration_branch_for_project(src, ib):
+            log(f"ensure_integration_branch: API ensured {ib!r} for repo={repo_id}")
+    except Exception as e:
+        log(f"ensure_integration_branch: API failed repo={repo_id}: {e}")
+
+    if local_repo_path and (local_repo_path / ".git").exists():
+        _ensure_local_integration_branch_push(local_repo_path, ib)
+
+
+def _ensure_local_integration_branch_push(repo_path: Path, integration_branch: str) -> None:
+    """If ``origin/<integration_branch>`` is missing, create it from the remote default branch tip."""
+    ib = (integration_branch or "").strip()
+    if not ib:
+        return
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "origin"],
+            capture_output=True,
+            timeout=120,
+        )
+        chk = subprocess.run(
+            ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{ib}"],
+            capture_output=True,
+        )
+        if chk.returncode == 0:
+            return
+        db = resolve_default_branch(str(repo_path))
+        if ib == db:
+            return
+        pr = subprocess.run(
+            ["git", "-C", str(repo_path), "push", "origin", f"refs/remotes/origin/{db}:refs/heads/{ib}"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if pr.returncode != 0:
+            log(
+                f"ensure_local_integration_branch: push {db!r} -> {ib!r} failed: "
+                f"{(pr.stderr or pr.stdout or '')[:300]}"
+            )
+        else:
+            log(f"ensure_local_integration_branch: created origin/{ib} from origin/{db}")
+    except Exception as e:
+        log(f"ensure_local_integration_branch: {e}")
+
+
 def _configure_git_identity(repo_path: Path) -> None:
     """Set a bot git identity if not already configured (required in containers)."""
     for cfg_key, cfg_val in [
@@ -557,6 +631,7 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
             repo_path = Path(local_path_str)
             if (repo_path / ".git").exists():
                 try:
+                    _maybe_ensure_integration_branch(repo_id, src, local_repo_path=repo_path)
                     proc = subprocess.run(
                         ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet",
                          f"refs/heads/{branch}"],
@@ -568,10 +643,29 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
                             check=True, capture_output=True,
                         )
                     else:
+                        gf = load_project_gitflow(repo_id)
+                        ib = (gf.get("integrationBranch") or "develop").strip()
                         subprocess.run(
-                            ["git", "-C", str(repo_path), "checkout", "-b", branch],
-                            check=True, capture_output=True,
+                            ["git", "-C", str(repo_path), "fetch", "origin"],
+                            capture_output=True,
+                            timeout=120,
                         )
+                        ib_ok = subprocess.run(
+                            ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet",
+                             f"refs/remotes/origin/{ib}"],
+                            capture_output=True,
+                        )
+                        integration_base = f"origin/{ib}" if ib_ok.returncode == 0 else None
+                        if integration_base:
+                            subprocess.run(
+                                ["git", "-C", str(repo_path), "checkout", "-b", branch, integration_base],
+                                check=True, capture_output=True,
+                            )
+                        else:
+                            subprocess.run(
+                                ["git", "-C", str(repo_path), "checkout", "-b", branch],
+                                check=True, capture_output=True,
+                            )
                     return branch, str(repo_path)
                 except Exception as e:
                     log(f"ensure_task_branch: local checkout failed task={task_id}: {e}")
@@ -584,6 +678,8 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
     if not repo_url:
         log(f"ensure_task_branch: no repoUrl for repo={repo_id}; cannot clone")
         return None, None
+
+    _maybe_ensure_integration_branch(repo_id, src)
 
     auth_url = _build_auth_clone_url(repo_url, repo_id)
 
@@ -763,6 +859,8 @@ def load_project_gitflow(repo_id):
         # Production: final release PR targets this branch (human merge).
         'releaseBranch': 'main',
         'autoMergeIntegrationPr': True,
+        # Create integration branch on remote from default tip if missing (gitflow).
+        'ensureIntegrationBranch': True,
     }
     if not repo_id:
         return default
@@ -1013,6 +1111,112 @@ def create_pr_for_task(task, reviewer_model, es_id: str | None = None):
     return pr_url, pr_number, None
 
 
+_MERGE_CONFLICT_KEYWORDS = (
+    'conflict',
+    'merge commit cannot be cleanly created',
+    'not mergeable',
+    'pull request is not mergeable',
+)
+
+
+def _looks_like_merge_conflict(err_text: str) -> bool:
+    e = (err_text or '').lower()
+    return any(k in e for k in _MERGE_CONFLICT_KEYWORDS)
+
+
+def _record_merge_conflict(
+    task: dict,
+    pr_number: int,
+    *,
+    client: object = None,
+    repo_path: Path | str | None = None,
+    es_id: str | None = None,
+    err_text: str = '',
+) -> None:
+    """
+    Annotate a task that failed to auto-merge due to a conflict and transition
+    it back to `blocked` (needs_human=false) so the auto-unblocker can nudge
+    an implementer through the rebase/resolve/force-push loop.
+    """
+    task_id = task.get('id')
+    head_branch = task.get('branch') or ''
+    repo_id = task.get('repo') or ''
+    gf = load_project_gitflow(repo_id) or {}
+    base_branch = gf.get('integrationBranch') or 'develop'
+
+    # Best-effort: pull PR files via REST so the agent knows which files conflict.
+    files_preview: list[str] = []
+    pr_url = task.get('pr_url') or ''
+    try:
+        if client is not None and type(client).__name__ == 'GitHubClient':
+            pr_info = {}
+            try:
+                pr_info = client.get_pull_request(int(pr_number)) or {}
+            except Exception:
+                pr_info = {}
+            pr_url = pr_url or pr_info.get('html_url') or pr_url
+            if pr_info.get('head', {}).get('ref'):
+                head_branch = head_branch or pr_info['head']['ref']
+            if pr_info.get('base', {}).get('ref'):
+                base_branch = pr_info['base']['ref'] or base_branch
+            try:
+                pr_files = client.get_pull_request_files(int(pr_number)) or []
+                files_preview = [
+                    (f.get('filename') or '')
+                    for f in pr_files[:15]
+                    if (f.get('filename') or '')
+                ]
+            except Exception:
+                files_preview = []
+    except Exception as e:
+        log(f'record_merge_conflict: pr-info lookup failed task={task_id}: {e}')
+
+    conflict_payload = {
+        'merge_conflict': True,
+        'merge_conflict_pr_number': int(pr_number),
+        'merge_conflict_pr_url': pr_url,
+        'merge_conflict_head_branch': head_branch,
+        'merge_conflict_base_branch': base_branch,
+        'merge_conflict_files_preview': files_preview,
+        'merge_conflict_last_error': (err_text or '')[:600],
+    }
+    note = (
+        '[Merge conflict] Auto-merge into the integration branch failed.\n'
+        f'- PR: {pr_url or "#" + str(pr_number)}\n'
+        f'- Rebase {head_branch!r} onto latest origin/{base_branch!r} and resolve conflicts.\n'
+        f'- Suggested commands:\n'
+        f'    git fetch origin {base_branch} {head_branch}\n'
+        f'    git checkout {head_branch}\n'
+        f'    git rebase origin/{base_branch}\n'
+        f'    # resolve conflicts in-place, then:\n'
+        f'    git add -A && git rebase --continue\n'
+        f'    git push --force-with-lease origin {head_branch}\n'
+        f'- Conflicting files (first 15): {files_preview or "(not available — inspect PR)"}\n'
+        '- After pushing, the dashboard will retry the integration merge automatically.'
+    )
+
+    try:
+        append_agent_note(es_id or task_id, note)
+    except Exception:
+        pass
+
+    if es_id:
+        try:
+            update_task_doc(es_id, {
+                'status': 'blocked',
+                'needs_human': False,
+                'queue_state': 'queued',
+                'active_worker': None,
+                **conflict_payload,
+            })
+            log(
+                f"auto-merge conflict recorded task={task_id} pr={pr_number} "
+                f"files={len(files_preview)}"
+            )
+        except Exception as e:
+            log(f"record_merge_conflict: update_task_doc failed task={task_id}: {e}")
+
+
 def _maybe_auto_merge_integration_pr(
     task: dict,
     pr_number: int | None,
@@ -1043,6 +1247,14 @@ def _maybe_auto_merge_integration_pr(
             if 'already merged' in err or 'pull request is already merged' in err:
                 merged_ok = True
                 log(f"auto-merge: PR #{pr_number} already merged for task={task.get('id')}")
+            elif _looks_like_merge_conflict(err):
+                log(f"auto-merge conflict task={task.get('id')} pr={pr_number}: {e}")
+                _record_merge_conflict(
+                    task, int(pr_number),
+                    client=client, repo_path=repo_path, es_id=es_id,
+                    err_text=str(e),
+                )
+                return
             else:
                 log(f"auto-merge GitHub API failed (non-fatal) task={task.get('id')}: {e}")
         if merged_ok:
@@ -1068,12 +1280,21 @@ def _maybe_auto_merge_integration_pr(
                 timeout=120,
             )
             if mr.returncode != 0:
-                err = (mr.stderr or mr.stdout or '').lower()
+                raw = (mr.stderr or mr.stdout or '')
+                err = raw.lower()
                 if 'already merged' in err or 'nothing to merge' in err:
                     merged_ok = True
                     log(f"auto-merge: PR #{pr_number} already merged (gh) for task={task.get('id')}")
+                elif _looks_like_merge_conflict(err):
+                    log(f"auto-merge conflict (gh) task={task.get('id')} pr={pr_number}: {raw[:300]}")
+                    _record_merge_conflict(
+                        task, int(pr_number),
+                        client=client, repo_path=repo_path, es_id=es_id,
+                        err_text=raw,
+                    )
+                    return
                 else:
-                    log(f"auto-merge gh failed task={task.get('id')}: {(mr.stderr or mr.stdout or '')[:400]}")
+                    log(f"auto-merge gh failed task={task.get('id')}: {raw[:400]}")
             else:
                 merged_ok = True
                 log(f"auto-merge: gh merged PR #{pr_number} for task={task.get('id')}")
@@ -1195,7 +1416,8 @@ def _handle_release_promotion_task(task: dict, es_id: str) -> bool:
 
 
 def create_bug_task(parent_task, bug, idx):
-    bug_id = f"bug-{parent_task.get('id', 'task')}-{idx}"
+    parent_id = parent_task.get('id', 'task')
+    bug_id = f"bug-{parent_id}-{idx}"
     doc = {
         'id': bug_id,
         'title': bug.get('title', f"Bug follow-up for {parent_task.get('title', 'task')}"),
@@ -1203,6 +1425,11 @@ def create_bug_task(parent_task, bug, idx):
         'repo': parent_task.get('repo'),
         'worktree': parent_task.get('worktree'),
         'item_type': 'bug',
+        # Link back to the originating task so the dashboard's parent-revival
+        # sweep can re-queue the parent once this bug is closed.
+        'parent_id': parent_id,
+        'origin_task_id': parent_id,
+        'branch': parent_task.get('branch'),
         'owner': 'implementer',
         'assigned_agent_role': 'implementer',
         'status': 'ready',

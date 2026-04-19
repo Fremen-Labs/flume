@@ -192,6 +192,7 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
             'integrationBranch': 'develop',
             'releaseBranch': 'main',
             'autoMergeIntegrationPr': True,
+            'ensureIntegrationBranch': True,
         }
     else:
         gf = entry['gitflow']
@@ -205,6 +206,8 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
             gf['releaseBranch'] = 'main'
         if 'autoMergeIntegrationPr' not in gf:
             gf['autoMergeIntegrationPr'] = True
+        if 'ensureIntegrationBranch' not in gf:
+            gf['ensureIntegrationBranch'] = True
     return entry
 
 
@@ -2374,6 +2377,36 @@ def load_repos(registry=None):
 _SNAPSHOT_CACHE_DATA = None
 _SNAPSHOT_CACHE_TIME = 0.0
 
+
+def _merge_recent_task_hits_with_blocked(recent_hits: list, blocked_hits: list) -> list:
+    """
+    Snapshot caps recent activity (300) for performance. Blocked tasks must always be
+    visible for triage — merge in any blocked docs not already in the recent slice.
+    """
+    by_id: dict = {}
+    order: list = []
+    for h in recent_hits:
+        src = h.get('_source') or {}
+        tid = src.get('id') or h.get('_id')
+        if not tid:
+            continue
+        k = str(tid)
+        if k not in by_id:
+            order.append(k)
+        by_id[k] = h
+    for h in blocked_hits:
+        src = h.get('_source') or {}
+        tid = src.get('id') or h.get('_id')
+        if not tid:
+            continue
+        k = str(tid)
+        if k in by_id:
+            continue
+        order.append(k)
+        by_id[k] = h
+    return [by_id[k] for k in order]
+
+
 def load_snapshot():
     global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
     now = time.time()
@@ -2383,13 +2416,23 @@ def load_snapshot():
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         pass
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         f_tasks = pool.submit(lambda: es_search('agent-task-records', {
             'size': 300,
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': {
                 'bool': {
                     'must': [{'match_all': {}}],
+                    'must_not': [{'term': {'status': 'archived'}}],
+                }
+            },
+        }))
+        f_blocked_tasks = pool.submit(lambda: es_search('agent-task-records', {
+            'size': 500,
+            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+            'query': {
+                'bool': {
+                    'must': [{'term': {'status': 'blocked'}}],
                     'must_not': [{'term': {'status': 'archived'}}],
                 }
             },
@@ -2470,7 +2513,9 @@ def load_snapshot():
         f_workers = pool.submit(load_workers)
         f_projects = pool.submit(load_projects_registry)
 
-        tasks_res = f_tasks.result().get('hits', {}).get('hits', [])
+        tasks_recent = f_tasks.result().get('hits', {}).get('hits', [])
+        tasks_blocked_extra = f_blocked_tasks.result().get('hits', {}).get('hits', [])
+        tasks_res = _merge_recent_task_hits_with_blocked(tasks_recent, tasks_blocked_extra)
         reviews_res = f_reviews.result().get('hits', {}).get('hits', [])
         failures_res = f_failures.result().get('hits', {}).get('hits', [])
         provenance_res = f_provenance.result().get('hits', {}).get('hits', [])
@@ -2800,6 +2845,34 @@ async def lifespan(app: FastAPI):
 
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
+
+    # Start the auto-unblocker daemon. Self-contained background thread; no-op
+    # when FLUME_AUTO_UNBLOCK_ENABLED=0. See src/dashboard/auto_unblock.py.
+    try:
+        import auto_unblock as _auto_unblock
+        _auto_unblock.maybe_start(
+            es_search=es_search,
+            es_post=es_post,
+            append_note=_append_task_agent_log_note,
+            logger=logger,
+        )
+    except Exception as _exc:
+        logger.warning(f'auto_unblock.start_failed: {_exc}')
+
+    # Start the autonomy sweeps (parent-revival + stuck-worker watchdog +
+    # plan-progress scanner). See src/dashboard/autonomy_sweeps.py.
+    try:
+        import autonomy_sweeps as _autonomy
+        _autonomy.maybe_start(
+            es_search=es_search,
+            es_post=es_post,
+            es_upsert=es_upsert,
+            append_note=_append_task_agent_log_note,
+            list_projects=load_projects_registry,
+            logger=logger,
+        )
+    except Exception as _exc:
+        logger.warning(f'autonomy_sweeps.start_failed: {_exc}')
 
     app.state.http_client = httpx.AsyncClient()
     yield
@@ -3560,6 +3633,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
             "integrationBranch": "develop",
             "releaseBranch": "main",
             "autoMergeIntegrationPr": True,
+            "ensureIntegrationBranch": True,
         },
     }
 
@@ -3970,6 +4044,39 @@ def api_task_commits(task_id: str):
         pass
     return []
 
+def _append_task_agent_log_note(es_id: str, note: str) -> bool:
+    """
+    Append one entry to task.agent_log (same shape as worker append_agent_note).
+    Used for human guidance when unblocking from the dashboard.
+    """
+    note = (note or '').strip()
+    if not note:
+        return False
+    ts = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    safe_id = urllib.parse.quote(str(es_id), safe='')
+    try:
+        es_post(
+            f'agent-task-records/_update/{safe_id}',
+            {
+                'script': {
+                    'source': (
+                        'if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }'
+                        'ctx._source.agent_log.add(params.entry);'
+                        'if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }'
+                        'ctx._source.updated_at = params.touch;'
+                        'ctx._source.last_update = params.touch;'
+                    ),
+                    'lang': 'painless',
+                    'params': {'entry': {'ts': ts, 'note': note}, 'touch': ts},
+                },
+            },
+        )
+        return True
+    except Exception as e:
+        logger.warning(json.dumps({'event': 'append_task_agent_log_failed', 'error': str(e)[:300]}))
+        return False
+
+
 @app.post("/api/tasks/{task_id}/transition")
 def api_task_transition(task_id: str, payload: dict):
     """
@@ -3979,6 +4086,11 @@ def api_task_transition(task_id: str, payload: dict):
       - ready   → re-queues the task from the same role it blocked on
       - planned → demotes back to planning phase
       - inbox   → returns to the intake queue
+
+    Optional:
+      - instruction: human guidance appended to agent_log before transition (implementer sees full task JSON).
+      - auto_recovery_prompt: when true (default) and transitioning blocked → ready without instruction,
+        append a standard recovery hint so the agent re-tests and fixes root cause.
 
     History (agent_log, commit_sha, execution_thoughts) is preserved so
     engineers can read why the task blocked before retrying.
@@ -3994,6 +4106,27 @@ def api_task_transition(task_id: str, payload: dict):
     es_id, src = find_task_doc_by_logical_id(task_id)
     if not es_id or src is None:
         return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
+
+    instruction = (payload.get('instruction') or '').strip()
+    if len(instruction) > 8000:
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'instruction exceeds 8000 characters'},
+        )
+
+    prev_status = (src.get('status') or '').strip().lower()
+    auto_recovery = payload.get('auto_recovery_prompt', True)
+    if isinstance(auto_recovery, str):
+        auto_recovery = auto_recovery.strip().lower() not in ('0', 'false', 'no', 'off')
+
+    if instruction:
+        _append_task_agent_log_note(es_id, f'[Human guidance] {instruction}')
+    elif status == 'ready' and prev_status == 'blocked' and auto_recovery:
+        _append_task_agent_log_note(
+            es_id,
+            '[Recovery] Re-queued after blocked. Read prior agent_log and execution_thoughts; '
+            'fix the root cause, run or add tests, and iterate until acceptance criteria are met.',
+        )
 
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
@@ -4042,6 +4175,13 @@ def api_tasks_bulk_requeue(payload: dict):
             if not es_id or src is None:
                 failed.append({'task_id': task_id, 'error': 'not found'})
                 continue
+            prev = (src.get('status') or '').strip().lower()
+            if prev == 'blocked':
+                _append_task_agent_log_note(
+                    es_id,
+                    '[Recovery] Bulk re-queue after blocked. Read prior agent_log and execution_thoughts; '
+                    'fix root cause, run tests, and iterate until done.',
+                )
             owner = src.get('owner') or src.get('assigned_agent_role')
             doc = {
                 'status': 'ready',
@@ -4063,6 +4203,93 @@ def api_tasks_bulk_requeue(payload: dict):
 
     logger.info(f'bulk-requeue: requeued={len(requeued)} failed={len(failed)}')
     return {'requeued': requeued, 'failed': failed}
+
+
+@app.get('/api/autonomy/status')
+def api_autonomy_status():
+    """Aggregate status for all autonomy background sweeps."""
+    out: dict = {}
+    try:
+        import auto_unblock as _auto_unblock
+        out['auto_unblock'] = _auto_unblock.get_status()
+    except Exception as e:
+        out['auto_unblock'] = {'error': str(e)[:200]}
+    try:
+        import autonomy_sweeps as _autonomy
+        out['sweeps'] = _autonomy.get_status()
+    except Exception as e:
+        out['sweeps'] = {'error': str(e)[:200]}
+    return out
+
+
+@app.post('/api/autonomy/sweep/{sweep_name}')
+def api_autonomy_sweep_now(sweep_name: str):
+    """
+    Force-run an autonomy sweep on demand.
+
+    Valid names:
+      - auto_unblock            — LLM-guided re-queue for blocked tasks
+      - parent_revival          — re-queue blocked parents when bug children close
+      - stuck_worker_watchdog   — release stale claims past the idle threshold
+    """
+    try:
+        if sweep_name == 'auto_unblock':
+            import auto_unblock as _auto_unblock
+            summary = _auto_unblock._sweep_once({
+                'es_search': es_search,
+                'es_post': es_post,
+                'append_note': _append_task_agent_log_note,
+                'logger': logger,
+            })
+            return {'ok': True, 'sweep': 'auto_unblock', 'summary': summary}
+
+        import autonomy_sweeps as _autonomy
+        result = _autonomy.run_sweep_now(
+            sweep_name,
+            es_search=es_search,
+            es_post=es_post,
+            es_upsert=es_upsert,
+            append_note=_append_task_agent_log_note,
+            list_projects=load_projects_registry,
+            logger=logger,
+        )
+        return {'ok': True, **result}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={'error': str(e)})
+    except Exception as e:
+        logger.exception(f'autonomy.sweep_failed: {e}')
+        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
+
+
+@app.get('/api/auto-unblock/status')
+def api_auto_unblock_status():
+    """Current auto-unblocker daemon state + last sweep summary."""
+    try:
+        import auto_unblock as _auto_unblock
+        return _auto_unblock.get_status()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)[:200]})
+
+
+@app.post('/api/auto-unblock/sweep')
+def api_auto_unblock_sweep_now():
+    """Manually trigger one auto-unblock sweep and return its summary.
+
+    Useful for operators who want to drain the blocked queue immediately
+    without waiting for the next scheduled tick.
+    """
+    try:
+        import auto_unblock as _auto_unblock
+        summary = _auto_unblock._sweep_once({
+            'es_search': es_search,
+            'es_post': es_post,
+            'append_note': _append_task_agent_log_note,
+            'logger': logger,
+        })
+        return {'ok': True, 'summary': summary}
+    except Exception as e:
+        logger.exception(f'auto_unblock.manual_sweep_failed: {e}')
+        return JSONResponse(status_code=500, content={'error': str(e)[:300]})
 
 
 @app.post('/api/tasks/bulk-update')
