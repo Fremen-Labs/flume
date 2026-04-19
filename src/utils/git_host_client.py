@@ -97,6 +97,14 @@ class GitHostClient(ABC):
         Each commit: {"sha": str, "author": str, "date": str, "message": str}
         """
 
+    def ensure_integration_branch(self, branch_name: str) -> bool:
+        """
+        If missing, create the branch at the repository default branch tip.
+        Returns True when the branch exists or was created.
+        Subclasses override when supported (GitHub, Azure DevOps).
+        """
+        return False
+
     def create_pull_request(
         self,
         title: str,
@@ -384,6 +392,54 @@ class GitHubClient(GitHostClient):
             })
         return commits
 
+    def ensure_integration_branch(self, branch_name: str) -> bool:
+        """
+        Create ``branch_name`` at the default branch tip when absent (gitflow integration line).
+        Idempotent; tolerates races where the branch appears between check and create.
+        """
+        name = (branch_name or "").strip()
+        if not name:
+            return False
+        default = self.get_default_branch()
+        if name == default:
+            return True
+        # Prefer a direct ref lookup (avoids relying on paginated branch lists).
+        enc = urllib.parse.quote(name, safe="")
+        try:
+            self._get(f"git/ref/heads/{enc}")
+            return True
+        except GitHostNotFoundError:
+            pass
+        except GitHostError:
+            pass
+
+        ref_data = self._get(f"git/ref/heads/{urllib.parse.quote(default, safe='')}")
+        obj = ref_data.get("object") or {}
+        sha = obj.get("sha")
+        if not sha:
+            return False
+        try:
+            self._post(
+                "git/refs",
+                {"ref": f"refs/heads/{name}", "sha": sha},
+            )
+            logger.info(
+                "Created integration branch on GitHub",
+                extra={"structured_data": {"branch": name, "sha": sha[:7]}},
+            )
+            return True
+        except GitHostError as e:
+            err = str(e).lower()
+            if "already exists" in err or "reference already exists" in err:
+                return True
+            if "422" in str(e):
+                return True
+            logger.warning(
+                "ensure_integration_branch GitHub failed",
+                extra={"structured_data": {"branch": name, "error": str(e)[:200]}},
+            )
+            return False
+
     def create_pull_request(self, title: str, body: str, head: str, base: str) -> dict:
         data = self._post("pulls", {
             "title": title,
@@ -401,6 +457,22 @@ class GitHubClient(GitHostClient):
             f"pulls/{pull_number}/merge",
             {"merge_method": merge_method},
         )
+
+    def get_pull_request(self, pull_number: int) -> dict:
+        """
+        Return the PR metadata including `mergeable`, `mergeable_state`,
+        head/base branch info, and links. Useful for diagnosing why an
+        auto-merge failed (conflict vs. failed checks vs. permissions).
+        """
+        return self._get(f"pulls/{pull_number}")
+
+    def get_pull_request_files(self, pull_number: int, per_page: int = 100) -> list[dict]:
+        """
+        List the files in a PR. Returns raw GitHub API items (filename, status,
+        additions, deletions, patch). Callers use this to populate merge-conflict
+        context for recovery tasks.
+        """
+        return self._get(f"pulls/{pull_number}/files", params={"per_page": per_page}) or []
 
     def delete_remote_branch(self, branch: str) -> None:
         """
@@ -464,7 +536,7 @@ class AzureDevOpsClient(GitHostClient):
             extra_headers={"Authorization": f"Basic {self._ado_token()}"},
         )
 
-    def _post(self, path: str, body: dict, params: dict | None = None) -> Any:
+    def _post(self, path: str, body: dict | list, params: dict | None = None) -> Any:
         p = {"api-version": self.API_VERSION}
         if params:
             p.update(params)
@@ -588,6 +660,54 @@ class AzureDevOpsClient(GitHostClient):
                 "message": c.get("comment", "").split("\n")[0],
             })
         return commits
+
+    def ensure_integration_branch(self, branch_name: str) -> bool:
+        """Create ``branch_name`` at the default branch tip when absent (ADO git refs API)."""
+        name = (branch_name or "").strip()
+        if not name:
+            return False
+        default = self.get_default_branch()
+        if name == default:
+            return True
+        if name in self.get_branches():
+            return True
+
+        data = self._get("")
+        repo_id = data.get("id")
+        if not repo_id:
+            return False
+
+        refs_data = self._get("refs", {"filter": f"heads/{default}"})
+        values = refs_data.get("value") or []
+        if not values:
+            return False
+        new_object_id = (values[0].get("objectId") or "").strip()
+        if not new_object_id:
+            return False
+
+        body = [
+            {
+                "name": f"refs/heads/{name}",
+                "oldObjectId": "0000000000000000000000000000000000000000",
+                "newObjectId": new_object_id,
+            }
+        ]
+        try:
+            self._post("refs", body)
+            logger.info(
+                "Created integration branch on Azure DevOps",
+                extra={"structured_data": {"branch": name}},
+            )
+            return True
+        except GitHostError as e:
+            err = str(e).lower()
+            if "already exists" in err or "name already exists" in err:
+                return True
+            logger.warning(
+                "ensure_integration_branch ADO failed",
+                extra={"structured_data": {"branch": name, "error": str(e)[:200]}},
+            )
+            return False
 
     def create_pull_request(self, title: str, body: str, head: str, base: str) -> dict:
         data = self._post("pullrequests", {
@@ -778,3 +898,31 @@ def get_git_client(proj: dict) -> GitHostClient:
         f"No GitHostClient implementation for provider type '{repo_type}' "
         f"(URL: {repo_url}). Supported: github, ado."
     )
+
+
+def ensure_integration_branch_for_project(proj: dict, branch_name: str) -> bool:
+    """
+    Ensure the integration branch (e.g. ``develop``) exists on the remote at the
+    default branch tip. Used before cloning so feature work branches from it.
+
+    Returns True if the branch exists or was created, False if unsupported or on error.
+    """
+    branch_name = (branch_name or "").strip()
+    if not branch_name:
+        return False
+    try:
+        client = get_git_client(proj)
+    except Exception as e:
+        logger.warning(
+            "ensure_integration_branch_for_project: no client",
+            extra={"structured_data": {"error": str(e)[:200]}},
+        )
+        return False
+    try:
+        return bool(client.ensure_integration_branch(branch_name))
+    except Exception as e:
+        logger.warning(
+            "ensure_integration_branch_for_project failed",
+            extra={"structured_data": {"branch": branch_name, "error": str(e)[:200]}},
+        )
+        return False

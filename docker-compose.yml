@@ -144,10 +144,19 @@ services:
       - |
         set -euo pipefail
         if [ -d /dist-cache ]; then
-          echo "Flume UI: forcefully syncing dist from multi-stage Docker cache to host mount..."
-          rm -rf /app/src/frontend/dist/*
-          mkdir -p /app/src/frontend/dist
-          cp -R /dist-cache/* /app/src/frontend/dist/
+          # Seed dist from the multi-stage Docker cache ONLY if it is missing
+          # or empty. A host-built dist (from `npm run build`) must survive
+          # container restarts — previously this block clobbered it every boot.
+          # Set FLUME_FORCE_DIST_SYNC=1 to restore the old wipe-and-replace
+          # behavior (useful after upgrading the base image).
+          if [ ! -f /app/src/frontend/dist/index.html ] || [ "${FLUME_FORCE_DIST_SYNC:-0}" = "1" ]; then
+            echo "Flume UI: seeding dist from multi-stage Docker cache..."
+            mkdir -p /app/src/frontend/dist
+            rm -rf /app/src/frontend/dist/*
+            cp -R /dist-cache/* /app/src/frontend/dist/
+          else
+            echo "Flume UI: host dist present — leaving it alone (set FLUME_FORCE_DIST_SYNC=1 to override)."
+          fi
         fi
         # Set up a writable SSH workspace. /root/.ssh is mounted :ro from the host
         # so we cannot chmod it or write known_hosts there. Instead we write
@@ -215,6 +224,8 @@ services:
       - FLUME_GATEWAY_URL=http://gateway:8090
       # Per-task PR into develop (default task); set to story for one PR per story branch.
       - FLUME_AUTO_PR_SCOPE
+      # Create integration branch (develop) on remote via API if missing; feature branches use it as base.
+      - FLUME_ENSURE_INTEGRATION_BRANCH
       # After merge into develop, delete the remote feature branch (default on).
       - FLUME_DELETE_REMOTE_BRANCH_AFTER_MERGE
       # ES_URL: must match the service name in this compose file.

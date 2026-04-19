@@ -382,7 +382,7 @@ _IMPLEMENTER_TOOLS = [
         'type': 'function',
         'function': {
             'name': 'list_directory',
-            'description': 'List files and subdirectories at a path.',
+            'description': 'List files and subdirectories at a path (non-recursive). Use this instead of shell `ls` or `ls -R`. For deeper trees, call it on subdirectories or use run_shell with `find`/`grep`.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -830,6 +830,7 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         if not command.strip():
             return json.dumps({"status": "error", "message": "Empty command provided."})
             
+
         result = subprocess.run(
             command, shell=True, executable='/bin/bash', capture_output=True, text=True, timeout=300, cwd=str(resolved_cwd), env=safe_env
         )
@@ -1099,6 +1100,28 @@ def _preflight_validate_task(
     return None
 
 
+def _implementer_max_iterations() -> int:
+    raw = os.environ.get('FLUME_IMPLEMENTER_MAX_ITERATIONS', '30').strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 30
+    return max(5, min(n, 80))
+
+
+def _tool_result_modified_repo(fn_name: str, tool_result: str) -> bool:
+    """True if write_file or multi_replace actually changed the working tree."""
+    if fn_name == 'write_file':
+        return tool_result.startswith('OK:')
+    if fn_name == 'multi_replace_file_content':
+        try:
+            j = json.loads(tool_result)
+            return j.get('status') == 'success'
+        except Exception:
+            return False
+    return False
+
+
 def run_implementer(
     task: dict[str, Any],
     repo_path: Optional[str] = None,
@@ -1167,7 +1190,12 @@ def run_implementer(
         return _phantom_result
 
     # AST is always available — projects are cloned and AST-indexed before work begins.
-    system_prompt += "\n\nCRITICAL CONTEXT: An Elastro AST index is available. You MUST use the `elastro_query_ast` tool to search for function names, component paths, or code structures BEFORE listing directories or reading files. This is dramatically faster than directory traversal. You may also use `grep` or `find` via `run_shell` for targeted file searches."
+    system_prompt += (
+        "\n\nCRITICAL CONTEXT: An Elastro AST index is available. For code changes, use `elastro_query_ast` first when searching for symbols. "
+        "If the task is documentation-only or adds new files (e.g. README), AST hits may be sparse — then use `list_directory` on the repo root and `read_file` as needed. "
+        "Do NOT use `run_shell` for `ls`/`cat` when `list_directory`/`read_file` apply; use `grep`/`find` via `run_shell` for search. "
+        "You may use `grep` or `find` via `run_shell` for targeted file searches."
+    )
 
     messages: list[dict] = [
         {'role': 'system', 'content': system_prompt},
@@ -1187,7 +1215,19 @@ def run_implementer(
                         if task.get('requires_code')
                         else 'Decide whether this is a code task, analysis task, or context task. '
                         )
-                        + ' You MUST use elastro_query_ast to search the AST index FIRST. Do NOT use list_directory unless the AST search fails or is insufficient. Act accordingly, then call implementation_complete with a clear summary.'
+                        + ' Use elastro_query_ast when looking for existing code symbols. For new docs/files or when AST is not relevant, explore with list_directory/read_file. Then call implementation_complete with a clear summary.'
+                        + ' If task.agent_log contains [Human guidance] or [Recovery], read those entries first and align your work with them.'
+                        + ' After a blocked/retry cycle, prefer validating with tests and fixing failures before handing off.'
+                        + (
+                            ' This task is a merge-conflict recovery. Do NOT re-implement the feature. '
+                            'Check out task.merge_conflict_head_branch, rebase onto origin/'
+                            + (task.get('merge_conflict_base_branch') or 'develop')
+                            + ' (or merge it in), resolve the conflicts in task.merge_conflict_files_preview '
+                            'using your best judgment of both sides, run or add tests for the merged result, '
+                            'and push --force-with-lease before calling implementation_complete. The dashboard '
+                            'will retry the integration merge once you push.'
+                            if task.get('merge_conflict') else ''
+                        )
                     ),
                 },
                 indent=2,
@@ -1198,11 +1238,31 @@ def run_implementer(
     final_summary = ''
     final_commit_message = ''
     final_artifacts: list[str] = []
+    repo_touched = False
+    nudge_sent = False
+    max_iter = _implementer_max_iterations()
 
     _progress('Agent started — analysing task…')
 
-    for _iteration in range(40):
-        _progress(f'Thinking… (step {_iteration + 1})')
+    for _iteration in range(max_iter):
+        _progress(f'Thinking… (step {_iteration + 1}/{max_iter})')
+        if (
+            task.get('requires_code')
+            and not repo_touched
+            and not nudge_sent
+            and _iteration >= 7
+        ):
+            nudge_sent = True
+            messages.append({
+                'role': 'user',
+                'content': (
+                    'SYSTEM NUDGE: You have not written or modified any repository files yet. '
+                    'Stop exploring. For this task you MUST call write_file (or multi_replace_file_content) '
+                    'with the real deliverable, then call implementation_complete with a commit message. '
+                    'If the task is documentation (e.g. README.md), write that file at the repo root now.'
+                ),
+            })
+            _progress('Nudge: require write_file before completion')
         dynamic_tools = _IMPLEMENTER_TOOLS.copy()
         dynamic_tools.append(_ELASTRO_QUERY_TOOL)
             
@@ -1290,7 +1350,18 @@ def run_implementer(
         messages.append(assistant_msg)
 
         if not tool_calls:
-            final_summary = (message.get('content') or '').strip() or 'Implementation completed.'
+            text = (message.get('content') or '').strip()
+            if task.get('requires_code') and not repo_touched:
+                _progress('Model returned text without tools — require file edits before finishing.')
+                messages.append({
+                    'role': 'user',
+                    'content': (
+                        'Invalid stop: this task requires repository changes. Do not answer with plain text. '
+                        'Use write_file or multi_replace_file_content, then implementation_complete.'
+                    ),
+                })
+                continue
+            final_summary = text or 'Implementation completed.'
             _progress(f'Done: {final_summary[:120]}')
             break
 
@@ -1312,9 +1383,13 @@ def run_implementer(
             elif fn_name == 'write_file':
                 _progress(f'Writing file: {fn_args.get("path", "")}')
                 tool_result = _exec_write_file(fn_args, repo_path)
+                if _tool_result_modified_repo(fn_name, tool_result):
+                    repo_touched = True
             elif fn_name == 'multi_replace_file_content':
                 _progress(f'Replacing content in: {fn_args.get("path", "")}')
                 tool_result = _exec_multi_replace_file_content(fn_args, repo_path)
+                if _tool_result_modified_repo(fn_name, tool_result):
+                    repo_touched = True
             elif fn_name == 'list_directory':
                 _progress(f'Listing directory: {fn_args.get("path", "") or "(repo root)"}')
                 tool_result = _exec_list_directory(fn_args, repo_path)
@@ -1332,14 +1407,24 @@ def run_implementer(
                 _progress(f'Querying AST for nodes mapping: {fn_args.get("query", "")}')
                 tool_result = _exec_elastro_query_ast(fn_args, repo_path)
             elif fn_name == 'implementation_complete':
-                final_summary = fn_args.get('summary', 'Implementation completed.')
-                final_commit_message = fn_args.get('commit_message', '')
-                if not final_commit_message:
-                    final_commit_message = 'Verified task complete, no code changes required.'
-                final_artifacts = fn_args.get('artifacts') or []
-                _progress(f'Completing: {final_summary[:120]}')
-                tool_result = 'Implementation marked complete.'
-                done = True
+                if task.get('requires_code') and not repo_touched:
+                    tool_result = json.dumps({
+                        'status': 'error',
+                        'message': (
+                            'Cannot complete yet: no file was written or modified in this session. '
+                            'Call write_file or multi_replace_file_content first, then call implementation_complete again.'
+                        ),
+                    })
+                    _progress('Blocked implementation_complete — no repo writes yet')
+                else:
+                    final_summary = fn_args.get('summary', 'Implementation completed.')
+                    final_commit_message = fn_args.get('commit_message', '')
+                    if not final_commit_message:
+                        final_commit_message = 'Verified task complete, no code changes required.'
+                    final_artifacts = fn_args.get('artifacts') or []
+                    _progress(f'Completing: {final_summary[:120]}')
+                    tool_result = 'Implementation marked complete.'
+                    done = True
             else:
                 tool_result = f'Unknown tool: {fn_name}'
                 _progress(f'Unknown tool called: {fn_name}')
