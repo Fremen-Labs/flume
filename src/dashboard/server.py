@@ -4797,6 +4797,8 @@ async def get_system_telemetry():
                 "flume_node_requests_total": [],
                 "flume_routing_decision": [],
                 "flume_node_load": [],
+                "flume_concurrency_throttled_total": 0,
+                "flume_tasks_blocked_total": 0,
             }
             
             for line in lines:
@@ -4822,6 +4824,10 @@ async def get_system_telemetry():
                         results["flume_escalation_total"] = int(float(val))
                     elif key_with_tags == "flume_vram_pressure_events_total":
                         results["flume_vram_pressure_events_total"] = int(float(val))
+                    elif key_with_tags == "flume_concurrency_throttled_total":
+                        results["flume_concurrency_throttled_total"] = int(float(val))
+                    elif key_with_tags == "flume_tasks_blocked_total":
+                        results["flume_tasks_blocked_total"] = int(float(val))
                     elif key_with_tags.startswith("flume_build_info{"):
                         m = re.search(r'version="([^"]+)"', key_with_tags)
                         if m:

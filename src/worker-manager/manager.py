@@ -74,51 +74,35 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
-def _fetch_adaptive_max_concurrency(active_mesh_count: int) -> int:
-    """Dynamically determine MAX_CONCURRENT_TASKS based on cluster VRAM constraints."""
+def _fetch_node_concurrency_caps() -> dict:
+    """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints."""
+    node_caps = {}
     try:
-        ceiling_gb = 12  # Default fallback
         res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
-        if res:
-            nodes = res.get('hits', {}).get('hits', [])
-            sum_gb = 0
-            for n in nodes:
-                c = n.get('_source', {}).get('capabilities', {})
-                mem = c.get('memory_gb', 0)
-                if mem:
-                    sum_gb += float(mem)
-            if sum_gb > 0:
-                ceiling_gb = sum_gb
+        nodes = res.get('hits', {}).get('hits', []) if res else []
+        for n in nodes:
+            src = n.get('_source', {})
+            node_id = src.get('id', n.get('_id'))
+            
+            node_cap = src.get('concurrency_cap', 4)
+            health = src.get('health', {})
+            latency = health.get('latency_ms', 0)
+            
+            # Emergency Brake: Gradual ramp-down limit instead of hard clamping to 1
+            if latency > 20000:
+                _manager_logger.critical(f"EMERGENCY BRAKE: Severe latency on {node_id} ({latency}ms). Ramping limit down by 1.")
+                node_cap = max(1, node_cap - 1)
                 
-        ceiling_bytes = ceiling_gb * (1024**3)
-        
-        current_vram_bytes = 0
-        try:
-            import urllib.request
-            import json
-            req = urllib.request.Request('http://host.docker.internal:11434/api/ps', method='GET')
-            with urllib.request.urlopen(req, timeout=1.0) as ps_resp:
-                ps_data = json.loads(ps_resp.read().decode())
-                for m in ps_data.get('models', []):
-                    current_vram_bytes += float(m.get('size_vram', 0))
-        except Exception:
-            pass
-            
-        # Context Floor Constraint (approx 1.5GB KV cache allowance per active local agent)
-        projected_total = current_vram_bytes + (active_mesh_count * 1.5 * (1024**3))
-        
-        # Adaptive Threshold Formula
-        max_parallel = int(os.environ.get('FLUME_MAX_PARALLEL', '4'))
-        if projected_total > ceiling_bytes:
-            return 1 # Choked VRAM, clamp to strictly 1 task execution
-        elif projected_total > ceiling_bytes * 0.75:
-            return 2 # 75% Utilized, Throttle partially 
-        else:
-            return max_parallel # Sub-ceiling, run at maximum capacity!
-            
+            node_caps[node_id] = node_cap
+
     except Exception as e:
-        _manager_logger.error(f"Failed calculating adaptive concurrency: {e}")
-        return 2
+        _manager_logger.error(f"Failed calculating adaptive per-node concurrency: {e}")
+        
+    # Default fallback for unknown locals
+    if 'localhost' not in node_caps:
+        node_caps['localhost'] = 4
+        
+    return node_caps
 
 def log(msg, **kwargs):
     if kwargs:
@@ -408,6 +392,25 @@ def _dedup_skip_task(task_id: str, reason: str):
         log(f"failed to mark task {task_id} as skipped: {e}")
 
 
+PAINLESS_CLAIM_SCRIPT = (
+    'if (ctx._source.status == params.expected_status '
+    '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
+    '  ctx._source.status = params.new_status;'
+    '  ctx._source.queue_state = "active";'
+    '  ctx._source.active_worker = params.worker_name;'
+    '  ctx._source.assigned_agent_role = params.role;'
+    '  ctx._source.owner = params.role;'
+    '  ctx._source.updated_at = params.now;'
+    '  ctx._source.last_update = params.now;'
+    '  if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }'
+    '  if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }'
+    '  if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }'
+    '  if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }'
+    '} else {'
+    '  ctx.op = "noop";'
+    '}'
+)
+
 def try_atomic_claim(
     role: str,
     worker_name: str,
@@ -475,24 +478,7 @@ def try_atomic_claim(
     now = now_iso()
     new_status = 'running' if role != 'pm' else 'planned'
     script = {
-        'source': (
-            'if (ctx._source.status == params.expected_status '
-            '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
-            '  ctx._source.status = params.new_status;'
-            '  ctx._source.queue_state = "active";'
-            '  ctx._source.active_worker = params.worker_name;'
-            '  ctx._source.assigned_agent_role = params.role;'
-            '  ctx._source.owner = params.role;'
-            '  ctx._source.updated_at = params.now;'
-            '  ctx._source.last_update = params.now;'
-            '  if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }'
-            '  if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }'
-            '  if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }'
-            '  if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }'
-            '} else {'
-            '  ctx.op = "noop";'
-            '}'
-        ),
+        'source': PAINLESS_CLAIM_SCRIPT,
         'lang': 'painless',
         'params': {
             'expected_status': target_status,
@@ -511,6 +497,10 @@ def try_atomic_claim(
         'query': query,
         'script': script,
         'max_docs': 1,
+        'sort': [
+            {'priority': {'order': 'desc', 'unmapped_type': 'keyword'}},
+            {'_score': {'order': 'desc'}}
+        ]
     }
 
     try:
@@ -814,7 +804,72 @@ def promote_planned_tasks() -> int:
     return n
 
 
+import time
+import random
+
+last_resume_timestamp = 0
+
+PAINLESS_RESUME_SCRIPT = (
+    'ctx._source.status = "ready";'
+    'ctx._source.queue_state = "idle";'
+    'ctx._source.active_worker = null;'
+)
+
+PAINLESS_BLOCK_SCRIPT = (
+    'ctx._source.status = "blocked";'
+    'ctx._source.queue_state = "idle";'
+    'ctx._source.message = "Task paused due to mesh capacity limits (node overload). Will automatically resume with jitter when resources free up.";'
+)
+
+def _execute_block_sweep(node_loads: dict, node_caps: dict, cloud_providers: set):
+    """Pushes stalled ready tasks to the Blocked column to provide explicit Kanban feedback when cluster is saturated"""
+    total_load = sum(node_loads.values())
+    total_cap = sum(node_caps.values()) if node_caps else 4
+    
+    if total_load < total_cap:
+        return
+        
+    try:
+        body = {
+            'query': {'term': {'status': 'ready'}},
+            'script': {
+                'source': PAINLESS_BLOCK_SCRIPT,
+                'lang': 'painless'
+            }
+        }
+        res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
+        updated = res.get('updated', 0)
+        if updated > 0:
+            log(f"Pushed {updated} capacity-stalled tasks to block queue", metric_id="flume_tasks_blocked_total", counter=updated)
+    except Exception as e:
+        _manager_logger.error(f"Failed to execute block sweep: {e}")
+
+def _execute_resume_sweep():
+    global last_resume_timestamp
+    now = time.time()
+    
+    # Introduce Jitter for resuming (60s base + random 1-15s)
+    if now - last_resume_timestamp < (60 + random.uniform(1, 15)):
+        return
+        
+    try:
+        body = {
+            'query': {'term': {'status': 'blocked'}},
+            'script': {
+                'source': PAINLESS_RESUME_SCRIPT,
+                'lang': 'painless'
+            }
+        }
+        res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
+        updated = res.get('updated', 0)
+        if updated > 0:
+            last_resume_timestamp = now
+            _manager_logger.info(f"Auto-Resumed {updated} blocked tasks safely due to cleared mesh capacity.")
+    except Exception as e:
+        _manager_logger.error(f"Failed to execute resume sweep: {e}")
+
 def cycle():
+    """Main orchestration heartbeat tick"""
     # 1. Check Global Cluster Paused state
     is_paused = False
     try:
@@ -866,17 +921,22 @@ def cycle():
     workers = build_workers()
     
     cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
-    active_mesh_count = 0
+    node_loads = {}
     
-    # Pre-calculate active non-cloud nodes
+    # Pre-calculate active loads dynamically natively per-node
     for wn, wdat in busy_workers.items():
         matching_worker = next((w for w in workers if w['name'] == wn), None)
         if matching_worker:
             w_prov = (matching_worker.get('llm_provider') or 'ollama').lower()
             if w_prov not in cloud_providers:
-                active_mesh_count += 1
+                h = wdat.get('execution_host') or matching_worker.get('execution_host') or 'localhost'
+                node_loads[h] = node_loads.get(h, 0) + 1
                 
-    max_concurrent = _fetch_adaptive_max_concurrency(active_mesh_count)
+    node_caps = _fetch_node_concurrency_caps()
+    
+    # Auto-resume sweep to recover Blocked tasks natively ensuring global mesh unlocks
+    _execute_resume_sweep()
+    _execute_block_sweep(node_loads, node_caps, cloud_providers)
     
     state = {'updated_at': now_iso(), 'workers': []}
     for worker in workers:
@@ -913,13 +973,17 @@ def cycle():
         pref_cred = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
 
         check_prov = (pref_prov or 'ollama').lower()
-        if check_prov not in cloud_providers and active_mesh_count >= max_concurrent:
+        active_host = worker.get('execution_host') or 'localhost'
+        host_load = node_loads.get(active_host, 0)
+        host_cap = node_caps.get(active_host, 4)
+        
+        if check_prov not in cloud_providers and host_load >= host_cap:
             snapshot['status'] = 'idle'
             wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             snapshot['preferred_llm_credential_id'] = wcid
             snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
             state['workers'].append(snapshot)
-            log(f"{worker['name']} throttled from claiming task to protect local Node Mesh. (MAX_CONCURRENT_TASKS={max_concurrent})")
+            log(f"{worker['name']} throttled to protect local Node {active_host} (Node Cap={host_cap})", metric_id="flume_concurrency_throttled_total")
             continue
 
         claimed_task = try_atomic_claim(

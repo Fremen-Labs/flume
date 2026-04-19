@@ -50,6 +50,9 @@ FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
 REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
 PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
+BACKOFF_BASE_DELAY = float(os.environ.get('FLUME_BACKOFF_BASE_DELAY', '2.0'))
+BACKOFF_MAX_DELAY = float(os.environ.get('FLUME_BACKOFF_MAX_DELAY', '30.0'))
+BACKOFF_JITTER_FACTOR = float(os.environ.get('FLUME_BACKOFF_JITTER_FACTOR', '0.2'))
 # AP-3 cleanup: PROJECTS_REGISTRY (projects.json) removed — gitflow config read from ES flume-projects index.
 
 ctx = None
@@ -1118,9 +1121,10 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
     cap = _implementer_max_llm_failures_cap()
 
     if cap > 0 and next_n >= cap:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: implementer hit {next_n} consecutive LLM failures (cap={cap}, '
+            f'Blocked on Node {host}: implementer hit {next_n} consecutive LLM failures (cap={cap}, '
             'FLUME_IMPLEMENTER_MAX_LLM_FAILURES). Fix LLM on the worker host '
             '(see worker_handlers.log), or set cap to 0 to retry indefinitely. '
             'Transition this task to **ready** after fixing to reset the failure counter.',
@@ -1286,9 +1290,10 @@ def handle_implementer_worker(task, es_id):
                 next_push_failures = prev_push_failures + 1
 
                 if next_push_failures > _MAX_PUSH_FAILURES:
+                    host = task.get('execution_host', 'localhost')
                     append_agent_note(
                         es_id,
-                        f'Blocked: git push failed {next_push_failures} consecutive times (cap={_MAX_PUSH_FAILURES}). '
+                        f'Blocked on Node {host}: git push failed {next_push_failures} consecutive times (cap={_MAX_PUSH_FAILURES}). '
                         'The most common cause is an expired or incorrect ADO/GH token. '
                         'Check the Security page → Vault connection, then reset this task to **ready** to retry.',
                     )
@@ -1445,9 +1450,10 @@ def handle_tester_worker(task, es_id):
     task_id = task.get('id')
 
     if _TESTER_RETRY_CAP > 0 and next_retries > _TESTER_RETRY_CAP:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: tester has looped {next_retries} times without the reviewer completing '
+            f'Blocked on Node {host}: tester has looped {next_retries} times without the reviewer completing '
             f'(cap={_TESTER_RETRY_CAP}, FLUME_TESTER_RETRY_CAP). '
             'This usually indicates a handoff or reviewer claim issue. '
             'Manually review and reset this task to **ready** or **done** after inspection.',
@@ -1665,9 +1671,10 @@ def handle_reviewer_worker(task, es_id):
     next_blocks = prev_blocks + 1
 
     if next_blocks >= _REVIEWER_BLOCK_CAP:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: reviewer returned an unresolvable verdict {next_blocks} times '
+            f'Blocked on Node {host}: reviewer returned an unresolvable verdict {next_blocks} times '
             f'(cap={_REVIEWER_BLOCK_CAP}, FLUME_REVIEWER_BLOCK_CAP). '
             'Manually review and reset this task to **ready** or **done** after inspection.',
         )

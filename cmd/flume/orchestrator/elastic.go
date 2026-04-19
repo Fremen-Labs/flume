@@ -335,6 +335,7 @@ var allIndices = []indexDef{
 				"model_tag":        map[string]interface{}{"type": "keyword"},
 				"capabilities":     map[string]interface{}{"type": "object", "enabled": true},
 				"health":           map[string]interface{}{"type": "object", "enabled": true},
+				"concurrency_cap":  map[string]interface{}{"type": "integer"},
 				"auth_secret_path": map[string]interface{}{"type": "keyword"},
 				"updated_at":       map[string]interface{}{"type": "date"},
 			},

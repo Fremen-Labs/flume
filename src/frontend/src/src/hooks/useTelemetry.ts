@@ -8,6 +8,8 @@ export interface TelemetryData {
   flume_escalation_total: number;
   flume_build_info: string;
   flume_vram_pressure_events_total: number;
+  flume_concurrency_throttled_total: number;
+  flume_tasks_blocked_total: number;
   flume_active_models: string[];
   flume_ensemble_requests_total: {
     tags: Record<string, string>;
