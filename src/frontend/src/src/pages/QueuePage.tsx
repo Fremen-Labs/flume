@@ -47,7 +47,9 @@ function timeAgo(ts?: string) {
 }
 
 export default function QueuePage() {
-  const { data: snapshot, isLoading, error, mutate } = useSnapshot();
+  // `useSnapshot` wraps `useQuery`, which exposes `refetch` (not `mutate`).
+  // Alias it so existing callsites keep working.
+  const { data: snapshot, isLoading, error, refetch: mutate } = useSnapshot();
   const { toast } = useToast();
   const [isHalting, setIsHalting] = useState(false);
   const [dialogAction, setDialogAction] = useState<'halt' | 'resume' | null>(null);
