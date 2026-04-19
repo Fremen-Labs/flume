@@ -6,7 +6,15 @@ export interface ApiProject {
   repoUrl: string;
   path: string;
   created_at: string;
-  gitflow: { autoPrOnApprove: boolean; defaultBranch: string | null };
+  gitflow: {
+    autoPrOnApprove: boolean;
+    defaultBranch: string | null;
+    integrationBranch?: string;
+    releaseBranch?: string;
+    autoMergeIntegrationPr?: boolean;
+    /** Create integration branch on remote from default tip if missing */
+    ensureIntegrationBranch?: boolean;
+  };
 }
 
 export interface ApiTask {

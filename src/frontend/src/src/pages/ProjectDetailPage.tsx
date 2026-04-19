@@ -19,10 +19,13 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
+import { useToast } from '@/hooks/use-toast';
 
 function timeAgo(ts?: string) {
   if (!ts) return '';
@@ -560,6 +563,10 @@ export default function ProjectDetailPage() {
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
+  const [unblockDialogTaskId, setUnblockDialogTaskId] = useState<string | null>(null);
+  const [unblockInstruction, setUnblockInstruction] = useState('');
+  const [unblockSubmitting, setUnblockSubmitting] = useState(false);
+  const { toast } = useToast();
 
   const project = snapshot?.projects.find(p => p.id === projectId);
   const allTasks = snapshot?.tasks ?? [];
@@ -658,16 +665,42 @@ export default function ProjectDetailPage() {
     retry: 2,
   });
 
-  // Unblock a task
-  async function unblockTask(taskId: string) {
-    await fetch(`/api/tasks/${taskId}/transition`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'ready' }),
-    });
-    qc.invalidateQueries({ queryKey: ['snapshot'] });
-    qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
-    qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
+  async function submitUnblockDialog() {
+    if (!unblockDialogTaskId) return;
+    setUnblockSubmitting(true);
+    try {
+      const body: Record<string, unknown> = { status: 'ready' };
+      const ins = unblockInstruction.trim();
+      if (ins) body.instruction = ins;
+      const r = await fetch(`/api/tasks/${encodeURIComponent(unblockDialogTaskId)}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data: { error?: string } = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data?.error || 'Transition failed');
+      }
+      toast({
+        title: 'Task unblocked',
+        description: ins
+          ? 'Your guidance was added to agent_log and the task was re-queued.'
+          : 'Recovery hint added; task re-queued for the same role.',
+      });
+      setUnblockDialogTaskId(null);
+      setUnblockInstruction('');
+      qc.invalidateQueries({ queryKey: ['snapshot'] });
+      qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
+      qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
+    } catch (e) {
+      toast({
+        title: 'Unblock failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setUnblockSubmitting(false);
+    }
   }
 
   function toggleSelect(node: TaskNode) {
@@ -1031,7 +1064,7 @@ export default function ProjectDetailPage() {
                   depth={0}
                   selectedTaskId={selectedTaskId}
                   onSelect={setSelectedTaskId}
-                  onUnblock={unblockTask}
+                  onRequestUnblock={(id) => setUnblockDialogTaskId(id)}
                   selectionMode={selectionMode}
                   selected={selected}
                   onToggleSelect={toggleSelect}
@@ -1308,6 +1341,42 @@ export default function ProjectDetailPage() {
       </div>
 
       {/* Modals */}
+      <Dialog open={unblockDialogTaskId !== null} onOpenChange={(open) => { if (!open) { setUnblockDialogTaskId(null); setUnblockInstruction(''); } }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Unblock &amp; re-queue</DialogTitle>
+            <DialogDescription>
+              The task returns to <strong>ready</strong> for the same agent role. Optional guidance is appended to{' '}
+              <code className="text-xs">agent_log</code> — the implementer receives the full task JSON, including these notes.
+              If you leave guidance empty, Flume adds a short <strong>recovery</strong> hint so the agent re-tests and fixes the root cause.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            placeholder="e.g. Pin pydantic to v2; run pytest tests/test_hangman.py before completing…"
+            value={unblockInstruction}
+            onChange={e => setUnblockInstruction(e.target.value)}
+            className="min-h-[100px] text-sm"
+          />
+          <DialogFooter className="gap-2 sm:gap-0">
+            <button
+              type="button"
+              className="text-sm px-3 py-2 rounded-md border border-border text-muted-foreground hover:bg-muted/30"
+              onClick={() => { setUnblockDialogTaskId(null); setUnblockInstruction(''); }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="text-sm px-4 py-2 rounded-md bg-primary text-primary-foreground font-medium disabled:opacity-50"
+              disabled={unblockSubmitting}
+              onClick={() => void submitUnblockDialog()}
+            >
+              {unblockSubmitting ? 'Saving…' : 'Unblock & resume'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <FileExplorerModal
         open={explorerOpen}
         onOpenChange={setExplorerOpen}
@@ -1338,14 +1407,14 @@ function ItemTypeBadge({ type }: { type?: string }) {
 }
 
 function HierarchyNode({
-  node, depth, selectedTaskId, onSelect, onUnblock,
+  node, depth, selectedTaskId, onSelect, onRequestUnblock,
   selectionMode, selected, onToggleSelect,
 }: {
   node: TaskNode;
   depth: number;
   selectedTaskId: string | null;
   onSelect: (id: string) => void;
-  onUnblock: (id: string) => void;
+  onRequestUnblock: (id: string) => void;
   selectionMode: boolean;
   selected: Set<string>;
   onToggleSelect: (node: TaskNode) => void;
@@ -1420,10 +1489,11 @@ function HierarchyNode({
           {node.pr_status === 'failed' && <AlertCircle className="w-3 h-3 text-destructive" />}
           {isBlocked && !selectionMode && (
             <button
-              onClick={e => { e.stopPropagation(); onUnblock(node.id); }}
+              type="button"
+              onClick={e => { e.stopPropagation(); onRequestUnblock(node.id); }}
               className="text-[10px] px-2 py-0.5 rounded bg-warning/10 border border-warning/20 text-warning hover:bg-warning/20 transition-all"
             >
-              Unblock
+              Unblock…
             </button>
           )}
           {/* Expander button in selection mode for nodes with children */}
@@ -1449,7 +1519,7 @@ function HierarchyNode({
               depth={depth + 1}
               selectedTaskId={selectedTaskId}
               onSelect={onSelect}
-              onUnblock={onUnblock}
+              onRequestUnblock={onRequestUnblock}
               selectionMode={selectionMode}
               selected={selected}
               onToggleSelect={onToggleSelect}

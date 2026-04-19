@@ -429,6 +429,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setCommitted(true);
       setPhase('committed');
       qc.invalidateQueries({ queryKey: ['snapshot'] });
+      qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to commit');
       setPhase('chat');
