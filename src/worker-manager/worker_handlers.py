@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -606,7 +607,11 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
             h = _stable_scope_hash(scope_id)
             branch = f"{prefix}/{seg}-{h}"
         else:
-            branch = f"{prefix}/{task_id}-{uuid.uuid4().hex[:6]}"
+            # Stable per-task branch: reusing the same name across retries lets the
+            # implementer stack commits on prior work and prevents the orphan-branch
+            # explosion we saw when every retry generated a fresh uuid suffix.
+            safe_tid = _sanitize_git_branch_segment(task_id)
+            branch = f"{prefix}/{safe_tid}"
 
     # ── Local repo path: retain legacy worktree-free behaviour ──────────────
     # For locally-mounted repos (clone_status='local') we still check out a
@@ -1206,6 +1211,84 @@ def _record_merge_conflict(
             log(f"record_merge_conflict: update_task_doc failed task={task_id}: {e}")
 
 
+_INTEGRATION_LOCK_INDEX = 'flume-integration-locks'
+_INTEGRATION_LOCK_TTL_SECONDS = 180
+
+
+def _acquire_integration_merge_lock(repo_id: str, task_id: str, pr_number: int) -> bool:
+    """Acquire per-repo integration-merge lock via ES op_type=create (atomic)."""
+    if not repo_id:
+        return True
+    now = datetime.now(timezone.utc).isoformat()
+    body = {
+        'repo': repo_id,
+        'task_id': task_id,
+        'pr_number': pr_number,
+        'acquired_at': now,
+    }
+    try:
+        _es_projects_request_worker(
+            f'/{_INTEGRATION_LOCK_INDEX}/_create/{repo_id}?refresh=true',
+            body=body,
+            method='PUT',
+        )
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code != 409:
+            log(f"integration lock acquire unexpected error repo={repo_id}: {e}")
+            return False
+    except Exception as e:
+        log(f"integration lock acquire failed repo={repo_id}: {e}")
+        return False
+    # Stale-lock reclaim: if the existing lock is older than TTL, force-release and retry once.
+    try:
+        existing = _es_projects_request_worker(f'/{_INTEGRATION_LOCK_INDEX}/_doc/{repo_id}', method='GET')
+        src = (existing or {}).get('_source') or {}
+        acquired_at = src.get('acquired_at')
+        if acquired_at:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(acquired_at.replace('Z', '+00:00'))).total_seconds()
+            if age > _INTEGRATION_LOCK_TTL_SECONDS:
+                log(f"integration lock: releasing stale lock repo={repo_id} age={age:.0f}s")
+                _release_integration_merge_lock(repo_id)
+                try:
+                    _es_projects_request_worker(
+                        f'/{_INTEGRATION_LOCK_INDEX}/_create/{repo_id}?refresh=true',
+                        body=body,
+                        method='PUT',
+                    )
+                    return True
+                except Exception as ee:
+                    log(f"integration lock re-acquire after stale release failed repo={repo_id}: {ee}")
+                    return False
+    except Exception as e:
+        log(f"integration lock stale-check failed repo={repo_id}: {e}")
+    return False
+
+
+def _release_integration_merge_lock(repo_id: str) -> None:
+    if not repo_id:
+        return
+    try:
+        _es_projects_request_worker(
+            f'/{_INTEGRATION_LOCK_INDEX}/_doc/{repo_id}?refresh=true',
+            method='DELETE',
+        )
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            log(f"integration lock release error repo={repo_id}: {e}")
+    except Exception as e:
+        log(f"integration lock release failed repo={repo_id}: {e}")
+
+
+def _serialize_integration_merge_enabled(repo_id: str) -> bool:
+    try:
+        from utils.concurrency_config import serialize_integration_merge  # noqa: PLC0415
+    except Exception:
+        return True
+    src = _get_project_source(repo_id) if repo_id else None
+    return bool(serialize_integration_merge(src))
+
+
 def _maybe_auto_merge_integration_pr(
     task: dict,
     pr_number: int | None,
@@ -1218,6 +1301,10 @@ def _maybe_auto_merge_integration_pr(
     Merge feature PR into the integration branch (develop) when enabled, then
     optionally delete the remote task branch so develop is the single line of integration.
     Never runs for release-promotion tasks.
+
+    Serializes merges per-repo via an ES CAS lock so two feature PRs don't race
+    into develop at the same instant -- the primary cause of avoidable merge
+    conflicts under parallel work.
     """
     if not pr_number or task.get('release_promotion_task'):
         return
@@ -1225,6 +1312,37 @@ def _maybe_auto_merge_integration_pr(
     gf = load_project_gitflow(repo_id)
     if not gf.get('autoMergeIntegrationPr', True):
         return
+
+    lock_held = False
+    if _serialize_integration_merge_enabled(repo_id):
+        lock_held = _acquire_integration_merge_lock(repo_id, str(task.get('id') or ''), int(pr_number))
+        if not lock_held:
+            log(
+                f"auto-merge deferred task={task.get('id')} pr={pr_number} repo={repo_id}: "
+                f"another merge holds the integration lock; retry on next cycle"
+            )
+            if es_id:
+                try:
+                    update_task_doc(es_id, {'pr_status': 'awaiting_integration_merge'})
+                except Exception:
+                    pass
+            return
+    try:
+        _do_auto_merge_integration_pr(task, pr_number, client=client, repo_path=repo_path, es_id=es_id, gf=gf)
+    finally:
+        if lock_held:
+            _release_integration_merge_lock(repo_id)
+
+
+def _do_auto_merge_integration_pr(
+    task: dict,
+    pr_number: int,
+    *,
+    client: object,
+    repo_path: Path | str | None,
+    es_id: str | None,
+    gf: dict,
+) -> None:
     merged_ok = False
     if client is not None and type(client).__name__ == 'GitHubClient':
         try:
@@ -1404,13 +1522,83 @@ def _handle_release_promotion_task(task: dict, es_id: str) -> bool:
     return True
 
 
+def _bug_recursion_depth(task_id: str) -> int:
+    """Count how many times a task has recursed through the bug-fix pipeline.
+
+    Bug tasks are named `bug-<parent_id>-<idx>`, so a chain like
+    `task-abc → bug-task-abc-1 → bug-bug-task-abc-1-1` has depth 0, 1, 2
+    respectively. This is the cheapest, most reliable way to detect runaway
+    bug-fix loops without walking the parent chain through Elasticsearch.
+    """
+    depth = 0
+    tid = task_id or ""
+    while tid.startswith("bug-"):
+        tid = tid[4:]
+        depth += 1
+    return depth
+
+
 def create_bug_task(parent_task, bug, idx):
+    """
+    Idempotently create (or re-open) the follow-up bug task for *parent_task*.
+
+    Historically this function blindly indexed a new document every time the
+    tester failed, which caused Elasticsearch to accumulate dozens of records
+    with identical logical ids (`bug-<parent>-<idx>`) — each spawning its own
+    random branch. We now:
+
+      1. Use `PUT _create/<bug_id>` so the ES `_id` is the logical bug id,
+         making duplicates physically impossible.
+      2. If a doc already exists for this bug id, reopen it instead of
+         creating a new one — preserving its branch so retries stack on top
+         of prior implementer work.
+    """
     parent_id = parent_task.get('id', 'task')
     bug_id = f"bug-{parent_id}-{idx}"
+    title = bug.get('title', f"Bug follow-up for {parent_task.get('title', 'task')}")
+    objective = bug.get('objective', 'Fix defect identified during tester validation.')
+    priority = 'high' if bug.get('severity') == 'high' else 'normal'
+
+    existing_es_id, existing_src = fetch_task_doc(bug_id)
+    if existing_es_id and existing_src:
+        prev_status = str(existing_src.get('status') or '').lower()
+        terminal = prev_status in ('done', 'archived', 'cancelled', 'blocked')
+        patch: dict = {
+            'objective': objective,
+            'title': title,
+            'priority': priority,
+            'updated_at': now_iso(),
+            'last_update': now_iso(),
+        }
+        if terminal:
+            patch.update({
+                'status': 'ready',
+                'queue_state': 'queued',
+                'active_worker': None,
+                'owner': 'implementer',
+                'assigned_agent_role': 'implementer',
+                'needs_human': False,
+            })
+        try:
+            update_task_doc(existing_es_id, patch)
+            if terminal:
+                append_agent_note(
+                    existing_es_id,
+                    f'Re-opened by tester (was {prev_status}). Reusing existing branch '
+                    f'{existing_src.get("branch") or "(none)"} to avoid orphan branches.',
+                )
+            log(
+                f"create_bug_task: reused existing {bug_id} "
+                f"(prev_status={prev_status}, branch={existing_src.get('branch')})"
+            )
+        except Exception as e:
+            log(f"create_bug_task: reopen failed for {bug_id}: {e}")
+        return
+
     doc = {
         'id': bug_id,
-        'title': bug.get('title', f"Bug follow-up for {parent_task.get('title', 'task')}"),
-        'objective': bug.get('objective', 'Fix defect identified during tester validation.'),
+        'title': title,
+        'objective': objective,
         'repo': parent_task.get('repo'),
         'worktree': parent_task.get('worktree'),
         'item_type': 'bug',
@@ -1422,7 +1610,7 @@ def create_bug_task(parent_task, bug, idx):
         'owner': 'implementer',
         'assigned_agent_role': 'implementer',
         'status': 'ready',
-        'priority': 'high' if bug.get('severity') == 'high' else 'normal',
+        'priority': priority,
         'depends_on': [],
         'acceptance_criteria': [],
         'artifacts': [],
@@ -1432,7 +1620,23 @@ def create_bug_task(parent_task, bug, idx):
         'updated_at': now_iso(),
         'last_update': now_iso(),
     }
-    write_doc(TASK_INDEX, doc)
+    try:
+        es_request(
+            f'/{TASK_INDEX}/_create/{bug_id}?refresh=wait_for',
+            doc,
+            method='PUT',
+        )
+    except urllib.error.HTTPError as e:
+        if getattr(e, 'code', None) == 409:
+            log(f"create_bug_task: race — {bug_id} created concurrently; skipping duplicate")
+            return
+        log(f"create_bug_task: PUT _create/{bug_id} failed: {e}; falling back to POST _doc")
+        try:
+            write_doc(TASK_INDEX, doc)
+        except Exception as ee:
+            log(f"create_bug_task: fallback POST for {bug_id} failed: {ee}")
+    except Exception as e:
+        log(f"create_bug_task: unexpected error creating {bug_id}: {e}")
 
 
 def compute_ready_for_repo(repo):
@@ -1480,18 +1684,103 @@ def compute_ready_for_repo(repo):
 
     changed = 0
 
+    # --- WIP gate (repo/story parallelism) -------------------------------------
+    # Compute current "active" (ready+running+review) counts so we don't promote
+    # more leaf work than the project's concurrency settings allow.
+    try:
+        from utils.concurrency_config import (  # noqa: PLC0415
+            max_ready_for_repo,
+            story_parallelism,
+        )
+        _proj_src = _get_project_source(repo) or {}
+        _repo_cap = int(max_ready_for_repo(_proj_src) or 0)
+        _story_cap = int(story_parallelism(_proj_src) or 0)
+    except Exception:
+        _repo_cap = 0
+        _story_cap = 0
+
+    _rollup_types = {'epic', 'feature', 'story'}
+    # `blocked` is included because a task that blocked mid-pipeline (e.g. on a
+    # merge conflict awaiting pr_reconcile) still owns an unmerged branch.
+    # Promoting another task while that branch is in flight is exactly what
+    # causes the multi-branch merge-conflict cascade we are trying to avoid.
+    _active_states = {'ready', 'running', 'review', 'blocked'}
+
+    def _counts_as_wip(item: dict) -> bool:
+        if item.get('status') not in _active_states:
+            return False
+        it = (item.get('item_type') or 'task').lower()
+        if it in _rollup_types:
+            return False
+        if (item.get('owner') or '').lower() == 'pm':
+            return False
+        if (item.get('assigned_agent_role') or '').lower() == 'pm':
+            return False
+        # A blocked task only contributes to WIP if it still has an unmerged
+        # branch (merge_conflict flag, or a commit_sha without pr_merged=True).
+        # Blocked bug tasks with no branch shouldn't hold up the pipeline.
+        if item.get('status') == 'blocked':
+            if item.get('pr_merged') is True:
+                return False
+            has_branch = bool(item.get('branch')) or bool(item.get('commit_sha'))
+            if not has_branch:
+                return False
+        return True
+
+    # Saturation is measured in *distinct branches in flight*, not raw WIP
+    # count. That way promoting another task onto an already-in-flight branch
+    # (e.g. a follow-up task under the same story scope) is fine; only NEW
+    # branches are gated.
+    in_flight_branches: set = set()
+    active_story_count: dict = {}
+    for s in by_id.values():
+        if not _counts_as_wip(s):
+            continue
+        br = (s.get('branch') or '').strip()
+        if br:
+            in_flight_branches.add(br)
+        pid = s.get('parent_id') or ''
+        if pid:
+            active_story_count[pid] = active_story_count.get(pid, 0) + 1
+    active_repo_branch_count = len(in_flight_branches)
+
     # Pass 1: promote 'planned' items to 'ready' when all deps are done
     for item_id, src in by_id.items():
         if not item_id or src.get('status') != 'planned':
             continue
         item_type = src.get('item_type', 'task')
         deps = src.get('depends_on') or []
-        
+
         if deps:
             if not all(by_id.get(dep, {}).get('status') == 'done' for dep in deps):
                 continue
         else:
             if item_type != 'task':
+                continue
+
+        is_leaf = (item_type or 'task').lower() not in _rollup_types
+        if is_leaf and _repo_cap:
+            # Pre-compute the branch this task would land on once promoted.
+            # If the task or any of its done-deps already has a branch, and
+            # that branch is already in flight, continuing on it is free —
+            # no new branch will be cut, so no saturation concern.
+            prospective_branch = (src.get('branch') or '').strip()
+            if not prospective_branch:
+                for dep in deps:
+                    dsrc = by_id.get(dep)
+                    if dsrc and dsrc.get('branch'):
+                        prospective_branch = (dsrc.get('branch') or '').strip()
+                        if prospective_branch:
+                            break
+            would_open_new_branch = (
+                not prospective_branch
+                or prospective_branch not in in_flight_branches
+            )
+            if would_open_new_branch and active_repo_branch_count >= _repo_cap:
+                continue
+        if is_leaf and _story_cap:
+            pid = src.get('parent_id') or ''
+            if pid and active_story_count.get(pid, 0) >= _story_cap:
                 continue
         
         # Infer role/requirements for task items if missing
@@ -1530,6 +1819,17 @@ def compute_ready_for_repo(repo):
         update_task_doc(src['_es_id'], patch)
         src.update(patch)  # update local view
         changed += 1
+        if is_leaf:
+            promoted_branch = (patch.get('branch') or src.get('branch') or '').strip()
+            if promoted_branch and promoted_branch not in in_flight_branches:
+                in_flight_branches.add(promoted_branch)
+                active_repo_branch_count = len(in_flight_branches)
+            elif not promoted_branch:
+                # Fresh branch will be cut by ensure_task_branch; reserve a slot.
+                active_repo_branch_count += 1
+            pid = src.get('parent_id') or ''
+            if pid:
+                active_story_count[pid] = active_story_count.get(pid, 0) + 1
         log(f"compute_ready: promoted {item_id} to ready")
 
     # Pass 2: mark parent items 'done' when all their children are 'done'
@@ -2215,14 +2515,72 @@ def handle_implementer_worker(task, es_id):
             try:
                 _, cur = fetch_task_doc(task_id)
                 if cur and str(cur.get('status') or '') == 'running':
-                    update_task_doc(es_id, {
-                        'status': 'ready',
-                        'owner': 'implementer',
-                        'assigned_agent_role': 'implementer',
-                        'needs_human': False,
-                        **_implementer_clear_claim_fields(),
-                    })
-                    log(f"implementer: released stuck running task={task_id} (handler did not finish normally)")
+                    # ── Loop termination: cap implementer exceptions ──────────
+                    # Without this, a task that reliably throws (missing binary
+                    # like `go`, Path Traversal Halted, Kill Switch abort) gets
+                    # released back to `ready` forever. Cap the abnormal exits
+                    # and escalate to human when the implementer can't even
+                    # finish its handler.
+                    _MAX_IMPL_EXCEPTIONS = int(
+                        os.environ.get('FLUME_MAX_IMPLEMENTER_EXCEPTIONS', '3')
+                    )
+                    prev_excs = int(cur.get('implementer_exception_count', 0) or 0)
+                    next_excs = prev_excs + 1
+                    if _MAX_IMPL_EXCEPTIONS > 0 and next_excs >= _MAX_IMPL_EXCEPTIONS:
+                        append_agent_note(
+                            es_id,
+                            f'Blocked: implementer handler has exited abnormally '
+                            f'{next_excs} times (cap={_MAX_IMPL_EXCEPTIONS}, '
+                            'FLUME_MAX_IMPLEMENTER_EXCEPTIONS). Common causes: '
+                            'missing binary (`go`, `node`), path traversal '
+                            'attempt, kill-switch abort, or LLM loop. Inspect '
+                            'worker logs for the latest traceback and reset '
+                            'the task to **ready** once the root cause is fixed.',
+                        )
+                        update_task_doc(es_id, {
+                            'status': 'blocked',
+                            'needs_human': True,
+                            'owner': 'implementer',
+                            'assigned_agent_role': 'implementer',
+                            'implementer_exception_count': next_excs,
+                            **_implementer_clear_claim_fields(),
+                        })
+                        try:
+                            write_doc(FAILURE_INDEX, {
+                                'id': f"failure-implexc-{task_id}-{int(time.time())}",
+                                'task_id': task_id,
+                                'project': task.get('repo'),
+                                'repo': task.get('repo'),
+                                'error_class': 'implementer_exception_cap',
+                                'summary': f'Implementer handler aborted {next_excs} times without completing.',
+                                'root_cause': 'Repeated abnormal handler exit',
+                                'fix_applied': 'Task blocked; needs_human=true',
+                                'model_used': task.get('preferred_model', ''),
+                                'confidence': 'high',
+                                'recurrence_count': next_excs,
+                                'created_at': now_iso(),
+                                'updated_at': now_iso(),
+                            })
+                        except Exception:
+                            pass
+                        log(
+                            f"implementer: task={task_id} blocked by exception cap "
+                            f"({next_excs}/{_MAX_IMPL_EXCEPTIONS})"
+                        )
+                    else:
+                        update_task_doc(es_id, {
+                            'status': 'ready',
+                            'owner': 'implementer',
+                            'assigned_agent_role': 'implementer',
+                            'needs_human': False,
+                            'implementer_exception_count': next_excs,
+                            **_implementer_clear_claim_fields(),
+                        })
+                        log(
+                            f"implementer: released stuck running task={task_id} "
+                            f"(handler did not finish normally; excs={next_excs}/"
+                            f"{_MAX_IMPL_EXCEPTIONS})"
+                        )
             except Exception as ex:
                 log(f"implementer: finally guard failed task={task_id}: {ex}")
 
@@ -2275,6 +2633,72 @@ def handle_tester_worker(task, es_id):
     tester_model = task.get('preferred_model') or _get_active_llm_model()
 
     if result.action == 'fail':
+        # ── Loop termination: bug recursion depth + per-task rejection cap ──
+        # Without these, a persistently-failing task can (a) spawn an unbounded
+        # chain of bug-bug-bug-*-* follow-ups, and (b) re-queue the implementer
+        # forever. Both are hard-capped here; when exceeded we block the task
+        # with needs_human=true so a person can intervene instead of the
+        # platform burning cycles.
+        _MAX_BUG_DEPTH = int(os.environ.get('FLUME_MAX_BUG_DEPTH', '2'))
+        _MAX_TESTER_REJECTIONS = int(os.environ.get('FLUME_MAX_TESTER_REJECTIONS', '3'))
+        current_depth = _bug_recursion_depth(task.get('id') or '')
+        prev_rejects = int(task.get('tester_reject_count', 0) or 0)
+        next_rejects = prev_rejects + 1
+
+        depth_exceeded = _MAX_BUG_DEPTH > 0 and current_depth >= _MAX_BUG_DEPTH
+        rejects_exceeded = _MAX_TESTER_REJECTIONS > 0 and next_rejects > _MAX_TESTER_REJECTIONS
+
+        if depth_exceeded or rejects_exceeded:
+            reason_bits = []
+            if depth_exceeded:
+                reason_bits.append(
+                    f'bug recursion depth={current_depth} >= cap {_MAX_BUG_DEPTH} '
+                    '(FLUME_MAX_BUG_DEPTH)'
+                )
+            if rejects_exceeded:
+                reason_bits.append(
+                    f'tester has rejected this task {next_rejects} times '
+                    f'(cap={_MAX_TESTER_REJECTIONS}, FLUME_MAX_TESTER_REJECTIONS)'
+                )
+            reason = ' and '.join(reason_bits)
+            append_agent_note(
+                es_id,
+                'Blocked: ' + reason + '. '
+                'No new bug task was created. Inspect the task, fix the '
+                'underlying issue (e.g. wrong language, missing dependency, '
+                'mis-decomposed plan), and reset this task to **ready** or '
+                'archive it. Counters reset on approval.',
+            )
+            update_task_doc(es_id, {
+                'status': 'blocked',
+                'needs_human': True,
+                'owner': 'tester',
+                'assigned_agent_role': 'tester',
+                'tester_reject_count': next_rejects,
+                **_implementer_clear_claim_fields(),
+            })
+            write_doc(FAILURE_INDEX, {
+                'id': f"failure-loopcap-{task.get('id')}-{int(time.time())}",
+                'task_id': task.get('id'),
+                'project': task.get('repo'),
+                'repo': task.get('repo'),
+                'error_class': 'loop_cap_tester',
+                'summary': reason + ' — escalated to human.',
+                'root_cause': 'Runaway tester/bug loop terminated by cap',
+                'fix_applied': 'Task blocked; needs_human=true',
+                'model_used': tester_model,
+                'confidence': 'high',
+                'recurrence_count': next_rejects,
+                'created_at': now_iso(),
+                'updated_at': now_iso(),
+            })
+            log(
+                f"tester: task={task.get('id')} blocked by loop cap "
+                f"(depth={current_depth}/{_MAX_BUG_DEPTH}, "
+                f"rejects={next_rejects}/{_MAX_TESTER_REJECTIONS})"
+            )
+            return True
+
         bugs = result.bugs or [{
             'title': f"Bug follow-up for {task.get('title', task.get('id'))}",
             'objective': result.summary,
@@ -2287,6 +2711,7 @@ def handle_tester_worker(task, es_id):
             'status': 'ready',
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            'tester_reject_count': next_rejects,
             **_implementer_clear_claim_fields(),
         })
         write_doc(FAILURE_INDEX, {
@@ -2300,11 +2725,15 @@ def handle_tester_worker(task, es_id):
             'fix_applied': '',
             'model_used': tester_model,
             'confidence': 'medium',
-            'recurrence_count': 1,
+            'recurrence_count': next_rejects,
             'created_at': now_iso(),
             'updated_at': now_iso(),
         })
-        log(f"tester found bugs for task={task.get('id')} and re-queued implementer")
+        log(
+            f"tester found bugs for task={task.get('id')} and re-queued implementer "
+            f"(depth={current_depth}/{_MAX_BUG_DEPTH}, "
+            f"rejects={next_rejects}/{_MAX_TESTER_REJECTIONS})"
+        )
         return True
 
     write_doc(HANDOFF_INDEX, {
@@ -2379,6 +2808,17 @@ def handle_reviewer_worker(task, es_id):
         update_task_doc(es_id, {
             'status': 'done',
             'owner': 'reviewer',
+            # Reset all loop-termination counters on success so re-opened tasks
+            # get a fresh budget instead of inheriting stale counts.
+            'tester_reject_count': 0,
+            'reviewer_rework_count': 0,
+            'tester_retry_count': 0,
+            'reviewer_block_count': 0,
+            'stuck_recovery_count': 0,
+            'implementer_consecutive_llm_failures': 0,
+            'implementer_exception_count': 0,
+            'push_failure_count': 0,
+            'needs_human': False,
             **_implementer_clear_claim_fields(),
         })
         write_doc(PROVENANCE_INDEX, {
@@ -2465,11 +2905,62 @@ def handle_reviewer_worker(task, es_id):
         return True
 
     if verdict == 'changes_requested':
+        # ── Loop termination: reviewer rework cap ─────────────────────────
+        # Reviewer 'changes_requested' kicks the task back to the implementer.
+        # Without a ceiling this can ping-pong forever (the language-mismatch
+        # loop we observed sent 107 rejections through a single project).
+        # Cap it; when exceeded, block the task for human inspection.
+        _MAX_REVIEWER_REWORK = int(os.environ.get('FLUME_MAX_REVIEWER_REWORK', '3'))
+        prev_rework = int(task.get('reviewer_rework_count', 0) or 0)
+        next_rework = prev_rework + 1
+
+        if _MAX_REVIEWER_REWORK > 0 and next_rework > _MAX_REVIEWER_REWORK:
+            append_agent_note(
+                es_id,
+                f'Blocked: reviewer has requested changes {next_rework} times '
+                f'(cap={_MAX_REVIEWER_REWORK}, FLUME_MAX_REVIEWER_REWORK). '
+                'This usually means the implementer is producing the wrong '
+                'kind of output (wrong language, mis-decomposed plan, missing '
+                'tooling). Inspect the latest review notes, fix the root '
+                'cause, and reset this task to **ready** or archive it. '
+                'Counter resets on approval.',
+            )
+            update_task_doc(es_id, {
+                'status': 'blocked',
+                'needs_human': True,
+                'owner': 'reviewer',
+                'assigned_agent_role': 'reviewer',
+                'reviewer_rework_count': next_rework,
+                **_implementer_clear_claim_fields(),
+            })
+            write_doc(FAILURE_INDEX, {
+                'id': f"failure-loopcap-review-{task_id}-{int(time.time())}",
+                'task_id': task_id,
+                'project': task.get('repo'),
+                'repo': task.get('repo'),
+                'error_class': 'loop_cap_reviewer',
+                'summary': f'Reviewer rework cap exceeded: {next_rework}/{_MAX_REVIEWER_REWORK}. '
+                           f'Latest verdict: {result.summary}',
+                'root_cause': 'Runaway reviewer/implementer loop terminated by cap',
+                'fix_applied': 'Task blocked; needs_human=true',
+                'model_used': reviewer_model,
+                'confidence': 'high',
+                'recurrence_count': next_rework,
+                'created_at': now_iso(),
+                'updated_at': now_iso(),
+            })
+            log(
+                f"reviewer: task={task_id} blocked by rework cap "
+                f"({next_rework}/{_MAX_REVIEWER_REWORK})"
+            )
+            return True
+
         # B3: Clear claim fields so the task is re-claimable by another worker
         update_task_doc(es_id, {
             'status': 'ready',
             'owner': 'implementer',
             'assigned_agent_role': 'implementer',
+            'reviewer_rework_count': next_rework,
             **_implementer_clear_claim_fields(),
         })
         write_doc(FAILURE_INDEX, {
@@ -2483,11 +2974,14 @@ def handle_reviewer_worker(task, es_id):
             'fix_applied': '',
             'model_used': reviewer_model,
             'confidence': 'medium',
-            'recurrence_count': 1,
+            'recurrence_count': next_rework,
             'created_at': now_iso(),
             'updated_at': now_iso(),
         })
-        log(f"reviewer requested changes for task={task_id}")
+        log(
+            f"reviewer requested changes for task={task_id} "
+            f"(rework={next_rework}/{_MAX_REVIEWER_REWORK})"
+        )
         return True
 
     # Unknown verdict (e.g. hallucinated value not caught by agent_runner normalisation).
@@ -2616,13 +3110,29 @@ def main():
                         src = h.get('_source', {})
                         aw = src.get('active_worker')
                         if aw and aw not in claimed_workers:
+                            # Route to the status the owning role will claim
+                            # from. pm -> planned, tester/reviewer -> review,
+                            # else -> ready. Without this check, reviewer-owned
+                            # tasks get silently orphaned in `ready` state.
+                            owner = (src.get('owner') or src.get('assigned_agent_role') or 'implementer')
+                            owner = owner.strip().lower()
+                            if owner not in ('implementer', 'tester', 'reviewer', 'pm', 'intake', 'memory-updater'):
+                                owner = 'implementer'
+                            if owner == 'pm':
+                                recover_status = 'planned'
+                            elif owner in ('tester', 'reviewer'):
+                                recover_status = 'review'
+                            else:
+                                recover_status = 'ready'
                             update_task_doc(h.get('_id'), {
-                                'status': 'ready',
+                                'status': recover_status,
+                                'owner': owner,
+                                'assigned_agent_role': owner,
                                 'queue_state': 'queued',
                                 'active_worker': None,
                                 'needs_human': False,
                             })
-                            log(f"released orphaned task={src.get('id')} (active_worker={aw})")
+                            log(f"released orphaned task={src.get('id')} (active_worker={aw}) -> {recover_status}/{owner}")
                 except BaseException as cleanup_err:
                     log(f"Orphan task cleanup failed securely: {cleanup_err}")
 

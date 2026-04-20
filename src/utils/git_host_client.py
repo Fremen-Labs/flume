@@ -458,6 +458,23 @@ class GitHubClient(GitHostClient):
             {"merge_method": merge_method},
         )
 
+    def list_pull_requests(
+        self,
+        state: str = "open",
+        *,
+        base: str | None = None,
+        per_page: int = 50,
+    ) -> list[dict]:
+        """
+        List pull requests in the repo. Used by the PR reconciliation sweep to
+        discover PRs whose task docs are out of sync with GitHub truth.
+        """
+        params: dict[str, Any] = {"state": state, "per_page": per_page}
+        if base:
+            params["base"] = base
+        out = self._get("pulls", params=params)
+        return out or []
+
     def get_pull_request(self, pull_number: int) -> dict:
         """
         Return the PR metadata including `mergeable`, `mergeable_state`,
