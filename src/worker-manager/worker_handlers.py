@@ -1406,6 +1406,19 @@ def handle_implementer_worker(task, es_id):
         return False
     finally:
         # AP-5C: Always clean up the ephemeral clone so /tmp doesn't grow unbounded.
+        # Before teardown, dump the undocumented state into Elasticsearch for debugging.
+        try:
+            if worktree_path and Path(worktree_path).exists() and str(Path(worktree_path)).startswith(tempfile.gettempdir()):
+                status_out = subprocess.run(['git', '-C', worktree_path, 'status'], capture_output=True, text=True, timeout=5).stdout
+                if status_out.strip():
+                    diff_out = subprocess.run(['git', '-C', worktree_path, 'diff'], capture_output=True, text=True, timeout=5).stdout
+                    note = f"**Ephemeral Workspace Pre-teardown state:**\n\n```text\n{status_out.strip()}\n```\n"
+                    if diff_out.strip():
+                        note += f"```diff\n{diff_out.strip()[:4000]}\n```"
+                    append_agent_note(es_id, note)
+        except Exception as _ex:
+            log(f"implementer: failed to capture ephemeral state for task={task_id}: {_ex}")
+
         # teardown_task_clone() is a no-op for local repos and non-tmp paths.
         teardown_task_clone(worktree_path)
         if not released:

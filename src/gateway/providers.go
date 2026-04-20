@@ -354,6 +354,13 @@ func (r *ProviderRouter) ollamaNonStream(
 		content, _ = msg["content"].(string)
 	}
 
+	// Route non-streamed responses through the ThinkMill to securely strip 
+	// `<think>` blocks before sending to JSON-expecting consumers (like agent_runner.py)
+	mill := NewThinkMill()
+	mill.Process([]byte(content))
+	cleanContent := mill.Visible()
+	thoughts := mill.Thoughts()
+
 	// P4: Extract token usage from Ollama response. Ollama uses
 	// prompt_eval_count / eval_count instead of OpenAI's prompt_tokens /
 	// completion_tokens. Populate both in our Usage struct so downstream
@@ -369,8 +376,9 @@ func (r *ProviderRouter) ollamaNonStream(
 
 	return &ChatResponse{
 		Message: ResponseMessage{
-			Role:    "assistant",
-			Content: strings.TrimSpace(content),
+			Role:     "assistant",
+			Content:  strings.TrimSpace(cleanContent),
+			Thoughts: thoughts,
 		},
 		Usage: usage,
 	}, nil

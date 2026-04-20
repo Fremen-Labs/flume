@@ -251,6 +251,7 @@ var Metrics = &metricsRegistry{
 	NodeRequests:         newCounterVec(),
 	RoutingDecisions:     newCounterVec(),
 	NodeLoad:             newGaugeVec(),
+	NodeHealthGauge:      newGaugeVec(),
 	LocalOffloadPct:      newGaugeVec(),
 	WorkerTokens:         newCounterVec(),
 	

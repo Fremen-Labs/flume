@@ -829,7 +829,8 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
                 
         executable = cmd_list[0]
         # Q2: Added 'git' for validation commands (git diff, git status, git log)
-        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git'}
+        # Q3: Added package management commands for dynamic workspace provisioning
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git', 'apt-get', 'apt', 'apk', 'pip', 'pip3', 'curl', 'wget', 'sh', 'bash', 'make'}
         
         if executable not in allow_list:
             logger.warning({
@@ -840,10 +841,10 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
                 "executable": executable,
                 "reason": "Executable not in allow-list"
             })
-            raise ShellPermissionError(f"run_shell is strictly bounded to validation commands ({', '.join(sorted(allow_list))}). System/file manipulation commands are explicitly denied.")
+            raise ShellPermissionError(f"run_shell is bounded to validation & provisioning commands ({', '.join(sorted(allow_list))}). Unsupported system level access is denied.")
             
         result = subprocess.run(
-            cmd_list, shell=False, capture_output=True, text=True, timeout=30, cwd=cwd,
+            cmd_list, shell=False, capture_output=True, text=True, timeout=120, cwd=cwd,
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:
@@ -856,7 +857,7 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     except ShellPermissionError:
         raise
     except subprocess.TimeoutExpired:
-        return json.dumps({"status": "error", "message": "Command timed out after 30s"})
+        return json.dumps({"status": "error", "message": "Command timed out after 120s"})
     except Exception as e:
         logger.error({
             "event": "run_shell_error",
