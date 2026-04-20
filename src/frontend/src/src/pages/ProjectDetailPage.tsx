@@ -716,17 +716,61 @@ export default function ProjectDetailPage() {
 
   async function bulkAction(action: 'archive' | 'delete') {
     if (selected.size === 0) return;
-    await fetch('/api/tasks/bulk-update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: [...selected], action, repo: projectId }),
-    });
+    const allIds = [...selected];
+    // Server caps each call at 200 tasks. Selecting an epic/feature pulls in
+    // every descendant via collectIds(), which can easily exceed that — so
+    // chunk the request here and surface any per-batch failures to the user
+    // instead of silently swallowing the 400.
+    const CHUNK = 200;
+    let successCount = 0;
+    const failures: { task_id: string; error: string }[] = [];
+    const errorMessages: string[] = [];
+    for (let i = 0; i < allIds.length; i += CHUNK) {
+      const chunk = allIds.slice(i, i + CHUNK);
+      try {
+        const r = await fetch('/api/tasks/bulk-update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: chunk, action, repo: projectId }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          errorMessages.push(data?.error || `HTTP ${r.status}`);
+          continue;
+        }
+        const ok = (action === 'archive' ? data?.archived : data?.deleted) ?? [];
+        successCount += Array.isArray(ok) ? ok.length : 0;
+        if (Array.isArray(data?.failed)) failures.push(...data.failed);
+      } catch (e) {
+        errorMessages.push(e instanceof Error ? e.message : 'Network error');
+      }
+    }
     setSelected(new Set());
     setSelectionMode(false);
     setConfirmDelete(false);
     qc.invalidateQueries({ queryKey: ['snapshot'] });
     qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
     qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
+
+    const verb = action === 'archive' ? 'Archived' : 'Deleted';
+    if (errorMessages.length || failures.length) {
+      const detail = [
+        successCount ? `${verb} ${successCount} of ${allIds.length}.` : null,
+        failures.length ? `${failures.length} failed (e.g. ${failures[0].error}).` : null,
+        errorMessages.length ? errorMessages[0] : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      toast({
+        title: `${verb === 'Archived' ? 'Archive' : 'Delete'} partially failed`,
+        description: detail || 'Some tasks could not be processed.',
+        variant: 'destructive',
+      });
+    } else if (successCount > 0) {
+      toast({
+        title: `${verb} ${successCount} task${successCount === 1 ? '' : 's'}`,
+      });
+    }
   }
 
   async function deleteProject() {

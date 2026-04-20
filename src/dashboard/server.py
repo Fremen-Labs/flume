@@ -184,7 +184,7 @@ if not ES_VERIFY_TLS:
 
 
 def _ensure_gitflow_defaults(entry: dict) -> dict:
-    """Backfill gitflow config with defaults if missing."""
+    """Backfill gitflow + concurrency config with defaults if missing."""
     if 'gitflow' not in entry:
         entry['gitflow'] = {
             'autoPrOnApprove': True,
@@ -208,6 +208,11 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
             gf['autoMergeIntegrationPr'] = True
         if 'ensureIntegrationBranch' not in gf:
             gf['ensureIntegrationBranch'] = True
+    try:
+        from utils.concurrency_config import ensure_concurrency_defaults  # noqa: PLC0415
+        ensure_concurrency_defaults(entry)
+    except Exception:
+        pass
     return entry
 
 
@@ -3638,6 +3643,12 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
             "autoMergeIntegrationPr": True,
             "ensureIntegrationBranch": True,
         },
+        "concurrency": {
+            "maxRunningPerRepo": 2,
+            "maxReadyPerRepo": 4,
+            "storyParallelism": 1,
+            "serializeIntegrationMerge": True,
+        },
     }
 
     # Single consistent write with ?refresh=wait_for — prevents the name
@@ -4187,7 +4198,6 @@ def api_tasks_bulk_requeue(payload: dict):
                 )
             owner = src.get('owner') or src.get('assigned_agent_role')
             doc = {
-                'status': 'ready',
                 'queue_state': 'queued',
                 'active_worker': None,
                 'needs_human': False,
@@ -4195,11 +4205,23 @@ def api_tasks_bulk_requeue(payload: dict):
                 'last_update': now,
                 'implementer_consecutive_llm_failures': 0,
             }
-            if owner:
-                doc['owner'] = owner
-                doc['assigned_agent_role'] = owner
+            # Route the task to the status its role actually claims from:
+            # pm -> planned, tester/reviewer -> review, everyone else -> ready.
+            # Without this, owner=reviewer + status=ready silently orphans
+            # the task (neither reviewer nor implementer worker will claim it).
+            role = (owner or '').strip().lower() or 'implementer'
+            if role not in ('implementer', 'tester', 'reviewer', 'pm', 'intake', 'memory-updater'):
+                role = 'implementer'
+            if role == 'pm':
+                doc['status'] = 'planned'
+            elif role in ('tester', 'reviewer'):
+                doc['status'] = 'review'
+            else:
+                doc['status'] = 'ready'
+            doc['owner'] = role
+            doc['assigned_agent_role'] = role
             es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
-            requeued.append({'task_id': task_id, 'owner': owner})
+            requeued.append({'task_id': task_id, 'owner': role, 'status': doc['status']})
         except Exception as exc:
             logger.error(f'bulk-requeue: task {task_id} failed: {exc}')
             failed.append({'task_id': task_id, 'error': str(exc)[:200]})
