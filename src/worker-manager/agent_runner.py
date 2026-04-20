@@ -1282,20 +1282,63 @@ def run_implementer(
             
         raw = _call_ollama_tools(messages, dynamic_tools, model, task=task)
         if not raw:
-            # Backoff before retrying to avoid tight error loops (e.g., rate limits)
-            time.sleep(min(2 + _iteration, 8))
-            _progress('LLM returned no response — stopping.')
-            return AgentResult(
-                action='implementer_failed',
-                summary='LLM returned no response — stopping.',
-                artifacts=[],
-                metadata={
-                    'source': 'llm_no_response',
-                    'commit_sha': '',
-                    'commit_message': '',
-                },
-            )
-
+            import random
+            import os
+            base_delay = float(os.environ.get('FLUME_BACKOFF_BASE_DELAY', '2.0'))
+            max_delay = float(os.environ.get('FLUME_BACKOFF_MAX_DELAY', '30.0'))
+            jitter_factor = float(os.environ.get('FLUME_BACKOFF_JITTER_FACTOR', '0.2'))
+            
+            # Non-Recursive Context-Aware Exponential Backoff
+            delay = min(base_delay * (2 ** _iteration), max_delay)
+            jitter = delay * jitter_factor
+            
+            logger.warning({
+                "message": "LLM returned no response — triggering backoff retry",
+                "metric_id": "flume_backoff_events_total",
+                "delay_sec": delay,
+                "iteration": _iteration
+            })
+            
+            final_delay = delay + random.uniform(0, jitter)
+            _slept = 0.0
+            
+            # Context-Aware chunked sleep polling for immediate human/mesh Abort logic
+            while _slept < final_delay:
+                chunk = min(5.0, final_delay - _slept)
+                time.sleep(chunk)
+                _slept += chunk
+                
+                # Verify Context State dynamically mid-sleep to free zombie threads on blocked gridlocks
+                try:
+                    from worker_handlers import check_kill_switch, KillSwitchAbortError
+                    task_id = task.get('id', task.get('_id', ''))
+                    if task_id:
+                        check_kill_switch(task_id)
+                except KillSwitchAbortError:
+                    _progress('Task blocked mid-backoff — aborting context.')
+                    return AgentResult(
+                        action='implementer_failed',
+                        summary='Task halted via Kill Switch (node overload or user intervention) during exponential backoff execution.',
+                        artifacts=[],
+                        metadata={'source': 'kill_switch', 'commit_sha': '', 'commit_message': ''}
+                    )
+                except Exception:
+                    pass
+            
+            if _iteration == 14:
+                _progress('LLM returned no response after max retries — stopping.')
+                return AgentResult(
+                    action='implementer_failed',
+                    summary='LLM returned no response after exponential backoff exhaustion.',
+                    artifacts=[],
+                    metadata={
+                        'source': 'llm_no_response',
+                        'commit_sha': '',
+                        'commit_message': '',
+                    },
+                )
+            _progress('LLM returned no response — retrying...')
+            continue
         message = raw.get('message', {})
         tool_calls = message.get('tool_calls') or []
         thoughts = message.get('thoughts') or ''

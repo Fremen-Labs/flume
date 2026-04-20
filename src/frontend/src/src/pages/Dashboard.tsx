@@ -4,6 +4,7 @@ import {
   TrendingUp, ArrowRight, Zap, Clock, Activity,
 } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
+import { useTelemetry } from '@/hooks/useTelemetry';
 import { StatusBadge } from '@/components/StatusBadge';
 import { useNavigate } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -42,6 +43,7 @@ function SectionHeader({ title }: { title: string }) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { data: snapshot, isLoading } = useSnapshot();
+  const { data: telemetry } = useTelemetry();
 
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
@@ -120,7 +122,17 @@ export default function Dashboard() {
           { title: 'Tasks Running', value: runningTasks.length, icon: Zap, color: 'text-primary', description: "Real-time AI compute clusters generating code currently synced to parallel Git worktrees." },
           { title: 'Tasks in Queue', value: plannedTasks.length, icon: ListTodo, color: 'text-muted-foreground', description: "Tickets staged by the orchestrator awaiting native daemon resource allocation bounds." },
           { title: 'Tasks Completed', value: doneTasks.length, icon: CheckCircle2, color: 'text-success', description: "System verified pipelines pushed natively successfully bypassing the PR Critic thresholds." },
-          { title: 'Blocked Issues', value: blockedTasks.length, icon: AlertTriangle, color: 'text-destructive', description: "Tasks flagged for explicit human intervention resolving Structural AST exceptions or loops." },
+          { title: 'Blocked Issues', value: blockedTasks.length, icon: AlertTriangle, color: 'text-destructive', description: blockedTasks.length > 0 ? (
+            <div className="space-y-2 mt-1">
+              <span className="block mb-2">Tasks flagged for explicit human intervention resolving Structural AST exceptions or loops.</span>
+              {blockedTasks.slice(0, 3).map(t => (
+                <div key={t.id} className="text-[10px] bg-black/40 p-1.5 rounded text-white/80 leading-snug">
+                  <span className="text-destructive font-medium">{t.id}:</span> {t.message || 'Blocked without explicit reason'}
+                </div>
+              ))}
+              {blockedTasks.length > 3 && <div className="text-[10px] text-muted-foreground">+{blockedTasks.length - 3} more</div>}
+            </div>
+          ) : "Tasks flagged for explicit human intervention resolving Structural AST exceptions or loops." },
         ].map(card => (
           <Tooltip key={card.title} delayDuration={150}>
             <TooltipTrigger asChild>
@@ -140,7 +152,7 @@ export default function Dashboard() {
               </motion.div>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="max-w-[240px] text-xs leading-relaxed glass-panel border-white/[0.1] shadow-2xl p-3">
-              <p className="text-foreground/90">{card.description}</p>
+              <div className="text-foreground/90">{card.description}</div>
               <div className="mt-2 text-[10px] text-primary flex items-center gap-1 font-medium">
                 Click to view details <ArrowRight className="w-3 h-3" />
               </div>
@@ -323,6 +335,29 @@ export default function Dashboard() {
                   </motion.div>
                 );
               })}
+            </div>
+          </motion.div>
+
+          {/* Local Intelligence */}
+          <motion.div initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.25 }}>
+            <SectionHeader title="Local Intelligence" />
+            <div className="glass-card p-4 space-y-4">
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-muted-foreground flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-orange-400" /> Mesh Throttling
+                </span>
+                <span className="font-semibold text-foreground">
+                  {telemetry?.flume_concurrency_throttled_total || 0}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-sm hover:bg-white/[0.02] -mx-2 px-2 py-1 rounded transition-colors cursor-pointer" onClick={() => navigate('/queue')}>
+                <span className="text-muted-foreground flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5 text-destructive" /> Total Blocked
+                </span>
+                <span className="font-semibold text-foreground">
+                  {telemetry?.flume_tasks_blocked_total || blockedTasks.length}
+                </span>
+              </div>
             </div>
           </motion.div>
         </div>
