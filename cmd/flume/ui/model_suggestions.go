@@ -21,26 +21,31 @@ import (
 // model names that change infrequently.
 var frontierModels = map[string][]string{
 	"openai": {
-		// GPT-5.4 series (current flagship — April 2026)
+		// Codex models (OAuth / Codex scope required)
+		"codex-mini-latest",
+		"codex-mini-2025-01-01",
 		"gpt-5.4",
-		"gpt-5.4-pro",
 		"gpt-5.4-mini",
-		"gpt-5.4-nano",
-		// GPT-5 series
-		"gpt-5",
-		"gpt-5-mini",
-		"gpt-5-nano",
-		// Specialised
-		"gpt-5.1-codex-max",
-		// Legacy (still available via API for many users)
-		"gpt-4o",
-		"gpt-4o-mini",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-spark",
+		"gpt-5.3",
+		// GPT-4.1 series (April 2026)
 		"gpt-4.1",
 		"gpt-4.1-mini",
 		"gpt-4.1-nano",
+		// Reasoning models
 		"o4-mini",
 		"o3",
 		"o3-mini",
+		// GPT-4o series
+		"gpt-4o",
+		"gpt-4o-mini",
+		// Legacy
+		"gpt-4-turbo",
+		"gpt-4",
+		"gpt-3.5-turbo",
+		"o1",
+		"o1-mini",
 	},
 	"anthropic": {
 		// Claude 4.7 (current flagship — April 2026)

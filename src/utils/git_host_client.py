@@ -817,10 +817,20 @@ def _parse_ado_components(repo_url: str) -> tuple[str, str, str] | None:
 
 def _get_github_token() -> str:
     """Resolve a GitHub PAT from environment variables."""
-    return (
+    direct = (
         os.environ.get("GH_TOKEN", "")
         or os.environ.get("GITHUB_TOKEN", "")
     ).strip()
+    if direct:
+        return direct
+    # Worker runtime may hydrate delegated GitHub secrets as FLUME_GH_<id>.
+    # If token metadata is unavailable, fall back to any hydrated secret.
+    delegated = sorted(
+        (v.strip() for k, v in os.environ.items() if k.startswith("FLUME_GH_") and str(v).strip()),
+        key=len,
+        reverse=True,
+    )
+    return delegated[0] if delegated else ""
 
 
 def _get_ado_token() -> str:

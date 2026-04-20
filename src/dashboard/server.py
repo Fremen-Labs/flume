@@ -678,6 +678,7 @@ def _test_planner_connection(status: dict) -> dict:
     provider  = (status.get('provider') or '').lower().strip()
     base_url  = (status.get('baseUrl') or '').rstrip('/')
     api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
+    using_codex_app_server = bool(status.get('usingCodexAppServer'))
 
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
@@ -724,6 +725,16 @@ def _test_planner_connection(status: dict) -> dict:
             url += f'?key={api_key}'
 
     elif provider in ('openai', 'openai_compatible', 'xai', 'grok', 'mistral', 'cohere'):
+        if provider == 'openai' and using_codex_app_server:
+            # For OpenAI OAuth/Codex tokens, direct /v1/models often returns 403 even
+            # when Codex app-server is fully usable. In that mode, test app-server
+            # availability instead of the raw OpenAI models endpoint.
+            status['connectionTestOk'] = True
+            status['connectionTestResult'] = (
+                'OPENAI via Codex app-server enabled — skipping direct /v1/models probe'
+            )
+            status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
+            return status
         # OpenAI-compatible family: strip a trailing /v1 that catalog URLs
         # (e.g. Grok → https://api.x.ai/v1) already include, then append /v1/models.
         norm = base_url
@@ -858,23 +869,39 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
 
 
 def _planner_should_use_codex_app_server() -> bool:
-    provider = (os.environ.get('LLM_PROVIDER') or '').strip().lower()
+    try:
+        pairs = load_effective_pairs(WORKSPACE_ROOT)
+    except Exception:
+        pairs = {}
+    provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or '').strip().lower()
     if provider != 'openai':
         return False
     force = (os.environ.get('FLUME_PLANNER_USE_CODEX_APP_SERVER') or 'auto').strip().lower()
     if force in ('0', 'false', 'off', 'no'):
         return False
-    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
+    model = (pairs.get('LLM_MODEL') or os.environ.get('LLM_MODEL') or '').strip().lower()
     api_key = (os.environ.get('LLM_API_KEY') or '').strip()
-    if not has_oauth and force not in ('1', 'true', 'on', 'yes'):
+    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
+    # Codex OAuth tokens are typically non-sk bearer tokens and often cannot
+    # use direct OpenAI /v1/models probes. Route those through app-server.
+    has_non_platform_bearer = bool(api_key) and not (api_key.startswith('sk-') or api_key.startswith('sk_'))
+    model_requests_codex = 'codex' in model
+    if (
+        not has_oauth
+        and not has_non_platform_bearer
+        and not model_requests_codex
+        and force not in ('1', 'true', 'on', 'yes')
+    ):
         return False
     if api_key.startswith('sk-') or api_key.startswith('sk_'):
-        return False
+        # If the user explicitly selected a codex model, still prefer app-server.
+        if not model_requests_codex:
+            return False
     try:
-        import codex_app_server  # type: ignore
-
-        st = codex_app_server.status()
-        return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
+        import shutil
+        # Avoid importing codex_app_server here; module import paths can vary in
+        # containerized runs. PATH lookup is enough for routing decisions.
+        return bool(shutil.which('codex') or shutil.which('npx'))
     except Exception:
         return False
 
@@ -894,14 +921,43 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         messageCount=len(messages or []),
     )
     if cfg.get('usingCodexAppServer'):
-        import codex_app_server_client  # type: ignore
+        try:
+            import codex_app_server_client  # type: ignore
+        except Exception:
+            # Fallback import when dashboard runs with a different cwd/PYTHONPATH.
+            import importlib.util
+            client_path = Path(__file__).resolve().parent / 'codex_app_server_client.py'
+            spec = importlib.util.spec_from_file_location('codex_app_server_client', str(client_path))
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f'Could not load Codex app-server client from {client_path}')
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            codex_app_server_client = mod  # type: ignore
 
-        return codex_app_server_client.planner_chat(
-            messages,
-            model=model,
-            cwd=str(WORKSPACE_ROOT),
-            timeout=timeout_seconds,
-        )
+        try:
+            return codex_app_server_client.planner_chat(
+                messages,
+                model=model,
+                cwd=_planner_safe_cwd(),
+                timeout=timeout_seconds,
+            )
+        except Exception as e:
+            # If app-server cannot start (missing auth/session, boot race, etc),
+            # degrade gracefully to direct provider routing instead of hard fail.
+            _planner_debug_log(
+                'codex_app_server_fallback',
+                error=str(e)[:300],
+                provider=cfg.get('provider'),
+                model=model,
+                baseUrl=cfg.get('baseUrl'),
+            )
+            # Hard-lock codex-model planning to app-server. Falling back to direct
+            # OpenAI chat/completions with ChatGPT/Codex OAuth tokens reliably
+            # yields 401/403 and creates a confusing auth loop.
+            if 'codex' in (model or '').lower():
+                raise RuntimeError(
+                    f'Codex app-server unavailable for model {model}: {e}'
+                )
 
     from utils import llm_client
     return llm_client.chat(
@@ -914,6 +970,26 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         timeout_seconds=timeout_seconds,
         ollama_think=False,
     )
+
+
+def _planner_safe_cwd() -> str:
+    """
+    Return a directory path safe to use as planner cwd.
+    Some deployments bind WORKSPACE_ROOT as '/local-repos' which may be missing
+    or accidentally be a file. Codex app-server raises Errno 20 in that case.
+    """
+    candidates = [
+        Path(WORKSPACE_ROOT),
+        Path('/app'),
+        Path.cwd(),
+    ]
+    for p in candidates:
+        try:
+            if p.exists() and p.is_dir():
+                return str(p)
+        except Exception:
+            continue
+    return str(Path.cwd())
 
 def _strip_json_blocks(text: str) -> str:
     """Remove trailing ```json ... ``` or bare {...} JSON blocks from a message string."""
@@ -964,6 +1040,12 @@ def parse_llm_response(raw_text):
 
 def _planner_llm_error_hint(err: str) -> str:
     """Short user-facing hint after a planner LLM call fails (OAuth, connectivity, etc.)."""
+    if 'Codex app-server unavailable' in err:
+        return (
+            ' The selected model is Codex and requires Codex app-server auth. '
+            'Run `npx --yes @openai/codex login` once on this host to create `~/.codex/auth.json`, '
+            'then retry planning.'
+        )
     if 'Connection refused' in err or 'Errno 111' in err:
         return (
             ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
@@ -2851,6 +2933,23 @@ async def lifespan(app: FastAPI):
     # Uses doc_as_upsert so we never overwrite a value the user saved via the Settings UI.
     _seed_llm_config_from_env()
 
+    # Self-heal Codex auth cache for planner transport:
+    # if OAuth state exists but ~/.codex/auth.json is missing, regenerate it.
+    try:
+        from llm_settings import ensure_codex_auth_cache  # type: ignore
+        regenerated, msg = ensure_codex_auth_cache(WORKSPACE_ROOT)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "codex_auth_cache_sync",
+                    "regenerated": bool(regenerated),
+                    "message": msg,
+                }
+            )
+        )
+    except Exception as e:
+        logger.warning(f"codex auth cache self-heal skipped: {e}")
+
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
 
@@ -3686,6 +3785,71 @@ def api_project_clone_status(project_id: str):
         'path': proj.get('path'),
         'is_git': (Path(proj.get('path', '')) / '.git').exists() if proj.get('path') else False,
     }
+
+
+@app.patch("/api/projects/{project_id}")
+def api_patch_project(project_id: str, payload: dict):
+    """Partially update a registered project (concurrency, branchScope, gitflow keys, display name)."""
+    registry = load_projects_registry()
+    proj = next((p for p in registry if p.get('id') == project_id), None)
+    if not proj:
+        return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
+
+    _ensure_gitflow_defaults(proj)
+
+    conc = payload.get('concurrency')
+    if isinstance(conc, dict) and conc:
+        proj.setdefault('concurrency', {})
+        allowed_c = (
+            'maxRunningPerRepo',
+            'maxReadyPerRepo',
+            'storyParallelism',
+            'serializeIntegrationMerge',
+        )
+        for key in allowed_c:
+            if key not in conc:
+                continue
+            val = conc[key]
+            if key == 'serializeIntegrationMerge':
+                proj['concurrency'][key] = bool(val)
+            else:
+                try:
+                    proj['concurrency'][key] = int(val)
+                except (TypeError, ValueError):
+                    return JSONResponse(
+                        status_code=400,
+                        content={'error': f'Invalid integer for concurrency.{key}'},
+                    )
+
+    bs = payload.get('branchScope') if payload.get('branchScope') is not None else payload.get('branch_scope')
+    if bs is not None:
+        b = str(bs).strip().lower()
+        if b not in ('story', 'task'):
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'branchScope must be "story" or "task"'},
+            )
+        proj['branchScope'] = b
+
+    if 'name' in payload and isinstance(payload['name'], str) and payload['name'].strip():
+        proj['name'] = payload['name'].strip()
+
+    gf_in = payload.get('gitflow')
+    if isinstance(gf_in, dict) and gf_in:
+        proj.setdefault('gitflow', {})
+        for gk in (
+            'autoPrOnApprove',
+            'defaultBranch',
+            'integrationBranch',
+            'releaseBranch',
+            'autoMergeIntegrationPr',
+            'ensureIntegrationBranch',
+        ):
+            if gk in gf_in:
+                proj['gitflow'][gk] = gf_in[gk]
+
+    _upsert_project(_ensure_gitflow_defaults(proj))
+    return {'success': True, 'project': proj}
 
 
 def _map_task_hit_for_api(h: dict) -> dict:
@@ -4983,6 +5147,20 @@ def api_settings_llm_oauth_refresh():
         return {"success": True, "message": msg, "token": token}
     return JSONResponse(status_code=400, content={"error": msg})
 
+
+@app.post("/api/settings/llm/oauth/save")
+def api_settings_llm_oauth_save(payload: dict):
+    """Accept an OAuth state dict from the CLI PKCE flow and persist it.
+
+    Required fields: client_id, access, refresh.
+    Optional: expires (Unix ms), oauth_scopes_requested.
+    """
+    from llm_settings import save_oauth_state  # type: ignore
+    ok, msg = save_oauth_state(WORKSPACE_ROOT, payload)
+    if ok:
+        return {"success": True, "message": msg}
+    return JSONResponse(status_code=400, content={"error": msg})
+
 @app.get("/api/settings/repos")
 def api_settings_repos():
     from repo_settings import get_repo_settings_response
@@ -5517,7 +5695,29 @@ async def complete_task(task_id: str):
 
 
 # Static Mount for Frontend
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+
+_MISSING_UI_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><title>Flume</title></head>
+<body>
+<h1>Flume dashboard</h1>
+<p>The web UI bundle is missing or incomplete (<code>index.html</code> not found under the static root).
+Build the frontend with <code>./flume build-ui</code> (or <code>npm run build</code> in <code>src/frontend</code>) and redeploy.</p>
+<p>API is still available: <a href="/api/health"><code>/api/health</code></a></p>
+</body></html>"""
+
+
+def _safe_path_under_static(full_path: str) -> Path | None:
+    """Reject path traversal; return resolved path under STATIC_ROOT or None."""
+    try:
+        base = STATIC_ROOT.resolve()
+        rel = (full_path or "").lstrip("/").replace("\\", "/")
+        cand = (base / rel).resolve()
+        cand.relative_to(base)
+        return cand
+    except (ValueError, OSError):
+        return None
+
 
 if STATIC_ROOT.exists():
     asset_dir = STATIC_ROOT / "assets"
@@ -5527,12 +5727,25 @@ if STATIC_ROOT.exists():
     @app.get("/{full_path:path}")
     async def serve_spa_catchall(full_path: str):
         if full_path.startswith("api/"):
-            from fastapi.responses import JSONResponse
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
-        path = STATIC_ROOT / full_path
+        path = _safe_path_under_static(full_path)
+        if path is None:
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
         if path.is_file():
             return FileResponse(path)
-        return FileResponse(STATIC_ROOT / "index.html")
+        index_html = STATIC_ROOT / "index.html"
+        if index_html.is_file():
+            return FileResponse(index_html)
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "static_ui_incomplete",
+                    "static_root": str(STATIC_ROOT),
+                    "hint": "Run ./flume build-ui or copy a built dist/ with index.html",
+                }
+            )
+        )
+        return HTMLResponse(content=_MISSING_UI_HTML, status_code=200)
 else:
     @app.get("/{full_path:path}")
     def fallback_root(full_path: str):

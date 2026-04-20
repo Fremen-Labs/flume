@@ -37,6 +37,11 @@ type PromptConfig struct {
 	ADOToken   string
 
 	Nodes []NodeEntry // Collected during node mesh wizard
+
+	// CodexOAuthLogin is set to true when the user picks the Codex OAuth option
+	// (provider 7). The caller should run `flume codex-oauth login` and then
+	// continue with the rest of setup.
+	CodexOAuthLogin bool
 }
 
 const (
@@ -72,6 +77,7 @@ var providerLabel = map[string]string{
 	"exo":       "Exo (Mac MLX)",
 	"gemini":    "Gemini",
 	"grok":      "Grok",
+	"codex":     "OpenAI Codex (OAuth)",
 }
 
 type promptModel struct {
@@ -196,24 +202,30 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m.next(StepModel)
 				}
 				return m.next(StepProvider)
-			case StepProvider:
-				switch val {
-				case "", "1":
-					m.cfg.Provider = "openai"
-				case "2":
-					m.cfg.Provider = "anthropic"
-				case "3":
-					m.cfg.Provider = "ollama"
-				case "4":
-					m.cfg.Provider = "exo"
-				case "5":
-					m.cfg.Provider = "gemini"
-				case "6":
-					m.cfg.Provider = "grok"
-				default:
-					return m, textinput.Blink
-				}
-				return m.next(StepModel)
+		case StepProvider:
+			switch val {
+			case "", "1":
+				m.cfg.Provider = "openai"
+			case "2":
+				m.cfg.Provider = "anthropic"
+			case "3":
+				m.cfg.Provider = "ollama"
+			case "4":
+				m.cfg.Provider = "exo"
+			case "5":
+				m.cfg.Provider = "gemini"
+			case "6":
+				m.cfg.Provider = "grok"
+			case "7", "codex":
+				// Signal the caller to run `flume codex-oauth login` and quit the wizard.
+				m.cfg.Provider = "openai"
+				m.cfg.APIKey = ""
+				m.cfg.CodexOAuthLogin = true
+				return m, tea.Quit
+			default:
+				return m, textinput.Blink
+			}
+			return m.next(StepModel)
 			case StepModel:
 				m.cfg.Model = val
 				if m.cfg.Provider == "ollama" {
@@ -324,7 +336,7 @@ func (m promptModel) View() string {
 	case StepExoPrompt:
 		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepProvider:
-		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+			return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n7. codex  (OpenAI Codex via OAuth — run 'flume codex-oauth login' to authenticate)\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
 		return NeonGreen("Enter "+pLabel+" model constraint (e.g. gpt-4o, claude-opus-4-5, qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n" + Dim("(Tab to autocomplete · Enter to confirm)") + "\n"
 	case StepOllamaScope:

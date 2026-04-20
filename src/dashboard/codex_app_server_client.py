@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,15 +19,18 @@ def _send(stdin, obj: dict[str, Any]) -> None:
 def _planner_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "message": {"type": "string"},
             "plan": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "epics": {
                         "type": "array",
                         "items": {
                             "type": "object",
+                            "additionalProperties": False,
                             "properties": {
                                 "id": {"type": "string"},
                                 "title": {"type": "string"},
@@ -34,6 +39,7 @@ def _planner_output_schema() -> dict[str, Any]:
                                     "type": "array",
                                     "items": {
                                         "type": "object",
+                                        "additionalProperties": False,
                                         "properties": {
                                             "id": {"type": "string"},
                                             "title": {"type": "string"},
@@ -41,6 +47,7 @@ def _planner_output_schema() -> dict[str, Any]:
                                                 "type": "array",
                                                 "items": {
                                                     "type": "object",
+                                                    "additionalProperties": False,
                                                     "properties": {
                                                         "id": {"type": "string"},
                                                         "title": {"type": "string"},
@@ -52,36 +59,31 @@ def _planner_output_schema() -> dict[str, Any]:
                                                             "type": "array",
                                                             "items": {
                                                                 "type": "object",
+                                                                "additionalProperties": False,
                                                                 "properties": {
                                                                     "id": {"type": "string"},
                                                                     "title": {"type": "string"},
                                                                 },
                                                                 "required": ["id", "title"],
-                                                                "additionalProperties": True,
                                                             },
                                                         },
                                                     },
                                                     "required": ["id", "title", "acceptanceCriteria", "tasks"],
-                                                    "additionalProperties": True,
                                                 },
                                             },
                                         },
                                         "required": ["id", "title", "stories"],
-                                        "additionalProperties": True,
                                     },
                                 },
                             },
                             "required": ["id", "title", "description", "features"],
-                            "additionalProperties": True,
                         },
                     }
                 },
                 "required": ["epics"],
-                "additionalProperties": True,
             },
         },
         "required": ["message", "plan"],
-        "additionalProperties": False,
     }
 
 
@@ -130,145 +132,63 @@ def _extract_text_from_notification(msg: dict[str, Any]) -> str:
 
 
 def planner_chat(messages: list[dict[str, Any]], model: str, cwd: str | None = None, timeout: int = 180) -> str:
-    cmd = codex_app_server.launch_args(['--session-source', 'vscode'])
-    env = os.environ.copy()
-    env.setdefault('PYTHONUNBUFFERED', '1')
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        env=env,
-        cwd=cwd or None,
-    )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
+    # Prefer `codex exec` for compatibility across Codex CLI versions.
+    # The previous JSON-RPC app-server handshake differs across versions and can
+    # fail before thread/start despite valid auth.
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        base_cmd = [codex_bin]
+    else:
+        npx_bin = shutil.which("npx")
+        if not npx_bin:
+            raise FileNotFoundError("Neither codex nor npx is on PATH")
+        base_cmd = [npx_bin, "--yes", "@openai/codex"]
 
-    try:
-        req_id = 1
-        _send(
-            proc.stdin,
-            {
-                'method': 'initialize',
-                'id': req_id,
-                'params': {
-                    'clientInfo': {
-                        'name': 'flume_dashboard_planner',
-                        'title': 'Flume Dashboard Planner',
-                        'version': '0.1.0',
-                    },
-                    'capabilities': {
-                        'optOutNotificationMethods': [
-                            'thread/started',
-                            'item/started',
-                            'item/completed',
-                        ]
-                    },
-                },
-            },
+    effective_cwd = cwd or str(Path.cwd())
+    prompt = _messages_to_prompt(messages)
+    with tempfile.TemporaryDirectory(prefix="flume-codex-") as td:
+        tdp = Path(td)
+        schema_path = tdp / "planner-schema.json"
+        out_path = tdp / "planner-out.txt"
+        schema_path.write_text(json.dumps(_planner_output_schema(), ensure_ascii=False), encoding="utf-8")
+
+        cmd = [
+            *base_cmd,
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-C",
+            effective_cwd,
+            "-m",
+            model,
+            "--sandbox",
+            "read-only",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(out_path),
+            "-",
+        ]
+
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            cwd=effective_cwd or None,
         )
-        _send(proc.stdin, {'method': 'initialized', 'params': {}})
-        req_id += 1
-        _send(
-            proc.stdin,
-            {
-                'method': 'thread/start',
-                'id': req_id,
-                'params': {
-                    'ephemeral': True,
-                    'model': model,
-                    'cwd': cwd or str(Path.cwd()),
-                    'approvalPolicy': 'never',
-                    'sandboxPolicy': {
-                        'type': 'workspaceWrite',
-                        'writableRoots': [cwd or str(Path.cwd())],
-                        'networkAccess': True,
-                    },
-                    'personality': 'pragmatic',
-                    'serviceName': 'flume_dashboard_planner',
-                },
-            },
-        )
-
-        thread_id = None
-        text_buf: list[str] = []
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                raise RuntimeError('Codex app-server exited before thread/start completed')
-            msg = json.loads(line)
-            if msg.get('id') == req_id:
-                thread = (msg.get('result') or {}).get('thread') or {}
-                thread_id = thread.get('id')
-                break
-            if msg.get('error'):
-                raise RuntimeError(str(msg['error']))
-        if not thread_id:
-            raise RuntimeError('Codex app-server did not return a thread id')
-
-        req_id += 1
-        _send(
-            proc.stdin,
-            {
-                'method': 'turn/start',
-                'id': req_id,
-                'params': {
-                    'threadId': thread_id,
-                    'input': [{'type': 'text', 'text': _messages_to_prompt(messages)}],
-                    'cwd': cwd or str(Path.cwd()),
-                    'approvalPolicy': 'never',
-                    'sandboxPolicy': {
-                        'type': 'workspaceWrite',
-                        'writableRoots': [cwd or str(Path.cwd())],
-                        'networkAccess': True,
-                    },
-                    'model': model,
-                    'personality': 'pragmatic',
-                    'summary': 'concise',
-                    'outputSchema': _planner_output_schema(),
-                },
-            },
-        )
-
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            msg = json.loads(line)
-            if msg.get('id') == req_id and msg.get('error'):
-                raise RuntimeError(str(msg['error']))
-            method = msg.get('method')
-            if method == 'item/agentMessage/delta':
-                delta = _extract_text_from_notification(msg)
-                if delta:
-                    text_buf.append(delta)
-            elif method == 'turn/completed':
-                params = msg.get('params') or {}
-                turn = params.get('turn') or {}
-                if isinstance(turn, dict) and turn.get('error'):
-                    raise RuntimeError(str(turn.get('error')))
-                break
-
-        out = ''.join(text_buf).strip()
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"codex exec failed (exit {proc.returncode}): {err[:500]}")
+        if not out_path.exists():
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"codex exec produced no planner output file. {err[:500]}")
+        out = out_path.read_text(encoding="utf-8", errors="replace").strip()
         if not out:
-            raise RuntimeError('Codex app-server returned no planner output')
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"codex exec returned empty planner output. {err[:500]}")
         return out
-    finally:
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass

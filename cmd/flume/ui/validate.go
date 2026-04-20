@@ -228,10 +228,10 @@ func validateForStep(step int, val string) string {
 		return "Please enter 1 (Yes) or 2 (No)"
 
 	case StepProvider:
-		if val == "" || val == "1" || val == "2" || val == "3" || val == "4" || val == "5" || val == "6" {
+		if val == "" || val == "1" || val == "2" || val == "3" || val == "4" || val == "5" || val == "6" || val == "7" || val == "codex" {
 			return ""
 		}
-		return "Please select a provider: 1–6"
+		return "Please select a provider: 1–7"
 
 	case StepModel:
 		return validateModel(val)

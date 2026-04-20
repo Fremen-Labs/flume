@@ -17,12 +17,13 @@ import (
 var knownProviders = []struct {
 	num, name, desc string
 }{
-	{"1", "openai", "OpenAI GPT-4o, GPT-4, GPT-3.5 — cloud API"},
+	{"1", "openai", "OpenAI GPT-4o, GPT-4.1 — cloud API key"},
 	{"2", "anthropic", "Claude 3.5 Sonnet, Claude 3 Opus — cloud API"},
 	{"3", "ollama", "Local Ollama models — self-hosted on this machine"},
 	{"4", "exo", "Mac MLX distributed inference — Apple Silicon cluster"},
 	{"5", "gemini", "Google Gemini Pro / Flash — cloud API"},
 	{"6", "grok", "xAI Grok — cloud API"},
+	{"7", "codex", "OpenAI Codex (OAuth) — run 'flume codex-oauth login' to authenticate"},
 }
 
 var configJSON bool
@@ -61,7 +62,7 @@ var configSetProviderCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		reader := bufio.NewReader(os.Stdin)
 
-		fmt.Print(ui.WarningGold("Enter provider number (1-6): "))
+		fmt.Print(ui.WarningGold("Enter provider number (1-7): "))
 		provInput, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("failed to read provider input: %w", err)
@@ -82,7 +83,7 @@ var configSetProviderCmd = &cobra.Command{
 			// Accept provider name typed directly, but only if it is known.
 			if !nameSet[provInput] {
 				return fmt.Errorf(
-					"unknown provider '%s': must be a number 1–6 or one of: %s",
+					"unknown provider '%s': must be a number 1–7 or one of: %s",
 					sanitizeForTerminal(provInput),
 					strings.Join(func() []string {
 						names := make([]string, len(knownProviders))
@@ -103,8 +104,15 @@ var configSetProviderCmd = &cobra.Command{
 		}
 		model = strings.TrimSpace(model)
 
+		// Codex uses OpenAI's API but authenticates via OAuth; no API key needed here.
+		if provider == "codex" {
+			provider = "openai"
+			fmt.Println(ui.WarningGold(
+				"Codex OAuth selected. Skipping API key — run 'flume codex-oauth login' to authenticate."))
+		}
+
 		apiKey := ""
-		if provider != "ollama" && provider != "exo" {
+		if provider != "ollama" && provider != "exo" && provider != "codex" {
 			fmt.Print(ui.WarningGold("Enter API key (input hidden — press Enter): "))
 			apiKey, err = reader.ReadString('\n')
 			if err != nil {
@@ -198,10 +206,15 @@ func showConfig() error {
 	// LLM section.
 	fmt.Println(ui.WarningGold(" LLM PROVIDER"))
 	if llm != nil {
-		printConfigField("Provider", stringValFromKeys(llm, "—", "provider"))
-		printConfigField("Model", stringValFromKeys(llm, "—", "model"))
-		printConfigField("Base URL", stringValFromKeys(llm, "—", "baseUrl", "base_url"))
-		apiKey := stringValFromKeys(llm, "", "apiKey", "api_key")
+		// Newer settings payload nests active values under "settings".
+		llmView := llm
+		if nested, ok := llm["settings"].(map[string]any); ok && nested != nil {
+			llmView = nested
+		}
+		printConfigField("Provider", stringValFromKeys(llmView, "—", "provider"))
+		printConfigField("Model", stringValFromKeys(llmView, "—", "model"))
+		printConfigField("Base URL", stringValFromKeys(llmView, "—", "baseUrl", "base_url"))
+		apiKey := stringValFromKeys(llmView, "", "apiKey", "api_key")
 		printConfigField("API Key", maskSecret(apiKey))
 	}
 	fmt.Println()
