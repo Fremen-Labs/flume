@@ -113,6 +113,14 @@ def _should_skip(src: dict, grace_sec: int, max_attempts: int) -> str | None:
     if it in _SKIP_ITEM_TYPES:
         # Rollups should flow via compute_ready_for_repo when children finish.
         return f'rollup_item_type={it}'
+    # Defer merge-conflict blocks to the pr_reconcile sweep. Re-queueing a
+    # task that is blocked purely because its PR can't merge just loops —
+    # the reviewer will re-approve identical code and the auto-merge will
+    # fail again. Only pr_reconcile can actually rebase/resolve the branch,
+    # so let it own these. Once the conflict is resolved upstream the flags
+    # are cleared and this rule no longer skips.
+    if src.get('merge_conflict') is True:
+        return 'merge_conflict_pending_reconcile'
     attempts = int(src.get('auto_unblock_attempts') or 0)
     if attempts >= max_attempts:
         return 'max_attempts_reached'

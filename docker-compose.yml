@@ -138,6 +138,13 @@ services:
       - ADO_PROJECT
       - ADO_PERSONAL_ACCESS_TOKEN
       - FLUME_GATEWAY_URL=http://gateway:8090
+      # Serial-merge mode (see worker service for details). Dashboard reads
+      # these too because auto_unblock/autonomy sweeps consult concurrency
+      # config when deciding whether to re-queue work.
+      - FLUME_MAX_READY_PER_REPO=${FLUME_MAX_READY_PER_REPO:-1}
+      - FLUME_MAX_RUNNING_PER_REPO=${FLUME_MAX_RUNNING_PER_REPO:-1}
+      - FLUME_STORY_PARALLELISM=${FLUME_STORY_PARALLELISM:-1}
+      - FLUME_SERIALIZE_INTEGRATION_MERGE=${FLUME_SERIALIZE_INTEGRATION_MERGE:-1}
     command:
       - /bin/bash
       - -c
@@ -228,6 +235,16 @@ services:
       - FLUME_ENSURE_INTEGRATION_BRANCH
       # After merge into develop, delete the remote feature branch (default on).
       - FLUME_DELETE_REMOTE_BRANCH_AFTER_MERGE
+      # ── Serial-merge mode: one branch in flight per repo ────────────────
+      # With these set to 1, the PM dispatcher will only promote one leaf
+      # task at a time per repo, and at most one implementer can be in
+      # running+review state. This avoids the "multiple branches cut from
+      # the same base → everyone merges → conflict cascade" pattern.
+      # Raise these (or unset) to restore parallel branches.
+      - FLUME_MAX_READY_PER_REPO=${FLUME_MAX_READY_PER_REPO:-1}
+      - FLUME_MAX_RUNNING_PER_REPO=${FLUME_MAX_RUNNING_PER_REPO:-1}
+      - FLUME_STORY_PARALLELISM=${FLUME_STORY_PARALLELISM:-1}
+      - FLUME_SERIALIZE_INTEGRATION_MERGE=${FLUME_SERIALIZE_INTEGRATION_MERGE:-1}
       # ES_URL: must match the service name in this compose file.
       # worker_handlers.py, agent_runner.py, and es_credential_store.py all
       # read ES_URL; without it they fall back to 127.0.0.1:9200 (broken inside Docker).

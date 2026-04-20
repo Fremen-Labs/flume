@@ -374,8 +374,59 @@ def _is_duplicate_task(task_title: str, task_id: str) -> bool:
         return False  # fail open — better to allow potential dups than block work
 
 
+def _delete_remote_branch_for_task(task_src: dict) -> None:
+    """
+    Best-effort: delete the remote branch associated with *task_src* when the
+    task is being skipped/dedup'd so we don't litter the repo with orphan
+    branches. Skips deletion for branches that may be shared (story-scoped
+    `feature/story-*` and protected names like main/develop).
+    """
+    branch = str(task_src.get('branch') or '').strip()
+    repo_id = str(task_src.get('repo') or '').strip()
+    if not branch or not repo_id:
+        return
+    protected = {'main', 'master', 'develop', 'trunk'}
+    if branch in protected:
+        return
+    # Shared story-scoped branches may be referenced by sibling tasks. Only
+    # delete per-task branches (bugfix/<task-id>, feature/<task-id>).
+    if branch.startswith('feature/story-') or branch.startswith('bugfix/story-'):
+        return
+    try:
+        proj_res = es_request(f'/flume-projects/_doc/{repo_id}', method='GET')
+        src = (proj_res or {}).get('_source') or {}
+    except Exception:
+        src = {}
+    if not src or not (src.get('repoUrl') or src.get('repo_url')):
+        return
+    try:
+        from utils.git_host_client import get_git_client, GitHostNotFoundError, GitHostError  # noqa: PLC0415
+        client = get_git_client(src)
+        client.delete_remote_branch(branch)
+        log(f"dedup_cleanup: deleted orphan remote branch {branch!r} for skipped task {task_src.get('id')}")
+    except Exception as e:
+        # Imported lazily; handle NotFound specifically if the exception module is available.
+        try:
+            from utils.git_host_client import GitHostNotFoundError  # noqa: PLC0415
+            if isinstance(e, GitHostNotFoundError):
+                return
+        except Exception:
+            pass
+        log(f"dedup_cleanup: failed to delete {branch!r} for task {task_src.get('id')}: {e}")
+
+
 def _dedup_skip_task(task_id: str, reason: str):
-    """Mark a task as skipped due to deduplication."""
+    """Mark a task as skipped due to deduplication and GC its orphan branch."""
+    # Load the doc first so we can clean up its remote branch after marking done.
+    task_src: dict = {}
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_doc/{task_id}',
+            method='GET',
+        )
+        task_src = (res or {}).get('_source') or {}
+    except Exception:
+        task_src = {}
     try:
         es_request(
             f'/{TASK_INDEX}/_update/{task_id}?refresh=true',
@@ -383,6 +434,7 @@ def _dedup_skip_task(task_id: str, reason: str):
                 'status': 'done',
                 'queue_state': 'skipped',
                 'active_worker': None,
+                'remote_branch_deleted': True,
                 'updated_at': now_iso(),
                 'agent_log': [{'note': f'Skipped: {reason}', 'ts': now_iso()}],
             }},
@@ -390,6 +442,186 @@ def _dedup_skip_task(task_id: str, reason: str):
         )
     except Exception as e:
         log(f"failed to mark task {task_id} as skipped: {e}")
+    # Clean up the orphan branch on best-effort basis. Never let this raise into the claim path.
+    try:
+        if task_src:
+            _delete_remote_branch_for_task(task_src)
+    except Exception as e:
+        log(f"dedup_cleanup: unexpected error for {task_id}: {e}")
+
+
+_WIP_CACHE: dict = {
+    'ts': 0.0,
+    'saturated_repos': set(),
+    'saturated_stories': set(),
+    'in_flight_branches': set(),  # branch names currently occupying a WIP slot
+}
+# Cache TTL is deliberately tight: the aggregation is cheap (single count-only
+# search) and caching too long lets concurrent workers race past the WIP cap
+# before the shared count reflects the new `running` task.
+_WIP_CACHE_TTL_SECONDS = 0.25
+
+
+def _load_repo_wip_limits() -> dict:
+    """Return {repo_id: max_running_per_repo} from flume-projects (0 = unlimited)."""
+    try:
+        from utils.concurrency_config import max_running_for_repo  # noqa: PLC0415
+    except Exception:
+        return {}
+    try:
+        res = es_request('/flume-projects/_search', {'size': 500, 'query': {'match_all': {}}}, method='GET')
+        hits = res.get('hits', {}).get('hits', []) if res else []
+        out = {}
+        for h in hits:
+            src = h.get('_source') or {}
+            pid = src.get('id') or h.get('_id')
+            if not pid:
+                continue
+            out[pid] = max_running_for_repo(src)
+        return out
+    except Exception as e:
+        log(f"_load_repo_wip_limits: {e}")
+        return {}
+
+
+def _compute_saturated_scopes(force: bool = False) -> tuple:
+    """Return (saturated_repos, saturated_stories, in_flight_branches).
+
+    Saturation is measured in *distinct branches in flight per repo*, not raw
+    task count. A branch is "in flight" when at least one of its tasks is in
+    ``running``/``review`` or is ``blocked`` with an unmerged branch.
+
+    - ``saturated_repos``: repos where distinct-branches-in-flight >=
+      ``maxRunningPerRepo``. When the repo is saturated, the claim layer
+      only allows claims on tasks whose ``branch`` is already in flight
+      (i.e. "continue existing work"), not tasks that would cut a brand-new
+      branch.
+    - ``saturated_stories``: parent story IDs that already saturate the
+      feature-level story-parallelism cap.
+    - ``in_flight_branches``: the global set of branch names currently
+      occupying any WIP slot, used by the claim query to allow continuation.
+
+    Cached briefly to amortize the aggregation across the worker swarm.
+    """
+    now = time.time()
+    if not force and (now - _WIP_CACHE['ts']) < _WIP_CACHE_TTL_SECONDS:
+        return (
+            _WIP_CACHE['saturated_repos'],
+            _WIP_CACHE['saturated_stories'],
+            _WIP_CACHE['in_flight_branches'],
+        )
+
+    try:
+        repo_limits = _load_repo_wip_limits()
+    except Exception:
+        repo_limits = {}
+
+    try:
+        body = {
+            'size': 0,
+            # WIP includes any task whose branch is live but unmerged:
+            #   running / review    – agent is actively working the branch
+            #   blocked+branch/sha  – stuck mid-pipeline, branch still floating
+            'query': {'bool': {
+                'should': [
+                    {'terms': {'status': ['running', 'review']}},
+                    {'bool': {
+                        'must': [
+                            {'term': {'status': 'blocked'}},
+                            {'bool': {'should': [
+                                {'exists': {'field': 'branch'}},
+                                {'exists': {'field': 'commit_sha'}},
+                            ], 'minimum_should_match': 1}},
+                        ],
+                        'must_not': [{'term': {'pr_merged': True}}],
+                    }},
+                ],
+                'minimum_should_match': 1,
+                'must_not': [
+                    {'terms': {'item_type': ['epic', 'feature', 'story']}},
+                    {'term': {'owner': 'pm'}},
+                    {'term': {'assigned_agent_role': 'pm'}},
+                ],
+            }},
+            'aggs': {
+                # For each repo, enumerate the distinct branches that are
+                # in flight. ``len(buckets)`` is exact at the sizes we run.
+                'by_repo': {
+                    'terms': {'field': 'repo', 'size': 500},
+                    'aggs': {
+                        'branches': {'terms': {'field': 'branch', 'size': 200}},
+                    },
+                },
+                'by_parent': {'terms': {'field': 'parent_id.keyword', 'size': 1000, 'missing': ''}},
+                'all_branches': {'terms': {'field': 'branch', 'size': 500}},
+            },
+        }
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='POST')
+    except Exception as e:
+        try:
+            log(f"_compute_saturated_scopes: agg failed {e!r} body={json.dumps(body)[:500]}")
+        except Exception:
+            log(f"_compute_saturated_scopes: agg failed {e}")
+        res = {}
+
+    saturated_repos = set()
+    distinct_branch_counts: dict = {}
+    for b in (res.get('aggregations', {}).get('by_repo', {}).get('buckets', []) or []):
+        key = b.get('key')
+        if not key:
+            continue
+        branch_buckets = (b.get('branches') or {}).get('buckets') or []
+        # Unique branches with a non-empty name. Tasks whose branch field is
+        # missing also hit this agg as the "" bucket, which we filter out —
+        # those tasks haven't cut a branch yet so they don't count against
+        # saturation (but the claim gate will still block them from cutting
+        # a new one when the repo is saturated).
+        distinct = sum(1 for bb in branch_buckets if (bb.get('key') or '').strip())
+        distinct_branch_counts[key] = distinct
+        limit = repo_limits.get(key, 0)
+        if limit and distinct >= limit:
+            saturated_repos.add(key)
+    # Repos with unknown limits fall back to env default via module helper
+    if repo_limits.get('__default__') is None:
+        try:
+            from utils.concurrency_config import max_running_for_repo as _mrf  # noqa
+            default_limit = _mrf(None)
+        except Exception:
+            default_limit = 0
+        if default_limit:
+            for key, cnt in distinct_branch_counts.items():
+                if key and key not in repo_limits and cnt >= default_limit:
+                    saturated_repos.add(key)
+
+    # Global branch allow-list: any branch currently occupying a WIP slot
+    # may receive additional claims (those don't create NEW branches).
+    in_flight_branches = {
+        (b.get('key') or '').strip()
+        for b in (res.get('aggregations', {}).get('all_branches', {}).get('buckets', []) or [])
+        if (b.get('key') or '').strip()
+    }
+
+    saturated_stories: set = set()
+    try:
+        from utils.concurrency_config import story_parallelism  # noqa
+        default_story = story_parallelism(None)
+    except Exception:
+        default_story = 0
+    if default_story:
+        parent_counts = {
+            b.get('key'): int(b.get('doc_count', 0) or 0)
+            for b in (res.get('aggregations', {}).get('by_parent', {}).get('buckets', []) or [])
+            if b.get('key')
+        }
+        for pid, cnt in parent_counts.items():
+            if cnt >= default_story:
+                saturated_stories.add(pid)
+
+    _WIP_CACHE['ts'] = now
+    _WIP_CACHE['saturated_repos'] = saturated_repos
+    _WIP_CACHE['saturated_stories'] = saturated_stories
+    _WIP_CACHE['in_flight_branches'] = in_flight_branches
+    return saturated_repos, saturated_stories, in_flight_branches
 
 
 PAINLESS_CLAIM_SCRIPT = (
@@ -464,12 +696,62 @@ def try_atomic_claim(
     # picks up the same "slice" of tasks, minimising cross-worker contention.
     seed = abs(hash(worker_name)) % 2147483647
 
+    # WIP gate: enforce "one branch at a time" style serialization for
+    # implementer claims. Tasks that would CONTINUE an already-in-flight
+    # branch (same ``branch`` field) are still claimable — we only want to
+    # block claims that would cut a NEW branch while a saturated repo /
+    # story is still draining. Testers/reviewers always drain `review` so
+    # in-flight work can complete; we only gate the front door.
+    must_not: list = []
+    if role == 'implementer':
+        try:
+            saturated_repos, saturated_stories, in_flight_branches = _compute_saturated_scopes()
+            allowed_branches = list(in_flight_branches)
+            if saturated_repos:
+                # Block claims where the repo is saturated AND the task
+                # would cut a new branch (its ``branch`` is absent or not
+                # among the already-in-flight set).
+                if allowed_branches:
+                    must_not.append({
+                        'bool': {
+                            'must': [{'terms': {'repo': list(saturated_repos)}}],
+                            'must_not': [{'terms': {'branch': allowed_branches}}],
+                        }
+                    })
+                else:
+                    # No existing in-flight branches — just block the repo
+                    # entirely (shouldn't happen when saturated > 0, but be
+                    # safe).
+                    must_not.append({'terms': {'repo': list(saturated_repos)}})
+            if saturated_stories:
+                # Same logic at the story level: only block claims that
+                # would open a new branch under a saturated story. With
+                # FLUME_BRANCH_SCOPE=story, sibling tasks under the same
+                # story share one branch — continuing that branch must not
+                # be blocked, otherwise ready tasks for an in-flight story
+                # can never drain.
+                if allowed_branches:
+                    must_not.append({
+                        'bool': {
+                            'must': [{'terms': {'parent_id.keyword': list(saturated_stories)}}],
+                            'must_not': [{'terms': {'branch': allowed_branches}}],
+                        }
+                    })
+                else:
+                    must_not.append({'terms': {'parent_id.keyword': list(saturated_stories)}})
+        except Exception as e:
+            log(f"wip gate skipped: {e}")
+
+    bool_body = {'must': [
+        {'term': {'status': target_status}},
+        role_filter,
+    ]}
+    if must_not:
+        bool_body['must_not'] = must_not
+
     query = {
         'function_score': {
-            'query': {'bool': {'must': [
-                {'term': {'status': target_status}},
-                role_filter,
-            ]}},
+            'query': {'bool': bool_body},
             'functions': [{'random_score': {'seed': seed, 'field': '_seq_no'}}],
             'boost_mode': 'replace',
         }
@@ -747,60 +1029,221 @@ def requeue_stuck_review_tasks() -> int:
     return n
 
 
+def _count_active_per_repo() -> dict:
+    """Return {repo_id: count} of leaf tasks with an in-flight branch.
+
+    Includes ``blocked`` tasks that still have a branch/commit_sha: a task
+    blocked on a merge conflict (awaiting pr_reconcile rebase) still owns an
+    unmerged branch, and promoting another ready task on top of it is what
+    produces the multi-branch conflict cascade.
+    """
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_search',
+            {
+                'size': 0,
+                'query': {'bool': {
+                    'should': [
+                        {'terms': {'status': ['ready', 'running', 'review']}},
+                        {'bool': {
+                            'must': [
+                                {'term': {'status': 'blocked'}},
+                                {'bool': {'should': [
+                                    {'exists': {'field': 'branch'}},
+                                    {'exists': {'field': 'commit_sha'}},
+                                ], 'minimum_should_match': 1}},
+                            ],
+                            'must_not': [{'term': {'pr_merged': True}}],
+                        }},
+                    ],
+                    'minimum_should_match': 1,
+                    'must_not': [
+                        {'terms': {'item_type': ['epic', 'feature', 'story']}},
+                        {'term': {'owner': 'pm'}},
+                        {'term': {'assigned_agent_role': 'pm'}},
+                    ],
+                }},
+                'aggs': {'by_repo': {'terms': {'field': 'repo', 'size': 500}}},
+            },
+            method='POST',
+        )
+    except Exception:
+        return {}
+    out = {}
+    for b in (res.get('aggregations', {}).get('by_repo', {}).get('buckets', []) or []):
+        key = b.get('key')
+        if key:
+            out[key] = int(b.get('doc_count', 0) or 0)
+    return out
+
+
+def _count_active_per_story() -> dict:
+    """Return {parent_id: count} of leaf tasks with an in-flight branch.
+
+    Mirrors ``_count_active_per_repo`` — includes blocked-with-branch so a
+    merge-conflict task still occupies its story's parallelism slot.
+    """
+    try:
+        res = es_request(
+            f'/{TASK_INDEX}/_search',
+            {
+                'size': 0,
+                'query': {'bool': {
+                    'should': [
+                        {'terms': {'status': ['ready', 'running', 'review']}},
+                        {'bool': {
+                            'must': [
+                                {'term': {'status': 'blocked'}},
+                                {'bool': {'should': [
+                                    {'exists': {'field': 'branch'}},
+                                    {'exists': {'field': 'commit_sha'}},
+                                ], 'minimum_should_match': 1}},
+                            ],
+                            'must_not': [{'term': {'pr_merged': True}}],
+                        }},
+                    ],
+                    'minimum_should_match': 1,
+                    'must_not': [
+                        {'terms': {'item_type': ['epic', 'feature', 'story']}},
+                        {'term': {'owner': 'pm'}},
+                        {'term': {'assigned_agent_role': 'pm'}},
+                    ],
+                }},
+                'aggs': {'by_parent': {'terms': {'field': 'parent_id.keyword', 'size': 1000, 'missing': ''}}},
+            },
+            method='POST',
+        )
+    except Exception:
+        return {}
+    out = {}
+    for b in (res.get('aggregations', {}).get('by_parent', {}).get('buckets', []) or []):
+        key = b.get('key')
+        if key:
+            out[key] = int(b.get('doc_count', 0) or 0)
+    return out
+
+
 def promote_planned_tasks() -> int:
     """
     Find tasks in status=planned. If all their depends_on tasks are status=done,
-    transition them to status=ready.
+    transition them to status=ready -- respecting per-repo maxReadyPerRepo and
+    per-story storyParallelism so we don't stampede a single repo with branches.
     """
     body = {
-        'size': 100,
+        'size': 200,
         'query': {
             'term': {'status': 'planned'}
-        }
+        },
+        'sort': [{'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}],
     }
     try:
-        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='POST')
     except Exception:
         return 0
+
+    try:
+        from utils.concurrency_config import max_ready_for_repo, story_parallelism  # noqa: PLC0415
+    except Exception:
+        max_ready_for_repo = lambda _p: 0  # noqa: E731
+        story_parallelism = lambda _p: 0  # noqa: E731
+
+    repo_limit_cache: dict = {}
+    story_limit = story_parallelism(None)
+    # `_compute_saturated_scopes` gives us both saturation and the set of
+    # branches currently in flight. We reuse that so promotion decisions use
+    # the same definition of "WIP slot" as the claim layer (one branch at a
+    # time rather than one task at a time).
+    try:
+        _sat_repos, _sat_stories, _in_flight = _compute_saturated_scopes()
+    except Exception:
+        _sat_repos, _sat_stories, _in_flight = set(), set(), set()
+    # branches-in-flight per repo (derived from active_by_repo buckets)
+    active_by_story = _count_active_per_story() if story_limit else {}
+
+    def _repo_limit(repo_id: str) -> int:
+        if repo_id in repo_limit_cache:
+            return repo_limit_cache[repo_id]
+        try:
+            proj_res = es_request(f'/flume-projects/_doc/{repo_id}', method='GET')
+            src = (proj_res or {}).get('_source') or {}
+        except Exception:
+            src = {}
+        limit = max_ready_for_repo(src) if src else max_ready_for_repo(None)
+        repo_limit_cache[repo_id] = limit
+        return limit
+
+    rollup_types = {'epic', 'feature', 'story'}
+
+    # Local, mutable copy: promoting a task onto a new branch reserves a slot.
+    in_flight_branches = set(_in_flight)
+    saturated_repos = set(_sat_repos)
+
+    def _promote(es_doc_id: str, src: dict, reason: str) -> bool:
+        nonlocal saturated_repos
+        repo_id = src.get('repo') or ''
+        parent_id = src.get('parent_id') or ''
+        item_type = (src.get('item_type') or src.get('work_item_type') or 'task').lower()
+        is_leaf = item_type not in rollup_types
+        if is_leaf and repo_id:
+            limit = _repo_limit(repo_id)
+            prospective_branch = (src.get('branch') or '').strip()
+            would_open_new_branch = (
+                not prospective_branch
+                or prospective_branch not in in_flight_branches
+            )
+            # Only block promotion when a NEW branch would be cut on a
+            # repo that has already hit its cap. Continuations (same branch
+            # already in flight) are always allowed because they don't
+            # widen the merge surface.
+            if limit and would_open_new_branch and repo_id in saturated_repos:
+                return False
+            if story_limit and parent_id and active_by_story.get(parent_id, 0) >= story_limit:
+                return False
+        try:
+            es_request(
+                f'/{TASK_INDEX}/_update/{es_doc_id}',
+                {'doc': {'status': 'ready', 'updated_at': now_iso(), 'last_update': now_iso(), 'queue_state': 'queued'}},
+                method='POST',
+            )
+        except Exception as e:
+            log(f"failed to promote planned task {es_doc_id}: {e}")
+            return False
+        log(f"promoted planned task {src.get('id', es_doc_id)} to ready ({reason})")
+        if is_leaf and repo_id:
+            prospective_branch = (src.get('branch') or '').strip()
+            if prospective_branch:
+                in_flight_branches.add(prospective_branch)
+            # Recompute saturation for this repo.
+            limit = _repo_limit(repo_id)
+            if limit:
+                distinct = sum(
+                    1 for b in in_flight_branches if b
+                )  # global branches (across repos — fine for single-project deployments)
+                if distinct >= limit:
+                    saturated_repos.add(repo_id)
+            if parent_id:
+                active_by_story[parent_id] = active_by_story.get(parent_id, 0) + 1
+        return True
+
     n = 0
     for h in res.get('hits', {}).get('hits', []):
         src = h.get('_source', {})
         deps = src.get('depends_on', [])
         es_doc_id = h.get('_id')
         if not deps:
-            # If no dependencies, promote it immediately
-            try:
-                es_request(
-                    f'/{TASK_INDEX}/_update/{es_doc_id}',
-                    {'doc': {'status': 'ready', 'updated_at': now_iso(), 'last_update': now_iso(), 'queue_state': 'queued'}},
-                    method='POST',
-                )
-                log(f"promoted planned task {src.get('id', es_doc_id)} to ready (no dependencies)")
+            if _promote(es_doc_id, src, 'no dependencies'):
                 n += 1
-            except Exception as e:
-                log(f"failed to promote planned task {es_doc_id}: {e}")
             continue
-        
-        # Check if all deps are done
         try:
             dep_res = es_request(f'/{TASK_INDEX}/_mget', {'ids': deps}, method='POST')
             docs = dep_res.get('docs', [])
-            all_done = False
             if docs and all(d.get('found', False) and d.get('_source', {}).get('status') == 'done' for d in docs):
-                all_done = True
-                
-            if all_done:
-                es_request(
-                    f'/{TASK_INDEX}/_update/{es_doc_id}',
-                    {'doc': {'status': 'ready', 'updated_at': now_iso(), 'last_update': now_iso(), 'queue_state': 'queued'}},
-                    method='POST',
-                )
-                log(f"promoted planned task {src.get('id', es_doc_id)} to ready (dependencies resolved)")
-                n += 1
+                if _promote(es_doc_id, src, 'dependencies resolved'):
+                    n += 1
         except Exception as e:
             log(f"dependency sweep error for task {es_doc_id}: {e}")
             continue
-            
+
     return n
 
 
