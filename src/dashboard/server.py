@@ -45,7 +45,7 @@ if str(BASE) not in sys.path:
 from utils.logger import get_logger, set_global_log_level
 logger = get_logger(__name__)
 
-from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao, load_legacy_dotenv_into_environ  # type: ignore  # noqa: E402
+from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao  # type: ignore  # noqa: E402
 
 # Merge .env config
 apply_runtime_config(_SRC_ROOT)

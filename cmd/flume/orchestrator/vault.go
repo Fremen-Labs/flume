@@ -345,11 +345,6 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken string, env
 	// 2. Resolve KV payload
 	esKey, _ := GenerateESAPIKey()
 
-	adoOrgUrl := ""
-	if envCfg.ADOOrg != "" && envCfg.ADOProject != "" {
-		adoOrgUrl = fmt.Sprintf("https://dev.azure.com/%s/%s", envCfg.ADOOrg, envCfg.ADOProject)
-	}
-
 	// OpenBao holds ONLY actual secrets — LLM config (model/provider/baseUrl) is non-sensitive
 	// and is written to ES flume-llm-config by SeedLLMConfig during startup.
 	kvPayload := map[string]string{
@@ -366,9 +361,6 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken string, env
 	}
 	if envCfg.ADOToken != "" {
 		kvPayload["ADO_TOKEN"] = envCfg.ADOToken
-	}
-	if adoOrgUrl != "" {
-		kvPayload["ADO_ORG_URL"] = adoOrgUrl
 	}
 
 	// Fetch existing configurations before injecting gracefully natively

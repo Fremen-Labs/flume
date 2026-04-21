@@ -357,64 +357,12 @@ _BOOTSTRAP_ONLY_KEYS = frozenset({
     "OPENBAO_TOKEN_FILE",
 })
 
-
-def _parse_env_lines(text: str) -> dict[str, str]:
-    """Parse a .env file into a key/value dict (bootstrap config only)."""
-    out: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        out[key.strip()] = val.strip()
-    return out
-
-
-def _load_bootstrap_env(workspace_root: Path) -> dict[str, str]:
-    """Load BOOTSTRAP-ONLY keys from .env files (ES_URL, OPENBAO_ADDR, etc.).
-
-    The .env file is no longer the source of truth for LLM settings or tokens.
-    This function reads it only for cluster-connection bootstrap parameters.
-    """
-    out: dict[str, str] = {}
-    wr = workspace_root.resolve()
-    for base in (wr, wr.parent):
-        path = base / ".env"
-        if path.is_file():
-            try:
-                out.update(_parse_env_lines(path.read_text(encoding="utf-8", errors="replace")))
-            except OSError:
-                pass
-    return out
-
-
-# Keep load_env_pairs as a thin alias so existing callers that only need
-# bootstrap config (OpenBao connection, ES URL) don't break.
-def load_env_pairs(workspace_root: Path) -> dict[str, str]:
-    """Return bootstrap .env keys (ES_URL, OPENBAO_ADDR, etc.). LLM settings
-    are no longer stored in .env — use load_effective_pairs() for those."""
-    return _load_bootstrap_env(workspace_root)
-
-
-def _merge_openbao_connection_from_env(pairs: dict[str, str]) -> dict[str, str]:
-    """Use process env + token file so Settings works after server hydrated from OpenBao."""
-    for k in ("OPENBAO_ADDR", "OPENBAO_TOKEN", "OPENBAO_MOUNT", "OPENBAO_PATH", "OPENBAO_TOKEN_FILE"):
+def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
+    pairs: dict[str, str] = {}
+    for k in ("OPENBAO_ADDR", "OPENBAO_TOKEN", "OPENBAO_MOUNT", "OPENBAO_PATH"):
         v = os.environ.get(k, "").strip()
         if v:
             pairs[k] = v
-    tf = pairs.get("OPENBAO_TOKEN_FILE", "").strip()
-    if tf and not pairs.get("OPENBAO_TOKEN", "").strip():
-        p = Path(tf).expanduser()
-        if p.is_file():
-            try:
-                pairs["OPENBAO_TOKEN"] = p.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                pass
-    return pairs
-
-
-def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
-    pairs = _merge_openbao_connection_from_env(_load_bootstrap_env(workspace_root))
     addr = str(pairs.get("OPENBAO_ADDR", "") or "").strip()
     token = str(pairs.get("OPENBAO_TOKEN", "") or "").strip()
     if not addr or not token:
@@ -541,8 +489,11 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
     LLM keys are never read from process env to avoid stale shell exports
     overriding cluster-stored values.
     """
-    # Start with bootstrap keys from .env (lowest priority)
-    pairs = _merge_openbao_connection_from_env(_load_bootstrap_env(workspace_root))
+    # Start with bootstrap keys from os.environ (lowest priority)
+    pairs: dict[str, str] = {}
+    for k in ("OPENBAO_ADDR", "OPENBAO_TOKEN", "OPENBAO_MOUNT", "OPENBAO_PATH"):
+        if k in os.environ:
+            pairs[k] = os.environ[k].strip()
 
     # Layer in non-LLM process env keys (e.g. ES_URL, EXECUTION_HOST)
     try:
@@ -612,9 +563,9 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
     Routing:
       • LLM non-sensitive config (provider, model, baseUrl)  → ES flume-llm-config
       • Sensitive secrets (API key, OAuth tokens)            → OpenBao KV
-      • Bootstrap keys (ES_URL, OPENBAO_ADDR, etc.)         → .env only (never LLM keys)
+      • Bootstrap keys (ES_URL, OPENBAO_ADDR, etc.)         → Container Environment Variables
 
-    The .env file is NEVER written with LLM or token keys at runtime.
+    The OS environment block cleanly drives connection states dynamically mapped by the CLI orchestrator.
     """
     if not updates:
         return
@@ -650,33 +601,12 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
                 "Configure OPENBAO_ADDR/OPENBAO_TOKEN or restart with OpenBao running."
             )
 
-    # 3. Bootstrap keys only — write to .env (ES_URL, OPENBAO_ADDR, etc.)
+    # 3. Bootstrap keys only — load from environment
     bootstrap_updates = {k: v for k, v in updates.items()
                          if k in _BOOTSTRAP_ONLY_KEYS and k not in _MUST_NOT_GO_TO_ENV}
     if bootstrap_updates:
-        # Find the .env file (parent dir wins over workspace subdir)
-        wr = workspace_root.resolve()
-        env_path = wr.parent / ".env" if (wr.parent / ".env").is_file() else wr / ".env"
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-        seen: set[str] = set()
-        new_lines: list[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                new_lines.append(line)
-                continue
-            if "=" in stripped:
-                k = stripped.split("=")[0].strip()
-                if k in bootstrap_updates:
-                    new_lines.append(f"{k}={bootstrap_updates[k]}")
-                    seen.add(k)
-                    continue
-            new_lines.append(line)
         for k, v in bootstrap_updates.items():
-            if k not in seen:
-                new_lines.append(f"{k}={v}")
-        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            os.environ[k] = str(v)
 
 
 

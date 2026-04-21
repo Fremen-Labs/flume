@@ -28,9 +28,9 @@ type MeshConfigYaml struct {
 		URL      string `yaml:"url"`
 	} `yaml:"elastic"`
 	Repo struct {
-		Type     string `yaml:"type"`       // "github" or "ado"
-		TokenEnv string `yaml:"token_env"`  // Name of environment variable holding token
-		AdoOrg   string `yaml:"ado_org"`
+		Type       string `yaml:"type"`       // "github" or "ado"
+		TokenEnv   string `yaml:"token_env"`  // Name of environment variable holding token
+		AdoOrg     string `yaml:"ado_org"`
 	} `yaml:"repo"`
 }
 
@@ -46,12 +46,19 @@ func parseMeshConfig(path string) (orchestrator.EnvConfig, error) {
 		return envCfg, err
 	}
 
-	for _, cp := range m.Mesh.CloudProviders {
+	for i, cp := range m.Mesh.CloudProviders {
 		envCfg.CloudProviders = append(envCfg.CloudProviders, orchestrator.CloudProviderEntry{
 			Provider: cp.Provider,
 			Model:    cp.Model,
 			APIKey:   cp.APIKey,
 		})
+		
+		// Map the first element to the legacy singular fields for OpenBao initialization
+		if i == 0 {
+			envCfg.Provider = cp.Provider
+			envCfg.Model = cp.Model
+			envCfg.APIKey = cp.APIKey
+		}
 	}
 
 	for _, ln := range m.Mesh.LocalNodes {

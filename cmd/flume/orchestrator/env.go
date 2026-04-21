@@ -119,9 +119,6 @@ func GenerateEnv(config EnvConfig) []string {
 		if config.ADOOrg != "" {
 			env = append(env, "ADO_ORGANIZATION="+config.ADOOrg)
 		}
-		if config.ADOProject != "" {
-			env = append(env, "ADO_PROJECT="+config.ADOProject)
-		}
 		if config.ADOToken != "" {
 			env = append(env, "ADO_PERSONAL_ACCESS_TOKEN="+config.ADOToken)
 		}

@@ -39,9 +39,6 @@ cd flume
 go build -o flume cmd/flume/main.go
 sudo cp ./flume /usr/local/bin/flume
 
-# 3. Define the LLM Array
-cp .env.example .env
-
 # 3. Boot the Matrix
 # Start the Hub-and-Spoke interactive configuration wizard
 flume start 

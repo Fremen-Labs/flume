@@ -32,8 +32,6 @@ class FlumeSettings(BaseSettings):
     WORKERS_PER_ROLE: int | None = None
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="allow",
     )
 
@@ -48,7 +46,6 @@ class FlumeSettings(BaseSettings):
     ):
         return (
             env_settings,
-            dotenv_settings,
             init_settings,
             file_secret_settings,
         )
@@ -129,9 +126,7 @@ def apply_runtime_config(workspace_root: Path | None = None) -> None:
         pass  # Graceful degradation: keep docker-compose values if ES is unreachable
 
 
-def load_legacy_dotenv_into_environ(workspace_root: Path) -> None:
-    """AP-10: No-op stub. .env is bootstrap-only; LLM keys come from ES/OpenBao."""
-    pass
+
 
 def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, str] | None:
     """Natively executes Vault queries strictly out of the box dynamically."""
