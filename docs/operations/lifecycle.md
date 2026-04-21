@@ -20,12 +20,15 @@ cd flume
 go build -o flume cmd/flume/main.go
 sudo cp ./flume /usr/local/bin/flume
 
-# 3. Boot the Ecosystem
+# 3. Boot the Ecosystem via Hub-and-Spoke Wizard
 flume start
+
+# OR - Programmatically Boot via declarative IaC
+flume start --config ./flume-mesh.yml
 ```
 
 > [!NOTE]
-> During a cold boot, Flume automatically provisions the OpenBao KMS instance and stores Unseal Keys and Root Tokens in OpenBao itself. All LLM provider settings and secrets are configured via **Settings → LLM** in the dashboard after first boot — no manual `.env` editing is required.
+> During a cold boot, Flume automatically provisions the OpenBao KMS instance and stores Unseal Keys and Root Tokens natively. The interactive `flume start` wizard utilizes a **Menu-Driven Hub** that allows you to continuously append external Cloud Frontier models (Anthropic, Grok, Gemini) onto the exact same topological plane securely alongside your local GPU nodes (Ollama/Exo). All bindings natively parse array matrices directly down onto Elasticsearch without writing a single local configuration file manually.
 
 ## 2. Update & Synchronization (Day 2)
 

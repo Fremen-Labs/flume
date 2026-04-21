@@ -42,9 +42,15 @@ sudo cp ./flume /usr/local/bin/flume
 # 3. Define the LLM Array
 cp .env.example .env
 
-# 4. Boot the Matrix
+# 3. Boot the Matrix
+# Start the Hub-and-Spoke interactive configuration wizard
 flume start 
+
+# OR - Boot programmatically using Infrastructure-as-Code (IaC) YAML
+flume start --config ./flume-mesh.yml
 ```
+
+> **Note on Configuration:** The interactive wizard loops infinitely, allowing you to seamlessly integrate both public Frontier API endpoints (Grok, Anthropic, Gemini) and Local hardware nodes (Ollama/Exo) on the exact same topological plane securely.
 
 *The Flume orchestrator dashboard will initialize concurrently at [http://localhost:8765](http://localhost:8765).*
 
