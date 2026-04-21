@@ -205,16 +205,41 @@ def load_agent_role_defs():
     return defs
 
 
-def get_dynamic_worker_limit() -> int:
-    """Return the default number of workers per agent role.
+def fetch_routing_policy() -> dict:
+    try:
+        res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
+        if res and '_source' in res:
+            return res['_source']
+    except Exception as e:
+        _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
+    return {}
 
-    P1: Capped to 2 to match realistic Ollama concurrency. The previous
-    CPU_COUNT * 0.8 formula produced 6 workers/role on an 8-core Mac,
-    spawning ~72 virtual workers across 2 replicas for only 2 Ollama slots.
-    Override with WORKERS_PER_ROLE env var for higher concurrency with
-    frontier providers that support many parallel requests.
+def get_dynamic_worker_limit() -> int:
+    """Return the dynamic number of workers per agent role based on routing policy and mesh size.
+
+    Frontier/Hybrid: Compute boundaries scaled cleanly by host multiprocessing cores.
+    Local: Mesh node caps combined algorithmically (max 2 as floor).
+    Override with WORKERS_PER_ROLE env var for explicitly forcing concurrency boundaries.
     """
-    return 2
+    try:
+        policy = fetch_routing_policy()
+        mode = policy.get('mode', 'local').lower()
+        
+        if mode in ('frontier', 'hybrid'):
+            import multiprocessing
+            cores = multiprocessing.cpu_count()
+            limit = max(4, cores * 2)
+            _manager_logger.info(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
+            return limit
+        else:
+            caps = _fetch_node_concurrency_caps()
+            total_mesh_capacity = sum(caps.values())
+            limit = max(2, total_mesh_capacity)
+            _manager_logger.info(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
+            return limit
+    except Exception as e:
+        _manager_logger.error(f"Failed dynamic scaling, defaulting to 2: {e}")
+        return 2
 
 
 def build_workers():
