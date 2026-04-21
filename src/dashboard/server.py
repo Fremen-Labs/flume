@@ -4706,6 +4706,76 @@ async def api_nodes_test(node_id: str, request: Request):
         )
         return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing Policy API — proxy to Go Gateway /api/routing-policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get('/api/routing-policy')
+async def api_routing_policy_get(request: Request):
+    """Proxy GET /api/routing-policy to the Go Gateway."""
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{gw_url}/api/routing-policy", timeout=5.0)
+        logger.info(
+            "routing_policy: fetched policy from gateway",
+            extra={"component": "routing_policy_api", "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "routing_policy: failed to fetch policy",
+            extra={"component": "routing_policy_api", "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
+@app.put('/api/routing-policy')
+async def api_routing_policy_put(request: Request):
+    """Proxy PUT /api/routing-policy to the Go Gateway."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(f"{gw_url}/api/routing-policy", json=body, timeout=5.0)
+        logger.info(
+            "routing_policy: updated policy via gateway",
+            extra={"component": "routing_policy_api", "mode": body.get("mode", "unknown"), "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "routing_policy: failed to update policy",
+            extra={"component": "routing_policy_api", "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
+@app.get('/api/frontier-models')
+async def api_frontier_models(request: Request):
+    """Proxy GET /api/frontier-models to the Go Gateway."""
+    try:
+        gw_url = _gateway_base()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{gw_url}/api/frontier-models", timeout=5.0)
+        logger.info(
+            "routing_policy: fetched frontier catalog from gateway",
+            extra={"component": "routing_policy_api", "status": resp.status_code}
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        logger.error(
+            "routing_policy: failed to fetch frontier catalog",
+            extra={"component": "routing_policy_api", "error": str(e)}
+        )
+        return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
+
+
 active_connections = []
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
@@ -4799,6 +4869,8 @@ async def get_system_telemetry():
                 "flume_node_load": [],
                 "flume_concurrency_throttled_total": 0,
                 "flume_tasks_blocked_total": 0,
+                "flume_frontier_spend_usd_total": [],
+                "flume_frontier_circuit_breaks_total": [],
             }
             
             for line in lines:
@@ -4871,6 +4943,20 @@ async def get_system_telemetry():
                         results["flume_node_load"].append({
                             "tags": tag_dict,
                             "value": float(val)
+                        })
+                    elif key_with_tags.startswith("flume_frontier_spend_usd_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_frontier_spend_usd_total"].append({
+                            "tags": tag_dict,
+                            "value": float(val)
+                        })
+                    elif key_with_tags.startswith("flume_frontier_circuit_breaks_total{"):
+                        tags = re.findall(r'([a-z_]+)="([^"]+)"', key_with_tags)
+                        tag_dict = {k: v for k, v in tags}
+                        results["flume_frontier_circuit_breaks_total"].append({
+                            "tags": tag_dict,
+                            "count": int(float(val))
                         })
 
             return results

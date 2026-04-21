@@ -1,14 +1,23 @@
-import { useState } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Server, Plus, Trash2, RefreshCw, CheckCircle2, AlertTriangle,
   XCircle, Cpu, MemoryStick, Gauge, Clock, Zap, ChevronDown, ChevronUp, Wifi,
+  DollarSign, Globe,
 } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
+import { RoutingModeSelector } from '@/components/RoutingModeSelector';
+import { FrontierModelCard } from '@/components/FrontierModelCard';
+import { HybridTuner } from '@/components/HybridTuner';
+import { RolePinningPanel } from '@/components/RolePinningPanel';
+import type {
+  RoutingMode, RoutingPolicy, FrontierModelWeight,
+  FrontierModelsResponse, FrontierProviderCatalog,
+} from '@/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Types
+// Types (Node Mesh — preserved)
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface NodeCapabilities {
@@ -58,7 +67,7 @@ interface AddNodeForm {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API helpers
+// API helpers — Node Mesh (preserved)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchNodes(): Promise<NodesResponse> {
@@ -97,7 +106,35 @@ async function testNode(nodeId: string): Promise<TestResult> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-components
+// API helpers — Routing Policy
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fetchRoutingPolicy(): Promise<RoutingPolicy> {
+  const res = await fetch('/api/routing-policy');
+  if (!res.ok) throw new Error(`GET /api/routing-policy → ${res.status}`);
+  return res.json();
+}
+
+async function saveRoutingPolicy(policy: RoutingPolicy): Promise<void> {
+  const res = await fetch('/api/routing-policy', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(policy),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `PUT /api/routing-policy → ${res.status}`);
+  }
+}
+
+async function fetchFrontierModels(): Promise<FrontierModelsResponse> {
+  const res = await fetch('/api/frontier-models');
+  if (!res.ok) throw new Error(`GET /api/frontier-models → ${res.status}`);
+  return res.json();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components (preserved exactly)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STATUS_CONFIG = {
@@ -169,100 +206,86 @@ function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string)
       {/* Header row */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-indigo-500/15 flex items-center justify-center flex-shrink-0">
+          <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
             <Server className="w-4 h-4 text-indigo-400" />
           </div>
           <div className="min-w-0">
-            <p className="font-semibold text-sm text-foreground truncate">{node.id}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">{node.host}</p>
+            <p className="text-sm font-semibold text-foreground truncate">{node.id}</p>
+            <p className="text-[11px] text-muted-foreground font-mono truncate">{node.host}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <StatusBadge status={status} />
-          <button
-            id={`node-test-${node.id}`}
-            onClick={handleTest}
-            disabled={testing}
-            className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-cyan-400 hover:bg-cyan-400/10 transition-colors disabled:opacity-50"
-            title="Test connection"
-          >
-            <Wifi className={`w-3.5 h-3.5 ${testing ? 'animate-pulse' : ''}`} />
-          </button>
-          <button
-            id={`node-delete-${node.id}`}
-            onClick={() => onDelete(node.id)}
-            className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors"
-            title="Remove node"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Test result banner */}
-      {testResult && (
-        <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: 'auto' }}
-          className={`rounded-lg px-3 py-2 text-xs border ${
-            testResult.reachable
-              ? 'bg-emerald-400/10 border-emerald-400/20 text-emerald-400'
-              : 'bg-red-400/10 border-red-400/20 text-red-400'
-          }`}
-        >
-          <div className="flex items-center gap-2 mb-1">
-            {testResult.reachable ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-            <span className="font-medium">{testResult.reachable ? `Reachable — ${testResult.latency_ms}ms` : 'Unreachable'}</span>
-          </div>
-          {testResult.reachable && testResult.models.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1">
-              {testResult.models.map(m => (
-                <span key={m} className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-300 font-mono">{m}</span>
-              ))}
-            </div>
-          )}
-          {testResult.error && <p className="mt-1 text-[10px]">{testResult.error}</p>}
-        </motion.div>
-      )}
-
-      {/* Model tag */}
-      <div className="flex items-center gap-2">
-        <Cpu className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-        <span className="text-xs text-foreground/80 font-mono">{node.model_tag || '—'}</span>
-      </div>
-
-      {/* Load bar */}
-      <div>
-        <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Load</p>
-        <LoadBar load={node.health?.current_load ?? 0} />
+        <StatusBadge status={status} />
       </div>
 
       {/* Quick stats */}
-      <div className="grid grid-cols-3 gap-2 text-center">
-        <div className="bg-white/4 rounded-lg py-1.5">
-          <p className="text-[10px] text-muted-foreground">Latency</p>
-          <p className="text-xs font-semibold text-foreground">{node.health?.latency_ms ?? 0}ms</p>
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="flex items-center gap-1 text-muted-foreground">
+          <Cpu className="w-3 h-3" />
+          <span className="truncate" title={node.model_tag}>{node.model_tag || '—'}</span>
         </div>
-        <div className="bg-white/4 rounded-lg py-1.5">
-          <p className="text-[10px] text-muted-foreground">Memory</p>
-          <p className="text-xs font-semibold text-foreground">{node.capabilities?.memory_gb ?? 0}GB</p>
+        <div className="flex items-center gap-1 text-muted-foreground">
+          <MemoryStick className="w-3 h-3" />
+          <span>{node.capabilities?.memory_gb ?? '?'}GB</span>
         </div>
-        <div className="bg-white/4 rounded-lg py-1.5">
-          <p className="text-[10px] text-muted-foreground">TPS</p>
-          <p className="text-xs font-semibold text-foreground">{node.capabilities?.estimated_tps ?? 0}</p>
+        <div className="flex items-center gap-1 text-muted-foreground">
+          <Clock className="w-3 h-3" />
+          <span>{node.health?.latency_ms ?? '?'}ms</span>
         </div>
       </div>
 
-      {/* Expand/collapse for details */}
-      <button
-        id={`node-expand-${node.id}`}
-        onClick={() => setExpanded(v => !v)}
-        className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-      >
-        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        {expanded ? 'Less' : 'Details'}
-      </button>
+      {/* Load bar */}
+      <LoadBar load={node.health?.current_load ?? 0} />
 
+      {/* Test result */}
+      <AnimatePresence>
+        {testResult && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className={`border rounded-lg px-3 py-2 text-xs ${
+              testResult.reachable
+                ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-400'
+                : 'border-red-400/20 bg-red-400/5 text-red-400'
+            }`}>
+              {testResult.reachable
+                ? `✓ Reachable · ${testResult.latency_ms}ms · ${testResult.models?.length ?? 0} models loaded`
+                : `✗ ${testResult.error ?? 'Unreachable'}`}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Action bar */}
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          {expanded ? 'Less' : 'More'}
+        </button>
+        <div className="flex-1" />
+        <button
+          onClick={handleTest}
+          disabled={testing}
+          className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md text-muted-foreground hover:text-foreground border border-border/20 hover:bg-white/5 transition-colors disabled:opacity-50"
+        >
+          <Wifi className="w-3 h-3" />
+          {testing ? 'Testing…' : 'Test'}
+        </button>
+        <button
+          onClick={() => onDelete(node.id)}
+          className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md text-red-400/70 hover:text-red-400 border border-red-400/10 hover:bg-red-400/5 transition-colors"
+        >
+          <Trash2 className="w-3 h-3" />
+          Remove
+        </button>
+      </div>
+
+      {/* Expandable details */}
       <AnimatePresence>
         {expanded && (
           <motion.div
@@ -304,7 +327,7 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Add Node Form
+// Add Node Form (preserved exactly)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BLANK_FORM: AddNodeForm = {
@@ -405,17 +428,152 @@ function Field({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Add Frontier Model Modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AddFrontierModelModal({
+  catalog, onClose, onAdd,
+}: {
+  catalog: FrontierProviderCatalog[];
+  onClose: () => void;
+  onAdd: (model: FrontierModelWeight) => void;
+}) {
+  const [provider, setProvider] = useState(catalog[0]?.id ?? '');
+  const [model, setModel] = useState('');
+  const [credentialId, setCredentialId] = useState('');
+  const [budget, setBudget] = useState(50);
+
+  const selectedProvider = catalog.find(p => p.id === provider);
+  const models = selectedProvider?.models ?? [];
+  const credentials = selectedProvider?.credentials ?? [];
+
+  useEffect(() => {
+    setModel(models[0] ?? '');
+    setCredentialId(credentials[0]?.id ?? '');
+  }, [provider]);
+
+  const handleAdd = () => {
+    if (!model || !provider) return;
+    onAdd({
+      provider,
+      model,
+      credential_id: credentialId,
+      weight: 0.5,
+      budget_usd: budget,
+      spent_usd: 0,
+      circuit_open: false,
+    });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="glass-card w-full max-w-md mx-4 p-6 space-y-4"
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold text-foreground">Add Frontier Model</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">✕</button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-[11px] text-muted-foreground mb-1">Provider</label>
+            <select
+              id="frontier-provider-select"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            >
+              {catalog.map(p => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] text-muted-foreground mb-1">Model</label>
+            <select
+              id="frontier-model-select"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            >
+              {models.map(m => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+
+          {credentials.length > 0 && (
+            <div>
+              <label className="block text-[11px] text-muted-foreground mb-1">Credential</label>
+              <select
+                id="frontier-credential-select"
+                value={credentialId}
+                onChange={(e) => setCredentialId(e.target.value)}
+                className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              >
+                {credentials.map(c => (
+                  <option key={c.id} value={c.id}>{c.label} {c.has_key ? '✓' : '(no key)'}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-[11px] text-muted-foreground mb-1">Budget ($)</label>
+            <input
+              id="frontier-budget-input"
+              type="number"
+              min={0}
+              step={5}
+              value={budget}
+              onChange={(e) => setBudget(Math.max(0, Number(e.target.value)))}
+              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
+          </div>
+        </div>
+
+        <div className="flex gap-3 pt-2">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 rounded-lg text-sm text-muted-foreground border border-border/30 hover:bg-white/5 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            id="frontier-model-add-submit"
+            onClick={handleAdd}
+            disabled={!model || !provider}
+            className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
+          >
+            Add Model
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function NodesOverview() {
   const [showAdd, setShowAdd] = useState(false);
+  const [showAddFrontier, setShowAddFrontier] = useState(false);
   const qc = useQueryClient();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
+  // ── Node mesh queries (preserved) ──────────────────────────────────────
   const { data, isLoading, isError, dataUpdatedAt } = useQuery<NodesResponse>({
     queryKey: ['nodes'],
     queryFn: fetchNodes,
-    refetchInterval: 15_000,   // align with health checker probe interval
+    refetchInterval: 15_000,
     staleTime: 10_000,
   });
 
@@ -424,6 +582,90 @@ export default function NodesOverview() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['nodes'] }),
   });
 
+  // ── Routing Policy queries ─────────────────────────────────────────────
+  const { data: policy, isLoading: policyLoading } = useQuery<RoutingPolicy>({
+    queryKey: ['routing-policy'],
+    queryFn: fetchRoutingPolicy,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  });
+
+  const { data: frontierCatalog } = useQuery<FrontierModelsResponse>({
+    queryKey: ['frontier-models'],
+    queryFn: fetchFrontierModels,
+    staleTime: 60_000,
+  });
+
+  const savePolicyMut = useMutation({
+    mutationFn: saveRoutingPolicy,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['routing-policy'] }),
+  });
+
+  // Debounced save helper
+  const debouncedSave = useCallback((updated: RoutingPolicy) => {
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      savePolicyMut.mutate(updated);
+    }, 500);
+  }, [savePolicyMut]);
+
+  // ── Policy mutation helpers ────────────────────────────────────────────
+  const currentPolicy: RoutingPolicy = policy ?? {
+    mode: 'local_only',
+    frontier_mix: [],
+    frontier_local_ratio: 0.3,
+    complexity_threshold: 7,
+    role_pinning: {},
+  };
+
+  const handleModeChange = (mode: RoutingMode) => {
+    const updated = { ...currentPolicy, mode };
+    savePolicyMut.mutate(updated);
+  };
+
+  const handleWeightChange = (idx: number, weight: number) => {
+    const mix = [...currentPolicy.frontier_mix];
+    mix[idx] = { ...mix[idx], weight };
+    const updated = { ...currentPolicy, frontier_mix: mix };
+    debouncedSave(updated);
+  };
+
+  const handleBudgetChange = (idx: number, budget: number) => {
+    const mix = [...currentPolicy.frontier_mix];
+    mix[idx] = { ...mix[idx], budget_usd: budget };
+    const updated = { ...currentPolicy, frontier_mix: mix };
+    debouncedSave(updated);
+  };
+
+  const handleRemoveModel = (idx: number) => {
+    if (!window.confirm(`Remove ${currentPolicy.frontier_mix[idx]?.model} from the frontier mix?`)) return;
+    const mix = currentPolicy.frontier_mix.filter((_, i) => i !== idx);
+    const updated = { ...currentPolicy, frontier_mix: mix };
+    savePolicyMut.mutate(updated);
+  };
+
+  const handleAddFrontierModel = (model: FrontierModelWeight) => {
+    const mix = [...currentPolicy.frontier_mix, model];
+    const updated = { ...currentPolicy, frontier_mix: mix };
+    savePolicyMut.mutate(updated);
+  };
+
+  const handleRatioChange = (ratio: number) => {
+    const updated = { ...currentPolicy, frontier_local_ratio: ratio };
+    debouncedSave(updated);
+  };
+
+  const handleComplexityChange = (threshold: number) => {
+    const updated = { ...currentPolicy, complexity_threshold: threshold };
+    debouncedSave(updated);
+  };
+
+  const handleRolePinningChange = (pinning: Record<string, string>) => {
+    const updated = { ...currentPolicy, role_pinning: pinning };
+    debouncedSave(updated);
+  };
+
+  // ── Derived state ──────────────────────────────────────────────────────
   const nodes = data?.nodes ?? [];
   const healthy = nodes.filter(n => n.health?.status === 'healthy').length;
   const degraded = nodes.filter(n => n.health?.status === 'degraded').length;
@@ -433,6 +675,12 @@ export default function NodesOverview() {
     : 0;
   const lastRefreshed = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : '—';
 
+  const mode = currentPolicy.mode;
+  const showFrontierControls = mode === 'frontier_only' || mode === 'hybrid';
+  const showLocalNodes = mode === 'local_only' || mode === 'hybrid';
+  const totalSpent = currentPolicy.frontier_mix.reduce((s, m) => s + m.spent_usd, 0);
+  const totalBudget = currentPolicy.frontier_mix.reduce((s, m) => s + m.budget_usd, 0);
+
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
       {/* Header */}
@@ -440,17 +688,20 @@ export default function NodesOverview() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Node Mesh</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Distributed Ollama nodes · Auto-refreshes every 15s · Last updated {lastRefreshed}
+            Intelligent routing command center · Last updated {lastRefreshed}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <button
             id="nodes-refresh"
-            onClick={() => qc.invalidateQueries({ queryKey: ['nodes'] })}
-            disabled={isLoading}
+            onClick={() => {
+              qc.invalidateQueries({ queryKey: ['nodes'] });
+              qc.invalidateQueries({ queryKey: ['routing-policy'] });
+            }}
+            disabled={isLoading || policyLoading}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-muted-foreground border border-border/30 hover:bg-white/5 transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading || policyLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
           <button
@@ -464,21 +715,160 @@ export default function NodesOverview() {
         </div>
       </motion.div>
 
+      {/* ── Section 1: Routing Mode Selector ──────────────────────────────── */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.03 }}
+      >
+        <RoutingModeSelector
+          mode={mode}
+          onChange={handleModeChange}
+          disabled={savePolicyMut.isPending}
+        />
+      </motion.div>
+
+      {/* Frontier mode warning banner */}
+      <AnimatePresence>
+        {mode === 'frontier_only' && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
+              <Globe className="w-4 h-4 flex-shrink-0" />
+              All requests will use cloud LLMs. Spend controls are active.
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Summary metrics */}
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.05 }}
-        className="grid grid-cols-2 sm:grid-cols-4 gap-4"
+        className={`grid gap-4 ${showFrontierControls ? 'grid-cols-2 sm:grid-cols-5' : 'grid-cols-2 sm:grid-cols-4'}`}
       >
         <GlassMetricCard title="Total Nodes" value={String(nodes.length)} icon={Server} trend={{ value: healthy, label: `${healthy} healthy` }} />
         <GlassMetricCard title="Healthy" value={String(healthy)} icon={CheckCircle2} trend={{ value: healthy, label: 'online & passing probes' }} />
         <GlassMetricCard title="Degraded / Offline" value={String(degraded + offline)} icon={AlertTriangle} trend={{ value: degraded, label: `${degraded} degraded, ${offline} offline` }} />
         <GlassMetricCard title="Avg Load" value={`${avgLoad}%`} icon={Gauge} trend={{ value: avgLoad, label: 'across healthy nodes' }} />
+        {showFrontierControls && (
+          <GlassMetricCard
+            title="Frontier Spend"
+            value={`$${totalSpent.toFixed(2)}`}
+            icon={DollarSign}
+            trend={{ value: totalBudget > 0 ? Math.round((totalSpent / totalBudget) * 100) : 0, label: `of $${totalBudget.toFixed(0)} budget` }}
+          />
+        )}
       </motion.div>
 
-      {/* Empty state */}
-      {!isLoading && !isError && nodes.length === 0 && (
+      {/* ── Section 2: Frontier Model Mix Panel ───────────────────────────── */}
+      <AnimatePresence>
+        {showFrontierControls && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-foreground">Frontier Model Mix</h2>
+              <button
+                id="add-frontier-model"
+                onClick={() => setShowAddFrontier(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600/80 hover:bg-indigo-500 text-white transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Model
+              </button>
+            </div>
+
+            {currentPolicy.frontier_mix.length === 0 ? (
+              <div className="glass-card p-8 flex flex-col items-center text-center gap-3">
+                <Globe className="w-8 h-8 text-muted-foreground/40" />
+                <p className="text-sm text-muted-foreground">
+                  No frontier models configured. Add a model to enable cloud routing.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                <AnimatePresence>
+                  {currentPolicy.frontier_mix.map((model, idx) => (
+                    <FrontierModelCard
+                      key={`${model.provider}-${model.model}`}
+                      model={model}
+                      onWeightChange={(w) => handleWeightChange(idx, w)}
+                      onBudgetChange={(b) => handleBudgetChange(idx, b)}
+                      onRemove={() => handleRemoveModel(idx)}
+                    />
+                  ))}
+                </AnimatePresence>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Section 3: Hybrid Tuning Panel ────────────────────────────────── */}
+      <AnimatePresence>
+        {mode === 'hybrid' && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <HybridTuner
+              frontierLocalRatio={currentPolicy.frontier_local_ratio}
+              complexityThreshold={currentPolicy.complexity_threshold}
+              onRatioChange={handleRatioChange}
+              onComplexityChange={handleComplexityChange}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Section 4: Role Assignments Panel ─────────────────────────────── */}
+      <AnimatePresence>
+        {showFrontierControls && currentPolicy.frontier_mix.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <RolePinningPanel
+              rolePinning={currentPolicy.role_pinning ?? {}}
+              frontierMix={currentPolicy.frontier_mix}
+              onChange={handleRolePinningChange}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Section 5: Node Grid (preserved) ──────────────────────────────── */}
+
+      {/* Node grid dimmed in frontier_only mode */}
+      {mode === 'frontier_only' && nodes.length > 0 && (
+        <div className="opacity-40 pointer-events-none select-none">
+          <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.03] border border-border/10 text-xs text-muted-foreground mb-4">
+            <Server className="w-3.5 h-3.5" />
+            Local nodes are inactive in Frontier Only mode
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {nodes.map(node => (
+              <NodeCard key={node.id} node={node} onDelete={() => {}} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Empty state (local_only / hybrid with no nodes) */}
+      {showLocalNodes && !isLoading && !isError && nodes.length === 0 && (
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -512,8 +902,8 @@ export default function NodesOverview() {
         </div>
       )}
 
-      {/* Node grid */}
-      {nodes.length > 0 && (
+      {/* Active node grid (local_only + hybrid) */}
+      {showLocalNodes && nodes.length > 0 && (
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -542,6 +932,17 @@ export default function NodesOverview() {
           <AddNodeModal
             onClose={() => setShowAdd(false)}
             onSaved={() => setShowAdd(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Add frontier model modal */}
+      <AnimatePresence>
+        {showAddFrontier && frontierCatalog && (
+          <AddFrontierModelModal
+            catalog={frontierCatalog.providers}
+            onClose={() => setShowAddFrontier(false)}
+            onAdd={handleAddFrontierModel}
           />
         )}
       </AnimatePresence>

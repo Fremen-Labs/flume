@@ -254,6 +254,8 @@ var Metrics = &metricsRegistry{
 	NodeHealthGauge:      newGaugeVec(),
 	LocalOffloadPct:      newGaugeVec(),
 	WorkerTokens:         newCounterVec(),
+	FrontierSpend:        newCounterVec(),
+	FrontierCircuitBreaks: newCounterVec(),
 	
 	ConcurrencyThrottledTotal: &simpleCounter{},
 	BackoffEventsTotal:        &simpleCounter{},
@@ -304,6 +306,14 @@ type metricsRegistry struct {
 
 	// flume_worker_tokens_total{worker_name, direction}
 	WorkerTokens *counterVec
+
+	// ── Frontier Spend metrics ─────────────────────────────────────────
+
+	// flume_frontier_spend_usd_total{provider, model}
+	FrontierSpend *counterVec
+
+	// flume_frontier_circuit_breaks_total{provider, model}
+	FrontierCircuitBreaks *counterVec
 	
 	// flume_concurrency_throttled_total
 	ConcurrencyThrottledTotal *simpleCounter
@@ -456,6 +466,20 @@ func (m *metricsRegistry) SetNodeHealth(nodeID, model, status string) {
 // SetLocalOffloadPercentage sets the percentage of requests handled locally vs. frontier.
 func (m *metricsRegistry) SetLocalOffloadPercentage(pct float64) {
 	m.LocalOffloadPct.Set("", pct)
+}
+
+// RecordFrontierSpend records a USD spend increment for a frontier model.
+func (m *metricsRegistry) RecordFrontierSpend(provider, model string, usd float64) {
+	// Use the Add method for fractional counter increments (USD amounts).
+	// We store in millionths to maintain integer counter semantics.
+	labels := formatLabels([]Label{{"provider", provider}, {"model", model}})
+	m.FrontierSpend.Add(labels, uint64(usd*1_000_000))
+}
+
+// RecordFrontierCircuitBreak records when a frontier model is circuit-broken.
+func (m *metricsRegistry) RecordFrontierCircuitBreak(provider, model string) {
+	labels := formatLabels([]Label{{"provider", provider}, {"model", model}})
+	m.FrontierCircuitBreaks.Inc(labels)
 }
 
 // ─── Prometheus text exposition ──────────────────────────────────────────────
@@ -667,6 +691,28 @@ func HandleMetrics() http.HandlerFunc {
 		buf = append(buf, "flume_tasks_blocked_total "...)
 		buf = strconv.AppendUint(buf, Metrics.TasksBlockedTotal.get(), 10)
 		buf = append(buf, '\n')
+
+		// ── flume_frontier_spend_usd_total ────────────────────────────
+		buf = append(buf, "# HELP flume_frontier_spend_usd_total Cumulative USD spent on frontier LLM providers (stored as microdollars).\n"...)
+		buf = append(buf, "# TYPE flume_frontier_spend_usd_total counter\n"...)
+		for labels, count := range Metrics.FrontierSpend.snapshot() {
+			buf = append(buf, "flume_frontier_spend_usd_total{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendFloat(buf, float64(count)/1_000_000.0, 'f', 6, 64)
+			buf = append(buf, '\n')
+		}
+
+		// ── flume_frontier_circuit_breaks_total ────────────────────────
+		buf = append(buf, "# HELP flume_frontier_circuit_breaks_total Number of times a frontier model was circuit-broken due to budget.\n"...)
+		buf = append(buf, "# TYPE flume_frontier_circuit_breaks_total counter\n"...)
+		for labels, count := range Metrics.FrontierCircuitBreaks.snapshot() {
+			buf = append(buf, "flume_frontier_circuit_breaks_total{"...)
+			buf = append(buf, labels...)
+			buf = append(buf, "} "...)
+			buf = strconv.AppendUint(buf, count, 10)
+			buf = append(buf, '\n')
+		}
 
 		_, err := w.Write(buf)
 		if err != nil {

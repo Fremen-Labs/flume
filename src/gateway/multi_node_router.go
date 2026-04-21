@@ -46,11 +46,118 @@ func NewMultiNodeRouter(router *ProviderRouter, registry *NodeRegistry, config *
 	}
 }
 
-// ExecuteSmartRoute selects the optimal node and routes the request.
-// For non-Ollama providers, delegates directly to ProviderRouter.Route().
+// ExecuteSmartRoute selects the optimal routing path based on the active
+// RoutingPolicy mode, then dispatches the request accordingly.
+//
+// Mode semantics:
+//   - frontier_only: Bypass node mesh, use weighted frontier selection.
+//   - hybrid:        Complexity + probability gate decides frontier vs local.
+//   - local_only:    Existing node mesh routing (default, zero-regression).
 func (m *MultiNodeRouter) ExecuteSmartRoute(ctx context.Context, req *ChatRequest, taskType string, withTools bool) (*ChatResponse, error) {
 	log := WithContext(ctx)
+	policy := m.config.GetRoutingPolicy()
 
+	switch policy.Mode {
+	case RoutingModeFrontierOnly:
+		return m.executeFrontierOnly(ctx, req, taskType, withTools, policy)
+
+	case RoutingModeHybrid:
+		return m.executeHybrid(ctx, req, taskType, withTools, policy)
+
+	default:
+		// RoutingModeLocalOnly — existing behavior, zero changes.
+		return m.executeLocalOnly(ctx, req, taskType, withTools, log)
+	}
+}
+
+// executeFrontierOnly routes all requests to frontier models via weighted selection.
+func (m *MultiNodeRouter) executeFrontierOnly(ctx context.Context, req *ChatRequest, taskType string, withTools bool, policy *RoutingPolicy) (*ChatResponse, error) {
+	log := WithContext(ctx)
+
+	model := policy.SelectWeightedFrontier(req.AgentRole)
+	if model == nil {
+		log.Error("routing_policy: frontier_only mode — no frontier models available (all circuit-broken)")
+		return nil, fmt.Errorf("frontier_only mode: all frontier models are circuit-broken — no available endpoints")
+	}
+
+	log.Info("routing_policy: frontier_only dispatch",
+		slog.String("model", model.Model),
+		slog.String("provider", model.Provider),
+		slog.String("agent_role", req.AgentRole),
+		slog.String("task_type", taskType),
+	)
+
+	Metrics.RecordRoutingDecision("frontier_direct", taskType)
+
+	cloned := cloneChatRequest(req)
+	cloned.Model = model.Model
+	cloned.Provider = model.Provider
+	cloned.CredentialID = model.CredentialID
+
+	resp, err := m.router.Route(ctx, cloned, withTools)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enforce spend budget after every frontier response
+	if resp != nil {
+		policy.EnforceSpendBudget(model.Model, resp.Usage)
+		policy.PersistSpendIfDue(ctx, m.config.esURL, m.config.httpClient)
+	}
+
+	return resp, nil
+}
+
+// executeHybrid uses complexity + probability gating to route between
+// frontier and local nodes. Falls back to frontier on total mesh failure.
+func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, taskType string, withTools bool, policy *RoutingPolicy) (*ChatResponse, error) {
+	log := WithContext(ctx)
+
+	useFrontier := policy.ShouldUseFrontier(taskType) && policy.HasAvailableFrontierModels()
+
+	if useFrontier {
+		model := policy.SelectWeightedFrontier(req.AgentRole)
+		if model != nil {
+			log.Info("routing_policy: hybrid → frontier path",
+				slog.String("model", model.Model),
+				slog.String("provider", model.Provider),
+				slog.String("task_type", taskType),
+			)
+
+			Metrics.RecordRoutingDecision("hybrid_frontier", taskType)
+
+			cloned := cloneChatRequest(req)
+			cloned.Model = model.Model
+			cloned.Provider = model.Provider
+			cloned.CredentialID = model.CredentialID
+
+			resp, err := m.router.Route(ctx, cloned, withTools)
+			if err != nil {
+				log.Warn("routing_policy: hybrid frontier path failed, trying local mesh",
+					slog.String("error", err.Error()),
+				)
+				// Fall through to local mesh routing
+			} else {
+				if resp != nil {
+					policy.EnforceSpendBudget(model.Model, resp.Usage)
+					policy.PersistSpendIfDue(ctx, m.config.esURL, m.config.httpClient)
+				}
+				return resp, nil
+			}
+		}
+	}
+
+	// Local mesh path — same as executeLocalOnly
+	log.Info("routing_policy: hybrid → local mesh path",
+		slog.String("task_type", taskType),
+	)
+	Metrics.RecordRoutingDecision("hybrid_local", taskType)
+	return m.executeLocalOnly(ctx, req, taskType, withTools, log)
+}
+
+// executeLocalOnly is the original ExecuteSmartRoute behavior — preserved exactly
+// for zero functional regressions when mode=local_only.
+func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest, taskType string, withTools bool, log *slog.Logger) (*ChatResponse, error) {
 	// Resolve effective provider to decide if node mesh applies.
 	_, provider, _ := m.config.ResolveModel(req)
 

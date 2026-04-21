@@ -110,6 +110,18 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 		SanitizeToolResponse(resp)
 	}
 
+	// ── Spend tracking for frontier providers ───────────────────────────
+	// Track cost for non-Ollama providers when routing policy is active.
+	// This is a defence-in-depth layer — the primary spend tracking is in
+	// MultiNodeRouter.executeFrontierOnly/executeHybrid, but this catches
+	// direct Route() calls from ensemble members and other paths.
+	if provider != ProviderOllama && resp != nil {
+		policy := r.config.GetRoutingPolicy()
+		if policy != nil && policy.Mode != RoutingModeLocalOnly {
+			policy.EnforceSpendBudget(model, resp.Usage)
+		}
+	}
+
 	return resp, nil
 }
 

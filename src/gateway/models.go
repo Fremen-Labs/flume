@@ -204,3 +204,30 @@ type AgentModelConfig struct {
 	CredentialID string `json:"credential_id,omitempty"`
 	Think        bool   `json:"think,omitempty"`
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Frontier Model Catalog — static catalog for the routing policy UI.
+// Updated: April 2026 — reflects current model lineup per provider.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FrontierModelCatalog is the static catalog of frontier provider models
+// available for selection in the routing policy UI.
+var FrontierModelCatalog = map[string][]string{
+	ProviderOpenAI:    {"gpt-5", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3", "o4-mini", "gpt-4o", "gpt-4o-mini"},
+	ProviderAnthropic: {"claude-opus-4.7", "claude-sonnet-4.6", "claude-haiku-4.5"},
+	ProviderGemini:    {"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"},
+	ProviderXAI:       {"grok-4.20", "grok-4", "grok-4.1-fast"},
+}
+
+// FrontierProviderLabels maps provider IDs to human-readable labels for UI.
+var FrontierProviderLabels = map[string]string{
+	ProviderOpenAI:    "OpenAI",
+	ProviderAnthropic: "Anthropic",
+	ProviderGemini:    "Google Gemini",
+	ProviderXAI:       "xAI (Grok)",
+}
+
+// AllAgentRoles lists every agent role available for per-role frontier pinning.
+var AllAgentRoles = []string{
+	RolePlanner, RoleImplementer, RoleReviewer, RoleTester, RolePM, RoleCritic,
+}
