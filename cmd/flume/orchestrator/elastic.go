@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -538,6 +539,73 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 	return nil
 }
 
+// SeedPainlessScripts securely uploads native compilation scripts into ES
+// drastically reducing HTTP wire overhead natively during swarm operations.
+func SeedPainlessScripts(ctx context.Context, esURL, apiKey string) error {
+	log.Debug("[ELASTICSEARCH SCRIPTS] Seeding Enterprise Painless execution routines natively")
+
+	scripts := map[string]string{
+		"flume-task-claim": `
+			if (ctx._source.status == params.expected_status 
+			&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {
+				ctx._source.status = params.new_status;
+				ctx._source.queue_state = "active";
+				ctx._source.active_worker = params.worker_name;
+				ctx._source.assigned_agent_role = params.role;
+				ctx._source.owner = params.role;
+				ctx._source.updated_at = params.now;
+				ctx._source.last_update = params.now;
+				if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }
+				if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }
+				if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }
+				if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }
+			} else {
+				ctx.op = "noop";
+			}`,
+		"flume-task-block": `
+			ctx._source.status = "blocked";
+			ctx._source.queue_state = "idle";
+			ctx._source.message = "Task paused due to mesh capacity limits (node overload). Will automatically resume with jitter when resources free up.";
+		`,
+		"flume-task-resume": `
+			ctx._source.status = "ready";
+			ctx._source.queue_state = "idle";
+			ctx._source.active_worker = null;
+		`,
+		"flume-append-agent-note": `
+			if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }
+			ctx._source.agent_log.add(params.entry);
+			if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }
+			ctx._source.updated_at = params.touch;
+			ctx._source.last_update = params.touch;
+		`,
+		"flume-append-execution-thought": `
+			if (ctx._source.execution_thoughts == null) { ctx._source.execution_thoughts = []; }
+			ctx._source.execution_thoughts.add(params.entry);
+			if (ctx._source.execution_thoughts.length > 500) { ctx._source.execution_thoughts.remove(0); }
+			ctx._source.updated_at = params.touch;
+			ctx._source.last_update = params.touch;
+		`,
+	}
+
+	for id, source := range scripts {
+		payload := map[string]interface{}{
+			"script": map[string]interface{}{
+				"lang":   "painless",
+				"source": source,
+			},
+		}
+		endpoint := fmt.Sprintf("_scripts/%s", id)
+		_, _, err := esRequest(ctx, esURL, apiKey, endpoint, "PUT", payload)
+		if err != nil {
+			log.Warn("[ELASTICSEARCH SCRIPTS] Failed to seed Painless script natively", "id", id, "error", err)
+		} else {
+			log.Info(fmt.Sprintf("[ELASTICSEARCH SCRIPTS] ✅ Native Painless routine deployed: %s", id))
+		}
+	}
+	return nil
+}
+
 // BootstrapElasticsearch runs all ES infrastructure setup: ILM policies,
 // index templates, the full index catalogue, and seed data.
 //
@@ -627,6 +695,9 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 		// Non-fatal: continue boot — existing indices will work
 	}
 
+	// 4. Seed Native Painless Routine Scripts
+	SeedPainlessScripts(ctx, esURL, apiKey)
+
 	return nil
 }
 
@@ -693,6 +764,43 @@ func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) err
 		if err == nil {
 			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config",
 				"provider", provider, "model", cfg.Model, "attempt", attempt)
+				
+			// BOOTSTRAP EXTENSION: Native Routing Policy Injection
+			// Bind the frontier models natively into the Gateway's Routing Policy map
+			if len(cfg.CloudProviders) > 0 {
+				var frontierMix []map[string]interface{}
+				for _, cp := range cfg.CloudProviders {
+					modelStr := cp.Model
+					if modelStr == "" {
+						modelStr = "default"
+					}
+					frontierMix = append(frontierMix, map[string]interface{}{
+						"provider":      cp.Provider,
+						"model":         modelStr,
+						"credential_id": "__settings_default__",
+						"weight":        1.0,
+						"budget_usd":    50.0,
+					})
+				}
+
+				routingPayload := map[string]interface{}{
+					"mode":                 "hybrid",
+					"frontier_mix":         frontierMix,
+					"frontier_local_ratio": 0.3,
+					"complexity_threshold": 7,
+				}
+
+				_, _, rErr := esRequest(ctx, esURL, apiKey, "flume-routing-policy/_doc/singleton", "PUT", routingPayload)
+				if rErr == nil {
+					log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded Native Routing Policy for Frontier Mesh.")
+					slog.Info("orchestrator: safely bootstrapped flume-routing-policy document natively into ES",
+						slog.Int("provider_count", len(cfg.CloudProviders)))
+				} else {
+					log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to seed routing policy natively", "error", rErr)
+					slog.Warn("orchestrator: failed to bootstrap flume-routing-policy", "error", rErr)
+				}
+			}
+
 			return nil
 		}
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to write flume-llm-config, retrying...",

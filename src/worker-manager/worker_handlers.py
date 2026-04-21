@@ -181,14 +181,7 @@ def append_agent_note(es_id: str, note: str) -> None:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
             'script': {
-                'source': (
-                    'if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }'
-                    'ctx._source.agent_log.add(params.entry);'
-                    'if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }'
-                    'ctx._source.updated_at = params.touch;'
-                    'ctx._source.last_update = params.touch;'
-                ),
-                'lang': 'painless',
+                'id': 'flume-append-agent-note',
                 'params': {'entry': {'ts': ts, 'note': note}, 'touch': ts},
             }
         }, method='POST')
@@ -203,14 +196,7 @@ def append_execution_thought(es_id: str, thought: str) -> None:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
             'script': {
-                'source': (
-                    'if (ctx._source.execution_thoughts == null) { ctx._source.execution_thoughts = []; }'
-                    'ctx._source.execution_thoughts.add(params.entry);'
-                    'if (ctx._source.execution_thoughts.length > 500) { ctx._source.execution_thoughts.remove(0); }'
-                    'ctx._source.updated_at = params.touch;'
-                    'ctx._source.last_update = params.touch;'
-                ),
-                'lang': 'painless',
+                'id': 'flume-append-execution-thought',
                 'params': {'entry': {'ts': ts, 'thought': thought}, 'touch': ts},
             }
         }, method='POST')

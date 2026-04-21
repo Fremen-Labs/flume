@@ -621,122 +621,27 @@ def _update_planning_status(session: dict, **updates) -> dict:
 
 
 def _test_planner_connection(status: dict) -> dict:
-    """Probe the configured LLM endpoint and update status with the result.
-
-    Each provider family uses a distinct URL pattern and auth scheme:
-      - openai / grok / xai / mistral / cohere / openai_compatible
-            → {base}/v1/models   (trailing /v1 stripped first to avoid /v1/v1)
-            → Authorization: Bearer <api_key>
-      - anthropic
-            → https://api.anthropic.com/v1/models
-            → x-api-key + anthropic-version headers
-      - gemini
-            → https://generativelanguage.googleapis.com/v1beta/models?key=<api_key>
-      - ollama / exo
-            → {base}/api/version   (no auth)
-    """
-    provider  = (status.get('provider') or '').lower().strip()
-    base_url  = (status.get('baseUrl') or '').rstrip('/')
-    api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
-
+    """Probe the Flume Gateway endpoint and update status with the result."""
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
 
-    if not base_url:
-        status['connectionTestOk']     = False
-        status['connectionTestResult'] = (
-            f'No base URL configured for provider "{provider}". '
-            'Check Settings → LLM Provider.'
-        )
-        status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
-        return status
-
-    # ── Build provider-specific test URL & headers ─────────────────────────
-
-    headers: dict = {}
-    url: str = base_url   # default fallback
-
-    if provider == 'ollama':
-        # Ollama uses the /api/version health endpoint
-        url = base_url + '/api/version'
-
-    elif provider == 'exo':
-        # Exo acts as an OpenAI-compatible API (port 52415), using /v1/models
-        norm = base_url
-        if norm.endswith('/v1'):
-            norm = norm[:-3]
-        url = norm.rstrip('/') + '/v1/models'
-
-    elif provider == 'anthropic':
-        # Anthropic always uses a fixed root, ignoring whatever base_url
-        # may have been supplied (it could be overridden by the user).
-        root = base_url if base_url else 'https://api.anthropic.com'
-        url  = root.rstrip('/') + '/v1/models'
-        if api_key:
-            headers['x-api-key']         = api_key
-            headers['anthropic-version']  = '2023-06-01'
-
-    elif provider == 'gemini':
-        # Gemini uses the Google Generative Language API, not OpenAI /v1/models.
-        # The key is passed as a query parameter, not a Bearer token.
-        url = 'https://generativelanguage.googleapis.com/v1beta/models'
-        if api_key:
-            url += f'?key={api_key}'
-
-    elif provider in ('openai', 'openai_compatible', 'xai', 'grok', 'mistral', 'cohere'):
-        # OpenAI-compatible family: strip a trailing /v1 that catalog URLs
-        # (e.g. Grok → https://api.x.ai/v1) already include, then append /v1/models.
-        norm = base_url
-        if norm.endswith('/v1'):
-            norm = norm[:-3]
-        url = norm.rstrip('/') + '/v1/models'
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
-    else:
-        # Unknown / openai_compatible fallback — try /v1/models with Bearer.
-        norm = base_url
-        if norm.endswith('/v1'):
-            norm = norm[:-3]
-        url = norm.rstrip('/') + '/v1/models'
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-
-    # ── Execute the probe ──────────────────────────────────────────────────
-    logger.debug(
-        'connection_test_probe',
-        extra={'provider': provider, 'url': url, 'has_key': bool(api_key)},
-    )
+    # We now offload all connectivity proxying directly to the Gateway
+    gw_url = _gateway_base()
+    url = f"{gw_url}/health"
+    
     try:
-        req = urllib.request.Request(url, headers=headers, method='GET')
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body   = resp.read().decode(errors='ignore')
-            status_code = getattr(resp, 'status', 200)
-            status['connectionTestOk']     = True
-            status['connectionTestResult'] = (
-                f'{provider.upper()} connection OK — {url} responded HTTP {status_code}'
-            )
-            # For Ollama, surface the version string.
-            if provider == 'ollama':
-                try:
-                    version = json.loads(body).get('version')
-                    if version:
-                        status['connectionTestResult'] += f' (Ollama {version})'
-                except Exception:
-                    pass
-            # For OpenAI-family, surface how many models came back.
-            elif provider not in ('gemini',):
-                try:
-                    n = len(json.loads(body).get('data', []))
-                    if n:
-                        status['connectionTestResult'] += f' · {n} models available'
-                except Exception:
-                    pass
-    except Exception as exc:
-        status['connectionTestOk']     = False
-        status['connectionTestResult'] = (
-            f'{provider.upper()} connection FAILED — {url}: {exc}'
-        )[:300]
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'}, method='GET')
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            if response.getcode() == 200:
+                status['connectionTestOk'] = True
+                status['connectionTestResult'] = 'GATEWAY connection OK'
+            else:
+                status['connectionTestOk'] = False
+                status['connectionTestResult'] = f'GATEWAY HTTP {response.getcode()}'
+    except Exception as e:
+        status['connectionTestOk'] = False
+        status['connectionTestResult'] = f'GATEWAY connection FAILED — {e}'
+        logger.warning(f"Plan New Work modal connection test failed: {e}")
 
     status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
     return status
@@ -844,14 +749,14 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     cfg = _planner_runtime_config()
     model = cfg.get('model') or LLM_MODEL
     timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
-    _planner_debug_log(
-        'planner_request',
-        provider=cfg.get('provider'),
-        model=model,
-        baseUrl=cfg.get('baseUrl'),
-        timeoutSeconds=timeout_seconds,
-        usingCodexAppServer=bool(cfg.get('usingCodexAppServer')),
-        messageCount=len(messages or []),
+    logger.info(
+        json.dumps({
+            'event': 'planner_request',
+            'agent_role': 'intake',
+            'model': model,
+            'timeoutSeconds': timeout_seconds,
+            'messageCount': len(messages or []),
+        }, ensure_ascii=False)
     )
     if cfg.get('usingCodexAppServer'):
         import codex_app_server_client  # type: ignore
@@ -869,10 +774,9 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
         model=model,
         temperature=0.3,
         max_tokens=8192,
-        provider_override=cfg.get('provider'),
-        base_url_override=cfg.get('baseUrl'),
         timeout_seconds=timeout_seconds,
         ollama_think=False,
+        agent_role='intake',
     )
 
 def _strip_json_blocks(text: str) -> str:

@@ -392,24 +392,9 @@ def _dedup_skip_task(task_id: str, reason: str):
         log(f"failed to mark task {task_id} as skipped: {e}")
 
 
-PAINLESS_CLAIM_SCRIPT = (
-    'if (ctx._source.status == params.expected_status '
-    '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
-    '  ctx._source.status = params.new_status;'
-    '  ctx._source.queue_state = "active";'
-    '  ctx._source.active_worker = params.worker_name;'
-    '  ctx._source.assigned_agent_role = params.role;'
-    '  ctx._source.owner = params.role;'
-    '  ctx._source.updated_at = params.now;'
-    '  ctx._source.last_update = params.now;'
-    '  if (params.execution_host != null) { ctx._source.execution_host = params.execution_host; }'
-    '  if (params.preferred_model != null) { ctx._source.preferred_model = params.preferred_model; }'
-    '  if (params.preferred_llm_provider != null) { ctx._source.preferred_llm_provider = params.preferred_llm_provider; }'
-    '  if (params.preferred_llm_credential_id != null) { ctx._source.preferred_llm_credential_id = params.preferred_llm_credential_id; }'
-    '} else {'
-    '  ctx.op = "noop";'
-    '}'
-)
+# The raw Painless claim script is now pre-compiled into Elasticsearch natively
+# during cluster bootstrap by the Flume Orchestrator, mapped to 'flume-task-claim'.
+# This eliminates massive JSON payload wire overhead on every single _update loop.
 
 def try_atomic_claim(
     role: str,
@@ -478,8 +463,7 @@ def try_atomic_claim(
     now = now_iso()
     new_status = 'running' if role != 'pm' else 'planned'
     script = {
-        'source': PAINLESS_CLAIM_SCRIPT,
-        'lang': 'painless',
+        'id': 'flume-task-claim',
         'params': {
             'expected_status': target_status,
             'new_status': new_status,
@@ -809,17 +793,8 @@ import random
 
 last_resume_timestamp = 0
 
-PAINLESS_RESUME_SCRIPT = (
-    'ctx._source.status = "ready";'
-    'ctx._source.queue_state = "idle";'
-    'ctx._source.active_worker = null;'
-)
-
-PAINLESS_BLOCK_SCRIPT = (
-    'ctx._source.status = "blocked";'
-    'ctx._source.queue_state = "idle";'
-    'ctx._source.message = "Task paused due to mesh capacity limits (node overload). Will automatically resume with jitter when resources free up.";'
-)
+# PAINLESS_RESUME_SCRIPT & PAINLESS_BLOCK_SCRIPT natively execute via ES pre-compiled scripts
+# mapping cleanly through 'id': 'flume-task-resume' and 'id': 'flume-task-block'.
 
 def _execute_block_sweep(node_loads: dict, node_caps: dict, cloud_providers: set):
     """Pushes stalled ready tasks to the Blocked column to provide explicit Kanban feedback when cluster is saturated"""
@@ -833,8 +808,7 @@ def _execute_block_sweep(node_loads: dict, node_caps: dict, cloud_providers: set
         body = {
             'query': {'term': {'status': 'ready'}},
             'script': {
-                'source': PAINLESS_BLOCK_SCRIPT,
-                'lang': 'painless'
+                'id': 'flume-task-block',
             }
         }
         res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
@@ -856,8 +830,7 @@ def _execute_resume_sweep():
         body = {
             'query': {'term': {'status': 'blocked'}},
             'script': {
-                'source': PAINLESS_RESUME_SCRIPT,
-                'lang': 'painless'
+                'id': 'flume-task-resume',
             }
         }
         res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')

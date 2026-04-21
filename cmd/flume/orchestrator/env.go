@@ -23,6 +23,13 @@ type NodeConfigEntry struct {
 	MemoryGB float64
 }
 
+// CloudProviderEntry represents a native unified Cloud API provider binding
+type CloudProviderEntry struct {
+	Provider string
+	Model    string
+	APIKey   string
+}
+
 type EnvConfig struct {
 	Provider           string
 	APIKey             string
@@ -42,7 +49,8 @@ type EnvConfig struct {
 	ADOProject  string
 	ADOToken    string
 
-	Nodes []NodeConfigEntry // Collected during node mesh wizard
+	CloudProviders []CloudProviderEntry
+	Nodes          []NodeConfigEntry // Collected during node mesh wizard
 }
 
 // GenerateAdminToken creates a 256-bit cryptographically secure token.
