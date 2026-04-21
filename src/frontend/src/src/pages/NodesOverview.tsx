@@ -11,6 +11,7 @@ import { RoutingModeSelector } from '@/components/RoutingModeSelector';
 import { FrontierModelCard } from '@/components/FrontierModelCard';
 import { HybridTuner } from '@/components/HybridTuner';
 import { RolePinningPanel } from '@/components/RolePinningPanel';
+import { AddFrontierModelModal } from '@/components/AddFrontierModelModal';
 import type {
   RoutingMode, RoutingPolicy, FrontierModelWeight,
   FrontierModelsResponse, FrontierProviderCatalog,
@@ -423,138 +424,6 @@ function Field({
         className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
       />
       {hint && <p className="text-[10px] text-muted-foreground/60 mt-0.5">{hint}</p>}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Add Frontier Model Modal
-// ─────────────────────────────────────────────────────────────────────────────
-
-function AddFrontierModelModal({
-  catalog, onClose, onAdd,
-}: {
-  catalog: FrontierProviderCatalog[];
-  onClose: () => void;
-  onAdd: (model: FrontierModelWeight) => void;
-}) {
-  const [provider, setProvider] = useState(catalog[0]?.id ?? '');
-  const [model, setModel] = useState('');
-  const [credentialId, setCredentialId] = useState('');
-  const [budget, setBudget] = useState(50);
-
-  const selectedProvider = catalog.find(p => p.id === provider);
-  const models = selectedProvider?.models ?? [];
-  const credentials = selectedProvider?.credentials ?? [];
-
-  useEffect(() => {
-    setModel(models[0] ?? '');
-    setCredentialId(credentials[0]?.id ?? '');
-  }, [provider]);
-
-  const handleAdd = () => {
-    if (!model || !provider) return;
-    onAdd({
-      provider,
-      model,
-      credential_id: credentialId,
-      weight: 0.5,
-      budget_usd: budget,
-      spent_usd: 0,
-      circuit_open: false,
-    });
-    onClose();
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
-        className="glass-card w-full max-w-md mx-4 p-6 space-y-4"
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-foreground">Add Frontier Model</h2>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">✕</button>
-        </div>
-
-        <div className="space-y-3">
-          <div>
-            <label className="block text-[11px] text-muted-foreground mb-1">Provider</label>
-            <select
-              id="frontier-provider-select"
-              value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            >
-              {catalog.map(p => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-[11px] text-muted-foreground mb-1">Model</label>
-            <select
-              id="frontier-model-select"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            >
-              {models.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
-
-          {credentials.length > 0 && (
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">Credential</label>
-              <select
-                id="frontier-credential-select"
-                value={credentialId}
-                onChange={(e) => setCredentialId(e.target.value)}
-                className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-              >
-                {credentials.map(c => (
-                  <option key={c.id} value={c.id}>{c.label} {c.has_key ? '✓' : '(no key)'}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-[11px] text-muted-foreground mb-1">Budget ($)</label>
-            <input
-              id="frontier-budget-input"
-              type="number"
-              min={0}
-              step={5}
-              value={budget}
-              onChange={(e) => setBudget(Math.max(0, Number(e.target.value)))}
-              className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-          </div>
-        </div>
-
-        <div className="flex gap-3 pt-2">
-          <button
-            onClick={onClose}
-            className="flex-1 px-4 py-2 rounded-lg text-sm text-muted-foreground border border-border/30 hover:bg-white/5 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            id="frontier-model-add-submit"
-            onClick={handleAdd}
-            disabled={!model || !provider}
-            className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
-          >
-            Add Model
-          </button>
-        </div>
-      </motion.div>
     </div>
   );
 }

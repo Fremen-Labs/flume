@@ -922,6 +922,7 @@ def cycle():
     
     cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
     node_loads = {}
+    active_mesh_count = 0
     
     # Pre-calculate active loads dynamically natively per-node
     for wn, wdat in busy_workers.items():

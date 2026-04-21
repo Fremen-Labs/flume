@@ -4412,7 +4412,7 @@ def api_settings_llm_credentials_post(payload: dict):
     if updates:
         _update_env_keys(workspace, updates)
         
-    return {"ok": True, "message": "Action applied successfully", "restartRequired": False}
+    return {"ok": True, "message": "Action applied successfully", "restartRequired": False, "credential_id": msg if msg else ""}
 
 @app.post("/api/settings/llm/oauth/refresh")
 def api_settings_llm_oauth_refresh():
