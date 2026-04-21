@@ -31,7 +31,9 @@ func init() {
     rootCmd.AddCommand(commands.ConfigCmd)
     rootCmd.AddCommand(commands.ProjectsCmd)
     rootCmd.AddCommand(commands.UpgradeCmd)
+    rootCmd.AddCommand(commands.RestartCmd)
     rootCmd.AddCommand(commands.SkillsCmd)
+    rootCmd.AddCommand(commands.CodexOAuthCmd)
 }
 
 func main() {

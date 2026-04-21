@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -121,6 +122,13 @@ def get_active_token_plain(workspace_root: Path) -> str:
             continue
         token = str(c.get("token") or "").strip()
         if token == "***OPENBAO_DELEGATED***":
+            # Worker-side fast path: secrets bootstrap hydrates FLUME_GH_<id>
+            # directly into env, so we can resolve without importing dashboard
+            # OpenBao helpers.
+            env_key = f"FLUME_GH_{aid}"
+            env_token = str(os.environ.get(env_key) or "").strip()
+            if env_token:
+                token = env_token
             try:
                 from llm_settings import _openbao_get_all  # type: ignore
                 bao_vals = _openbao_get_all(workspace_root)

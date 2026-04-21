@@ -105,6 +105,23 @@ var StartCmd = &cobra.Command{
 				log.Error("Interactive Wizard aborted.", "error", err)
 				return err
 			}
+
+			// User chose Codex OAuth (option 7) — run the interactive auth flow now.
+			if promptCfg.CodexOAuthLogin {
+				if err := runCodexLogin(nil, nil); err != nil {
+					return fmt.Errorf("Codex OAuth login failed: %w", err)
+				}
+				// Provider is openai; model will be set by the codex-oauth login flow.
+				promptCfg.Provider = "openai"
+				res := getLastCodexLoginResult()
+				if strings.TrimSpace(res.Model) != "" {
+					promptCfg.Model = strings.TrimSpace(res.Model)
+				}
+				if strings.TrimSpace(res.AccessToken) != "" {
+					promptCfg.APIKey = strings.TrimSpace(res.AccessToken)
+				}
+			}
+
 			envCfg.Provider = promptCfg.Provider
 			envCfg.APIKey = promptCfg.APIKey
 			envCfg.Model = promptCfg.Model

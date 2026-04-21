@@ -1225,6 +1225,29 @@ def promote_planned_tasks() -> int:
                 active_by_story[parent_id] = active_by_story.get(parent_id, 0) + 1
         return True
 
+    def _dependency_tasks_all_done(deps: list) -> bool:
+        """Resolve deps by logical ``id`` field (not only ES ``_id`` — they can diverge)."""
+        if not deps:
+            return True
+        try:
+            dep_res = es_request(
+                f'/{TASK_INDEX}/_search',
+                {
+                    'size': max(len(deps), 1),
+                    'query': {'terms': {'id': deps}},
+                    '_source': ['id', 'status'],
+                },
+                method='POST',
+            )
+            hits = (dep_res or {}).get('hits', {}).get('hits', [])
+            by_id = {(h.get('_source') or {}).get('id'): (h.get('_source') or {}).get('status') for h in hits}
+            if len(by_id) < len(deps):
+                return False
+            return all(by_id.get(d) == 'done' for d in deps)
+        except Exception as e:
+            log(f"dependency lookup error for deps={deps!r}: {e}")
+            return False
+
     n = 0
     for h in res.get('hits', {}).get('hits', []):
         src = h.get('_source', {})
@@ -1235,9 +1258,7 @@ def promote_planned_tasks() -> int:
                 n += 1
             continue
         try:
-            dep_res = es_request(f'/{TASK_INDEX}/_mget', {'ids': deps}, method='POST')
-            docs = dep_res.get('docs', [])
-            if docs and all(d.get('found', False) and d.get('_source', {}).get('status') == 'done' for d in docs):
+            if _dependency_tasks_all_done(deps):
                 if _promote(es_doc_id, src, 'dependencies resolved'):
                     n += 1
         except Exception as e:

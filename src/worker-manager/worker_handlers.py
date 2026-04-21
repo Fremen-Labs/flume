@@ -446,9 +446,23 @@ def _configure_git_identity(repo_path: Path) -> None:
             )
 
 
-def _flume_branch_scope() -> str:
-    """task = legacy per-leaf branch; story = one shared branch per story (long-running work)."""
-    return os.environ.get('FLUME_BRANCH_SCOPE', 'story').strip().lower() or 'story'
+def _flume_branch_scope_for_task(task: dict | None) -> str:
+    """Branch naming scope: ``story`` = one shared branch per story; ``task`` = one branch per leaf task.
+
+    Per-project ``branchScope`` on the flume-projects document overrides ``FLUME_BRANCH_SCOPE`` so a
+    single host can mix repos that want story-level integration vs strict per-task PRs to develop.
+    """
+    repo_id = (task or {}).get('repo') or ''
+    if repo_id:
+        try:
+            src = _get_project_source(repo_id) or {}
+            ps = (src.get('branchScope') or src.get('branch_scope') or '').strip().lower()
+            if ps in ('story', 'task'):
+                return ps
+        except Exception:
+            pass
+    env_val = (os.environ.get('FLUME_BRANCH_SCOPE') or 'story').strip().lower()
+    return env_val if env_val in ('story', 'task') else 'story'
 
 
 def _flume_auto_pr_scope() -> str:
@@ -612,7 +626,7 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
     else:
         item_type = (task.get('item_type') or '').lower()
         prefix    = 'bugfix' if (item_type == 'bug' or task_id.startswith('bug-')) else 'feature'
-        scope_id = _resolve_branch_scope_id(task) if _flume_branch_scope() == 'story' else None
+        scope_id = _resolve_branch_scope_id(task) if _flume_branch_scope_for_task(task) == 'story' else None
         if scope_id:
             seg = _sanitize_git_branch_segment(scope_id)
             h = _stable_scope_hash(scope_id)
@@ -2447,7 +2461,6 @@ def handle_implementer_worker(task, es_id):
         if agent_completed and not has_changes:
             if task_requires_code(task):
                 # This task *should* result in code edits, but the agent wrote nothing.
-                # Treat as LLM error to block gracefully instead of looping indefinitely.
                 _implementer_handle_llm_failure(es_id, task, task_id)
                 log(f"implementer: task={task_id} expected code edits but wrote nothing; handled as LLM failure")
                 released = True

@@ -8,6 +8,7 @@ import json
 import os
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 
 from flume_secrets import resolve_oauth_state_path
 from openai_oauth_state import load_state_from_env_or_file, save_state_to_env_or_file
@@ -26,6 +27,57 @@ logger = get_logger("llm_settings")
 _DEFAULT_OPENAI_OAUTH_SCOPES = (
     'openid profile email offline_access model.request api.model.read api.responses.write'
 )
+
+
+def _b64url_nopad(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _build_fallback_id_token(state: dict[str, Any]) -> str:
+    """
+    Build a minimal JWT-like id_token for Codex auth.json compatibility.
+    Signature is intentionally dummy ("sig"); Codex reads claims without JWT
+    signature verification in local auth cache workflows.
+    """
+    header = {"alg": "none", "typ": "JWT"}
+    claims = {
+        "email": str(state.get("email") or "flume@local"),
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": str(state.get("chatgpt_plan_type") or "pro"),
+        },
+    }
+    return (
+        f"{_b64url_nopad(json.dumps(header, separators=(',', ':')).encode('utf-8'))}."
+        f"{_b64url_nopad(json.dumps(claims, separators=(',', ':')).encode('utf-8'))}."
+        f"{_b64url_nopad(b'sig')}"
+    )
+
+
+def _sync_codex_auth_cache(state: dict[str, Any]) -> None:
+    """
+    Mirror Flume OAuth state into Codex CLI cache (~/.codex/auth.json) so
+    planner/app-server transport works immediately after OAuth setup.
+    Cross-platform path resolution via Path.home() supports Linux/macOS.
+    """
+    access = str(state.get("access") or "").strip()
+    refresh = str(state.get("refresh") or "").strip()
+    if not access or not refresh:
+        return
+    id_token = str(state.get("id_token") or "").strip() or _build_fallback_id_token(state)
+    auth_doc = {
+        "auth_mode": "chatgpt",
+        "openai_api_key": None,
+        "tokens": {
+            "id_token": id_token,
+            "access_token": access,
+            "refresh_token": refresh,
+            "account_id": None,
+        },
+        "last_refresh": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    auth_path = Path.home() / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(json.dumps(auth_doc, indent=2) + "\n", encoding="utf-8")
 
 
 def _openai_oauth_refresh_scopes() -> str | None:
@@ -116,16 +168,31 @@ PROVIDER_CATALOG = [
         "baseUrlDefault": "https://api.openai.com",
         "authMode": "api_key_or_oauth",
         "models": [
+            # ── Codex models (require OAuth or API key with Codex scope) ──────
+            {"id": "codex-mini-latest", "name": "Codex Mini (Latest) ⚡ recommended"},
+            {"id": "codex-mini-2025-01-01", "name": "Codex Mini (2025-01-01)"},
+            {"id": "gpt-5.4", "name": "GPT-5.4"},
+            {"id": "gpt-5.4-mini", "name": "GPT-5.4 Mini"},
+            {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex"},
+            {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark"},
+            {"id": "gpt-5.3", "name": "GPT-5.3"},
+            # ── GPT-4.1 series ───────────────────────────────────────────────
+            {"id": "gpt-4.1", "name": "GPT-4.1"},
+            {"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini"},
+            {"id": "gpt-4.1-nano", "name": "GPT-4.1 Nano"},
+            # ── Reasoning models ─────────────────────────────────────────────
+            {"id": "o4-mini", "name": "o4-mini"},
+            {"id": "o3", "name": "o3"},
+            {"id": "o3-mini", "name": "o3-mini"},
+            # ── GPT-4o series ────────────────────────────────────────────────
             {"id": "gpt-4o", "name": "GPT-4o"},
             {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+            # ── Legacy ───────────────────────────────────────────────────────
             {"id": "gpt-4-turbo", "name": "GPT-4 Turbo"},
             {"id": "gpt-4", "name": "GPT-4"},
             {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
             {"id": "o1", "name": "o1"},
             {"id": "o1-mini", "name": "o1 Mini"},
-            {"id": "gpt-5.4", "name": "GPT-5.4 (Codex)"},
-            {"id": "gpt-5.3", "name": "GPT-5.3 (Codex)"},
-            {"id": "gpt-5.2", "name": "GPT-5.2 (Codex)"},
         ],
     },
     {
@@ -878,6 +945,10 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     if expires_in > 0:
         state["expires"] = now_ms + (expires_in * 1000)
     saved_to, saved_path = save_state_to_env_or_file(state, state_path)
+    try:
+        _sync_codex_auth_cache(state)
+    except Exception as e:
+        logger.warning(f"Could not sync Codex auth cache after refresh: {e}")
 
     _update_env_keys(workspace_root, {"LLM_PROVIDER": "openai"})
     ob_enabled, _ = _openbao_enabled(workspace_root)
@@ -899,13 +970,15 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     pairs = load_effective_pairs(workspace_root)
     state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
     state_path = resolve_oauth_state_path(workspace_root, state_file)
-
-    if not state_path.exists():
-        return {"configured": False, "message": "OAuth state file not found"}
-
+    # State may be persisted in OpenBao/ENV JSON even when no local file exists.
     state, source = load_state_from_env_or_file(state_path)
     if not state:
-        msg = 'Invalid OAuth state file' if source == 'file' else 'OAuth state not found'
+        if source == 'file' and not state_path.exists():
+            msg = 'OAuth state file not found'
+        elif source == 'file':
+            msg = 'Invalid OAuth state file'
+        else:
+            msg = 'OAuth state not found'
         return {"configured": False, "message": msg}
 
     has_refresh = bool(str(state.get("refresh") or "").strip())
@@ -922,7 +995,7 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
     scope_status = _oauth_scope_status(dec, bool(access))
 
     return {
-        "configured": has_refresh and client_id,
+        "configured": bool(has_refresh and client_id),
         "hasAccessToken": has_access,
         "clientId": client_id[:20] + "..." if len(client_id) > 20 else client_id,
         "expiresInSeconds": expires_in_sec,
@@ -936,6 +1009,79 @@ def get_oauth_status(workspace_root: Path) -> dict[str, Any]:
         "oauthScopeStatus": scope_status,
         "stateSource": source,
     }
+
+
+def save_oauth_state(workspace_root: Path, state: dict[str, Any]) -> tuple[bool, str]:
+    """Persist an OAuth state dict obtained externally (e.g. from the CLI PKCE flow).
+
+    Accepts a dict with at minimum: ``client_id``, ``access``, ``refresh``.
+    Optional: ``expires`` (Unix ms), ``oauth_scopes_requested``.
+    """
+    required = ("client_id", "access", "refresh")
+    for k in required:
+        if not str(state.get(k) or "").strip():
+            return False, f"Missing required field in OAuth state: '{k}'"
+
+    # Normalise — ensure expires is an int
+    if "expires" in state:
+        try:
+            state["expires"] = int(state["expires"])
+        except (TypeError, ValueError):
+            pass
+
+    state_path = resolve_oauth_state_path(workspace_root, "")
+
+    # Persist to OpenBao / env
+    saved_to, _ = save_state_to_env_or_file(state, state_path)
+    try:
+        _sync_codex_auth_cache(state)
+    except Exception as e:
+        logger.warning(f"Could not sync Codex auth cache after save: {e}")
+
+    # Route non-sensitive LLM config to ES
+    _update_env_keys(workspace_root, {
+        "LLM_PROVIDER": "openai",
+    })
+
+    # Route sensitive keys to OpenBao
+    ob_enabled, _ = _openbao_enabled(workspace_root)
+    if ob_enabled:
+        try:
+            _openbao_put_many(workspace_root, {
+                "LLM_PROVIDER": "openai",
+                "OPENAI_OAUTH_STATE_JSON": json.dumps(state),
+                "OPENAI_OAUTH_STATE_FILE": str(state_path),
+                "LLM_API_KEY": str(state.get("access") or ""),
+            })
+        except Exception as e:
+            logger.warning(f"save_oauth_state: OpenBao write failed: {e}")
+    else:
+        # Fallback: sync access token so llm_client can pick it up immediately
+        os.environ["LLM_API_KEY"] = str(state.get("access") or "")
+        os.environ["OPENAI_OAUTH_STATE_FILE"] = str(state_path)
+
+    return True, f"OAuth state saved ({saved_to})"
+
+
+def ensure_codex_auth_cache(workspace_root: Path) -> tuple[bool, str]:
+    """
+    Best-effort startup self-heal:
+    If OAuth state exists but ~/.codex/auth.json is missing, regenerate it.
+    """
+    auth_path = Path.home() / ".codex" / "auth.json"
+    if auth_path.exists():
+        return False, "codex auth cache already present"
+    pairs = load_effective_pairs(workspace_root)
+    state_file = pairs.get("OPENAI_OAUTH_STATE_FILE", "").strip()
+    state_path = resolve_oauth_state_path(workspace_root, state_file)
+    state, source = load_state_from_env_or_file(state_path)
+    if not state:
+        return False, f"oauth state unavailable ({source})"
+    try:
+        _sync_codex_auth_cache(state)
+        return True, f"codex auth cache generated at {auth_path}"
+    except Exception as e:
+        return False, f"codex auth cache generation failed: {e}"
 
 
 def _looks_like_openai_platform_api_key(value: str) -> bool:

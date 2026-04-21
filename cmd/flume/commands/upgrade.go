@@ -175,6 +175,14 @@ func runUpgradeFallback(ctx context.Context, workersFlag string) error {
 		return fmt.Errorf("interactive prompt aborted: %w", err)
 	}
 
+	// User chose Codex OAuth (option 7) — run the interactive auth flow now.
+	if promptCfg.CodexOAuthLogin {
+		if err := runCodexLogin(nil, nil); err != nil {
+			return fmt.Errorf("Codex OAuth login failed: %w", err)
+		}
+		promptCfg.Provider = "openai"
+	}
+
 	envCfg := orchestrator.EnvConfig{
 		Provider:    promptCfg.Provider,
 		APIKey:      promptCfg.APIKey,
