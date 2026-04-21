@@ -4587,9 +4587,28 @@ class ElasticsearchClient:
         self.client = httpx.AsyncClient(headers=self.headers, verify=verify_ssl, timeout=10.0)
 
     async def update_tasks_to_halted(self):
+        # Mesh "busy" is derived from queue_state=active + active_worker (see worker-manager
+        # manager.py). Halt must clear those or workers stay "claimed" after stop. Include
+        # review (tester/reviewer) and any doc with an active claim (e.g. planned PM work).
         query = {
-            "query": {"terms": {"status": ["ready", "running"]}},
-            "script": {"source": "ctx._source.status = 'blocked'; ctx._source.ast_sync_status = 'halted';"}
+            "query": {
+                "bool": {
+                    "should": [
+                        {"terms": {"status": ["ready", "running", "review"]}},
+                        {"term": {"queue_state": "active"}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+            "script": {
+                "lang": "painless",
+                "source": (
+                    "ctx._source.status = 'blocked'; "
+                    "ctx._source.ast_sync_status = 'halted'; "
+                    "ctx._source.queue_state = 'idle'; "
+                    "ctx._source.active_worker = null;"
+                ),
+            },
         }
         url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
         try:
@@ -4601,6 +4620,7 @@ class ElasticsearchClient:
             raise KillSwitchDatabaseError(f"HTTP error updating Elasticsearch: {e.response.status_code}")
 
     async def update_tasks_to_ready(self):
+        # Mirror worker-manager PAINLESS_RESUME_SCRIPT: tester/reviewer dequeue `review`, not `ready`.
         query = {
             "query": {
                 "bool": {
@@ -4610,7 +4630,18 @@ class ElasticsearchClient:
                     ]
                 }
             },
-            "script": {"source": "ctx._source.status = 'ready'; ctx._source.ast_sync_status = null; ctx._source.owner = ctx._source.assigned_agent_role;"}
+            "script": {
+                "lang": "painless",
+                "source": (
+                    "if (ctx._source.owner == 'tester' || ctx._source.owner == 'reviewer' "
+                    "|| ctx._source.assigned_agent_role == 'tester' || ctx._source.assigned_agent_role == 'reviewer') { "
+                    "ctx._source.status = 'review'; } else { ctx._source.status = 'ready'; } "
+                    "ctx._source.ast_sync_status = null; "
+                    "ctx._source.owner = ctx._source.assigned_agent_role; "
+                    "ctx._source.queue_state = 'idle'; "
+                    "ctx._source.active_worker = null;"
+                ),
+            },
         }
         url = f"{self.es_url}/agent-task-records/_update_by_query?conflicts=proceed"
         try:
