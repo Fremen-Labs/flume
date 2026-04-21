@@ -829,8 +829,8 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
                 
         executable = cmd_list[0]
         # Q2: Added 'git' for validation commands (git diff, git status, git log)
-        # Q3: Added package management commands for dynamic workspace provisioning
-        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git', 'apt-get', 'apt', 'apk', 'pip', 'pip3', 'curl', 'wget', 'sh', 'bash', 'make'}
+        # Q3: Added package management commands & GNU coreutils for dynamic workspace provisioning and debugging
+        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git', 'apt-get', 'apt', 'apk', 'pip', 'pip3', 'curl', 'wget', 'sh', 'bash', 'make', 'ls', 'cat', 'which', 'tar', 'gzip', 'unzip', 'chmod', 'rm', 'mv', 'cp', 'mkdir', 'ln', 'env', 'pwd', 'awk', 'sed', 'jq', 'echo'}
         
         if executable not in allow_list:
             logger.warning({
