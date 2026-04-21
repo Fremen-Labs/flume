@@ -152,7 +152,37 @@ func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, t
 		slog.String("task_type", taskType),
 	)
 	Metrics.RecordRoutingDecision("hybrid_local", taskType)
-	return m.executeLocalOnly(ctx, req, taskType, withTools, log)
+	
+	resp, err := m.executeLocalOnly(ctx, req, taskType, withTools, log)
+	if err != nil {
+		// HA Fallback: If local mesh actively drops the request because all nodes are offline,
+		// and we have a Frontier fallback standing by, execute high-availability routing!
+		if policy.HasAvailableFrontierModels() {
+			log.Warn("routing_policy: local mesh unavailable, executing HA failover to frontier",
+				slog.String("error", err.Error()),
+				slog.String("task_type", taskType),
+			)
+			fallbackModel := policy.SelectWeightedFrontier(req.AgentRole)
+			if fallbackModel != nil {
+				Metrics.RecordRoutingDecision("hybrid_ha_failover", taskType)
+				
+				cloned := cloneChatRequest(req)
+				cloned.Model = fallbackModel.Model
+				cloned.Provider = fallbackModel.Provider
+				cloned.CredentialID = fallbackModel.CredentialID
+
+				haResp, haErr := m.router.Route(ctx, cloned, withTools)
+				if haResp != nil {
+					policy.EnforceSpendBudget(fallbackModel.Model, haResp.Usage)
+					policy.PersistSpendIfDue(ctx, m.config.esURL, m.config.httpClient)
+				}
+				return haResp, haErr
+			}
+		}
+		// Return original error if frontier fails or is unavailable
+		return nil, err
+	}
+	return resp, nil
 }
 
 // executeLocalOnly is the original ExecuteSmartRoute behavior — preserved exactly
@@ -188,7 +218,7 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 	requiresHighParam := taskType == "code" || withTools
 
 	// Select the best node.
-	node := m.registry.SelectNode(taskType, minScore, requiresHighParam)
+	node := m.registry.SelectNode(taskType, minScore, requiresHighParam, withTools)
 	if node == nil {
 		// No healthy nodes meeting criteria → frontier fallback.
 		log.Warn("multi_node_router: no suitable nodes — escalating to frontier",
