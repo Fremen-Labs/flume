@@ -502,7 +502,6 @@ def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
 
 
 def _sync_llm_runtime_env():
-    load_legacy_dotenv_into_environ(_SRC_ROOT)
     try:
         from workspace_llm_env import sync_llm_env_from_workspace  # type: ignore
 
