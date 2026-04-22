@@ -75,10 +75,26 @@ def _post_gateway(path: str, payload: dict, timeout: int = 180, max_retries: int
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+        except urllib.error.HTTPError as e:
+            if e.code in (402, 429):
+                logger.error(f"Gateway rejected request due to explicit API Credit Exhaustion (HTTP {e.code}): {e.read().decode()}")
+                raise Exception(f"Terminal API Exhaustion: HTTP {e.code}") from e
             if attempt < max_retries:
                 base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
                 # Jitter: +/- 10%
+                jitter = base_sleep * 0.1 * (random.random() * 2 - 1)
+                sleep_time = max(1.0, base_sleep + jitter)
+                logger.warning(
+                    f"Gateway HTTP error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Applying intelligent backoff for {sleep_time:.1f}s."
+                )
+                time.sleep(sleep_time)
+            else:
+                logger.error(f"Gateway connection permanently failed after {max_retries} retries: {e}")
+                raise e
+        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            if attempt < max_retries:
+                base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
                 jitter = base_sleep * 0.1 * (random.random() * 2 - 1)
                 sleep_time = max(1.0, base_sleep + jitter)
                 logger.warning(

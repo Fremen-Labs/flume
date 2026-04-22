@@ -675,7 +675,14 @@ func (r *ProviderRouter) doPost(
 		resp.Body.Close()
 
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 200)]))
+			bodyStr := string(respBody[:min(len(respBody), 200)])
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, bodyStr)
+
+			// Fast-fail on terminal credit exhaustion, skipping the 15-second Go backoff loop.
+			if resp.StatusCode == 402 || strings.Contains(bodyStr, "insufficient_quota") || strings.Contains(bodyStr, "no credits available") || strings.Contains(bodyStr, "credit limit reached") || strings.Contains(bodyStr, "spending limit") {
+				return nil, lastErr
+			}
+
 			sleepDuration := time.Duration(1<<uint(attempt)) * time.Second
 			log.Warn("retryable HTTP error",
 				slog.String("url", url),

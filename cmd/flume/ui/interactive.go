@@ -162,11 +162,24 @@ func (m promptModel) next(nextStep int) (tea.Model, tea.Cmd) {
 
 		// Enable tab-autocomplete on model entry steps.
 		if m.step == StepModel || m.step == StepNodeModel {
+			prov := m.cfg.Provider
 			ollamaHost := m.cfg.Host
 			if ollamaHost == "" {
 				ollamaHost = "127.0.0.1"
 			}
-			suggestions := ModelSuggestionsForProvider(m.cfg.Provider, ollamaHost)
+
+			if m.step == StepNodeModel {
+				prov = "ollama"
+				if m.curNode.Host != "" {
+					ollamaHost = m.curNode.Host
+					// Append user's port if available, otherwise Ollama fallback will handle it
+					if m.curNode.Port != "" {
+						ollamaHost += ":" + m.curNode.Port
+					}
+				}
+			}
+
+			suggestions := ModelSuggestionsForProvider(prov, ollamaHost)
 			tiNext.SetSuggestions(suggestions)
 			tiNext.ShowSuggestions = true
 		}

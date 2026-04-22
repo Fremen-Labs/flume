@@ -59,6 +59,14 @@ type Telemetry struct {
 	NodeID   string `json:"node_id,omitempty"`
 	NodeHost string `json:"node_host,omitempty"`
 	Model    string `json:"model,omitempty"`
+
+	// Real-time Frontier Header Extraction
+	LimitTokens       int64  `json:"limit_tokens,omitempty"`
+	RemainingTokens   int64  `json:"remaining_tokens,omitempty"`
+	LimitRequests     int64  `json:"limit_requests,omitempty"`
+	RemainingRequests int64  `json:"remaining_requests,omitempty"`
+	LimitResetAt      string `json:"limit_reset_at,omitempty"`
+	APIStatus         string `json:"api_status,omitempty"`
 }
 
 // ResponseMessage holds the assistant's reply.

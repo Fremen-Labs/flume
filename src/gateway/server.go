@@ -45,6 +45,8 @@ type Server struct {
 	nodeRegistry   *NodeRegistry
 	// healthChecker probes node health in the background.
 	healthChecker  *HealthChecker
+	// frontierProber periodically polls active cloud models for token limits.
+	frontierProber *FrontierProber
 	// multiRouter coordinates smart routing across the node mesh.
 	multiRouter    *MultiNodeRouter
 	// nodeSems provides per-node concurrency semaphores for the distributed ensemble.
@@ -197,8 +199,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
 		// Complex tasks get distributed Ensembles across the Node Mesh!
 		resp, err = s.ExecuteEnsemble(ctx, &req, false)
-	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
-		// Standard tasks get Smart Routing across the mesh
+	} else if s.multiRouter != nil && s.nodeRegistry != nil {
+		// Standard tasks get Smart Routing across the mesh and frontier models
 		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, false)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		// Legacy single-node Ensemble fallback
@@ -213,7 +215,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
 		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
+		
+		errStr := err.Error()
+		statusCode := http.StatusBadGateway
+		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
+			statusCode = http.StatusPaymentRequired
+		} else if strings.Contains(errStr, "HTTP 429") {
+			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 400") {
+			statusCode = http.StatusBadRequest
+		}
+
+		s.writeError(w, statusCode, errStr, requestID)
 		return
 	}
 
@@ -296,7 +309,7 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
-	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+	} else if s.multiRouter != nil && s.nodeRegistry != nil {
 		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, true)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
@@ -310,7 +323,18 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
 		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
+		
+		errStr := err.Error()
+		statusCode := http.StatusBadGateway
+		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
+			statusCode = http.StatusPaymentRequired
+		} else if strings.Contains(errStr, "HTTP 429") {
+			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 400") {
+			statusCode = http.StatusBadRequest
+		}
+
+		s.writeError(w, statusCode, errStr, requestID)
 		return
 	}
 
@@ -447,6 +471,10 @@ func StartGateway(addr string) error {
 	// Start background health checker.
 	server.healthChecker = NewHealthChecker(server.nodeRegistry)
 	server.healthChecker.Start(ctx)
+
+	// Start active frontier telemetry prober.
+	server.frontierProber = NewFrontierProber(config, secrets, server.router)
+	server.frontierProber.Start(ctx)
 
 	// Initialize per-node semaphore map.
 	server.nodeSems = NewNodeSemaphoreMap()

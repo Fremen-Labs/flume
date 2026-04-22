@@ -54,6 +54,14 @@ type FrontierModelWeight struct {
 	BudgetUSD   float64 `json:"budget_usd"`   // User-configurable spend cap ($)
 	SpentUSD    float64 `json:"spent_usd"`     // Cumulative spend tracked by gateway
 	CircuitOpen bool    `json:"circuit_open"`  // True when budget exhausted
+
+	// Live Telemetry (updated by active background probes)
+	LimitTokens       int64  `json:"limit_tokens,omitempty"`       // Max tokens allowed (typically per minute/day)
+	RemainingTokens   int64  `json:"remaining_tokens,omitempty"`   // Headspace remaining
+	LimitRequests     int64  `json:"limit_requests,omitempty"`     // Max requests allowed
+	RemainingRequests int64  `json:"remaining_requests,omitempty"` // Request Headspace
+	LimitResetAt      string `json:"limit_reset_at,omitempty"`     // e.g. "1s", "6m0s", or ISO8601
+	APIStatus         string `json:"api_status,omitempty"`         // "healthy", "error", "credit_exhausted"
 }
 
 // RoutingPolicy defines the complete routing configuration persisted in ES.
@@ -327,8 +335,42 @@ func (p *RoutingPolicy) SelectWeightedFrontier(agentRole string) *FrontierModelW
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Spend Enforcement
+// Spend Enforcement & Telemetry
 // ─────────────────────────────────────────────────────────────────────────────
+
+// FrontierTelemetry represents real-time limit/headspace indicators captured
+// from gateway response headers during active probes.
+type FrontierTelemetry struct {
+	LimitTokens       int64
+	RemainingTokens   int64
+	LimitRequests     int64
+	RemainingRequests int64
+	LimitResetAt      string
+	APIStatus         string
+}
+
+// UpdateTelemetry atomically applies live token limit details to a frontier model.
+func (p *RoutingPolicy) UpdateTelemetry(model string, t FrontierTelemetry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i, fm := range p.FrontierMix {
+		if fm.Model == model {
+			p.FrontierMix[i].LimitTokens = t.LimitTokens
+			p.FrontierMix[i].RemainingTokens = t.RemainingTokens
+			p.FrontierMix[i].LimitRequests = t.LimitRequests
+			p.FrontierMix[i].RemainingRequests = t.RemainingRequests
+			p.FrontierMix[i].LimitResetAt = t.LimitResetAt
+			if t.APIStatus != "" {
+				p.FrontierMix[i].APIStatus = t.APIStatus
+			}
+			if t.APIStatus == "credit_exhausted" {
+				p.FrontierMix[i].CircuitOpen = true
+			}
+			break
+		}
+	}
+}
 
 // EnforceSpendBudget computes the cost of a frontier response and updates the
 // model's cumulative spend. Circuit-breaks the model at 100% budget.

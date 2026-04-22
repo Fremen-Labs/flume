@@ -396,7 +396,7 @@ _IMPLEMENTER_TOOLS = [
         'type': 'function',
         'function': {
             'name': 'run_shell',
-            'description': 'Strict validation boundary. Run linting or test commands (e.g. npm test, pytest, golangci-lint, ruff). Strictly prohibited from file modification or guessing state via bash macros.',
+            'description': 'Full bash orchestration endpoint. You are empowered to use apt-get, wget, curl, and pipe operators to natively provision missing system frameworks or project dependencies automatically.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -805,46 +805,33 @@ def _exec_list_directory(args: dict, repo_path: Optional[str]) -> str:
     except Exception as e:
         return f'ERROR listing directory: {e}'
 
-
-class ShellPermissionError(PermissionError):
-    """Raised when an agent attempts to execute an unauthorized shell command."""
-    pass
-
 def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
     command = args.get('command', '')
     cwd = args.get('working_dir') or repo_path or '.'
     
+    # 1. Ephemeral Sandbox Workspace Resolution
+    resolved_cwd = _resolve_path(cwd, repo_path)
+    isolated_home = _resolve_path('.cache', repo_path)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    
+    # 2. Strict Credential Sanitization & Global Mapping
+    safe_env = os.environ.copy()
+    for secret in ['FLUME_ADMIN_TOKEN', 'OPENBAO_TOKEN', 'ADO_PERSONAL_ACCESS_TOKEN', 'LLM_API_KEY', 'OPENAI_API_KEY']:
+        safe_env.pop(secret, None)
+        
+    safe_env['HOME'] = str(isolated_home)
+    safe_env['CARGO_HOME'] = str(isolated_home / '.cargo')
+    safe_env['GOPATH'] = str(isolated_home / 'go')
+    safe_env['NVM_DIR'] = str(isolated_home / '.nvm')
+    # Prepend dynamic paths so instantly-installed binaries are available in subsequent calls
+    safe_env['PATH'] = f"{isolated_home / '.cargo' / 'bin'}:{isolated_home / '.local' / 'bin'}:{safe_env.get('PATH', '')}"
+
     try:
-        import shlex
-        cmd_list = shlex.split(command)
-        if not cmd_list:
+        if not command.strip():
             return json.dumps({"status": "error", "message": "Empty command provided."})
             
-        if len(cmd_list) >= 3 and cmd_list[0] == 'cd' and cmd_list[2] == '&&':
-            resolved_cwd = _resolve_path(cmd_list[1], repo_path)
-            cwd = str(resolved_cwd)
-            cmd_list = cmd_list[3:]
-            if not cmd_list:
-                return json.dumps({"status": "error", "message": "Empty command provided after cd."})
-                
-        executable = cmd_list[0]
-        # Q2: Added 'git' for validation commands (git diff, git status, git log)
-        # Q3: Added package management commands & GNU coreutils for dynamic workspace provisioning and debugging
-        allow_list = {'npm', 'npx', 'pytest', 'golangci-lint', 'ruff', 'go', 'python', 'python3', 'uv', 'node', 'grep', 'find', 'git', 'apt-get', 'apt', 'apk', 'pip', 'pip3', 'curl', 'wget', 'sh', 'bash', 'make', 'ls', 'cat', 'which', 'tar', 'gzip', 'unzip', 'chmod', 'rm', 'mv', 'cp', 'mkdir', 'ln', 'env', 'pwd', 'awk', 'sed', 'jq', 'echo'}
-        
-        if executable not in allow_list:
-            logger.warning({
-                "event": "security_boundary_violation",
-                "service": "worker-manager",
-                "function": "_exec_run_shell",
-                "attempted_command": command,
-                "executable": executable,
-                "reason": "Executable not in allow-list"
-            })
-            raise ShellPermissionError(f"run_shell is bounded to validation & provisioning commands ({', '.join(sorted(allow_list))}). Unsupported system level access is denied.")
-            
         result = subprocess.run(
-            cmd_list, shell=False, capture_output=True, text=True, timeout=120, cwd=cwd,
+            command, shell=True, executable='/bin/bash', capture_output=True, text=True, timeout=300, cwd=str(resolved_cwd), env=safe_env
         )
         output = (result.stdout + result.stderr).strip()
         if len(output) > 6000:
@@ -854,10 +841,8 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
             "exit_code": result.returncode,
             "output": output or "(no output)"
         })
-    except ShellPermissionError:
-        raise
     except subprocess.TimeoutExpired:
-        return json.dumps({"status": "error", "message": "Command timed out after 120s"})
+        return json.dumps({"status": "error", "message": "Command timed out after 300s"})
     except Exception as e:
         logger.error({
             "event": "run_shell_error",
@@ -1336,10 +1321,7 @@ def run_implementer(
             elif fn_name == 'run_shell':
                 cmd = (fn_args.get('command', ''))[:80]
                 _progress(f'Running: {cmd}')
-                try:
-                    tool_result = _exec_run_shell(fn_args, repo_path)
-                except ShellPermissionError as e:
-                    tool_result = json.dumps({"status": "error", "error_type": "ShellPermissionError", "message": str(e)})
+                tool_result = _exec_run_shell(fn_args, repo_path)
             elif fn_name == 'memory_read':
                 _progress(f'Reading memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
                 tool_result = _exec_memory_read(fn_args)
