@@ -23,6 +23,13 @@ type NodeConfigEntry struct {
 	MemoryGB float64
 }
 
+// CloudProviderEntry represents a native unified Cloud API provider binding
+type CloudProviderEntry struct {
+	Provider string
+	Model    string
+	APIKey   string
+}
+
 type EnvConfig struct {
 	Provider           string
 	APIKey             string
@@ -42,7 +49,8 @@ type EnvConfig struct {
 	ADOProject  string
 	ADOToken    string
 
-	Nodes []NodeConfigEntry // Collected during node mesh wizard
+	CloudProviders []CloudProviderEntry
+	Nodes          []NodeConfigEntry // Collected during node mesh wizard
 }
 
 // GenerateAdminToken creates a 256-bit cryptographically secure token.
@@ -110,9 +118,6 @@ func GenerateEnv(config EnvConfig) []string {
 	} else if config.RepoType == "ado" {
 		if config.ADOOrg != "" {
 			env = append(env, "ADO_ORGANIZATION="+config.ADOOrg)
-		}
-		if config.ADOProject != "" {
-			env = append(env, "ADO_PROJECT="+config.ADOProject)
 		}
 		if config.ADOToken != "" {
 			env = append(env, "ADO_PERSONAL_ACCESS_TOKEN="+config.ADOToken)

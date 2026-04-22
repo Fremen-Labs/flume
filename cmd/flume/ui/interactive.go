@@ -36,6 +36,11 @@ type PromptConfig struct {
 	ADOProject string
 	ADOToken   string
 
+	CloudProviders []struct {
+		Provider string
+		Model    string
+		APIKey   string
+	}
 	Nodes []NodeEntry // Collected during node mesh wizard
 }
 
@@ -46,6 +51,7 @@ const (
 	StepOllamaScope
 	StepOllamaIP
 	StepAPIKey
+	StepCloudMore   // loop back to StepProvider if Y
 	StepNodeMesh    // "Add more Ollama nodes?" yes/no
 	StepNodeID      // Node ID entry
 	StepNodeHost    // Node host (IP/DNS, no port)
@@ -119,7 +125,7 @@ func InitialPromptModel(cfg *PromptConfig, exoActive bool) promptModel {
 		if i == StepElasticURL {
 			ti.Placeholder = "http://localhost:9200"
 		}
-		if i == StepExoPrompt || i == StepElasticMenu || i == StepRepoMenu {
+		if i == StepExoPrompt || i == StepElasticMenu || i == StepRepoMenu || i == StepCloudMore {
 			ti.Placeholder = "1"
 		}
 		m.inputs[i] = ti
@@ -156,11 +162,24 @@ func (m promptModel) next(nextStep int) (tea.Model, tea.Cmd) {
 
 		// Enable tab-autocomplete on model entry steps.
 		if m.step == StepModel || m.step == StepNodeModel {
+			prov := m.cfg.Provider
 			ollamaHost := m.cfg.Host
 			if ollamaHost == "" {
 				ollamaHost = "127.0.0.1"
 			}
-			suggestions := ModelSuggestionsForProvider(m.cfg.Provider, ollamaHost)
+
+			if m.step == StepNodeModel {
+				prov = "ollama"
+				if m.curNode.Host != "" {
+					ollamaHost = m.curNode.Host
+					// Append user's port if available, otherwise Ollama fallback will handle it
+					if m.curNode.Port != "" {
+						ollamaHost += ":" + m.curNode.Port
+					}
+				}
+			}
+
+			suggestions := ModelSuggestionsForProvider(prov, ollamaHost)
 			tiNext.SetSuggestions(suggestions)
 			tiNext.ShowSuggestions = true
 		}
@@ -235,6 +254,30 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if val != "" {
 					m.cfg.Host = val
 				}
+				return m.next(StepCloudMore)
+			case StepAPIKey:
+				m.cfg.APIKey = val
+				return m.next(StepCloudMore)
+			case StepCloudMore:
+				if m.cfg.Provider != "" {
+					if m.cfg.Provider != "ollama" && m.cfg.Provider != "exo" {
+						m.cfg.CloudProviders = append(m.cfg.CloudProviders, struct {
+							Provider string
+							Model    string
+							APIKey   string
+						}{
+							Provider: m.cfg.Provider,
+							Model:    m.cfg.Model,
+							APIKey:   m.cfg.APIKey,
+						})
+					}
+				}
+				if val == "1" || val == "y" || val == "Y" || val == "" {
+					m.cfg.Provider = ""
+					m.cfg.Model = ""
+					m.cfg.APIKey = ""
+					return m.next(StepProvider)
+				}
 				return m.next(StepNodeMesh)
 			case StepNodeMesh:
 				if val == "1" || val == "y" || val == "Y" || val == "" {
@@ -268,9 +311,6 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.curNode = NodeEntry{}
 					return m.next(StepNodeID)
 				}
-				return m.next(StepElasticMenu)
-			case StepAPIKey:
-				m.cfg.APIKey = val
 				return m.next(StepElasticMenu)
 			case StepElasticMenu:
 				if val == "2" {
@@ -348,6 +388,8 @@ func (m promptModel) View() string {
 		return NeonGreen(fmt.Sprintf("%d node(s) registered. Add another?\n", count)) + "\n1. Yes\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepAPIKey:
 		return NeonGreen("Enter " + pLabel + " API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepCloudMore:
+		return NeonGreen("API Secret secured. Would you like to add another Cloud Provider to the Mesh?\n") + "\n1. Yes, add another Cloud endpoint\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticMenu:
 		return NeonGreen("Select Elasticsearch capability:\n") + "\n1. Use default Flume Docker instance\n2. Use an existing External Elastic instance\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticURL:

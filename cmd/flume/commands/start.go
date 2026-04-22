@@ -22,6 +22,7 @@ var (
 	ProviderFlag string
 	NativeFlag   bool
 	WorkersFlag  string
+	ConfigFlag   string
 )
 
 func isHeadlessEnv(getenv func(string) string, getstat func() (os.FileInfo, error)) bool {
@@ -93,12 +94,21 @@ var StartCmd = &cobra.Command{
 		}
 		envCfg.AdminToken = adminToken
 
-		if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" {
-			log.Error("Non-interactive terminal detected without an explicit Provider. Please pass -p [provider] natively to prevent pipeline hanging.")
+		if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" && ConfigFlag == "" {
+			log.Error("Non-interactive terminal detected without an explicit Provider or Config flag. Please pass -p [provider] or --config natively to prevent pipeline hanging.")
 			return fmt.Errorf("headless tty pseudo-hang prevented")
 		}
 
-		if !isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
+		if ConfigFlag != "" {
+			var err error
+			log.Info("Loading Mesh Architecture IaC definition", "config", ConfigFlag)
+			envCfg, err = parseMeshConfig(ConfigFlag)
+			if err != nil {
+				log.Error("Failed to parse mesh IaC configuration natively", "error", err)
+				return err
+			}
+			envCfg.IsNative = NativeFlag
+		} else if !isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
 			log.Warn("Escalating to User Auth Layer.")
 			promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
 			if err != nil {
@@ -128,6 +138,14 @@ var StartCmd = &cobra.Command{
 			}
 
 			// Map wizard-collected nodes to EnvConfig.
+			for _, cp := range promptCfg.CloudProviders {
+				envCfg.CloudProviders = append(envCfg.CloudProviders, orchestrator.CloudProviderEntry{
+					Provider: cp.Provider,
+					Model:    cp.Model,
+					APIKey:   cp.APIKey,
+				})
+			}
+			
 			for _, n := range promptCfg.Nodes {
 				mem := 0.0
 				if n.MemoryGB != "" {
@@ -401,4 +419,5 @@ func init() {
 	StartCmd.Flags().StringVarP(&ProviderFlag, "provider", "p", "", "Explicitly declare LLM Provider (openai, ollama, exo)")
 	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native High-Performance Git Worktrees")
 	StartCmd.Flags().StringVar(&WorkersFlag, "workers", "", `Number of workers: "2" (default), "4", "auto" (detect from hardware)`)
+	StartCmd.Flags().StringVarP(&ConfigFlag, "config", "c", "", "Path to flume-mesh.yml IaC document for programmatic booting")
 }

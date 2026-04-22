@@ -86,8 +86,16 @@ func (s *SecretStore) GetLLMKey(ctx context.Context, credentialID string) string
 	}
 
 	key := ""
+	// Backwards compatibility for legacy monolithic structure:
 	if v, ok := data[fmt.Sprintf("FLUME_CRED_%s", credentialID)].(string); ok {
 		key = v
+	}
+
+	// Primary structure from direct LLM credentials path:
+	if key == "" {
+		if v, ok := data["api_key"].(string); ok {
+			key = v
+		}
 	}
 
 	if key != "" {

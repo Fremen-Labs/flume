@@ -1,0 +1,7 @@
+# Fremen Agent Ecosystem Guardrails
+
+Before executing any architectural change, identify the current application you are modifying natively from your workspace context (e.g. `flume`, `elastro`, `vorsam`, `releaseflow`, `pipes-ui`, etc.). 
+
+You MUST structurally execute the MCP tool `list_available_skills("<App Name>")` to index the available SKILL standards from the Fremen Agent Skills network. Subsequently, you must execute `get_project_skill("<App Name>", "<Skill ID>")` for the precise sub-skill matching your target stack before executing code modifications. 
+
+Do not author or modify code arbitrarily without verifying the Elite Engineering standards for the current application.

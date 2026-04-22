@@ -110,6 +110,18 @@ func (r *ProviderRouter) Route(ctx context.Context, req *ChatRequest, withTools 
 		SanitizeToolResponse(resp)
 	}
 
+	// ── Spend tracking for frontier providers ───────────────────────────
+	// Track cost for non-Ollama providers when routing policy is active.
+	// This is a defence-in-depth layer — the primary spend tracking is in
+	// MultiNodeRouter.executeFrontierOnly/executeHybrid, but this catches
+	// direct Route() calls from ensemble members and other paths.
+	if provider != ProviderOllama && resp != nil {
+		policy := r.config.GetRoutingPolicy()
+		if policy != nil && policy.Mode != RoutingModeLocalOnly {
+			policy.EnforceSpendBudget(model, resp.Usage)
+		}
+	}
+
 	return resp, nil
 }
 
@@ -354,6 +366,13 @@ func (r *ProviderRouter) ollamaNonStream(
 		content, _ = msg["content"].(string)
 	}
 
+	// Route non-streamed responses through the ThinkMill to securely strip 
+	// `<think>` blocks before sending to JSON-expecting consumers (like agent_runner.py)
+	mill := NewThinkMill()
+	mill.Process([]byte(content))
+	cleanContent := mill.Visible()
+	thoughts := mill.Thoughts()
+
 	// P4: Extract token usage from Ollama response. Ollama uses
 	// prompt_eval_count / eval_count instead of OpenAI's prompt_tokens /
 	// completion_tokens. Populate both in our Usage struct so downstream
@@ -369,8 +388,9 @@ func (r *ProviderRouter) ollamaNonStream(
 
 	return &ChatResponse{
 		Message: ResponseMessage{
-			Role:    "assistant",
-			Content: strings.TrimSpace(content),
+			Role:     "assistant",
+			Content:  strings.TrimSpace(cleanContent),
+			Thoughts: thoughts,
 		},
 		Usage: usage,
 	}, nil
@@ -655,7 +675,14 @@ func (r *ProviderRouter) doPost(
 		resp.Body.Close()
 
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 200)]))
+			bodyStr := string(respBody[:min(len(respBody), 200)])
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, bodyStr)
+
+			// Fast-fail on terminal credit exhaustion, skipping the 15-second Go backoff loop.
+			if resp.StatusCode == 402 || strings.Contains(bodyStr, "insufficient_quota") || strings.Contains(bodyStr, "no credits available") || strings.Contains(bodyStr, "credit limit reached") || strings.Contains(bodyStr, "spending limit") {
+				return nil, lastErr
+			}
+
 			sleepDuration := time.Duration(1<<uint(attempt)) * time.Second
 			log.Warn("retryable HTTP error",
 				slog.String("url", url),

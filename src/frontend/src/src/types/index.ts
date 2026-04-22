@@ -542,3 +542,42 @@ export interface BottleneckItem {
   description: string;
   suggestedAction: string;
 }
+
+// ─── Routing Policy API ────────────────────────────────────────────────────
+
+export type RoutingMode = 'frontier_only' | 'hybrid' | 'local_only';
+
+export interface FrontierModelWeight {
+  provider: string;
+  model: string;
+  credential_id: string;
+  weight: number;
+  budget_usd: number;
+  spent_usd: number;
+  circuit_open: boolean;
+}
+
+export interface RoutingPolicy {
+  mode: RoutingMode;
+  frontier_mix: FrontierModelWeight[];
+  frontier_local_ratio: number;
+  complexity_threshold: number;
+  role_pinning: Record<string, string>;
+}
+
+export interface LlmCredentialSummary {
+  id: string;
+  label: string;
+  has_key: boolean;
+}
+
+export interface FrontierProviderCatalog {
+  id: string;
+  label: string;
+  models: string[];
+  credentials: LlmCredentialSummary[];
+}
+
+export interface FrontierModelsResponse {
+  providers: FrontierProviderCatalog[];
+}

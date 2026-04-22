@@ -91,6 +91,9 @@ type Config struct {
 	// Singleflight guard: prevents thundering-herd ES fetches when cache expires
 	// under concurrent load. 0 = idle, 1 = refresh in progress.
 	refreshing atomic.Int32
+
+	// Routing policy (from flume-routing-policy)
+	RoutingPolicy *RoutingPolicy
 }
 
 // CredentialMeta holds non-secret metadata about a saved LLM credential.
@@ -158,6 +161,7 @@ func (c *Config) Refresh(ctx context.Context) {
 	c.loadGlobalConfig(ctx, log)
 	c.loadAgentModels(ctx, log)
 	c.loadCredentials(ctx, log)
+	c.loadRoutingPolicy(ctx, log)
 
 	c.lastRefresh = time.Now()
 	log.Debug("configuration refreshed",
@@ -273,6 +277,23 @@ func (c *Config) ShouldThink(req *ChatRequest) bool {
 		}
 	}
 	return false
+}
+
+// GetRoutingPolicy returns the current routing policy, thread-safe.
+// Returns DefaultRoutingPolicy() if no policy has been loaded yet.
+func (c *Config) GetRoutingPolicy() *RoutingPolicy {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.RoutingPolicy == nil {
+		return DefaultRoutingPolicy()
+	}
+	return c.RoutingPolicy
+}
+
+// loadRoutingPolicy loads the routing policy from ES.
+func (c *Config) loadRoutingPolicy(ctx context.Context, log *slog.Logger) {
+	policy := LoadRoutingPolicyFromES(ctx, c.esURL, c.httpClient)
+	c.RoutingPolicy = policy
 }
 
 // IsKnownModel returns true if the model name is found in the static deployment

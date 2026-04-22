@@ -205,16 +205,41 @@ def load_agent_role_defs():
     return defs
 
 
-def get_dynamic_worker_limit() -> int:
-    """Return the default number of workers per agent role.
+def fetch_routing_policy() -> dict:
+    try:
+        res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
+        if res and '_source' in res:
+            return res['_source']
+    except Exception as e:
+        _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
+    return {}
 
-    P1: Capped to 2 to match realistic Ollama concurrency. The previous
-    CPU_COUNT * 0.8 formula produced 6 workers/role on an 8-core Mac,
-    spawning ~72 virtual workers across 2 replicas for only 2 Ollama slots.
-    Override with WORKERS_PER_ROLE env var for higher concurrency with
-    frontier providers that support many parallel requests.
+def get_dynamic_worker_limit() -> int:
+    """Return the dynamic number of workers per agent role based on routing policy and mesh size.
+
+    Frontier/Hybrid: Compute boundaries scaled cleanly by host multiprocessing cores.
+    Local: Mesh node caps combined algorithmically (max 2 as floor).
+    Override with WORKERS_PER_ROLE env var for explicitly forcing concurrency boundaries.
     """
-    return 2
+    try:
+        policy = fetch_routing_policy()
+        mode = policy.get('mode', 'local').lower()
+        
+        if mode in ('frontier', 'hybrid'):
+            import multiprocessing
+            cores = multiprocessing.cpu_count()
+            limit = max(4, cores * 2)
+            _manager_logger.info(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
+            return limit
+        else:
+            caps = _fetch_node_concurrency_caps()
+            total_mesh_capacity = sum(caps.values())
+            limit = max(2, total_mesh_capacity)
+            _manager_logger.info(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
+            return limit
+    except Exception as e:
+        _manager_logger.error(f"Failed dynamic scaling, defaulting to 2: {e}")
+        return 2
 
 
 def build_workers():
@@ -624,6 +649,9 @@ def _compute_saturated_scopes(force: bool = False) -> tuple:
     return saturated_repos, saturated_stories, in_flight_branches
 
 
+# The raw Painless claim script is now pre-compiled into Elasticsearch natively
+# during cluster bootstrap by the Flume Orchestrator, mapped to 'flume-task-claim'.
+# This eliminates massive JSON payload wire overhead on every single _update loop.
 PAINLESS_CLAIM_SCRIPT = (
     'if (ctx._source.status == params.expected_status '
     '&& (ctx._source.active_worker == null || ctx._source.active_worker == "")) {'
@@ -642,6 +670,7 @@ PAINLESS_CLAIM_SCRIPT = (
     '  ctx.op = "noop";'
     '}'
 )
+>>>>>>> 4e6fac51 (Implement Adaptive Concurrency Management and More (#227))
 
 def try_atomic_claim(
     role: str,
@@ -760,8 +789,7 @@ def try_atomic_claim(
     now = now_iso()
     new_status = 'running' if role != 'pm' else 'planned'
     script = {
-        'source': PAINLESS_CLAIM_SCRIPT,
-        'lang': 'painless',
+        'id': 'flume-task-claim',
         'params': {
             'expected_status': target_status,
             'new_status': new_status,
@@ -1252,17 +1280,8 @@ import random
 
 last_resume_timestamp = 0
 
-PAINLESS_RESUME_SCRIPT = (
-    'ctx._source.status = "ready";'
-    'ctx._source.queue_state = "idle";'
-    'ctx._source.active_worker = null;'
-)
-
-PAINLESS_BLOCK_SCRIPT = (
-    'ctx._source.status = "blocked";'
-    'ctx._source.queue_state = "idle";'
-    'ctx._source.message = "Task paused due to mesh capacity limits (node overload). Will automatically resume with jitter when resources free up.";'
-)
+# PAINLESS_RESUME_SCRIPT & PAINLESS_BLOCK_SCRIPT natively execute via ES pre-compiled scripts
+# mapping cleanly through 'id': 'flume-task-resume' and 'id': 'flume-task-block'.
 
 def _execute_block_sweep(node_loads: dict, node_caps: dict, cloud_providers: set):
     """Pushes stalled ready tasks to the Blocked column to provide explicit Kanban feedback when cluster is saturated"""
@@ -1276,8 +1295,7 @@ def _execute_block_sweep(node_loads: dict, node_caps: dict, cloud_providers: set
         body = {
             'query': {'term': {'status': 'ready'}},
             'script': {
-                'source': PAINLESS_BLOCK_SCRIPT,
-                'lang': 'painless'
+                'id': 'flume-task-block',
             }
         }
         res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
@@ -1299,8 +1317,7 @@ def _execute_resume_sweep():
         body = {
             'query': {'term': {'status': 'blocked'}},
             'script': {
-                'source': PAINLESS_RESUME_SCRIPT,
-                'lang': 'painless'
+                'id': 'flume-task-resume',
             }
         }
         res = es_request(f'/{TASK_INDEX}/_update_by_query?conflicts=proceed', body, method='POST')
@@ -1365,6 +1382,7 @@ def cycle():
     
     cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
     node_loads = {}
+    active_mesh_count = 0
     
     # Pre-calculate active loads dynamically natively per-node
     for wn, wdat in busy_workers.items():

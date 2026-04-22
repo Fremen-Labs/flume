@@ -254,10 +254,29 @@ def upsert_credential(
     doc["credentials"] = creds
     if key and key != "***OPENBAO_DELEGATED***":
         try:
-            from llm_settings import _openbao_put_many  # type: ignore
-            _openbao_put_many(workspace_root, {f"FLUME_CRED_{new_id}": key})
-        except ImportError:
-            logger.debug("OpenBao delegation import unavailable during credential upsert")
+            from llm_settings import _openbao_enabled  # type: ignore
+            enabled, pairs = _openbao_enabled(workspace_root)
+            if enabled:
+                import urllib.request
+                import json
+                addr = pairs["OPENBAO_ADDR"].rstrip("/")
+                token = pairs["OPENBAO_TOKEN"]
+                # Use standard mount 'secret' as fallback
+                mount = str(pairs.get("OPENBAO_MOUNT", "secret") or "secret").strip().strip("/")
+                secret_url = f"{addr}/v1/{mount}/data/flume/llm_credentials/{new_id}"
+                
+                payload = json.dumps({"data": {"api_key": key}}).encode("utf-8")
+                req = urllib.request.Request(
+                    secret_url,
+                    data=payload,
+                    headers={"X-Vault-Token": token, "Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    if r.status not in (200, 201, 204):
+                        logger.error(f"Failed to write credential to OpenBao: HTTP {r.status}")
+        except Exception as e:
+            logger.error(f"OpenBao credential upsert failed: {e}")
     save_document(workspace_root, doc)
     return new_id
 
@@ -448,6 +467,6 @@ def apply_credentials_action(
         except ValueError as e:
             return False, str(e), None
         # Do not auto-set default key — user chooses "Set as default" or saves from Settings.
-        return True, "", None
+        return True, new_id, None
 
     return False, "action must be upsert, delete, activate, default, or patch", None

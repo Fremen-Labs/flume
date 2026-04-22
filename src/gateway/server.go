@@ -45,6 +45,8 @@ type Server struct {
 	nodeRegistry   *NodeRegistry
 	// healthChecker probes node health in the background.
 	healthChecker  *HealthChecker
+	// frontierProber periodically polls active cloud models for token limits.
+	frontierProber *FrontierProber
 	// multiRouter coordinates smart routing across the node mesh.
 	multiRouter    *MultiNodeRouter
 	// nodeSems provides per-node concurrency semaphores for the distributed ensemble.
@@ -197,8 +199,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
 		// Complex tasks get distributed Ensembles across the Node Mesh!
 		resp, err = s.ExecuteEnsemble(ctx, &req, false)
-	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
-		// Standard tasks get Smart Routing across the mesh
+	} else if s.multiRouter != nil && s.nodeRegistry != nil {
+		// Standard tasks get Smart Routing across the mesh and frontier models
 		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, false)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		// Legacy single-node Ensemble fallback
@@ -213,7 +215,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
 		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
+		
+		errStr := err.Error()
+		statusCode := http.StatusBadGateway
+		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
+			statusCode = http.StatusPaymentRequired
+		} else if strings.Contains(errStr, "HTTP 429") {
+			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 400") {
+			statusCode = http.StatusBadRequest
+		}
+
+		s.writeError(w, statusCode, errStr, requestID)
 		return
 	}
 
@@ -296,7 +309,7 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
-	} else if s.multiRouter != nil && s.nodeRegistry != nil && s.nodeRegistry.Count() > 0 {
+	} else if s.multiRouter != nil && s.nodeRegistry != nil {
 		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, true)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
 		resp, err = s.ExecuteEnsemble(ctx, &req, true)
@@ -310,7 +323,18 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
 		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		s.writeError(w, http.StatusBadGateway, err.Error(), requestID)
+		
+		errStr := err.Error()
+		statusCode := http.StatusBadGateway
+		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
+			statusCode = http.StatusPaymentRequired
+		} else if strings.Contains(errStr, "HTTP 429") {
+			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 400") {
+			statusCode = http.StatusBadRequest
+		}
+
+		s.writeError(w, statusCode, errStr, requestID)
 		return
 	}
 
@@ -448,6 +472,10 @@ func StartGateway(addr string) error {
 	server.healthChecker = NewHealthChecker(server.nodeRegistry)
 	server.healthChecker.Start(ctx)
 
+	// Start active frontier telemetry prober.
+	server.frontierProber = NewFrontierProber(config, secrets, server.router)
+	server.frontierProber.Start(ctx)
+
 	// Initialize per-node semaphore map.
 	server.nodeSems = NewNodeSemaphoreMap()
 
@@ -459,6 +487,11 @@ func StartGateway(addr string) error {
 	server.mux.HandleFunc("POST /api/nodes", server.handleAddNode)
 	server.mux.HandleFunc("POST /api/nodes/{id}/test", server.handleTestNode)
 	server.mux.HandleFunc("DELETE /api/nodes/{id}", server.handleDeleteNode)
+
+	// Routing Policy API endpoints.
+	server.mux.HandleFunc("GET /api/routing-policy", server.handleGetRoutingPolicy)
+	server.mux.HandleFunc("PUT /api/routing-policy", server.handlePutRoutingPolicy)
+	server.mux.HandleFunc("GET /api/frontier-models", server.handleGetFrontierModels)
 
 	// Initialize Inception Skill Registry
 	server.skills = skills.NewSkillRegistry()
@@ -733,4 +766,144 @@ func isValidNodeHost(host string) bool {
 	}
 
 	return true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routing Policy API Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// handleGetRoutingPolicy returns the current routing policy as JSON.
+// GET /api/routing-policy
+func (s *Server) handleGetRoutingPolicy(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+	log.Info("api: GET /api/routing-policy")
+
+	policy := s.config.GetRoutingPolicy()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(policy); err != nil {
+		log.Error("api: failed to encode routing policy",
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, `{"error":"encoding failed"}`, http.StatusInternalServerError)
+	}
+}
+
+// handlePutRoutingPolicy validates and persists a new routing policy to ES.
+// PUT /api/routing-policy
+func (s *Server) handlePutRoutingPolicy(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+	log.Info("api: PUT /api/routing-policy")
+
+	var incoming RoutingPolicy
+	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+		log.Warn("api: invalid routing policy payload",
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, fmt.Sprintf(`{"error":"invalid JSON: %s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// Validate
+	if err := incoming.Validate(); err != nil {
+		log.Warn("api: routing policy validation failed",
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, fmt.Sprintf(`{"error":"validation: %s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// Normalize weights
+	incoming.normalizeWeights()
+
+	// Persist to ES
+	esURL := s.config.esURL
+	if err := incoming.PersistToES(r.Context(), esURL, s.config.httpClient); err != nil {
+		log.Error("api: failed to persist routing policy to ES",
+			slog.String("error", err.Error()),
+		)
+		http.Error(w, fmt.Sprintf(`{"error":"persist failed: %s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	// Force-refresh config so the new policy takes effect immediately
+	s.config.mu.Lock()
+	s.config.RoutingPolicy = &incoming
+	s.config.mu.Unlock()
+
+	log.Info("api: routing policy updated",
+		slog.String("mode", string(incoming.Mode)),
+		slog.Int("frontier_models", len(incoming.FrontierMix)),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// FrontierProviderCatalogResponse is the JSON shape returned by GET /api/frontier-models.
+type FrontierProviderCatalogResponse struct {
+	Providers []FrontierProviderCatalogEntry `json:"providers"`
+}
+
+// FrontierProviderCatalogEntry represents a single provider in the catalog.
+type FrontierProviderCatalogEntry struct {
+	ID          string                 `json:"id"`
+	Label       string                 `json:"label"`
+	Models      []string               `json:"models"`
+	Credentials []CredentialPublicInfo  `json:"credentials"`
+}
+
+// CredentialPublicInfo is the public (non-secret) info about a credential.
+type CredentialPublicInfo struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	HasKey bool   `json:"has_key"`
+}
+
+// handleGetFrontierModels returns the frontier model catalog merged with
+// configured credentials to show which providers have active API keys.
+// GET /api/frontier-models
+func (s *Server) handleGetFrontierModels(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+	log.Info("api: GET /api/frontier-models")
+
+	s.config.mu.RLock()
+	credentials := s.config.Credentials
+	s.config.mu.RUnlock()
+
+	var providers []FrontierProviderCatalogEntry
+	for providerID, models := range FrontierModelCatalog {
+		label := FrontierProviderLabels[providerID]
+		if label == "" {
+			label = providerID
+		}
+
+		// Find credentials for this provider
+		var creds []CredentialPublicInfo
+		for _, cred := range credentials {
+			if strings.EqualFold(cred.Provider, providerID) {
+				creds = append(creds, CredentialPublicInfo{
+					ID:     cred.ID,
+					Label:  cred.Label,
+					HasKey: cred.HasKey,
+				})
+			}
+		}
+
+		providers = append(providers, FrontierProviderCatalogEntry{
+			ID:          providerID,
+			Label:       label,
+			Models:      models,
+			Credentials: creds,
+		})
+	}
+
+	resp := FrontierProviderCatalogResponse{Providers: providers}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Error("api: failed to encode frontier models",
+			slog.String("error", err.Error()),
+		)
+	}
 }

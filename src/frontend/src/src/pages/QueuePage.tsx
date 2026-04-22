@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApiTask } from '@/types';
 import { appLogger } from '@/utils/logger';
+import type { ApiTask } from '@/types';
 
 const stages: { id: string; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },

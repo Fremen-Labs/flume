@@ -220,6 +220,12 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		)
 	}
 
+	// Hardware Architecture: real underlying family reported by Ollama.
+	discovered.Architecture = showResult.family
+
+	// Tool-Ready: statically derived from model tag and native architecture.
+	discovered.SupportsTools = modelSupportsTools(node.ModelTag, discovered.Architecture)
+
 	// Quantization: prefer /api/show (model-specific) over /api/tags (first match).
 	if showErr == nil && showResult.quantization != "" {
 		discovered.Quantization = showResult.quantization
@@ -709,5 +715,46 @@ func roundToConfig(estimatedGB float64, configs []float64) float64 {
 		}
 	}
 	return estimatedGB // larger than any known config
+}
+
+// modelSupportsTools applies a static heuristic to determine if a given model family natively supports tool usage.
+func modelSupportsTools(modelTag string, architecture string) bool {
+	tagLower := strings.ToLower(modelTag)
+	archLower := strings.ToLower(architecture)
+	
+	// Fast-path blacklist for known tool-incapable models that frequently trigger
+	// the HTTP 400 "does not support tools" error in Ollama.
+	// We only strictly block the raw `qwen` tag (since older deployments fail).
+	if tagLower == "qwen:latest" || tagLower == "qwen" {
+		return false
+	}
+
+	// First evaluate the underlying native architecture if Ollama returned one.
+	if archLower != "" {
+		archFamilies := []string{
+			"llama3", "qwen2", "qwen3", "mistral", "command-r", "mixtral",
+		}
+		for _, f := range archFamilies {
+			if strings.Contains(archLower, f) {
+				return true
+			}
+		}
+	}
+
+	// Fallback to evaluating the user-provided string tag.
+	families := []string{
+		"llama3.1", "llama3.2", "llama3.3", "llama-3.",
+		"qwen2.5", "qwen2.5-coder", "qwen3", "qwen3.5", "qwen3.6",
+		"mistral-nemo", "mixtral",
+		"command-r", "tools",
+	}
+	
+	for _, f := range families {
+		if strings.Contains(tagLower, f) {
+			return true
+		}
+	}
+	
+	return false
 }
 

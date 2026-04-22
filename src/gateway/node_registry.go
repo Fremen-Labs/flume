@@ -66,6 +66,8 @@ type NodeCapabilities struct {
 	Quantization   string  `json:"quantization"`    // "Q4_K_M", "Q8_0", "FP16"
 	EstimatedTPS   float64 `json:"estimated_tps"`   // tokens/sec
 	MemoryGB       float64 `json:"memory_gb"`       // total unified/VRAM
+	Architecture   string  `json:"architecture"`    // real underlying family (e.g. qwen35moe)
+	SupportsTools  bool    `json:"supports_tools"`  // derived from static model tag mapping
 }
 
 // NodeHealth is the live operational state of a node, updated by the HealthChecker.
@@ -266,6 +268,11 @@ func (r *NodeRegistry) UpdateCapabilities(nodeID string, discovered NodeCapabili
 	if discovered.ReasoningScore > 0 {
 		n.Capabilities.ReasoningScore = discovered.ReasoningScore
 	}
+	if discovered.Architecture != "" {
+		n.Capabilities.Architecture = discovered.Architecture
+	}
+	// SupportsTools is dynamically evaluated from the model tag on every probe
+	n.Capabilities.SupportsTools = discovered.SupportsTools
 }
 
 // extractModelParamSize parses parameter size out of a model tag (e.g. "35b" returns 35.0).
@@ -288,7 +295,7 @@ func extractModelParamSize(modelTag string) float64 {
 // Score = (model_fit × 0.4) + (load_inverse × 0.3) + (latency_inverse × 0.2) + (ensemble_eligible × 0.1)
 //
 // Returns nil if no healthy nodes are available.
-func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requiresHighParam bool) *Node {
+func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requiresHighParam bool, requiresTools bool) *Node {
 	healthy := r.HealthyNodes()
 	if len(healthy) == 0 {
 		return nil
@@ -324,6 +331,10 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requir
 
 	candidates := make([]scored, 0, len(healthy))
 	for _, n := range healthy {
+		if requiresTools && !n.Capabilities.SupportsTools {
+			continue
+		}
+
 		// Model fit: reasoning score normalized to 0-1, filtered by minimum.
 		if n.Capabilities.ReasoningScore < minReasoningScore {
 			continue

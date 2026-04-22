@@ -54,6 +54,9 @@ FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
 REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
 PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
+BACKOFF_BASE_DELAY = float(os.environ.get('FLUME_BACKOFF_BASE_DELAY', '2.0'))
+BACKOFF_MAX_DELAY = float(os.environ.get('FLUME_BACKOFF_MAX_DELAY', '30.0'))
+BACKOFF_JITTER_FACTOR = float(os.environ.get('FLUME_BACKOFF_JITTER_FACTOR', '0.2'))
 # AP-3 cleanup: PROJECTS_REGISTRY (projects.json) removed — gitflow config read from ES flume-projects index.
 
 ctx = None
@@ -182,14 +185,7 @@ def append_agent_note(es_id: str, note: str) -> None:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
             'script': {
-                'source': (
-                    'if (ctx._source.agent_log == null) { ctx._source.agent_log = []; }'
-                    'ctx._source.agent_log.add(params.entry);'
-                    'if (ctx._source.agent_log.length > 100) { ctx._source.agent_log.remove(0); }'
-                    'ctx._source.updated_at = params.touch;'
-                    'ctx._source.last_update = params.touch;'
-                ),
-                'lang': 'painless',
+                'id': 'flume-append-agent-note',
                 'params': {'entry': {'ts': ts, 'note': note}, 'touch': ts},
             }
         }, method='POST')
@@ -204,14 +200,7 @@ def append_execution_thought(es_id: str, thought: str) -> None:
         ts = now_iso()
         es_request(f'/{TASK_INDEX}/_update/{es_id}', {
             'script': {
-                'source': (
-                    'if (ctx._source.execution_thoughts == null) { ctx._source.execution_thoughts = []; }'
-                    'ctx._source.execution_thoughts.add(params.entry);'
-                    'if (ctx._source.execution_thoughts.length > 500) { ctx._source.execution_thoughts.remove(0); }'
-                    'ctx._source.updated_at = params.touch;'
-                    'ctx._source.last_update = params.touch;'
-                ),
-                'lang': 'painless',
+                'id': 'flume-append-execution-thought',
                 'params': {'entry': {'ts': ts, 'thought': thought}, 'touch': ts},
             }
         }, method='POST')
@@ -1812,13 +1801,21 @@ def compute_ready_for_repo(repo):
             if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
                 patch['requires_code'] = True
             # If this task depends on a completed task with a commit, inherit commit metadata
-            if not src.get('commit_sha') and deps:
-                dep = by_id.get(deps[0])
-                if dep and dep.get('commit_sha'):
-                    patch['commit_sha'] = dep.get('commit_sha')
-                    patch['commit_message'] = dep.get('commit_message')
-                    patch['branch'] = dep.get('branch')
-                    patch['worktree'] = dep.get('worktree')
+            if deps:
+                ctx_notes = []
+                for dep_id in deps:
+                    dep = by_id.get(dep_id)
+                    if not dep:
+                        continue
+                    if not src.get('commit_sha') and dep.get('commit_sha'):
+                        patch['commit_sha'] = dep.get('commit_sha')
+                        patch['commit_message'] = dep.get('commit_message')
+                        patch['branch'] = dep.get('branch')
+                        patch['worktree'] = dep.get('worktree')
+                    if dep.get('context_summary'):
+                        ctx_notes.append(f"Context from {dep_id}:\n{dep['context_summary']}")
+                if ctx_notes:
+                    patch['dependency_context'] = "\n\n".join(ctx_notes)
         update_task_doc(src['_es_id'], patch)
         src.update(patch)  # update local view
         changed += 1
@@ -2121,6 +2118,14 @@ def task_requires_code(task: dict) -> bool:
     We use it to avoid marking code-changing tasks as "done" when the agent
     only did analysis/context and didn't actually edit the repo.
     """
+    # Non-code overrides evaluated first — if the task is explicitly analytical,
+    # documentation-oriented, or exploratory, it must NOT be re-queued just
+    # because its title contains a code-sounding verb (e.g. "Research and update").
+    non_code_overrides = [
+        'research', 'investigate', 'analyze', 'analyse',
+        'explore', 'plan ', 'design', 'discuss', 'assess', 'report', 'summarize',
+        'summarise', 'audit', 'verify', 'validate', 'review ', 'test '
+    ]
     if task.get('requires_code') is False:
         return False
     if task.get('release_promotion_task'):
@@ -2202,9 +2207,10 @@ def _implementer_handle_llm_failure(es_id: str, task: dict, task_id: str) -> Non
     cap = _implementer_max_llm_failures_cap()
 
     if cap > 0 and next_n >= cap:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: implementer hit {next_n} consecutive LLM failures (cap={cap}, '
+            f'Blocked on Node {host}: implementer hit {next_n} consecutive LLM failures (cap={cap}, '
             'FLUME_IMPLEMENTER_MAX_LLM_FAILURES). Fix LLM on the worker host '
             '(see worker_handlers.log), or set cap to 0 to retry indefinitely. '
             'Transition this task to **ready** after fixing to reset the failure counter.',
@@ -2373,9 +2379,10 @@ def handle_implementer_worker(task, es_id):
                 next_push_failures = prev_push_failures + 1
 
                 if next_push_failures > _MAX_PUSH_FAILURES:
+                    host = task.get('execution_host', 'localhost')
                     append_agent_note(
                         es_id,
-                        f'Blocked: git push failed {next_push_failures} consecutive times (cap={_MAX_PUSH_FAILURES}). '
+                        f'Blocked on Node {host}: git push failed {next_push_failures} consecutive times (cap={_MAX_PUSH_FAILURES}). '
                         'The most common cause is an expired or incorrect ADO/GH token. '
                         'Check the Security page → Vault connection, then reset this task to **ready** to retry.',
                     )
@@ -2458,6 +2465,7 @@ def handle_implementer_worker(task, es_id):
                 'owner': 'implementer',
                 'assigned_agent_role': 'implementer',
                 'implementer_consecutive_llm_failures': 0,
+                'context_summary': result.summary,
                 **_implementer_clear_claim_fields(),
             })
             write_doc(HANDOFF_INDEX, {
@@ -2488,6 +2496,19 @@ def handle_implementer_worker(task, es_id):
         return False
     finally:
         # AP-5C: Always clean up the ephemeral clone so /tmp doesn't grow unbounded.
+        # Before teardown, dump the undocumented state into Elasticsearch for debugging.
+        try:
+            if worktree_path and Path(worktree_path).exists() and str(Path(worktree_path)).startswith(tempfile.gettempdir()):
+                status_out = subprocess.run(['git', '-C', worktree_path, 'status'], capture_output=True, text=True, timeout=5).stdout
+                if status_out.strip():
+                    diff_out = subprocess.run(['git', '-C', worktree_path, 'diff'], capture_output=True, text=True, timeout=5).stdout
+                    note = f"**Ephemeral Workspace Pre-teardown state:**\n\n```text\n{status_out.strip()}\n```\n"
+                    if diff_out.strip():
+                        note += f"```diff\n{diff_out.strip()[:4000]}\n```"
+                    append_agent_note(es_id, note)
+        except Exception as _ex:
+            log(f"implementer: failed to capture ephemeral state for task={task_id}: {_ex}")
+
         # teardown_task_clone() is a no-op for local repos and non-tmp paths.
         teardown_task_clone(worktree_path)
         if not released:
@@ -2590,9 +2611,10 @@ def handle_tester_worker(task, es_id):
     task_id = task.get('id')
 
     if _TESTER_RETRY_CAP > 0 and next_retries > _TESTER_RETRY_CAP:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: tester has looped {next_retries} times without the reviewer completing '
+            f'Blocked on Node {host}: tester has looped {next_retries} times without the reviewer completing '
             f'(cap={_TESTER_RETRY_CAP}, FLUME_TESTER_RETRY_CAP). '
             'This usually indicates a handoff or reviewer claim issue. '
             'Manually review and reset this task to **ready** or **done** after inspection.',
@@ -2970,9 +2992,10 @@ def handle_reviewer_worker(task, es_id):
     next_blocks = prev_blocks + 1
 
     if next_blocks >= _REVIEWER_BLOCK_CAP:
+        host = task.get('execution_host', 'localhost')
         append_agent_note(
             es_id,
-            f'Blocked: reviewer returned an unresolvable verdict {next_blocks} times '
+            f'Blocked on Node {host}: reviewer returned an unresolvable verdict {next_blocks} times '
             f'(cap={_REVIEWER_BLOCK_CAP}, FLUME_REVIEWER_BLOCK_CAP). '
             'Manually review and reset this task to **ready** or **done** after inspection.',
         )

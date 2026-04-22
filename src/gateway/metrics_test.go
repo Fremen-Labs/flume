@@ -31,6 +31,11 @@ func setupTestMetrics() (*metricsRegistry, func()) {
 		NodeHealthGauge:    newGaugeVec(),
 		LocalOffloadPct:    newGaugeVec(),
 		WorkerTokens:       newCounterVec(),
+		FrontierSpend:        newCounterVec(),
+		FrontierCircuitBreaks: newCounterVec(),
+		ConcurrencyThrottledTotal: &simpleCounter{},
+		BackoffEventsTotal:        &simpleCounter{},
+		TasksBlockedTotal:         &simpleCounter{},
 	}
 	Metrics = clean
 	return clean, func() { Metrics = old }
