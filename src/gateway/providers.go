@@ -420,7 +420,12 @@ func (r *ProviderRouter) openaiCompat(
 			baseURL = os.Getenv("LLM_BASE_URL")
 		}
 	}
-	url := strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
+	
+	normBase := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(normBase, "/v1") {
+		normBase = strings.TrimSuffix(normBase, "/v1")
+	}
+	url := normBase + "/v1/chat/completions"
 
 	// Normalise messages for OpenAI-compatible APIs: tool_calls arguments
 	// must be JSON *strings*, not parsed objects.  The gateway may have

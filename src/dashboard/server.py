@@ -393,204 +393,16 @@ def _delete_project_from_es(project_id: str):
         logger.warning({"event": "projects_delete_error", "id": project_id, "error": str(e)})
 
 
-def es_search(index, body):
-    # POST is required for reliable JSON bodies (some stacks strip GET bodies).
-    req = urllib.request.Request(
-        f"{ES_URL}/{index}/_search",
-        data=json.dumps(body).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(req, context=ctx) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {}
-        raise
-
-
-def find_task_doc_by_logical_id(logical_id: str):
-    """
-    Return (es_id, source) for a work item in agent-task-records.
-
-    Documents are usually upserted with PUT .../_doc/<logical_id>, so the ES _id
-    matches the logical id. Older or reindexed data may only match on the `id`
-    field — try `term` (keyword), `id.keyword` (dynamic mapping), and
-    `match_phrase` (text mapping) so history / git / PR endpoints stay consistent
-    with the snapshot list.
-    """
-    tid = (logical_id or '').strip()
-    if not tid:
-        return None, None
-    attempts = [
-        {'ids': {'values': [tid]}},
-        {'term': {'id': tid}},
-        {'term': {'id.keyword': tid}},
-        {'match_phrase': {'id': tid}},
-    ]
-    for query in attempts:
-        try:
-            hits = es_search('agent-task-records', {'size': 1, 'query': query}).get('hits', {}).get('hits', [])
-            if hits:
-                h = hits[0]
-                return h.get('_id'), h.get('_source', {})
-        except Exception:
-            continue
-    return None, None
-
-
-def es_index(index, doc):
-    req = urllib.request.Request(
-        f"{ES_URL}/{index}/_doc",
-        data=json.dumps(doc).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method='POST',
-    )
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        return json.loads(resp.read().decode())
-
-def es_upsert(index, doc_id, doc):
-    """PUT a document by explicit ID — idempotent upsert (create or overwrite)."""
-    req = urllib.request.Request(
-        f"{ES_URL}/{index}/_doc/{urllib.parse.quote(str(doc_id), safe='')}",
-        data=json.dumps(doc).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method='PUT',
-    )
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        return json.loads(resp.read().decode())
-
-
-# --- ES Bulk Buffering & Connection Resiliency ---
-import threading
-import time
-
-_ES_BULK_BUFFER = []
-_ES_BULK_LOCK = threading.Lock()
-_ES_BULK_LAST_FLUSH = time.time()
-
-def _es_bulk_flusher_loop():
-    global _ES_BULK_LAST_FLUSH
-    while True:
-        time.sleep(0.05)
-        with _ES_BULK_LOCK:
-            now = time.time()
-            if len(_ES_BULK_BUFFER) >= 50 or (len(_ES_BULK_BUFFER) > 0 and (now - _ES_BULK_LAST_FLUSH) >= 0.25):
-                _flush_es_bulk_unlocked()
-
-def _flush_es_bulk_unlocked():
-    global _ES_BULK_BUFFER, _ES_BULK_LAST_FLUSH
-    if not _ES_BULK_BUFFER:
-        return
-    payloads = _ES_BULK_BUFFER
-    _ES_BULK_BUFFER = []
-    _ES_BULK_LAST_FLUSH = time.time()
-    
-    ndjson = ""
-    for op in payloads:
-        ndjson += json.dumps({'update': {'_index': op['index'], '_id': op['id']}}) + "\n"
-        ndjson += json.dumps({'doc': op['doc']}) + "\n"
-    ndjson += "\n"
-    
-    req = urllib.request.Request(
-        f"{ES_URL}/_bulk",
-        data=ndjson.encode('utf-8'),
-        headers={
-            'Content-Type': 'application/x-ndjson',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method='POST',
-    )
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-                pass
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 504) and attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            logger.warning(f"[ES BULK] HTTP Flush failed: {e}")
-            break
-        except Exception as e:
-            if attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            logger.warning(f"[ES BULK] Connection failed: {e}")
-            break
-
-def es_bulk_update_proxy(path, body, method='POST'):
-    """
-    Transparent interceptor that absorbs simple agent-task-records /_update calls into the bulk buffer.
-    Falls back to normal `es_post` for all other operations.
-    """
-    if method == 'POST' and path.startswith('agent-task-records/_update/'):
-        doc_id = path.split('/')[-1]
-        doc = body.get('doc', {})
-        if doc:
-            with _ES_BULK_LOCK:
-                _ES_BULK_BUFFER.append({'index': 'agent-task-records', 'id': doc_id, 'doc': doc})
-            return {'status': 'buffered'}
-    return es_post(path, body, method)
-
-def es_post(path, body, method='POST'):
-    """
-    Generic helper for POST/other write operations against Elasticsearch.
-    Path should NOT start with a leading slash, e.g. 'agent-task-records/_update_by_query'.
-    """
-    req = urllib.request.Request(
-        f"{ES_URL}/{path}",
-        data=json.dumps(body).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method=method,
-    )
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 504) and attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            raise
-        except Exception as e:
-            if attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            raise
-
-
-def es_delete_doc(index: str, doc_id: str) -> bool:
-    """DELETE a document by id from Elasticsearch. Returns True if removed (2xx). False if 404."""
-    safe_id = urllib.parse.quote(str(doc_id), safe='')
-    req = urllib.request.Request(
-        f'{ES_URL}/{index}/_doc/{safe_id}',
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
-        },
-        method='DELETE',
-    )
-    try:
-        with urllib.request.urlopen(req, context=ctx) as resp:
-            return 200 <= resp.status < 300
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return False
-        raise
+from core.elasticsearch import (
+    es_search,
+    find_task_doc_by_logical_id,
+    es_index,
+    es_upsert,
+    es_post,
+    es_bulk_update_proxy,
+    _es_bulk_flusher_loop,
+    es_delete_doc,
+)
 
 
 def load_session(session_id):
@@ -744,27 +556,103 @@ def _update_planning_status(session: dict, **updates) -> dict:
 
 
 def _test_planner_connection(status: dict) -> dict:
-    """Probe the Flume Gateway endpoint and update status with the result."""
+    """Probe the configured LLM endpoint and update status with the result."""
+    provider  = (status.get('provider') or '').lower().strip()
+    base_url  = (status.get('baseUrl') or '').rstrip('/')
+    api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
+
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
 
-    # We now offload all connectivity proxying directly to the Gateway
-    gw_url = _gateway_base()
-    url = f"{gw_url}/health"
-    
+    # ── Build provider-specific test URL & headers ─────────────────────────
+
+    headers: dict = {}
+    url: str = base_url   # default fallback
+
+    if provider == 'ollama':
+        # Ollama local inference is orchestrated by the Flume Gateway Node Mesh.
+        # Test the Gateway's registry endpoint to confirm mesh connectivity.
+        gw_url = _gateway_base()
+        
+        # Fallback to localhost if running outside Docker or during DNS race condition
+        if 'gateway:' in gw_url:
+            import socket
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(gw_url)
+                if parsed.hostname:
+                    socket.gethostbyname(parsed.hostname)
+            except Exception:
+                gw_url = gw_url.replace('gateway', '127.0.0.1')
+                
+        url = f"{gw_url}/api/nodes"
+    else:
+        if not base_url:
+            status['connectionTestOk']     = False
+            status['connectionTestResult'] = (
+                f'No base URL configured for provider "{provider}". '
+                'Check Settings → LLM Provider.'
+            )
+            status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
+            return status
+
+        # Apply specific routing rules, identical to how tests were previously performed
+        if provider == 'exo':
+            norm = base_url
+            if norm.endswith('/v1'):
+                norm = norm[:-3]
+            url = norm.rstrip('/') + '/v1/models'
+        elif provider == 'anthropic':
+            root = base_url if base_url else 'https://api.anthropic.com'
+            url  = root.rstrip('/') + '/v1/models'
+            if api_key:
+                headers['x-api-key']         = api_key
+                headers['anthropic-version']  = '2023-06-01'
+        elif provider == 'gemini':
+            url = 'https://generativelanguage.googleapis.com/v1beta/models'
+            if api_key:
+                url += f'?key={api_key}'
+        elif provider in ('openai', 'openai_compatible', 'xai', 'grok', 'mistral', 'cohere'):
+            # OpenAI-compatible family: strip a trailing /v1 that catalog URLs
+            # (e.g. Grok → https://api.x.ai/v1) already include, then append /v1/models.
+            norm = base_url
+            if norm.endswith('/v1'):
+                norm = norm[:-3]
+            url = norm.rstrip('/') + '/v1/models'
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+        else:
+            norm = base_url
+            if norm.endswith('/v1'):
+                norm = norm[:-3]
+            url = norm.rstrip('/') + '/v1/models'
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+
+    # ── Execute the probe ──────────────────────────────────────────────────
     try:
-        req = urllib.request.Request(url, headers={'Accept': 'application/json'}, method='GET')
-        with urllib.request.urlopen(req, timeout=5.0) as response:
-            if response.getcode() == 200:
-                status['connectionTestOk'] = True
-                status['connectionTestResult'] = 'GATEWAY connection OK'
+        req = urllib.request.Request(url, headers=headers, method='GET')
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            status_code = getattr(resp, 'status', 200)
+            status['connectionTestOk']     = True
+            if provider == 'ollama':
+                status['connectionTestResult'] = f'NODE MESH connection OK — Gateway HTTP {status_code}'
             else:
-                status['connectionTestOk'] = False
-                status['connectionTestResult'] = f'GATEWAY HTTP {response.getcode()}'
-    except Exception as e:
-        status['connectionTestOk'] = False
-        status['connectionTestResult'] = f'GATEWAY connection FAILED — {e}'
-        logger.warning(f"Plan New Work modal connection test failed: {e}")
+                status['connectionTestResult'] = f'{provider.upper()} connection OK — {url} responded HTTP {status_code}'
+    except urllib.error.HTTPError as he:
+        status['connectionTestOk']     = False
+        if provider == 'ollama':
+             status['connectionTestResult'] = f'NODE MESH connection FAILED — Gateway HTTP {he.code}: {he.reason}'
+        else:
+             status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {url} returned HTTP {he.code}: {he.reason}'
+    except Exception as exc:
+        status['connectionTestOk']     = False
+        if provider == 'ollama':
+             status['connectionTestResult'] = f'NODE MESH connection FAILED — {exc}'
+        else:
+             status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {exc}'
+        
+        logger.warning(f"Plan New Work modal connection test failed: {exc}")
 
     status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
     return status

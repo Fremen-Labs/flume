@@ -45,8 +45,15 @@ Tasks that require reading and searching the codebase but NO modifications.
 Tasks that require modifying or writing files.
 - Process tasks strictly via the provided `task_id` array.
 - **Zero-Blind-Write Rule**: You MUST `read_file` on any target file BEFORE you call `write_file`.
+- **Strict Adherence Rule**: You MUST prioritize modifying existing files specified in the task description or acceptance criteria. Do NOT fabricate or hallucinate alternative new files (e.g., creating `CLI_DOCUMENTATION.md` when asked to update `README.md`).
 - **Pre-Execution Linting**: After executing `write_file`, run `golangci-lint`, `ruff`, or equivalent local linting via `run_shell` BEFORE asserting completion.
 - Call `implementation_complete`, summarizing the exact functions modified and confirming lint success.
+
+### Git Branch Protocol Context
+- You will be assigned to a specific branch natively by the orchestrator.
+- Do NOT attempt to run `git commit` or `git push` manually; the orchestrator handles native tracking and optimistic Rebase-on-Push automatically.
+- If you are on an isolated branch (`feature/task-*`), you have total ownership.
+- If you are on a shared branch (`feature/story-*`), realize your file edits may be interleaved with other agents. Ensure your logic boundaries belong strictly to your atomic task.
 
 ## Explicit Rules
 - Do NOT use abstract reasoning or speculative file modifications outside of the explicit `instructions` payload.

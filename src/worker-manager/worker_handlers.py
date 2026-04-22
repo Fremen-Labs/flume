@@ -2061,6 +2061,26 @@ def auto_commit_and_push(repo_path: str, branch: str, commit_message: str, task_
         repo_type = detect_repo_type(clean_url)
         auth_url = embed_credentials(clean_url, repo_type)
 
+        # --- Pre-Push Rebase Protocol (Optimistic Concurrency) ---
+        try:
+            fetch_url = auth_url if auth_url != clean_url else 'origin'
+            fetch_res = subprocess.run(
+                ['git', '-C', repo_path, 'fetch', fetch_url, f'refs/heads/{branch}'],
+                capture_output=True, text=True, timeout=60
+            )
+            # If fetch succeeds, the branch exists remotely, so we try to rebase
+            if fetch_res.returncode == 0:
+                rebase_res = subprocess.run(
+                    ['git', '-C', repo_path, 'rebase', 'FETCH_HEAD'],
+                    capture_output=True, text=True, timeout=60
+                )
+                if rebase_res.returncode != 0:
+                    log(f"auto_commit: rebase conflict detected for task={task_id} on {branch}. Aborting.")
+                    subprocess.run(['git', '-C', repo_path, 'rebase', '--abort'], capture_output=True)
+                    return 'conflict'
+        except Exception as e:
+            log(f"auto_commit: pre-push rebase error for task={task_id}: {e}")
+
         push_failed = False
         push_stderr = ''
         try:
@@ -2354,6 +2374,20 @@ def handle_implementer_worker(task, es_id):
                 # Code was written inside the physically isolated worktree natively
                 if branch:
                     commit_sha = auto_commit_and_push(repo_path, branch, commit_message, task_id)
+                    if commit_sha == 'conflict':
+                        append_agent_note(
+                            es_id,
+                            f"Push to remote aborted due to merge conflict on branch `{branch}`. "
+                            "Human or Orchestrator intervention required to resolve."
+                        )
+                        update_task_doc(es_id, {
+                            'status': 'blocked',
+                            'queue_state': 'merge_conflict',
+                            'blocked_reason': f"Merge conflict on pre-push rebase for {branch}"
+                        })
+                        teardown_task_clone(worktree_path)
+                        return True
+
                     if has_changes and not commit_sha:
                         # Push failed — surface the error in the agent log so it's visible in the UI
                         append_agent_note(

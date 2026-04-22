@@ -206,10 +206,14 @@ def load_agent_role_defs():
 
 
 def fetch_routing_policy() -> dict:
+    import urllib.error
     try:
         res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
         if res and '_source' in res:
             return res['_source']
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     except Exception as e:
         _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     return {}
@@ -670,7 +674,6 @@ PAINLESS_CLAIM_SCRIPT = (
     '  ctx.op = "noop";'
     '}'
 )
->>>>>>> 4e6fac51 (Implement Adaptive Concurrency Management and More (#227))
 
 def try_atomic_claim(
     role: str,
