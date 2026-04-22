@@ -183,216 +183,16 @@ if not ES_VERIFY_TLS:
 
 
 
-def _ensure_gitflow_defaults(entry: dict) -> dict:
-    """Backfill gitflow + concurrency config with defaults if missing."""
-    if 'gitflow' not in entry:
-        entry['gitflow'] = {
-            'autoPrOnApprove': True,
-            'defaultBranch': None,
-            'integrationBranch': 'develop',
-            'releaseBranch': 'main',
-            'autoMergeIntegrationPr': True,
-            'ensureIntegrationBranch': True,
-        }
-    else:
-        gf = entry['gitflow']
-        if 'autoPrOnApprove' not in gf:
-            gf['autoPrOnApprove'] = True
-        if 'defaultBranch' not in gf:
-            gf['defaultBranch'] = None
-        if 'integrationBranch' not in gf:
-            gf['integrationBranch'] = 'develop'
-        if 'releaseBranch' not in gf:
-            gf['releaseBranch'] = 'main'
-        if 'autoMergeIntegrationPr' not in gf:
-            gf['autoMergeIntegrationPr'] = True
-        if 'ensureIntegrationBranch' not in gf:
-            gf['ensureIntegrationBranch'] = True
-    try:
-        from utils.concurrency_config import ensure_concurrency_defaults  # noqa: PLC0415
-        ensure_concurrency_defaults(entry)
-    except Exception:
-        pass
-    return entry
+from core.projects_store import (
+    load_projects_registry,
+    save_projects_registry,
+    _upsert_project,
+    _update_project_registry_field,
+    _delete_project_from_es,
+)
 
 
-def es_counter_hwm(prefix: str) -> int:
-    """
-    Return the stored high-water-mark for *prefix* from the ES flume-counters index.
-    Returns 0 if the document does not yet exist or ES is unreachable.
-    """
-    try:
-        res = _es_counter_request(f'/{COUNTERS_INDEX}/_doc/{prefix}')
-        return int(res.get('_source', {}).get('value', 0))
-    except Exception:
-        return 0
-
-
-def es_counter_set_hwm(prefix: str, value: int) -> None:
-    """
-    Atomically raise the stored counter for *prefix* to *value* if it is higher.
-    Uses a Painless script so concurrent dashboard replicas are safe.
-    """
-    if value <= 0:
-        return
-    now = datetime.now(timezone.utc).isoformat()
-    body = {
-        'scripted_upsert': True,
-        'script': {
-            'source': (
-                'if (ctx._source.containsKey("value")) {'
-                '  ctx._source.value = Math.max(ctx._source.value, (long)params.v);'
-                '} else {'
-                '  ctx._source.value = (long)params.v;'
-                '}'
-                ' ctx._source.updated_at = params.ts;'
-                ' ctx._source.prefix = params.pfx;'
-            ),
-            'lang': 'painless',
-            'params': {'v': value, 'ts': now, 'pfx': prefix},
-        },
-        'upsert': {'prefix': prefix, 'value': value, 'updated_at': now},
-    }
-    try:
-        _es_counter_request(f'/{COUNTERS_INDEX}/_update/{prefix}', body=body, method='POST')
-    except Exception as exc:
-        logger.warning(json.dumps({
-            'event': 'es_counter_set_hwm_failed',
-            'prefix': prefix,
-            'value': value,
-            'error': str(exc),
-        }))
-
-
-def _es_counter_request(path: str, body=None, method: str = 'GET') -> dict:
-    """Thin HTTP helper scoped to the flume-counters ES index."""
-    headers = {'Content-Type': 'application/json'}
-    api_key = os.environ.get('ES_API_KEY', '')
-    if api_key:
-        headers['Authorization'] = f'ApiKey {api_key}'
-    data = json.dumps(body).encode() if body is not None else None
-    if data and method == 'GET':
-        method = 'POST'
-    req = urllib.request.Request(f'{ES_URL}{path}', data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, context=ctx) as resp:
-            raw = resp.read().decode()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {}
-        raise
-
-
-
-# ---------------------------------------------------------------------------
-# Projects Registry — Elasticsearch-backed (replaces projects.json)
-# ---------------------------------------------------------------------------
-
-PROJECTS_INDEX = "flume-projects"
-
-
-def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
-    """Low-level ES request scoped to the projects index."""
-    headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"ApiKey {api_key}"
-    data = json.dumps(body).encode() if body is not None else None
-    if data and method == "GET":
-        method = "POST"
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, context=ctx) as resp:
-            raw = resp.read().decode()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {}
-        raise
-
-
-def load_projects_registry() -> list:
-    """Return all registered projects from Elasticsearch."""
-    try:
-        res = _es_projects_request(
-            f"/{PROJECTS_INDEX}/_search",
-            {"size": 500, "query": {"match_all": {}}, "sort": [{"created_at": {"order": "asc"}}]},
-        )
-        hits = res.get("hits", {}).get("hits", [])
-        return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
-    except Exception as e:
-        logger.warning({"event": "projects_load_error", "error": str(e)})
-        return []
-
-
-def save_projects_registry(registry: list):
-    """
-    Upsert the full list of projects into ES.
-    Used for legacy callers that rewrite the entire list.
-    """
-    for entry in registry:
-        if not isinstance(entry, dict) or not entry.get("id"):
-            continue
-        entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-        try:
-            _es_projects_request(
-                f"/{PROJECTS_INDEX}/_doc/{entry['id']}",
-                entry,
-                method="PUT",
-            )
-        except Exception as e:
-            logger.warning({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)})
-
-
-def _upsert_project(entry: dict):
-    """Upsert a single project document to ES.
-
-    Uses ?refresh=wait_for so the document is immediately visible to searches
-    (prevents the optimistic cache insert being overwritten by a stale poll
-    before ES finishes indexing — fixes the 'project name disappears' bug).
-    """
-    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-    _es_projects_request(
-        f"/{PROJECTS_INDEX}/_doc/{entry['id']}?refresh=wait_for",
-        entry,
-        method="PUT",
-    )
-
-
-def _update_project_registry_field(project_id: str, **fields) -> None:
-    """Atomic field-level update on a single project document in ES.
-
-    Uses ?refresh=wait_for so the clone_status change is visible to the
-    /clone-status polling endpoint on the very next request — prevents the
-    UI being stuck on 'cloning' when the clone has already failed or succeeded.
-    """
-    registry = load_projects_registry()
-    for p in registry:
-        if p.get('id') == project_id:
-            p.update(fields)
-            # Write back only the updated document with immediate consistency.
-            p["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _es_projects_request(
-                f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
-                p,
-                method="PUT",
-            )
-            return
-    logger.warning(json.dumps({"event": "update_field_project_not_found", "project_id": project_id}))
-
-
-def _delete_project_from_es(project_id: str):
-    """Delete a project document from ES."""
-    try:
-        _es_projects_request(
-            f"/{PROJECTS_INDEX}/_doc/{project_id}",
-            method="DELETE",
-        )
-    except Exception as e:
-        logger.warning({"event": "projects_delete_error", "id": project_id, "error": str(e)})
-
-
+from core.counters import es_counter_hwm, es_counter_set_hwm, get_next_id_sequence
 from core.elasticsearch import (
     es_search,
     find_task_doc_by_logical_id,
@@ -405,36 +205,8 @@ from core.elasticsearch import (
 )
 
 
-def load_session(session_id):
-    try:
-        res = es_search('agent-plan-sessions', {'size': 1, 'query': {'term': {'_id': session_id}}})
-        hits = res.get('hits', {}).get('hits', [])
-        if hits:
-            return hits[0].get('_source')
-    except Exception as e:
-        logger.error("Error loading session from ES", extra={"structured_data": {"session_id": session_id, "error": str(e)}})
-    return None
+from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
 
-
-def save_session(session):
-    try:
-        session['updated_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-        es_post(f'agent-plan-sessions/_doc/{session["id"]}?refresh=true', session)
-    except Exception as e:
-        logger.error("Error saving session to ES", extra={"structured_data": {"error": str(e)}})
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-
-
-def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
-    if not started_at:
-        return None
-    try:
-        started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-        return round((datetime.now(timezone.utc) - started).total_seconds(), 3)
-    except Exception:
-        return None
 
 
 def _sync_llm_runtime_env():
@@ -1054,35 +826,6 @@ def placeholder_plan(repo: str, prompt: str):
 # Backward-compatible name for scripts/tests
 simple_plan = placeholder_plan
 
-
-def get_next_id_sequence(prefix: str) -> int:
-    """
-    Return the next available integer sequence number for IDs of the form `prefix-N`.
-
-    Takes the maximum of:
-      1. The highest N seen in the live ES index (covers active/archived records).
-      2. The persisted high-water-mark counter (covers IDs that were deleted from ES).
-
-    This guarantees monotonic, never-recycled IDs even when records are hard-deleted.
-    """
-    max_n = es_counter_hwm(prefix)
-    try:
-        hits = es_search('agent-task-records', {
-            'size': 10000,
-            '_source': ['id'],
-            'query': {'regexp': {'id': f'{re.escape(prefix)}-[0-9]+'}},
-        }).get('hits', {}).get('hits', [])
-        pattern = re.compile(rf'^{re.escape(prefix)}-(\d+)$')
-        for h in hits:
-            doc_id = (h.get('_source') or {}).get('id', '') or h.get('_id', '')
-            m = pattern.match(doc_id)
-            if m:
-                max_n = max(max_n, int(m.group(1)))
-    except Exception:
-        if max_n == 0:
-            # Fallback when both ES and the counter file are unavailable
-            return int(datetime.now(timezone.utc).timestamp()) % 1_000_000 + 1
-    return max_n + 1
 
 
 def _extract_target_file(title: str) -> str | None:
