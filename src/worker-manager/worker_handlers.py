@@ -797,13 +797,21 @@ def compute_ready_for_repo(repo):
             if src.get('requires_code') is None and any(k in title for k in ['update', 'modify', 'implement', 'change', 'edit', 'replace', 'add ', 'remove ', 'create']):
                 patch['requires_code'] = True
             # If this task depends on a completed task with a commit, inherit commit metadata
-            if not src.get('commit_sha') and deps:
-                dep = by_id.get(deps[0])
-                if dep and dep.get('commit_sha'):
-                    patch['commit_sha'] = dep.get('commit_sha')
-                    patch['commit_message'] = dep.get('commit_message')
-                    patch['branch'] = dep.get('branch')
-                    patch['worktree'] = dep.get('worktree')
+            if deps:
+                ctx_notes = []
+                for dep_id in deps:
+                    dep = by_id.get(dep_id)
+                    if not dep:
+                        continue
+                    if not src.get('commit_sha') and dep.get('commit_sha'):
+                        patch['commit_sha'] = dep.get('commit_sha')
+                        patch['commit_message'] = dep.get('commit_message')
+                        patch['branch'] = dep.get('branch')
+                        patch['worktree'] = dep.get('worktree')
+                    if dep.get('context_summary'):
+                        ctx_notes.append(f"Context from {dep_id}:\n{dep['context_summary']}")
+                if ctx_notes:
+                    patch['dependency_context'] = "\n\n".join(ctx_notes)
         update_task_doc(src['_es_id'], patch)
         src.update(patch)  # update local view
         changed += 1
@@ -1049,7 +1057,7 @@ def task_requires_code(task: dict) -> bool:
     # documentation-oriented, or exploratory, it must NOT be re-queued just
     # because its title contains a code-sounding verb (e.g. "Research and update").
     non_code_overrides = [
-        'document', 'documentation', 'research', 'investigate', 'analyze', 'analyse',
+        'research', 'investigate', 'analyze', 'analyse',
         'explore', 'plan ', 'design', 'discuss', 'assess', 'report', 'summarize',
         'summarise', 'audit', 'verify', 'validate', 'review ', 'test '
     ]
@@ -1362,6 +1370,7 @@ def handle_implementer_worker(task, es_id):
                 'owner': 'implementer',
                 'assigned_agent_role': 'implementer',
                 'implementer_consecutive_llm_failures': 0,
+                'context_summary': result.summary,
                 **_implementer_clear_claim_fields(),
             })
             write_doc(HANDOFF_INDEX, {

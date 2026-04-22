@@ -1201,7 +1201,7 @@ def run_implementer(
 
     _progress('Agent started — analysing task…')
 
-    for _iteration in range(15):
+    for _iteration in range(40):
         _progress(f'Thinking… (step {_iteration + 1})')
         dynamic_tools = _IMPLEMENTER_TOOLS.copy()
         dynamic_tools.append(_ELASTRO_QUERY_TOOL)
@@ -1251,7 +1251,7 @@ def run_implementer(
                 except Exception:
                     pass
             
-            if _iteration == 14:
+            if _iteration == 39:
                 _progress('LLM returned no response after max retries — stopping.')
                 return AgentResult(
                     action='implementer_failed',
