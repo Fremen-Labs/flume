@@ -4,6 +4,7 @@ from typing import Optional
 import json
 import os
 import re
+import shlex
 import signal
 import sys
 import tempfile
@@ -206,6 +207,7 @@ from core.elasticsearch import (
 
 
 from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
+from api.tasks import _append_task_agent_log_note
 
 
 
@@ -409,6 +411,7 @@ def load_snapshot():
         projects_res = f_projects.result()
 
     repos_res = load_repos(registry=projects_res)
+    from api.projects import _map_task_hit_for_api
 
     result = {
         'workers': workers_res,

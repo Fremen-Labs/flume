@@ -42,3 +42,6 @@ exclude = ["*node_modules*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "src/dashboard"]
+
+[tool.pyright]
+extraPaths = ["src/dashboard"]
