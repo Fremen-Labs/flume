@@ -87,3 +87,5 @@ We follow the elite **Diátaxis Documentation Framework**, segmenting the Flume 
 - **[The Container Matrix Architecture](./docs/reference/architecture.md)**: Understand the strict isolation paradigm splitting the execution logic from your raw SSD safely.
 - **[Settings & System Configuration](./docs/reference/settings-management.md)**: Deep dive into the Flume configuration GUI managing strict LLM limits, Vault keys, and GitHub/ADO tokens securely.
 - **[Provider Architecture Interface](./docs/reference/providers.md)**: Detailed mapping of internal gateway translation protocols parsing Anthropic nodes and Gemini execution invariants.
+- **[Elasticsearch Topology Map](./docs/reference/architecture.md#elasticsearch-architecture-map)**: Persistent index topology representing Flume's distributed schema patterns.
+

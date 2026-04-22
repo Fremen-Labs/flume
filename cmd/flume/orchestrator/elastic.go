@@ -131,8 +131,7 @@ var allIndices = []indexDef{
 			},
 		},
 	}},
-	{Name: "flume-tasks", Mapping: nil},
-	{Name: "flume-workers", Mapping: nil},
+	// ── Core project indices ──────────────────────────────────────
 
 	// ── AP-1: Atomic monotonic counters (replaces sequence_counters.json) ─
 	{Name: "flume-counters", Mapping: map[string]interface{}{
@@ -270,7 +269,6 @@ var allIndices = []indexDef{
 	}},
 
 	// ── System state / orchestration ─────────────────────────────────────
-	{Name: "agent-checkpoints", Mapping: nil},
 	{Name: "agent-plan-sessions", Mapping: nil},
 	{Name: "agent-system-cluster", Mapping: nil},
 	{Name: "agent-system-workers", Mapping: nil},
