@@ -15,6 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import type { ApiTask } from '@/types';
 import { appLogger } from '@/utils/logger';
 import type { ApiTask } from '@/types';
 
