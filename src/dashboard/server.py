@@ -471,6 +471,78 @@ def es_upsert(index, doc_id, doc):
         return json.loads(resp.read().decode())
 
 
+# --- ES Bulk Buffering & Connection Resiliency ---
+import threading
+import time
+
+_ES_BULK_BUFFER = []
+_ES_BULK_LOCK = threading.Lock()
+_ES_BULK_LAST_FLUSH = time.time()
+
+def _es_bulk_flusher_loop():
+    global _ES_BULK_LAST_FLUSH
+    while True:
+        time.sleep(0.05)
+        with _ES_BULK_LOCK:
+            now = time.time()
+            if len(_ES_BULK_BUFFER) >= 50 or (len(_ES_BULK_BUFFER) > 0 and (now - _ES_BULK_LAST_FLUSH) >= 0.25):
+                _flush_es_bulk_unlocked()
+
+def _flush_es_bulk_unlocked():
+    global _ES_BULK_BUFFER, _ES_BULK_LAST_FLUSH
+    if not _ES_BULK_BUFFER:
+        return
+    payloads = _ES_BULK_BUFFER
+    _ES_BULK_BUFFER = []
+    _ES_BULK_LAST_FLUSH = time.time()
+    
+    ndjson = ""
+    for op in payloads:
+        ndjson += json.dumps({'update': {'_index': op['index'], '_id': op['id']}}) + "\n"
+        ndjson += json.dumps({'doc': op['doc']}) + "\n"
+    ndjson += "\n"
+    
+    req = urllib.request.Request(
+        f"{ES_URL}/_bulk",
+        data=ndjson.encode('utf-8'),
+        headers={
+            'Content-Type': 'application/x-ndjson',
+            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+        },
+        method='POST',
+    )
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                pass
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503, 504) and attempt < 3:
+                time.sleep((2 ** attempt) * 0.1)
+                continue
+            logger.warning(f"[ES BULK] HTTP Flush failed: {e}")
+            break
+        except Exception as e:
+            if attempt < 3:
+                time.sleep((2 ** attempt) * 0.1)
+                continue
+            logger.warning(f"[ES BULK] Connection failed: {e}")
+            break
+
+def es_bulk_update_proxy(path, body, method='POST'):
+    """
+    Transparent interceptor that absorbs simple agent-task-records /_update calls into the bulk buffer.
+    Falls back to normal `es_post` for all other operations.
+    """
+    if method == 'POST' and path.startswith('agent-task-records/_update/'):
+        doc_id = path.split('/')[-1]
+        doc = body.get('doc', {})
+        if doc:
+            with _ES_BULK_LOCK:
+                _ES_BULK_BUFFER.append({'index': 'agent-task-records', 'id': doc_id, 'doc': doc})
+            return {'status': 'buffered'}
+    return es_post(path, body, method)
+
 def es_post(path, body, method='POST'):
     """
     Generic helper for POST/other write operations against Elasticsearch.
@@ -485,8 +557,20 @@ def es_post(path, body, method='POST'):
         },
         method=method,
     )
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        return json.loads(resp.read().decode())
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503, 504) and attempt < 3:
+                time.sleep((2 ** attempt) * 0.1)
+                continue
+            raise
+        except Exception as e:
+            if attempt < 3:
+                time.sleep((2 ** attempt) * 0.1)
+                continue
+            raise
 
 
 def es_delete_doc(index: str, doc_id: str) -> bool:
@@ -2572,6 +2656,9 @@ def agents_start() -> dict:
 
     python_bin = sys.executable
 
+    WORKER_MANAGER_SCRIPT = _SRC_ROOT / 'worker-manager' / 'manager.py'
+    WORKER_HANDLERS_SCRIPT = _SRC_ROOT / 'worker-manager' / 'worker_handlers.py'
+
     if not pids['manager']:
         proc = subprocess.Popen(
             [python_bin, str(WORKER_MANAGER_SCRIPT)],
@@ -2757,13 +2844,15 @@ async def lifespan(app: FastAPI):
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
 
+    threading.Thread(target=_es_bulk_flusher_loop, daemon=True).start()
+
     # Start the auto-unblocker daemon. Self-contained background thread; no-op
     # when FLUME_AUTO_UNBLOCK_ENABLED=0. See src/dashboard/auto_unblock.py.
     try:
         import auto_unblock as _auto_unblock
         _auto_unblock.maybe_start(
             es_search=es_search,
-            es_post=es_post,
+            es_post=es_bulk_update_proxy,
             append_note=_append_task_agent_log_note,
             logger=logger,
         )
@@ -2776,7 +2865,7 @@ async def lifespan(app: FastAPI):
         import autonomy_sweeps as _autonomy
         _autonomy.maybe_start(
             es_search=es_search,
-            es_post=es_post,
+            es_post=es_bulk_update_proxy,
             es_upsert=es_upsert,
             append_note=_append_task_agent_log_note,
             list_projects=load_projects_registry,
