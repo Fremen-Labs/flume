@@ -13,8 +13,6 @@ from utils.workspace import resolve_safe_workspace
 from core.elasticsearch import es_search
 from core.projects_store import load_projects_registry, _upsert_project, PROJECTS_INDEX, _es_projects_request
 
-# Temporary circular imports from server.py (will be moved in Phase 2)
-from server import _is_remote_url, _clone_and_setup_project, _deterministic_ast_ingest
 
 logger = get_logger(__name__)
 WORKSPACE_ROOT = resolve_safe_workspace()
@@ -23,6 +21,7 @@ router = APIRouter()
 
 @router.post("/api/projects")
 async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
+    from server import _is_remote_url, _clone_and_setup_project, _deterministic_ast_ingest
     from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url
     import ado_tokens_store
     import github_tokens_store

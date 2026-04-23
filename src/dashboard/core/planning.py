@@ -14,14 +14,7 @@ from core.elasticsearch import es_upsert
 from core.sessions_store import load_session, save_session, _utcnow_iso
 from core.counters import get_next_id_sequence, es_counter_set_hwm
 
-# Temporarily import needed things from server (until settings/workers are also extracted)
-from server import (
-    _sync_llm_runtime_env,
-    LLM_MODEL,
-    call_llm_client, # assuming something like this if it exists
-)
-# Wait, let's just cheat and do 'from server import *' inside functions that need it to prevent circular loops during this intermediate step
-from utils.env_manager import load_effective_pairs # making assumption
+
 
 logger = get_logger(__name__)
 WORKSPACE_ROOT = resolve_safe_workspace()
@@ -34,6 +27,8 @@ def _planner_debug_log(event: str, **fields):
 
 
 def _planner_runtime_config() -> dict:
+    from server import _sync_llm_runtime_env, LLM_MODEL
+    from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url
     _sync_llm_runtime_env()
     pairs = load_effective_pairs(WORKSPACE_ROOT)
     provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
@@ -153,6 +148,7 @@ def _test_planner_connection(status: dict) -> dict:
     if provider == 'ollama':
         # Ollama local inference is orchestrated by the Flume Gateway Node Mesh.
         # Test the Gateway's registry endpoint to confirm mesh connectivity.
+        from server import _gateway_base
         gw_url = _gateway_base()
         
         # Fallback to localhost if running outside Docker or during DNS race condition
@@ -339,6 +335,7 @@ def _planner_should_use_codex_app_server() -> bool:
 def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     """Call the configured planner backend and return the assistant response text."""
     cfg = _planner_runtime_config()
+    from server import LLM_MODEL
     model = cfg.get('model') or LLM_MODEL
     timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
     logger.info(

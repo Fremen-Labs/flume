@@ -11,13 +11,12 @@ from utils.logger import get_logger
 from core.elasticsearch import es_search, es_post
 from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
-# Temporary circular imports from server.py (will be moved in Phase 2)
-from server import (
-    task_history,
-    find_task_doc_by_logical_id,
-    _is_remote_url,
-    get_task_doc
-)
+from core.elasticsearch import find_task_doc_by_logical_id
+from core.tasks import task_history, get_task_doc
+
+def _lazy_is_remote_url(url: str) -> bool:
+    from server import _is_remote_url as _inner
+    return _inner(url)
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -60,7 +59,7 @@ def api_task_diff(task_id: str):
         repo_url = proj.get("repoUrl") or ""
 
         # ── Remote repo: GitHostClient REST API ──────────────────────────────
-        if clone_status in ("indexed", "cloned") and _is_remote_url(repo_url):
+        if clone_status in ("indexed", "cloned") and _lazy_is_remote_url(repo_url):
             try:
                 client = get_git_client(proj)
                 base = (
@@ -133,7 +132,7 @@ def api_task_commits(task_id: str):
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
         repo_url = proj.get("repoUrl") or ""
 
-        if branch and clone_status in ("indexed", "cloned") and _is_remote_url(repo_url):
+        if branch and clone_status in ("indexed", "cloned") and _lazy_is_remote_url(repo_url):
             try:
                 client = get_git_client(proj)
                 base = (

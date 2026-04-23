@@ -13,12 +13,7 @@ from utils.logger import get_logger
 from core.elasticsearch import es_search, es_post, es_upsert
 from core.projects_store import load_projects_registry, _es_projects_request, PROJECTS_INDEX
 
-# Temporary imports from server.py (circular bypass until fully modular)
-from server import (
-    _append_task_agent_log_note,
-    _is_remote_url,
-    find_task_doc_by_logical_id
-)
+
 
 logger = get_logger(__name__)
 

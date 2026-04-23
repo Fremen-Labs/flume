@@ -205,10 +205,11 @@ from core.elasticsearch import (
     es_delete_doc,
 )
 
-
 from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
-from api.tasks import _append_task_agent_log_note
 
+def _lazy_append_task_agent_log_note(es_id: str, note: str) -> bool:
+    from api.tasks import _append_task_agent_log_note
+    return _append_task_agent_log_note(es_id, note)
 
 
 def _sync_llm_runtime_env():
@@ -746,7 +747,7 @@ async def lifespan(app: FastAPI):
         _auto_unblock.maybe_start(
             es_search=es_search,
             es_post=es_bulk_update_proxy,
-            append_note=_append_task_agent_log_note,
+            append_note=_lazy_append_task_agent_log_note,
             logger=logger,
         )
     except Exception as _exc:
@@ -760,7 +761,7 @@ async def lifespan(app: FastAPI):
             es_search=es_search,
             es_post=es_bulk_update_proxy,
             es_upsert=es_upsert,
-            append_note=_append_task_agent_log_note,
+            append_note=_lazy_append_task_agent_log_note,
             list_projects=load_projects_registry,
             logger=logger,
         )
@@ -1318,7 +1319,7 @@ def api_autonomy_sweep_now(sweep_name: str):
             summary = _auto_unblock._sweep_once({
                 'es_search': es_search,
                 'es_post': es_post,
-                'append_note': _append_task_agent_log_note,
+                'append_note': _lazy_append_task_agent_log_note,
                 'logger': logger,
             })
             return {'ok': True, 'sweep': 'auto_unblock', 'summary': summary}
@@ -1329,7 +1330,7 @@ def api_autonomy_sweep_now(sweep_name: str):
             es_search=es_search,
             es_post=es_post,
             es_upsert=es_upsert,
-            append_note=_append_task_agent_log_note,
+            append_note=_lazy_append_task_agent_log_note,
             list_projects=load_projects_registry,
             logger=logger,
         )
@@ -1363,7 +1364,7 @@ def api_auto_unblock_sweep_now():
         summary = _auto_unblock._sweep_once({
             'es_search': es_search,
             'es_post': es_post,
-            'append_note': _append_task_agent_log_note,
+            'append_note': _lazy_append_task_agent_log_note,
             'logger': logger,
         })
         return {'ok': True, 'summary': summary}

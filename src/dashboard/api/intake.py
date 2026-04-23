@@ -6,14 +6,16 @@ from fastapi.responses import JSONResponse
 from utils.logger import get_logger
 from core.sessions_store import load_session, save_session
 
-# Temporary circular imports from server.py (will be moved in Phase 2)
-from server import (
+from core.planning import (
     create_planning_session,
-    _session_payload_for_client,
     refine_session,
     commit_plan,
     _count_plan_tasks
 )
+
+def _session_payload_for_client(session: dict) -> dict:
+    from server import _session_payload_for_client as _inner
+    return _inner(session)
 
 logger = get_logger(__name__)
 router = APIRouter()
