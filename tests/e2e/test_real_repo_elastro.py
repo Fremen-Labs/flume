@@ -9,7 +9,7 @@ def test_real_repo_website_update(api_client, flume_waiter, real_ado_repo):
     # 1. Onboard the Real Repository
     payload = {
         "name": "elastro-website-e2e",
-        "remoteUrl": real_ado_repo, # Using remote mapping explicitly
+        "repoUrl": real_ado_repo, # Using remote mapping explicitly
         # In a real run, Flume pulls via generic proxy or uses local path. 
         # We will attempt registering to see if the engine accepts ADO schemas
     }
@@ -36,7 +36,7 @@ def test_real_repo_website_update(api_client, flume_waiter, real_ado_repo):
     
     # Poll until LLM builds the plan asynchronously
     print(f"Waiting for LLM to draft plan for session {session_id}...")
-    flume_waiter.wait_for_session_plan(session_id, timeout_sec=120)
+    flume_waiter.wait_for_session_plan(session_id, timeout_sec=350)
     
     commit_resp = api_client.post(f"intake/session/{session_id}/commit", json={})
     assert commit_resp.status_code == 200

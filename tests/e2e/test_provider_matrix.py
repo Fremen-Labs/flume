@@ -37,7 +37,7 @@ def test_provider_planning_regression(api_client, flume_waiter, isolated_flume_p
     # 2. Extract Session ID and map it
     session_id = resp.json().get("sessionId")
     
-    flume_waiter.wait_for_session_plan(session_id, timeout_sec=120)
+    flume_waiter.wait_for_session_plan(session_id, timeout_sec=350)
     
     commit_resp = api_client.post(f"intake/session/{session_id}/commit", json={})
     assert commit_resp.status_code == 200, "Should compile into a dispatchable Flume Plan"

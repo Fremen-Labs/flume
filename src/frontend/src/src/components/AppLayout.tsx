@@ -15,8 +15,6 @@ const navItems = [
   { to: '/mission-control', icon: Radar, label: 'Mission Control' },
   { to: '/projects', icon: FolderKanban, label: 'Projects' },
   { to: '/queue', icon: ListTodo, label: 'Work Queue' },
-  { to: '/agents', icon: Bot, label: 'Agents' },
-  { to: '/activity', icon: Activity, label: 'Activity' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
 
   { to: '/nodes', icon: Server, label: 'Node Mesh' },

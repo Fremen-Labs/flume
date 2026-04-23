@@ -1,5 +1,7 @@
 import os
 import json
+import urllib.request
+import urllib.error
 import uuid
 import threading
 import time
@@ -11,7 +13,7 @@ from typing import Optional
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from core.elasticsearch import es_upsert
-from core.sessions_store import load_session, save_session, _utcnow_iso
+from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
 from core.counters import get_next_id_sequence, es_counter_set_hwm
 
 
@@ -477,12 +479,12 @@ def create_planning_session(repo, prompt):
         'updated_at': _utcnow_iso(),
     }
     save_session(session)
-    threading.Thread(target=_run_initial_planning, args=(session_id,), daemon=True).start()
+    session_copy = dict(session)
+    threading.Thread(target=_run_initial_planning, args=(session_copy,), daemon=True).start()
     return session
 
 
-def _run_initial_planning(session_id: str):
-    session = load_session(session_id)
+def _run_initial_planning(session: dict):
     if not session:
         return
     status = _update_planning_status(session, stage='testing_connection')

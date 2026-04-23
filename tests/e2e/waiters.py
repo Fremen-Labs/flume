@@ -86,6 +86,12 @@ class FlumeWaiter:
                 plan = data.get("plan", {})
                 if plan and plan.get("epics"):
                     return data
+                
+                # Fail fast if backend reports a fatal error
+                planning_status = data.get("planningStatus", {})
+                if planning_status and planning_status.get("stage") == "failed":
+                    raise Exception(f"Intake session failed: {planning_status.get('failureText')}")
+                    
             time.sleep(self.poll_interval)
         raise TimeoutError(f"Intake session '{session_id}' failed to generate a draft plan within {timeout_sec}s")
 
