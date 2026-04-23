@@ -85,36 +85,7 @@ async function fetchProjectTasks(
   return data as { tasks: ApiTask[] };
 }
 
-type ProjectActivityEvent = {
-  type: string;
-  task_id?: string;
-  timestamp?: string;
-  summary?: string;
-  details?: string;
-};
-
-async function fetchProjectActivity(projectId: string): Promise<{
-  events: ProjectActivityEvent[];
-  taskCount: number;
-}> {
-  const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/activity?limit=300`);
-  const data: unknown = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const msg =
-      typeof data === 'object' &&
-      data !== null &&
-      'error' in data &&
-      typeof (data as { error: unknown }).error === 'string'
-        ? (data as { error: string }).error
-        : `Failed to load activity (${r.status})`;
-    throw new Error(msg);
-  }
-  return data as { events: ProjectActivityEvent[]; taskCount: number };
-}
-
 /**
- * Elasticsearch can return multiple hits per logical task id (reindexes / duplicates).
- * Building a Map from a list with duplicates causes the same node to be attached
  * multiple times or split — the tree looks flat or wrong. Keep the newest revision.
  */
 function dedupeTasksByLogicalId(tasks: ApiTask[]): ApiTask[] {
@@ -229,7 +200,6 @@ function AgentControls({ projectId }: { projectId?: string }) {
               qc.invalidateQueries({ queryKey: ['snapshot'] });
               if (projectId) qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
               else qc.invalidateQueries({ queryKey: ['project-tasks'] });
-              qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
             }}
             className="p-1 text-muted-foreground/50 hover:text-muted-foreground rounded transition-colors"
             title="Refresh"
@@ -558,7 +528,6 @@ export default function ProjectDetailPage() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState(new Set<string>());
   const [workView, setWorkView] = useState<ProjectWorkView>('active');
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
@@ -579,13 +548,6 @@ export default function ProjectDetailPage() {
     refetchInterval: 5_000,
     staleTime: 3_000,
     retry: 1,
-  });
-
-  const activityQuery = useQuery({
-    queryKey: ['project-activity', projectId],
-    queryFn: () => fetchProjectActivity(projectId),
-    enabled: !!projectId && historyOpen,
-    staleTime: 15_000,
   });
   const projectTasks = dedupeTasksByLogicalId(
     projectTasksPayload?.tasks ?? allTasks.filter(t => t.repo === projectId),
@@ -980,76 +942,7 @@ export default function ProjectDetailPage() {
                   </button>
                 ))}
               </div>
-              <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
-                <DialogTrigger asChild>
-                  <button
-                    type="button"
-                    className="flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md bg-violet-500/10 border border-violet-500/25 text-violet-300 hover:bg-violet-500/20 transition-all font-medium"
-                  >
-                    <History className="w-3.5 h-3.5" />
-                    History
-                  </button>
-                </DialogTrigger>
-                <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
-                  <DialogHeader>
-                    <DialogTitle>Project activity</DialogTitle>
-                    <DialogDescription>
-                      Recent handoffs, reviews, failures, and updates across all work items in this project.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <div className="flex-1 overflow-y-auto min-h-0 space-y-2 pr-1">
-                    {activityQuery.isLoading && (
-                      <div className="flex items-center gap-2 text-muted-foreground text-xs py-4">
-                        <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-                      </div>
-                    )}
-                    {activityQuery.isError && (
-                      <p className="text-xs text-destructive">
-                        {activityQuery.error instanceof Error
-                          ? activityQuery.error.message
-                          : 'Failed to load activity'}
-                      </p>
-                    )}
-                    {!activityQuery.isLoading &&
-                      activityQuery.data?.events?.length === 0 && (
-                        <p className="text-xs text-muted-foreground py-4">No activity recorded yet.</p>
-                      )}
-                    {activityQuery.data?.events?.map((ev, i) => (
-                      <div
-                        key={`${ev.timestamp}-${ev.task_id}-${i}`}
-                        className="border-l-2 border-violet-500/30 pl-3 py-1.5 text-xs"
-                      >
-                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground mb-0.5 flex-wrap">
-                          <span className="text-violet-400/90 font-medium uppercase tracking-wide">
-                            {ev.type}
-                          </span>
-                          {ev.task_id && (
-                            <button
-                              type="button"
-                              className="font-mono text-primary/80 hover:underline"
-                              onClick={() => {
-                                setSelectedTaskId(ev.task_id!);
-                                setHistoryOpen(false);
-                              }}
-                            >
-                              {ev.task_id}
-                            </button>
-                          )}
-                          {ev.timestamp && (
-                            <span>{timeAgo(ev.timestamp)}</span>
-                          )}
-                        </div>
-                        <p className="text-foreground/90">{ev.summary}</p>
-                        {ev.details && (
-                          <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-3">
-                            {ev.details}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </DialogContent>
-              </Dialog>
+              
               <button
                 onClick={() => (selectionMode ? exitSelection() : setSelectionMode(true))}
                 className={`flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md border transition-all ${

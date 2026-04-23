@@ -95,8 +95,6 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
               {data.workers.map((worker: WorkerState, i: number) => {
             const isActive = worker.status === 'claimed' || worker.status === 'active';
             return (
-              
-            return (
               <WorkerRadarCard
                 key={worker.name}
                 worker={worker}
@@ -110,8 +108,6 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
                 saveRole={saveRole}
                 resetRole={resetRole}
               />
-            );
-
             );
                     })}
             </AnimatePresence>
