@@ -25,3 +25,6 @@ dist/
 /flume
 .flume/agents/
 .flume/worktrees/
+
+# Tests
+/tests/*.html

@@ -45,6 +45,7 @@ exclude = ["*node_modules*"]
 pythonpath = ["src", "src/dashboard"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--html=tests/report.html --self-contained-html"
 markers = [
     "unit: fast, mocked unit tests validating core logic",
     "integration: isolated Elasticsearch/DB abstraction tests",
