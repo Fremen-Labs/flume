@@ -62,20 +62,20 @@ def isolated_flume_project(api_client, mock_git_repo):
     
     # Register purely local project
     payload = {
-        "repoId": project_id,
-        "path": mock_git_repo,
-        "cloneStatus": "local"
+        "name": f"test-repo-{project_id}",
+        "localPath": mock_git_repo
     }
     
-    # Depending on exact API signature in api.projects
-    resp = api_client.post(f"/projects/{project_id}/register", json=payload)
-    if resp.status_code == 404:
-        # Fallback if route syntax differs
-        resp = api_client.post("/projects", json={"path": mock_git_repo})
+    resp = api_client.post("/projects", json=payload)
+    if resp.status_code == 200:
+        data = resp.json()
+        new_project_id = data.get("projectId")
+    else:
+        new_project_id = project_id
         
-    yield project_id
+    yield new_project_id
     
     # Teardown: Remove project from Elasticsearch
-    # (Assuming DELETE /api/projects/{id} exists)
-    api_client.delete(f"/projects/{project_id}")
+    if new_project_id:
+        api_client.post(f"/projects/{new_project_id}/delete")
 
