@@ -76,9 +76,9 @@ def _post_gateway(path: str, payload: dict, timeout: int = 180, max_retries: int
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            if e.code in (402, 429):
-                logger.error(f"Gateway rejected request due to explicit API Credit Exhaustion (HTTP {e.code}): {e.read().decode()}")
-                raise Exception(f"Terminal API Exhaustion: HTTP {e.code}") from e
+            if e.code in (400, 401, 402, 403, 404, 429):
+                logger.error(f"Gateway rejected request (HTTP {e.code}): {e.read().decode('utf-8', 'ignore')}")
+                raise Exception(f"Gateway HTTP {e.code}: {e.reason}") from e
             if attempt < max_retries:
                 base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
                 # Jitter: +/- 10%
@@ -93,6 +93,9 @@ def _post_gateway(path: str, payload: dict, timeout: int = 180, max_retries: int
                 logger.error(f"Gateway connection permanently failed after {max_retries} retries: {e}")
                 raise e
         except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            if isinstance(e, socket.timeout) and timeout >= 60:
+                logger.error(f"Gateway request timed out after {timeout}s. Not retrying as this indicates a slow LLM generation rather than a transient network error.")
+                raise e
             if attempt < max_retries:
                 base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
                 jitter = base_sleep * 0.1 * (random.random() * 2 - 1)

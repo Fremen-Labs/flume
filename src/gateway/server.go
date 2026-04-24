@@ -222,6 +222,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusPaymentRequired
 		} else if strings.Contains(errStr, "HTTP 429") {
 			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 401") || strings.Contains(errStr, "api key unavailable") {
+			statusCode = http.StatusUnauthorized
+		} else if strings.Contains(errStr, "HTTP 404") {
+			statusCode = http.StatusNotFound
 		} else if strings.Contains(errStr, "HTTP 400") {
 			statusCode = http.StatusBadRequest
 		}
@@ -330,6 +334,10 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusPaymentRequired
 		} else if strings.Contains(errStr, "HTTP 429") {
 			statusCode = http.StatusTooManyRequests
+		} else if strings.Contains(errStr, "HTTP 401") || strings.Contains(errStr, "api key unavailable") {
+			statusCode = http.StatusUnauthorized
+		} else if strings.Contains(errStr, "HTTP 404") {
+			statusCode = http.StatusNotFound
 		} else if strings.Contains(errStr, "HTTP 400") {
 			statusCode = http.StatusBadRequest
 		}

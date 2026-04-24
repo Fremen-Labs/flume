@@ -138,7 +138,14 @@ def _test_planner_connection(status: dict) -> dict:
     provider  = (status.get('provider') or '').lower().strip()
     base_url  = (status.get('baseUrl') or '').rstrip('/')
     api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
-
+    if not api_key:
+        try:
+            from llm_settings import _openbao_get_all
+            import pathlib
+            bao = _openbao_get_all(pathlib.Path(os.environ.get('FLUME_DATA_DIR', '/app')))
+            api_key = bao.get('LLM_API_KEY', '').strip()
+        except Exception:
+            pass
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
 

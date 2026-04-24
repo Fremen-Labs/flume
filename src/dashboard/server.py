@@ -1654,9 +1654,13 @@ def api_repo_branches(project_id: str):
             "message": "Repository is being cloned in the background\u2026",
         }
 
-    # ── Remote repo path: use GitHostClient REST API (no local clone required) ──
+    # ── Local clone precedence check ──────────────────────────────────────────
+    _local_path = proj.get("path") or ''
+    has_local_clone = _local_path and Path(_local_path).joinpath('.git').exists()
+
+    # ── Remote repo path: use GitHostClient REST API (no local clone available) ──
     repo_url = proj.get("repoUrl") or ""
-    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+    if not has_local_clone and cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
         try:
             client = get_git_client(proj)
             branches = client.get_branches()
@@ -1741,8 +1745,12 @@ def api_repo_tree(project_id: str, branch: str = ""):
     if cs in ("cloning", "indexing", "pending"):
         return JSONResponse(status_code=400, content={"error": "Repository is currently being cloned."})
 
+    # ── Local clone precedence check ──────────────────────────────────────────
+    _local_path = proj.get("path") or ''
+    has_local_clone = _local_path and Path(_local_path).joinpath('.git').exists()
+
     # ── Remote repo: GitHostClient REST API ──────────────────────────────────
-    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+    if not has_local_clone and cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
         try:
             client = get_git_client(proj)
             if not branch:
@@ -1838,8 +1846,12 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     if ".." in clean_path.split("/"):
         return JSONResponse(status_code=400, content={"error": "Invalid path"})
 
+    # ── Local clone precedence check ──────────────────────────────────────────
+    _local_path = proj.get("path") or ''
+    has_local_clone = _local_path and Path(_local_path).joinpath('.git').exists()
+
     # ── Remote repo: GitHostClient REST API ──────────────────────────────────
-    if cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
+    if not has_local_clone and cs in ("indexed", "cloned") and repo_url and _is_remote_url(repo_url):
         try:
             client = get_git_client(proj)
             if not branch:
