@@ -8,11 +8,11 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search, es_post
+from core.elasticsearch import es_post
 from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
 from core.elasticsearch import find_task_doc_by_logical_id
-from core.tasks import task_history, get_task_doc
+from core.tasks import task_history
 
 def _lazy_is_remote_url(url: str) -> bool:
     from server import _is_remote_url as _inner

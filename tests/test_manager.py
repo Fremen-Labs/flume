@@ -1,5 +1,4 @@
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import time
 
 # Add worker-manager to path directly since it has a hyphen in its name

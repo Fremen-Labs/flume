@@ -7,7 +7,6 @@ contain sensitive values must remain masked on read.
 
 Requires: Flume stack running (./flume start)
 """
-import pytest
 
 
 class TestLlmSettingsRead:

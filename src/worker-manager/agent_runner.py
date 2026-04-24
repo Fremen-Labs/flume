@@ -265,7 +265,7 @@ def _call_ollama(
                     inner = inner[:last_fence]
                 val = inner.strip()
             return json.loads(val)
-        except json.JSONDecodeError as de:
+        except json.JSONDecodeError:
             logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
             return None
     except Exception as e:
@@ -481,7 +481,8 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
 def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
     query = args.get('query', '')
-    target_path = _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
+    # execute the resolve path side effect just in case, though unused
+    _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_api_key = os.environ.get('ES_API_KEY', '')
@@ -1547,7 +1548,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     # ── Complexity-aware instruction ──────────────────────────────────────
     # Prevent the PM from re-decomposing tasks that the planner already scoped.
     item_type = (task or {}).get('item_type', 'task')
-    task_title = (task or {}).get('title', '')
+    
 
     instruction = (
         f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"

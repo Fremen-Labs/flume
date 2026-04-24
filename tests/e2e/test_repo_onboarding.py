@@ -1,4 +1,3 @@
-import pytest
 
 def test_ado_repo_registration(api_client, mock_git_repo):
     """

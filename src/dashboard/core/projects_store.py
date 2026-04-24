@@ -5,7 +5,7 @@ import urllib.error
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search, ES_URL, ctx
+from core.elasticsearch import ES_URL, ctx
 
 logger = get_logger(__name__)
 

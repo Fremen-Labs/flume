@@ -8,10 +8,10 @@ _SRC = _WS / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from flume_secrets import apply_runtime_config
+from flume_secrets import apply_runtime_config  # noqa: E402
 apply_runtime_config(_WS)
 
-from utils import llm_client
+from utils import llm_client  # noqa: E402
 
 try:
     print("Testing LLM chat...")

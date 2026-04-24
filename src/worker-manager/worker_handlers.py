@@ -983,7 +983,6 @@ def create_pr_for_task(task, reviewer_model, es_id: str | None = None):
 
     repo_id = task.get('repo')
     src     = _get_project_source(repo_id) or {}
-    gitflow = load_project_gitflow(repo_id)
     target_branch = resolve_pr_base_branch(repo_id)
 
     title = task.get('title') or f"Task {task_id}"

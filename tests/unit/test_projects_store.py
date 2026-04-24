@@ -4,7 +4,6 @@ Unit tests for core/projects_store.py — Project Configuration Defaults.
 Tests the gitflow default backfill logic and project data structure
 invariants without requiring a running Elasticsearch instance.
 """
-import pytest
 
 from core.projects_store import _ensure_gitflow_defaults, PROJECTS_INDEX
 

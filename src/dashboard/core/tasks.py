@@ -1,17 +1,14 @@
 import os
 import json
 import subprocess
-import threading
-import time
 import re
 from datetime import datetime, timezone
-import urllib.parse
 from pathlib import Path
 from typing import Optional
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search, es_post, es_upsert
-from core.projects_store import load_projects_registry, _es_projects_request, PROJECTS_INDEX
+from core.elasticsearch import es_search, es_post
+from core.projects_store import load_projects_registry
 
 
 

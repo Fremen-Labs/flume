@@ -1,6 +1,6 @@
 import time
 import httpx
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)

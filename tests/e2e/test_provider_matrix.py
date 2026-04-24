@@ -1,5 +1,4 @@
 import pytest
-import time
 
 # List of all officially supported Flume AI Grid providers
 PROVIDERS = [
@@ -53,7 +52,7 @@ def test_provider_planning_regression(api_client, gateway_client, flume_waiter, 
                     print(f"\n[Dynamic Fallback] Model '{model_name}' not found. Using discovered model '{first_available_model}'.")
                     actual_provider_model = f"ollama:{first_available_model}"
                 else:
-                    pytest.fail(f"Ollama is running, but no models are loaded on any node. Failing fast.")
+                    pytest.fail("Ollama is running, but no models are loaded on any node. Failing fast.")
     else:
         # For Frontier models, we need credentials loaded
         frontier_resp = gateway_client.get("/api/frontier-models")

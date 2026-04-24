@@ -7,7 +7,6 @@ and return documents with expected shapes.
 
 Requires: Flume stack running (./flume start)
 """
-import time
 import uuid
 import pytest
 

@@ -8,7 +8,6 @@ Requires: Flume stack running (./flume start)
 """
 import os
 import time
-import pytest
 
 
 class TestProjectCreationLifecycle:

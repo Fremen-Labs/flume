@@ -78,7 +78,7 @@ def _fetch_node_concurrency_caps() -> dict:
     """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints."""
     node_caps = {}
     try:
-        res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
+        res = es_request('/flume-node-registry/_search', {'size': 100}, method='GET')
         nodes = res.get('hits', {}).get('hits', []) if res else []
         for n in nodes:
             src = n.get('_source', {})
@@ -386,7 +386,8 @@ def _is_duplicate_task(task_title: str, task_id: str) -> bool:
             ]}},
         }
         res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-        hits = res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
+        # Execute search without binding unused hits variable
+        res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
         # Full scan: fetch titles of active tasks and compare normalized
         if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             body['size'] = 50
@@ -429,7 +430,7 @@ def _delete_remote_branch_for_task(task_src: dict) -> None:
     if not src or not (src.get('repoUrl') or src.get('repo_url')):
         return
     try:
-        from utils.git_host_client import get_git_client, GitHostNotFoundError, GitHostError  # noqa: PLC0415
+        from utils.git_host_client import get_git_client, GitHostNotFoundError  # noqa: PLC0415
         client = get_git_client(src)
         client.delete_remote_branch(branch)
         log(f"dedup_cleanup: deleted orphan remote branch {branch!r} for skipped task {task_src.get('id')}")
@@ -1278,8 +1279,7 @@ def promote_planned_tasks() -> int:
     return n
 
 
-import time
-import random
+import random  # noqa: E402
 
 last_resume_timestamp = 0
 

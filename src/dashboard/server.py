@@ -7,7 +7,6 @@ import re
 import shlex
 import signal
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -27,7 +26,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import traceback
-from fastapi import BackgroundTasks
 from concurrent.futures import ThreadPoolExecutor
 
 # Flume Bootstrap Logic
@@ -73,7 +71,6 @@ except _ue.HTTPError as _e:
 except Exception as _e:
     _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
 
-from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url  # type: ignore  # noqa: E402
 
 _DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
@@ -186,18 +183,13 @@ if not ES_VERIFY_TLS:
 
 from core.projects_store import (
     load_projects_registry,
-    save_projects_registry,
-    _upsert_project,
     _update_project_registry_field,
-    _delete_project_from_es,
 )
 
 
-from core.counters import es_counter_hwm, es_counter_set_hwm, get_next_id_sequence
 from core.elasticsearch import (
     es_search,
     find_task_doc_by_logical_id,
-    es_index,
     es_upsert,
     es_post,
     es_bulk_update_proxy,
@@ -205,7 +197,7 @@ from core.elasticsearch import (
     es_delete_doc,
 )
 
-from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
+from core.sessions_store import _utcnow_iso, _iso_elapsed_seconds
 
 def _lazy_append_task_agent_log_note(es_id: str, note: str) -> bool:
     from api.tasks import _append_task_agent_log_note
@@ -222,22 +214,13 @@ def _sync_llm_runtime_env():
 
 # --- Extracted Domain: Planning ---
 from core.planning import (
-    _planner_runtime_config, _planner_request_timeout_seconds,
-    _build_planning_status, _update_planning_status, _test_planner_connection,
-    _complete_planner_turn, _planner_should_use_codex_app_server,
-    call_planner_model, parse_llm_response, build_llm_messages,
-    create_planning_session, _run_initial_planning, refine_session,
-    placeholder_plan, simple_plan, _coalesce_story_tasks,
-    _count_plan_tasks, commit_plan
+    _count_plan_tasks
 )
 
 # --- Extracted Domain: Tasks ---
 from core.tasks import (
-    delete_task_branches, delete_repo_branches, load_workers,
-    priority_rank, queue_for_repo, transition_task,
-    task_history, git_repo_info, resolve_default_branch,
-    get_task_doc, create_task_pr, _git_task_context,
-    task_diff, task_commits
+    delete_task_branches, load_workers,
+    git_repo_info, resolve_default_branch
 )
 
 
@@ -695,7 +678,7 @@ def _count_plan_tasks(plan: Optional[dict]) -> int:
     return total
 
 
-from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware

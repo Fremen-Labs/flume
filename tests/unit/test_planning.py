@@ -9,15 +9,11 @@ Follows Google's Table-Driven Test Pattern for deterministic input→output
 validation with comprehensive edge-case coverage.
 """
 import json
-import re
-import sys
 import os
 import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timezone
+from unittest.mock import patch
 
 # Path setup and module mocking handled by conftest.py
-from core.sessions_store import _utcnow_iso, _iso_elapsed_seconds
 from core.planning import (
     parse_llm_response,
     _strip_json_blocks,
@@ -27,7 +23,6 @@ from core.planning import (
     _count_plan_tasks,
     _planner_llm_error_hint,
     _planner_request_timeout_seconds,
-    PLANNER_SYSTEM_PROMPT,
 )
 
 

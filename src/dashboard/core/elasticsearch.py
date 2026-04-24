@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import ssl
 import threading
@@ -7,7 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -182,7 +181,7 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
             raise
-        except Exception as e:
+        except Exception:
             if attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
