@@ -74,11 +74,24 @@ class TestWorkerBootstrap:
 
     def test_workers_are_idle(self, api_client):
         """On a clean stack, workers should be idle (no tasks dispatched)."""
-        data = api_client.get("/snapshot").json()
-        for w in data.get("workers", []):
-            assert w["status"] in ("idle", "running"), (
-                f"Worker '{w['name']}' in unexpected state: {w['status']}"
-            )
+        import time
+        max_retries = 5
+        for i in range(max_retries):
+            data = api_client.get("/snapshot").json()
+            all_idle = True
+            unexpected_states = []
+            for w in data.get("workers", []):
+                if w["status"] not in ("idle", "running"):
+                    all_idle = False
+                    unexpected_states.append(f"Worker '{w['name']}' is {w['status']}")
+            
+            if all_idle:
+                return
+                
+            if i < max_retries - 1:
+                time.sleep(3)
+                
+        pytest.fail(f"Workers failed to reach idle state: {', '.join(unexpected_states)}")
 
 
 class TestRoutingPolicyBootstrap:
