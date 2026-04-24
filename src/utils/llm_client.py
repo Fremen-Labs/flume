@@ -215,6 +215,10 @@ def chat(
                     payload['model'] = fallback
                     resp = _post_gateway('/v1/chat', payload, timeout=timeout_seconds)
                     content = resp.get('message', {}).get('content', '')
+                    if return_telemetry and return_usage:
+                        return content, resp.get('usage', {}), resp.get('telemetry', {})
+                    if return_telemetry:
+                        return content, resp.get('telemetry', {})
                     if return_usage:
                         return content, resp.get('usage', {})
                     return content
@@ -226,7 +230,7 @@ def chat(
 
     # Fallback to direct provider calls
     leg = _legacy()
-    return leg.chat(
+    leg_result = leg.chat(
         messages,
         model=model,
         temperature=temperature,
@@ -237,6 +241,11 @@ def chat(
         return_usage=return_usage,
         ollama_think=ollama_think,
     )
+    if return_telemetry and return_usage:
+        return leg_result[0], leg_result[1], {}
+    if return_telemetry:
+        return leg_result, {}
+    return leg_result
 
 
 def chat_with_tools(
@@ -313,7 +322,10 @@ def chat_with_tools(
                 logger.warning(f"Gateway chat_with_tools request failed for model '{m}': {e}. Intelligently downgrading to '{fallback}'.")
                 try:
                     payload['model'] = fallback
-                    return _post_gateway('/v1/chat/tools', payload, timeout=180)
+                    resp = _post_gateway('/v1/chat/tools', payload, timeout=180)
+                    if return_telemetry:
+                        return resp, resp.get('telemetry', {})
+                    return resp
                 except Exception as e2:
                     logger.warning(f"Gateway fallback chat_with_tools request also failed: {e2}. Proceeding to legacy client.")
             else:
@@ -321,7 +333,7 @@ def chat_with_tools(
             pass  # Fall through to legacy
 
     leg = _legacy()
-    return leg.chat_with_tools(
+    leg_result = leg.chat_with_tools(
         messages,
         tools,
         model=model,
@@ -331,3 +343,6 @@ def chat_with_tools(
         base_url_override=base_url_override,
         ollama_think=ollama_think,
     )
+    if return_telemetry:
+        return leg_result, {}
+    return leg_result

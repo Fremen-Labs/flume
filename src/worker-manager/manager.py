@@ -233,13 +233,13 @@ def get_dynamic_worker_limit() -> int:
             import multiprocessing
             cores = multiprocessing.cpu_count()
             limit = max(4, cores * 2)
-            _manager_logger.info(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
+            _manager_logger.debug(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
             return limit
         else:
             caps = _fetch_node_concurrency_caps()
             total_mesh_capacity = sum(caps.values())
             limit = max(2, total_mesh_capacity)
-            _manager_logger.info(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
+            _manager_logger.debug(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
             return limit
     except Exception as e:
         _manager_logger.error(f"Failed dynamic scaling, defaulting to 2: {e}")

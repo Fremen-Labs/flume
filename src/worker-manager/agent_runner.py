@@ -558,7 +558,7 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                     #    what a conventional RAG pipeline would send.
                     #    Formula: prompt + (chunks × avg_chunk_size) + summaries
                     task_prompt_tokens = len(json.dumps(args).encode('utf-8')) // 4
-                    num_chunks = min(max(len(hits), 6), 8)  # RAG retrieves 6-8 chunks
+                    num_chunks = len(hits)  # RAG baseline matches actual hits
                     avg_chunk_tokens = 768                    # midpoint of 512-1024
                     summary_tokens = 512                      # file-level summaries
                     baseline_tokens = task_prompt_tokens + (num_chunks * avg_chunk_tokens) + summary_tokens
