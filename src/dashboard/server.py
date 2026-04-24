@@ -2670,6 +2670,14 @@ async def complete_task(task_id: str):
 
 
 
+# --- Mount Domain Routers ---
+from api.projects import router as projects_router
+app.include_router(projects_router)
+from api.intake import router as intake_router
+app.include_router(intake_router)
+from api.tasks import router as tasks_router
+app.include_router(tasks_router)
+
 # Static Mount for Frontend
 from fastapi.responses import FileResponse
 
@@ -2691,16 +2699,6 @@ else:
     @app.get("/{full_path:path}")
     def fallback_root(full_path: str):
         return {"status": "ok", "message": "Flume UI bundle missing. CI fallback active."}
-
-
-
-# --- Mount Domain Routers ---
-from api.projects import router as projects_router
-app.include_router(projects_router)
-from api.intake import router as intake_router
-app.include_router(intake_router)
-from api.tasks import router as tasks_router
-app.include_router(tasks_router)
 
 if __name__ == "__main__":
     import uvicorn

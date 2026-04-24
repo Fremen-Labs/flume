@@ -890,7 +890,7 @@ func (s *Server) handleGetFrontierModels(w http.ResponseWriter, r *http.Request)
 		// Find credentials for this provider
 		var creds []CredentialPublicInfo
 		for _, cred := range credentials {
-			if strings.EqualFold(cred.Provider, providerID) {
+			if strings.EqualFold(cred.Provider, providerID) || (providerID == "xai" && strings.EqualFold(cred.Provider, "grok")) {
 				creds = append(creds, CredentialPublicInfo{
 					ID:     cred.ID,
 					Label:  cred.Label,
