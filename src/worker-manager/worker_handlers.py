@@ -611,7 +611,15 @@ def ensure_task_branch(task: dict) -> tuple[str | None, str | None]:
             # implementer stack commits on prior work and prevents the orphan-branch
             # explosion we saw when every retry generated a fresh uuid suffix.
             safe_tid = _sanitize_git_branch_segment(task_id)
-            branch = f"{prefix}/{safe_tid}"
+            
+            # Incorporate the task title into the branch name for human context
+            title = task.get('title') or ''
+            if title:
+                # Sanitize title aggressively, take first 50 chars to avoid absurdly long branches
+                safe_title = _sanitize_git_branch_segment(title.lower()[:50])
+                branch = f"{prefix}/{safe_tid}-{safe_title}"
+            else:
+                branch = f"{prefix}/{safe_tid}"
 
     # ── Local repo path: retain legacy worktree-free behaviour ──────────────
     # For locally-mounted repos (clone_status='local') we still check out a

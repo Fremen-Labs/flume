@@ -431,7 +431,15 @@ _IMPLEMENTER_TOOLS = [
 
 
 def _resolve_path(path: str, repo_path: Optional[str]) -> Path:
-    p = Path(path)
+    path_str = str(path)
+    # Automatically strip legacy ephemeral clone paths from the agent's memory
+    # to allow smooth resumption across worker claims without triggering sandbox blocks.
+    if path_str.startswith('/tmp/flume-'):
+        parts = path_str.split('/')
+        if len(parts) >= 4 and parts[1] == 'tmp' and parts[2].startswith('flume-'):
+            path_str = '/'.join(parts[3:])
+            
+    p = Path(path_str)
     try:
         base = Path(repo_path).resolve() if repo_path else Path('.').resolve()
         final_path = (base / p).resolve() if not p.is_absolute() else p.resolve()
