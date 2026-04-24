@@ -5,7 +5,91 @@ import { LiveMissionRadar } from '@/components/mission/LiveMissionRadar';
 import { toast } from 'sonner';
 import { useSystemState } from '@/hooks/useSystemState';
 
+import { useEffect, useCallback, useRef } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { fetchAgentModels, normalizeRoleSpec, RoleForm, SaveState, SETTINGS_DEFAULT_CREDENTIAL_ID } from '@/components/mission/AgentConfigPanel';
+
+
 export default function MissionControlPage() {
+
+  const queryClient = useQueryClient();
+  const { data: cfg, isLoading: cfgLoading } = useQuery({
+    queryKey: ['settings', 'agent-models'],
+    queryFn: fetchAgentModels,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+
+  const [roleForms, setRoleForms] = useState<Record<string, RoleForm>>({});
+  const [roleSaveState, setRoleSaveState] = useState<Record<string, SaveState>>({});
+  const [roleSaveMsg, setRoleSaveMsg] = useState<Record<string, string>>({});
+  const originalForms = useRef<Record<string, RoleForm>>({});
+
+  useEffect(() => {
+    if (!cfg) return;
+    const next: Record<string, RoleForm> = {};
+    const defP = cfg.settingsProvider;
+    const defM = cfg.defaultLlmModel;
+    const defH = cfg.defaultExecutionHost;
+    for (const id of cfg.roleIds) {
+      const effective = cfg.effective[id];
+      const row = normalizeRoleSpec(effective, {
+        credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
+        provider: defP,
+        model: defM,
+        host: defH,
+      });
+      next[id] = row;
+    }
+    setRoleForms(next);
+    originalForms.current = next;
+  }, [cfg]);
+
+  const updateRoleForm = useCallback((roleId: string, patch: Partial<RoleForm>) => {
+    setRoleForms((prev) => ({ ...prev, [roleId]: { ...prev[roleId], ...patch } }));
+  }, []);
+
+  const resetRole = useCallback((roleId: string) => {
+    const orig = originalForms.current[roleId];
+    if (orig) setRoleForms((prev) => ({ ...prev, [roleId]: orig }));
+    setRoleSaveState((prev) => ({ ...prev, [roleId]: 'idle' }));
+    setRoleSaveMsg((prev) => ({ ...prev, [roleId]: '' }));
+  }, []);
+
+  const saveRole = useCallback(async (roleId: string) => {
+    const form = roleForms[roleId];
+    if (!form) return;
+    setRoleSaveState((prev) => ({ ...prev, [roleId]: 'saving' }));
+    try {
+      let rolePayload: Record<string, unknown>;
+      if (form.useGlobal) {
+        rolePayload = { useGlobal: true, executionHost: form.executionHost.trim() };
+      } else {
+        rolePayload = {
+          credentialId: form.credentialId,
+          provider: form.provider,
+          model: form.model.trim(),
+          executionHost: form.executionHost.trim(),
+        };
+      }
+      const res = await fetch('/api/settings/agent-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roles: { [roleId]: rolePayload } }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((body as { error?: string }).error ?? 'Save failed');
+      setRoleSaveState((prev) => ({ ...prev, [roleId]: 'success' }));
+      setRoleSaveMsg((prev) => ({ ...prev, [roleId]: '' }));
+      originalForms.current[roleId] = form;
+      await queryClient.invalidateQueries({ queryKey: ['settings', 'agent-models'] });
+      setTimeout(() => setRoleSaveState((prev) => (prev[roleId] === 'success' ? { ...prev, [roleId]: 'idle' } : prev)), 4000);
+    } catch (e) {
+      setRoleSaveState((prev) => ({ ...prev, [roleId]: 'error' }));
+      setRoleSaveMsg((prev) => ({ ...prev, [roleId]: e instanceof Error ? e.message : 'Save failed' }));
+    }
+  }, [roleForms, queryClient]);
+
   const [haltingState, setHaltingState] = useState<'idle' | 'confirm' | 'halting'>('idle');
   const systemState = useSystemState(2000);
   const telemetry = systemState?.telemetry || {};
@@ -158,7 +242,17 @@ export default function MissionControlPage() {
       )}
 
       <div className="relative z-10">
-        <LiveMissionRadar />
+        
+          <LiveMissionRadar 
+            cfg={cfg}
+            roleForms={roleForms}
+            roleSaveState={roleSaveState}
+            roleSaveMsg={roleSaveMsg}
+            updateRoleForm={updateRoleForm}
+            saveRole={saveRole}
+            resetRole={resetRole}
+          />
+
       </div>
     </div>
   );

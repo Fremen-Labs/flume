@@ -230,10 +230,14 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
                 try:
                     from utils.llm_client_fallback import resolve_fallback_model
                     prov = "unknown"
-                    if "openai.com" in url: prov = "openai"
-                    elif "anthropic.com" in url: prov = "anthropic"
-                    elif "generativelanguage" in url: prov = "gemini"
-                    elif "/api/" in url or ":11434" in url: prov = "ollama"
+                    if "openai.com" in url:
+                        prov = "openai"
+                    elif "anthropic.com" in url:
+                        prov = "anthropic"
+                    elif "generativelanguage" in url:
+                        prov = "gemini"
+                    elif "/api/" in url or ":11434" in url:
+                        prov = "ollama"
                     
                     b_url = url.split('/api')[0] if prov == "ollama" else ""
                     fallback = resolve_fallback_model(prov, payload['model'], b_url)
@@ -267,10 +271,14 @@ def _post(url, payload, extra_headers=None, timeout=120, max_retries=4):
                 try:
                     from utils.llm_client_fallback import resolve_fallback_model
                     prov = "unknown"
-                    if "openai.com" in url: prov = "openai"
-                    elif "anthropic.com" in url: prov = "anthropic"
-                    elif "generativelanguage" in url: prov = "gemini"
-                    elif "/api/" in url or ":11434" in url: prov = "ollama"
+                    if "openai.com" in url:
+                        prov = "openai"
+                    elif "anthropic.com" in url:
+                        prov = "anthropic"
+                    elif "generativelanguage" in url:
+                        prov = "gemini"
+                    elif "/api/" in url or ":11434" in url:
+                        prov = "ollama"
                     
                     b_url = url.split('/api')[0] if prov == "ollama" else ""
                     fallback = resolve_fallback_model(prov, payload['model'], b_url)

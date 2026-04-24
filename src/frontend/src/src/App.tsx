@@ -8,9 +8,7 @@ import { AppLayout } from "@/components/AppLayout";
 import Dashboard from "@/pages/Dashboard";
 import ProjectsPage from "@/pages/ProjectsPage";
 import ProjectDetailPage from "@/pages/ProjectDetailPage";
-import AgentsPage from "@/pages/AgentsPage";
 import QueuePage from "@/pages/QueuePage";
-import ActivityPage from "@/pages/ActivityPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import SettingsPage from "@/pages/SettingsPage";
 import SecurityPage from "@/pages/SecurityPage";
@@ -33,9 +31,7 @@ const App = () => (
               <Route path="/mission-control" element={<MissionControlPage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:id" element={<ProjectDetailPage />} />
-              <Route path="/agents" element={<AgentsPage />} />
               <Route path="/queue" element={<QueuePage />} />
-              <Route path="/activity" element={<ActivityPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/nodes" element={<NodesOverview />} />

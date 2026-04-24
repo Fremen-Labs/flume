@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -94,4 +96,36 @@ func TestNormalizeGeminiModel(t *testing.T) {
 			t.Errorf("NormalizeGeminiModel(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
+}
+
+func TestSecretStoreTokenResolution(t *testing.T) {
+	// Clear the environment to ensure isolation
+	os.Unsetenv("OPENBAO_TOKEN")
+
+	t.Run("explicit token", func(t *testing.T) {
+		store := NewSecretStore("http://openbao:8200", "test-token", "", 0)
+		if store.token != "test-token" {
+			t.Errorf("Expected token to be 'test-token', got %q", store.token)
+		}
+	})
+
+	t.Run("env fallback", func(t *testing.T) {
+		os.Setenv("OPENBAO_TOKEN", "env-token")
+		defer os.Unsetenv("OPENBAO_TOKEN")
+
+		store := NewSecretStore("http://openbao:8200", "", "", 0)
+		if store.token != "env-token" {
+			t.Errorf("Expected token to fall back to 'env-token', got %q", store.token)
+		}
+	})
+
+	t.Run("empty token error path", func(t *testing.T) {
+		store := NewSecretStore("http://openbao:8200", "", "", 0)
+		// Assuming readKV is internal, we can test GetLLMKey which uses readKV
+		ctx := context.Background()
+		key := store.GetLLMKey(ctx, "test-id")
+		if key != "" {
+			t.Errorf("Expected empty key due to missing OPENBAO_TOKEN, got %q", key)
+		}
+	})
 }

@@ -337,12 +337,12 @@ var StartCmd = &cobra.Command{
 		}
 
 		// ── Seed node mesh from primary Ollama host + wizard entries ────────
+		gatewayPort := "8090" // default gateway port
+		gatewayURL := fmt.Sprintf("http://localhost:%s", gatewayPort)
+
+		var seedEntries []orchestrator.NodeSeedEntry
+
 		if envCfg.Provider == "ollama" || envCfg.Provider == "exo" {
-			gatewayPort := "8090" // default gateway port
-			gatewayURL := fmt.Sprintf("http://localhost:%s", gatewayPort)
-
-			var seedEntries []orchestrator.NodeSeedEntry
-
 			// Always register the primary Ollama host so it appears on the Node Mesh page.
 			primaryHost := envCfg.Host
 			if primaryHost == "" {
@@ -363,20 +363,22 @@ var StartCmd = &cobra.Command{
 			// ReasoningScore and MaxContext are left at zero — the health checker
 			// dynamically derives them from POST /api/show within 15 seconds.
 			seedEntries = append(seedEntries, primaryEntry)
+		}
 
-			// Append any additional nodes collected during the interactive wizard.
-			for _, n := range envCfg.Nodes {
-				entry := orchestrator.NodeSeedEntry{
-					ID:       n.ID,
-					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
-					ModelTag: n.ModelTag,
-				}
-				if n.MemoryGB > 0 {
-					entry.Capabilities.MemoryGB = n.MemoryGB
-				}
-				seedEntries = append(seedEntries, entry)
+		// Append any additional nodes collected during the interactive wizard.
+		for _, n := range envCfg.Nodes {
+			entry := orchestrator.NodeSeedEntry{
+				ID:       n.ID,
+				Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
+				ModelTag: n.ModelTag,
 			}
+			if n.MemoryGB > 0 {
+				entry.Capabilities.MemoryGB = n.MemoryGB
+			}
+			seedEntries = append(seedEntries, entry)
+		}
 
+		if len(seedEntries) > 0 {
 			if err := orchestrator.SeedNodes(ctx, gatewayURL, seedEntries); err != nil {
 				log.Warn("Node mesh seeding encountered errors (non-fatal)", "error", err)
 			} else {

@@ -1,5 +1,4 @@
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import time
 
 # Add worker-manager to path directly since it has a hyphen in its name
@@ -50,6 +49,7 @@ def test_fetch_node_concurrency_caps_heterogeneous(mock_es):
 def test_execute_block_sweep(mock_es):
     """Tests that tasks are pushed to blocked only when total capacity is saturated"""
     
+    mock_es.return_value = {'updated': 1}
     node_loads = {'mac-studio': 4, 'mac-mini-1': 2}
     node_caps = {'mac-studio': 8, 'mac-mini-1': 2}
     
@@ -64,12 +64,13 @@ def test_execute_block_sweep(mock_es):
     
     call_args = mock_es.call_args[0]
     assert '/_update_by_query' in call_args[0]
-    assert call_args[1]['script']['source'] == manager.PAINLESS_BLOCK_SCRIPT
+    assert call_args[1]['script']['id'] == 'flume-task-block'
 
 @patch('manager.es_request')
 def test_execute_resume_sweep_jitter(mock_es):
     """Tests that Jitter correctly prevents immediate cyclical sweeps natively"""
     
+    mock_es.return_value = {'updated': 1}
     manager.last_resume_timestamp = time.time()
     
     # Called immediately after another sweep. Should abort due to 60s + 1-15s Jitter
@@ -83,4 +84,4 @@ def test_execute_resume_sweep_jitter(mock_es):
     
     call_args = mock_es.call_args[0]
     assert '/_update_by_query' in call_args[0]
-    assert call_args[1]['script']['source'] == manager.PAINLESS_RESUME_SCRIPT
+    assert call_args[1]['script']['id'] == 'flume-task-resume'

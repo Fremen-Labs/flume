@@ -1,4 +1,4 @@
-from utils import llm_client
+from utils import llm_client_legacy as llm_client
 
 def test_normalize_gemini_model():
     """Verify Gemini's model-mapping architecture is strict."""
@@ -9,4 +9,4 @@ def test_normalize_gemini_model():
 
 def test_provider_identification():
     """Verify robust LLM provider isolation based on environment."""
-    assert llm_client._PROVIDER in ["ollama", "openai", "anthropic", "gemini", "openai_compatible"]
+    assert llm_client._provider() in ["ollama", "openai", "anthropic", "gemini", "openai_compatible", "xai", "grok"]

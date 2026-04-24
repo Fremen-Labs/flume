@@ -131,8 +131,7 @@ var allIndices = []indexDef{
 			},
 		},
 	}},
-	{Name: "flume-tasks", Mapping: nil},
-	{Name: "flume-workers", Mapping: nil},
+	// ── Core project indices ──────────────────────────────────────
 
 	// ── AP-1: Atomic monotonic counters (replaces sequence_counters.json) ─
 	{Name: "flume-counters", Mapping: map[string]interface{}{
@@ -270,7 +269,6 @@ var allIndices = []indexDef{
 	}},
 
 	// ── System state / orchestration ─────────────────────────────────────
-	{Name: "agent-checkpoints", Mapping: nil},
 	{Name: "agent-plan-sessions", Mapping: nil},
 	{Name: "agent-system-cluster", Mapping: nil},
 	{Name: "agent-system-workers", Mapping: nil},
@@ -357,6 +355,7 @@ var allTemplates = []templateDef{
 					"number_of_replicas": 0,
 				},
 				"mappings": map[string]interface{}{
+					"dynamic": false,
 					"dynamic_templates": []map[string]interface{}{
 						{
 							"strings_as_keywords": map[string]interface{}{
@@ -656,8 +655,10 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 				"number_of_replicas":             0,
 				"index.lifecycle.name":           "flume-task-records-policy",
 				"index.lifecycle.rollover_alias": "agent-task-records",
+				"index.refresh_interval":         "30s",
 			},
 			"mappings": map[string]interface{}{
+				"dynamic": false,
 				"dynamic_templates": []map[string]interface{}{
 					{
 						"strings_as_keywords": map[string]interface{}{
@@ -677,6 +678,9 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 					"owner":               map[string]interface{}{"type": "keyword"},
 					"updated_at":          map[string]interface{}{"type": "date"},
 					"last_update":         map[string]interface{}{"type": "date"},
+					"execution_thoughts":  map[string]interface{}{"type": "object", "enabled": false},
+					"agent_log":           map[string]interface{}{"type": "object", "enabled": false},
+					"doc":                 map[string]interface{}{"type": "object", "enabled": false},
 				},
 			},
 		},

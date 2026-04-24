@@ -104,7 +104,11 @@ func (p *FrontierProber) probeModel(ctx context.Context, fm FrontierModelWeight)
 		}
 	} else {
 		// OpenAI compatible format
-		url := strings.TrimRight(baseURL, "/") + "/v1/chat/completions"
+		normBase := strings.TrimRight(baseURL, "/")
+		if strings.HasSuffix(normBase, "/v1") {
+			normBase = strings.TrimSuffix(normBase, "/v1")
+		}
+		url := normBase + "/v1/chat/completions"
 		payload := `{"model":"` + fm.Model + `","max_tokens":1,"messages":[{"role":"user","content":"."}]}`
 		req, errReq = http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload))
 		if errReq == nil {

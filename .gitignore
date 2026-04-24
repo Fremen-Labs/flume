@@ -9,6 +9,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+.venv/
+venv/
 
 # Node / frontend
 node_modules/
@@ -22,3 +25,6 @@ dist/
 /flume
 .flume/agents/
 .flume/worktrees/
+
+# Tests
+/tests/*.html

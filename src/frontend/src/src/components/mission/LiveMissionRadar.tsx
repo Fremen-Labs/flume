@@ -1,12 +1,30 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { Radar, Activity, CheckCircle2, Clock, Server, Monitor, TerminalSquare } from 'lucide-react';
+
+import { useState } from 'react';
+import { ChevronDown } from 'lucide-react';
+import { RoleConfigPanel, RoleForm, SaveState } from '@/components/mission/AgentConfigPanel';
+import type { AgentModelsResponse } from '@/types';
+
 import { StatusBadge } from '@/components/StatusBadge';
 import { Line, LineChart, ResponsiveContainer } from 'recharts';
 import { useSystemState, WorkerState } from '@/hooks/useSystemState';
 import { useWorkerHistory } from '@/hooks/useWorkerHistory';
 import { useTelemetryStream } from '@/hooks/useTelemetryStream';
 
-export function LiveMissionRadar() {
+
+interface LiveMissionRadarProps {
+  cfg?: AgentModelsResponse;
+  roleForms?: Record<string, RoleForm>;
+  roleSaveState?: Record<string, SaveState>;
+  roleSaveMsg?: Record<string, string>;
+  updateRoleForm?: (roleId: string, patch: Partial<RoleForm>) => void;
+  saveRole?: (roleId: string) => Promise<void>;
+  resetRole?: (roleId: string) => void;
+}
+
+export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, updateRoleForm, saveRole, resetRole }: LiveMissionRadarProps) {
+
   const data = useSystemState(2000);
   const history = useWorkerHistory(data);
   const logs = useTelemetryStream();
@@ -77,8 +95,55 @@ export function LiveMissionRadar() {
               {data.workers.map((worker: WorkerState, i: number) => {
             const isActive = worker.status === 'claimed' || worker.status === 'active';
             return (
-              <motion.div
+              <WorkerRadarCard
                 key={worker.name}
+                worker={worker}
+                isActive={isActive}
+                i={i}
+                cfg={cfg}
+                form={roleForms?.[worker.role]}
+                saveState={roleSaveState?.[worker.role] || 'idle'}
+                saveMsg={roleSaveMsg?.[worker.role] || ''}
+                updateRoleForm={updateRoleForm}
+                saveRole={saveRole}
+                resetRole={resetRole}
+              />
+            );
+                    })}
+            </AnimatePresence>
+          </div>
+        </div>
+
+        {/* Live Telemetry Feed (Sidebar) */}
+        <div className="lg:col-span-1 border border-white/[0.05] rounded-xl flex flex-col overflow-hidden bg-black/60 shadow-inner">
+          <div className="p-3 border-b border-white/[0.05] bg-white/[0.01] flex items-center gap-2">
+            <TerminalSquare className="w-3.5 h-3.5 text-muted-foreground" />
+            <h3 className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Live Telemetry Feed</h3>
+            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 space-y-2 h-[400px] lg:h-auto custom-scrollbar">
+            {logs.length === 0 ? (
+              <div className="text-[10px] text-muted-foreground/30 text-center py-4 font-mono">Awaiting stream...</div>
+            ) : (
+              logs.map((log) => (
+                <div key={log.id} className="text-[10px] font-mono leading-relaxed">
+                  <span className="text-muted-foreground/50">[{log.time}]</span> 
+                  <span className={log.level === 'INFO' ? 'text-primary/90' : 'text-success/90'}> {log.msg}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function WorkerRadarCard({ worker, isActive, i, cfg, form, saveState, saveMsg, updateRoleForm, saveRole, resetRole }: any) {
+  const [configOpen, setConfigOpen] = useState(false);
+  return (
+              <motion.div
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
@@ -113,42 +178,42 @@ export function LiveMissionRadar() {
                   </div>
 
                   <div className="flex items-center justify-between text-[10px] pt-1">
-                    <span className="text-muted-foreground flex items-center gap-1.5">
-                      <Server className="w-3.5 h-3.5" /> <span className="capitalize">{worker.llm_provider}</span>
-                    </span>
-                    <span className="text-muted-foreground flex items-center gap-1.5 truncate max-w-[120px]">
-                      <Monitor className="w-3.5 h-3.5" /> {worker.execution_host.split('.')[0]}
-                    </span>
+                    <div className="flex items-center gap-4">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        <Server className="w-3.5 h-3.5" /> <span className="capitalize">{worker.llm_provider}</span>
+                      </span>
+                      <span className="text-muted-foreground flex items-center gap-1.5 truncate max-w-[120px]">
+                        <Monitor className="w-3.5 h-3.5" /> {worker.execution_host.split('.')[0]}
+                      </span>
+                    </div>
+                    {cfg && form && (
+                      <button
+                        type="button"
+                        onClick={() => setConfigOpen((v) => !v)}
+                        className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                        aria-expanded={configOpen}
+                      >
+                        Configure
+                        <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${configOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
                   </div>
                 </div>
+                <AnimatePresence>
+                  {configOpen && cfg && form && updateRoleForm && saveRole && resetRole && (
+                    <RoleConfigPanel
+                      roleId={worker.role}
+                      form={form}
+                      cfg={cfg}
+                      onChange={(patch) => updateRoleForm(worker.role, patch)}
+                      onSave={() => saveRole(worker.role)}
+                      onReset={() => resetRole(worker.role)}
+                      saveState={saveState}
+                      saveMsg={saveMsg}
+                    />
+                  )}
+                </AnimatePresence>
               </motion.div>
-            );
-                    })}
-            </AnimatePresence>
-          </div>
-        </div>
-
-        {/* Live Telemetry Feed (Sidebar) */}
-        <div className="lg:col-span-1 border border-white/[0.05] rounded-xl flex flex-col overflow-hidden bg-black/60 shadow-inner">
-          <div className="p-3 border-b border-white/[0.05] bg-white/[0.01] flex items-center gap-2">
-            <TerminalSquare className="w-3.5 h-3.5 text-muted-foreground" />
-            <h3 className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Live Telemetry Feed</h3>
-            <div className="ml-auto w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-          </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 h-[400px] lg:h-auto custom-scrollbar">
-            {logs.length === 0 ? (
-              <div className="text-[10px] text-muted-foreground/30 text-center py-4 font-mono">Awaiting stream...</div>
-            ) : (
-              logs.map((log) => (
-                <div key={log.id} className="text-[10px] font-mono leading-relaxed">
-                  <span className="text-muted-foreground/50">[{log.time}]</span> 
-                  <span className={log.level === 'INFO' ? 'text-primary/90' : 'text-success/90'}> {log.msg}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
+

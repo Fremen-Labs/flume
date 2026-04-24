@@ -78,7 +78,7 @@ def _fetch_node_concurrency_caps() -> dict:
     """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints."""
     node_caps = {}
     try:
-        res = es_request(f'/flume-node-registry/_search', {'size': 100}, method='GET')
+        res = es_request('/flume-node-registry/_search', {'size': 100}, method='GET')
         nodes = res.get('hits', {}).get('hits', []) if res else []
         for n in nodes:
             src = n.get('_source', {})
@@ -206,10 +206,14 @@ def load_agent_role_defs():
 
 
 def fetch_routing_policy() -> dict:
+    import urllib.error
     try:
         res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
         if res and '_source' in res:
             return res['_source']
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     except Exception as e:
         _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     return {}
@@ -229,13 +233,13 @@ def get_dynamic_worker_limit() -> int:
             import multiprocessing
             cores = multiprocessing.cpu_count()
             limit = max(4, cores * 2)
-            _manager_logger.info(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
+            _manager_logger.debug(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
             return limit
         else:
             caps = _fetch_node_concurrency_caps()
             total_mesh_capacity = sum(caps.values())
             limit = max(2, total_mesh_capacity)
-            _manager_logger.info(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
+            _manager_logger.debug(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
             return limit
     except Exception as e:
         _manager_logger.error(f"Failed dynamic scaling, defaulting to 2: {e}")
@@ -382,7 +386,8 @@ def _is_duplicate_task(task_title: str, task_id: str) -> bool:
             ]}},
         }
         res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-        hits = res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
+        # Execute search without binding unused hits variable
+        res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
         # Full scan: fetch titles of active tasks and compare normalized
         if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             body['size'] = 50
@@ -425,7 +430,7 @@ def _delete_remote_branch_for_task(task_src: dict) -> None:
     if not src or not (src.get('repoUrl') or src.get('repo_url')):
         return
     try:
-        from utils.git_host_client import get_git_client, GitHostNotFoundError, GitHostError  # noqa: PLC0415
+        from utils.git_host_client import get_git_client, GitHostNotFoundError  # noqa: PLC0415
         client = get_git_client(src)
         client.delete_remote_branch(branch)
         log(f"dedup_cleanup: deleted orphan remote branch {branch!r} for skipped task {task_src.get('id')}")
@@ -670,7 +675,6 @@ PAINLESS_CLAIM_SCRIPT = (
     '  ctx.op = "noop";'
     '}'
 )
->>>>>>> 4e6fac51 (Implement Adaptive Concurrency Management and More (#227))
 
 def try_atomic_claim(
     role: str,
@@ -1275,8 +1279,7 @@ def promote_planned_tasks() -> int:
     return n
 
 
-import time
-import random
+import random  # noqa: E402
 
 last_resume_timestamp = 0
 

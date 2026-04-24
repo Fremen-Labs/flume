@@ -24,6 +24,7 @@ export interface ApiTask {
   objective?: string;
   repo?: string;
   item_type?: 'epic' | 'feature' | 'story' | 'task';
+  work_item_type?: 'epic' | 'feature' | 'story' | 'task';
   status: string;
   priority: string;
   owner?: string;

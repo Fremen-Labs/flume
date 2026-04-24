@@ -14,13 +14,13 @@ _DB = _SRC / "dashboard"
 if str(_DB) not in sys.path:
     sys.path.insert(0, str(_DB))
 
-from flume_secrets import apply_runtime_config
+from flume_secrets import apply_runtime_config  # noqa: E402
 apply_runtime_config(_WS)
 
-import worker_handlers
+import worker_handlers  # noqa: E402
 
-import urllib.request
-import json
+import urllib.request  # noqa: E402
+import json  # noqa: E402
 req = urllib.request.Request("http://elasticsearch:9200/flume-projects/_doc/proj-5bc17450")
 res = urllib.request.urlopen(req).read()
 data = json.loads(res.decode('utf-8'))

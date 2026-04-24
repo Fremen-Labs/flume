@@ -265,7 +265,7 @@ def _call_ollama(
                     inner = inner[:last_fence]
                 val = inner.strip()
             return json.loads(val)
-        except json.JSONDecodeError as de:
+        except json.JSONDecodeError:
             logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
             return None
     except Exception as e:
@@ -431,7 +431,15 @@ _IMPLEMENTER_TOOLS = [
 
 
 def _resolve_path(path: str, repo_path: Optional[str]) -> Path:
-    p = Path(path)
+    path_str = str(path)
+    # Automatically strip legacy ephemeral clone paths from the agent's memory
+    # to allow smooth resumption across worker claims without triggering sandbox blocks.
+    if path_str.startswith('/tmp/flume-'):
+        parts = path_str.split('/')
+        if len(parts) >= 4 and parts[1] == 'tmp' and parts[2].startswith('flume-'):
+            path_str = '/'.join(parts[3:])
+            
+    p = Path(path_str)
     try:
         base = Path(repo_path).resolve() if repo_path else Path('.').resolve()
         final_path = (base / p).resolve() if not p.is_absolute() else p.resolve()
@@ -473,7 +481,8 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
 
 def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
     query = args.get('query', '')
-    target_path = _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
+    # execute the resolve path side effect just in case, though unused
+    _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_api_key = os.environ.get('ES_API_KEY', '')
@@ -558,7 +567,7 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                     #    what a conventional RAG pipeline would send.
                     #    Formula: prompt + (chunks × avg_chunk_size) + summaries
                     task_prompt_tokens = len(json.dumps(args).encode('utf-8')) // 4
-                    num_chunks = min(max(len(hits), 6), 8)  # RAG retrieves 6-8 chunks
+                    num_chunks = len(hits)  # RAG baseline matches actual hits
                     avg_chunk_tokens = 768                    # midpoint of 512-1024
                     summary_tokens = 512                      # file-level summaries
                     baseline_tokens = task_prompt_tokens + (num_chunks * avg_chunk_tokens) + summary_tokens
@@ -1539,7 +1548,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
     # ── Complexity-aware instruction ──────────────────────────────────────
     # Prevent the PM from re-decomposing tasks that the planner already scoped.
     item_type = (task or {}).get('item_type', 'task')
-    task_title = (task or {}).get('title', '')
+    
 
     instruction = (
         f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"
