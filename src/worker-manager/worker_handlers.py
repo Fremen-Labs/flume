@@ -15,6 +15,8 @@ import urllib.request
 
 import uuid
 import socket
+import asyncio
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +43,11 @@ from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 apply_runtime_config(_WS)
 
 from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402  # type: ignore
+
+async def _run_with_client(func, *args, **kwargs):
+    async with httpx.AsyncClient() as client:
+        kwargs['client'] = client
+        return await func(*args, **kwargs)
 
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace  # noqa: E402
@@ -1953,7 +1960,7 @@ def handle_pm_dispatcher_worker(task):
         append_execution_thought(es_id, f"*[PM Dispatcher]* Sending to LLM for decomposition analysis (model: `{active_model}`)…")
 
     try:
-        result = run_pm_dispatcher(task)
+        result = asyncio.run(_run_with_client(run_pm_dispatcher, task))
     except Exception as e:
         log(f"pm-dispatcher: Execution Trap mapping decomposition on {task_id} natively: {e}")
         if es_id:
@@ -2344,7 +2351,7 @@ def handle_implementer_worker(task, es_id):
     released = False
 
     try:
-        result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress, on_thought=_on_thought)
+        result = asyncio.run(_run_with_client(run_implementer, task, repo_path=repo_path, on_progress=_on_progress, on_thought=_on_thought))
         implementer_model = task.get('preferred_model') or _get_active_llm_model()
 
 
@@ -2670,7 +2677,7 @@ def handle_tester_worker(task, es_id):
         log(f"tester: task={task_id} blocked after {next_retries} retry loops (cap={_TESTER_RETRY_CAP})")
         return True
 
-    result = run_tester(task)
+    result = asyncio.run(_run_with_client(run_tester, task))
     tester_model = task.get('preferred_model') or _get_active_llm_model()
 
     if result.action == 'fail':
@@ -2828,7 +2835,7 @@ def handle_reviewer_worker(task, es_id):
         log(f"reviewer: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
-    result = run_reviewer(task)
+    result = asyncio.run(_run_with_client(run_reviewer, task))
     reviewer_model = task.get('preferred_model') or _get_active_llm_model()
 
     verdict = result.verdict or 'approved'

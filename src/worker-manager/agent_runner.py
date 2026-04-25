@@ -58,7 +58,7 @@ class AgentResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _emit_usage(
+async def _emit_usage(
     task: Optional[dict[str, Any]],
     usage: dict,
     *,
@@ -66,6 +66,7 @@ def _emit_usage(
     baseline_full_context_tokens: int = 0,
     actual_tokens_sent: int = 0,
     savings: int = 0,
+    client: httpx.AsyncClient = None,
 ):
     """Emit a token-usage telemetry document to agent-token-telemetry.
 
@@ -76,25 +77,15 @@ def _emit_usage(
         baseline_full_context_tokens: Tokens if the LLM received all blast-radius files.
         actual_tokens_sent: Tokens actually consumed via Elastro's targeted results.
         savings: Honest delta: baseline_tokens - actual_tokens_sent (>= 0).
+        client: Shared httpx.AsyncClient.
     """
-    if not task or not usage:
+    if not task or not usage or not client:
         return
     try:
-        import urllib.request
-        import json
-        import ssl
         from datetime import datetime, timezone
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_key = os.environ.get('ES_API_KEY', '')
-
-        # S2: Only disable TLS verification for non-TLS endpoints
-        ssl_ctx = None
-        if es_url.startswith('https'):
-            ssl_ctx = ssl.create_default_context()
-            if os.environ.get('ES_VERIFY_TLS', 'true').lower() == 'false':
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
 
         # P4: Ollama returns prompt_eval_count/eval_count, OpenAI uses
         # prompt_tokens/completion_tokens. Accept both key conventions.
@@ -124,17 +115,20 @@ def _emit_usage(
             'created_at': ts
         }
         hdrs = {'Content-Type': 'application/json'}
-        # S1: Only send Authorization header when an API key is present
         if es_key:
             hdrs['Authorization'] = f'ApiKey {es_key}'
-        req = urllib.request.Request(f"{es_url}/agent-token-telemetry/_doc", data=json.dumps(doc).encode(), headers=hdrs, method='POST')
-        with urllib.request.urlopen(req, timeout=2, context=ssl_ctx):
-            pass
+            
+        await client.post(
+            f"{es_url}/agent-token-telemetry/_doc",
+            json=doc,
+            headers=hdrs,
+            timeout=2.0
+        )
     except Exception as e:
         logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
 
-def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict):
-    if not task or not telemetry:
+async def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict, client: httpx.AsyncClient = None):
+    if not task or not telemetry or not client:
         return
     tid = task.get('id', task.get('_id'))
     if not tid:
@@ -144,9 +138,6 @@ def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict):
     if not host:
         return
     try:
-        import urllib.request
-        import json
-        import ssl
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_key = os.environ.get('ES_API_KEY', '')
@@ -158,20 +149,12 @@ def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict):
         if model:
             doc['model'] = model
             
-        req = urllib.request.Request(
-            f"{es_url}/{os.environ.get('ES_INDEX_TASKS', 'agent-task-records')}/_update/{tid}", 
-            data=json.dumps({'doc': doc}).encode(), 
-            headers=hdrs, 
-            method='POST'
+        await client.post(
+            f"{es_url}/{os.environ.get('ES_INDEX_TASKS', 'agent-task-records')}/_update/{tid}",
+            json={'doc': doc},
+            headers=hdrs,
+            timeout=2.0
         )
-        ctx = None
-        if es_url.startswith('https'):
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-        with urllib.request.urlopen(req, context=ctx, timeout=2):
-            pass
         logger.info(f"Synchronized execution telemetry to core worker registry for task {tid}")
     except Exception as e:
         logger.warning(f"Failed to sync execution host to task: {e}")
@@ -221,21 +204,27 @@ def _task_uses_codex_app_server(task: Optional[dict[str, Any]]) -> bool:
     return False
 
 
-def _call_ollama(
+async def _call_ollama(
     system_prompt: str,
     user_payload: dict[str, Any],
     model: Optional[str] = None,
     task: Optional[dict[str, Any]] = None,
+    client: httpx.AsyncClient = None,
 ) -> Optional[dict[str, Any]]:
     from utils import llm_client
     messages = [
         {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': json.dumps(user_payload, indent=2)},
     ]
+    if not client:
+        logger.error("[agent_runner] _call_ollama missing httpx client")
+        return None
+        
     try:
         kw = _task_llm_kw(task)
         role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        content, usage, telemetry = llm_client.chat(
+        content, usage, telemetry = await llm_client.chat_async(
+            client,
             messages,
             model=model or _current_llm_model(),
             temperature=0.2,
@@ -248,8 +237,8 @@ def _call_ollama(
             task_id=task.get('id', task.get('_id')) if task else None,
             **kw,
         )
-        _emit_usage(task, usage)
-        _sync_task_execution_host(task, telemetry)
+        await _emit_usage(task, usage, client=client)
+        await _sync_task_execution_host(task, telemetry, client=client)
         content = content.strip()
         try:
             val = content
@@ -479,10 +468,13 @@ def _exec_write_file(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR writing file: {e}'
 
 
-def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
+async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: httpx.AsyncClient = None) -> str:
     query = args.get('query', '')
     # execute the resolve path side effect just in case, though unused
     _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
+    if not client:
+        return f"ERROR: _exec_elastro_query_ast missing httpx client"
+        
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
         es_api_key = os.environ.get('ES_API_KEY', '')
@@ -511,13 +503,6 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
 
         elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
 
-        req = urllib.request.Request(
-            f"{es_url}/{elastro_index}/_search",
-            data=json.dumps(query_payload).encode(),
-            headers=headers,
-            method='POST'
-        )
-
         # ── Token accounting defaults ──────────────────────────────────────
         actual_tokens_sent = 0
         baseline_tokens = 0
@@ -525,74 +510,83 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
         savings = 0
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
-                hits = data.get('hits', {}).get('hits', [])
-                if not hits:
-                    output = f"AST Search: No matching nodes found for '{query}' in index '{elastro_index}'. Try a broader search term or fall back to list_directory + grep."
-                else:
-                    output_chunks = []
-                    blast_radius_files: set[str] = set()
-                    total_stored_bytes = 0
-                    for h in hits:
-                        src = h.get('_source', {})
-                        fp = src.get('file_path', 'unknown')
-                        chunk_type = src.get('chunk_type', 'file')
-                        chunk_name = src.get('chunk_name', 'module')
-                        ext = src.get('extension', '')
-                        fns_defined = src.get('functions_defined', [])
-                        fns_called = src.get('functions_called', [])
-                        content = src.get('content', '')[:800]
+            resp = await client.post(
+                f"{es_url}/{elastro_index}/_search",
+                json=query_payload,
+                headers=headers,
+                timeout=15.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            hits = data.get('hits', {}).get('hits', [])
+            if not hits:
+                output = f"AST Search: No matching nodes found for '{query}' in index '{elastro_index}'. Try a broader search term or fall back to list_directory + grep."
+            else:
+                output_chunks = []
+                blast_radius_files: set[str] = set()
+                total_stored_bytes = 0
+                for h in hits:
+                    src = h.get('_source', {})
+                    fp = src.get('file_path', 'unknown')
+                    chunk_type = src.get('chunk_type', 'file')
+                    chunk_name = src.get('chunk_name', 'module')
+                    ext = src.get('extension', '')
+                    fns_defined = src.get('functions_defined', [])
+                    fns_called = src.get('functions_called', [])
+                    content = src.get('content', '')[:800]
 
-                        entry = f"── {fp} ({chunk_type}: {chunk_name}) [{ext}]"
-                        if fns_defined:
-                            entry += f"\n  Defines: {', '.join(fns_defined[:10])}"
-                        if fns_called:
-                            entry += f"\n  Calls: {', '.join(fns_called[:10])}"
-                        entry += f"\n  Content:\n{content}"
-                        output_chunks.append(entry)
+                    entry = f"── {fp} ({chunk_type}: {chunk_name}) [{ext}]"
+                    if fns_defined:
+                        entry += f"\n  Defines: {', '.join(fns_defined[:10])}"
+                    if fns_called:
+                        entry += f"\n  Calls: {', '.join(fns_called[:10])}"
+                    entry += f"\n  Content:\n{content}"
+                    output_chunks.append(entry)
 
-                        # Track unique files for full-context baseline
-                        if fp and fp not in blast_radius_files:
-                            blast_radius_files.add(fp)
-                            total_stored_bytes += len(content.encode('utf-8'))
+                    # Track unique files for full-context baseline
+                    if fp and fp not in blast_radius_files:
+                        blast_radius_files.add(fp)
+                        total_stored_bytes += len(content.encode('utf-8'))
 
-                    output = f"AST Search Results ({len(hits)} hits):\n\n" + "\n\n".join(output_chunks)
+                output = f"AST Search Results ({len(hits)} hits):\n\n" + "\n\n".join(output_chunks)
 
-                    # ── Realistic Token Savings Accounting ─────────────────
-                    # 1. actual_tokens_sent: what the agent actually received
-                    actual_tokens_sent = len(output.encode('utf-8')) // 4
+                # ── Realistic Token Savings Accounting ─────────────────
+                # 1. actual_tokens_sent: what the agent actually received
+                actual_tokens_sent = len(output.encode('utf-8')) // 4
 
-                    # 2. baseline_tokens (Naive RAG): conservative estimate of
-                    #    what a conventional RAG pipeline would send.
-                    #    Formula: prompt + (chunks × avg_chunk_size) + summaries
-                    task_prompt_tokens = len(json.dumps(args).encode('utf-8')) // 4
-                    num_chunks = len(hits)  # RAG baseline matches actual hits
-                    avg_chunk_tokens = 768                    # midpoint of 512-1024
-                    summary_tokens = 512                      # file-level summaries
-                    baseline_tokens = task_prompt_tokens + (num_chunks * avg_chunk_tokens) + summary_tokens
+                # 2. baseline_tokens (Naive RAG): conservative estimate of
+                #    what a conventional RAG pipeline would send.
+                #    Formula: prompt + (chunks × avg_chunk_size) + summaries
+                task_prompt_tokens = len(json.dumps(args).encode('utf-8')) // 4
+                num_chunks = len(hits)  # RAG baseline matches actual hits
+                avg_chunk_tokens = 768                    # midpoint of 512-1024
+                summary_tokens = 512                      # file-level summaries
+                baseline_tokens = task_prompt_tokens + (num_chunks * avg_chunk_tokens) + summary_tokens
 
-                    # 3. baseline_full_context_tokens: all files in the blast radius.
-                    #    AST stores content[:800] per chunk; 5× heuristic (v1) to
-                    #    approximate full file sizes.
-                    baseline_full_context_tokens = max(total_stored_bytes * 5 // 4, baseline_tokens)
+                # 3. baseline_full_context_tokens: all files in the blast radius.
+                #    AST stores content[:800] per chunk; 5× heuristic (v1) to
+                #    approximate full file sizes.
+                baseline_full_context_tokens = max(total_stored_bytes * 5 // 4, baseline_tokens)
 
-                    # Honest savings: how many tokens Elastro saved vs Naive RAG
-                    savings = max(baseline_tokens - actual_tokens_sent, 0)
+                # Honest savings: how many tokens Elastro saved vs Naive RAG
+                savings = max(baseline_tokens - actual_tokens_sent, 0)
 
-                    logger.debug(
-                        f"[ast_telemetry] query='{query}' hits={len(hits)} "
-                        f"actual={actual_tokens_sent} baseline_rag={baseline_tokens} "
-                        f"baseline_full={baseline_full_context_tokens} savings={savings}"
-                    )
+                logger.debug(
+                    f"[ast_telemetry] query='{query}' hits={len(hits)} "
+                    f"actual={actual_tokens_sent} baseline_rag={baseline_tokens} "
+                    f"baseline_full={baseline_full_context_tokens} savings={savings}"
+                )
 
-        except urllib.error.HTTPError as he:
-            if he.code == 404:
+        except httpx.HTTPStatusError as he:
+            if he.response.status_code == 404:
                 return f"AST Search Failed: Index '{elastro_index}' not found. The codebase AST has not been ingested yet. Please fall back to manual recursive file search via list_directory and grep."
-            return f"AST Search HTTP Error: {he.code} {he.reason}"
+            return f"AST Search HTTP Error: {he.response.status_code} {he.response.reason_phrase}"
+        except httpx.RequestError as re:
+            return f"AST Search HTTP Error: {re}"
 
         # Submit agent telemetry metric
         if es_url:
+            from datetime import datetime, timezone
             ts = datetime.now(timezone.utc).isoformat()
             doc = {
                 '@timestamp': ts,
@@ -609,18 +603,15 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
                 'created_at': ts,
             }
             tel_hdrs = {'Content-Type': 'application/json'}
-            es_api_key = os.environ.get('ES_API_KEY', '')
             if es_api_key:
                 tel_hdrs['Authorization'] = f'ApiKey {es_api_key}'
-            req = urllib.request.Request(
-                f"{es_url}/agent-token-telemetry/_doc",
-                data=json.dumps(doc).encode(),
-                headers=tel_hdrs,
-                method='POST'
-            )
             try:
-                with urllib.request.urlopen(req, timeout=3):
-                    pass
+                await client.post(
+                    f"{es_url}/agent-token-telemetry/_doc",
+                    json=doc,
+                    headers=tel_hdrs,
+                    timeout=3.0
+                )
             except Exception:
                 pass
                 
@@ -629,7 +620,7 @@ def _exec_elastro_query_ast(args: dict, repo_path: Optional[str]) -> str:
         return f'ERROR querying AST natively: {e}'
 
 
-def _exec_memory_read(args: dict) -> str:
+async def _exec_memory_read(args: dict, client: httpx.AsyncClient = None) -> str:
     ns = args.get('namespace')
     key = args.get('key')
     
@@ -641,53 +632,51 @@ def _exec_memory_read(args: dict) -> str:
         })
         return json.dumps({"status": "error", "message": "namespace and key are required"})
         
+    if not client:
+        return json.dumps({"status": "error", "message": "_exec_memory_read missing httpx client"})
+        
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
         api_key = os.environ.get('ES_API_KEY', '')
         headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
-        query = json.dumps({'query': {'term': {'_id': key}}}).encode()
+        query_payload = {'query': {'term': {'_id': key}}}
         
-        req = urllib.request.Request(f"{es_url}/{ns}/_search", data=query, headers=headers, method='POST')
-        import ssl
-        # ensure no local shadow
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        resp = await client.post(
+            f"{es_url}/{ns}/_search",
+            json=query_payload,
+            headers=headers,
+            timeout=5.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+            
+        hits = data.get('hits', {}).get('hits', [])
+        if not hits:
+            logger.info({"event": "memory_read", "status": "not_found", "namespace": ns, "key": key})
+            return json.dumps({"status": "not_found", "message": "No memory stored at this key."})
         
-        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-            raw = resp.read().decode()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError as je:
-                raise ValueError(f"Invalid JSON returned from ES: {raw[:100]}") from je
-                
-            hits = data.get('hits', {}).get('hits', [])
-            if not hits:
-                logger.info({"event": "memory_read", "status": "not_found", "namespace": ns, "key": key})
-                return json.dumps({"status": "not_found", "message": "No memory stored at this key."})
+        src = hits[0].get('_source', {})
+        expires = src.get('expires_at')
+        if expires:
+            import time
+            if time.time() > expires:
+                logger.info({"event": "memory_read", "status": "expired", "namespace": ns, "key": key})
+                return json.dumps({"status": "not_found", "message": "Memory has expired due to TTL decay."})
+        
+        value = src.get('value', '')
+        logger.info({"event": "memory_read", "status": "success", "namespace": ns, "key": key})
+        return json.dumps({"status": "success", "value": value})
             
-            src = hits[0].get('_source', {})
-            expires = src.get('expires_at')
-            if expires:
-                import time
-                if time.time() > expires:
-                    logger.info({"event": "memory_read", "status": "expired", "namespace": ns, "key": key})
-                    return json.dumps({"status": "not_found", "message": "Memory has expired due to TTL decay."})
-            
-            value = src.get('value', '')
-            logger.info({"event": "memory_read", "status": "success", "namespace": ns, "key": key})
-            return json.dumps({"status": "success", "value": value})
-            
-    except urllib.error.URLError as e:
+    except httpx.RequestError as e:
         logger.error({
             "event": "memory_read",
             "status": "failure",
             "namespace": ns,
             "key": key,
             "error": str(e),
-            "error_type": "URLError"
+            "error_type": "RequestError"
         }, exc_info=True)
-        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "RequestError"})
         
     except Exception as e:
         logger.error({
@@ -700,7 +689,7 @@ def _exec_memory_read(args: dict) -> str:
         }, exc_info=True)
         return json.dumps({"status": "error", "message": f"Internal error during memory read: {e}", "error_type": type(e).__name__})
 
-def _exec_memory_write(args: dict) -> str:
+async def _exec_memory_write(args: dict, client: httpx.AsyncClient = None) -> str:
     ns = args.get('namespace')
     key = args.get('key')
     val = args.get('value')
@@ -713,6 +702,9 @@ def _exec_memory_write(args: dict) -> str:
             "error": "namespace, key, and value are required"
         })
         return json.dumps({"status": "error", "message": "namespace, key, and value are required"})
+        
+    if not client:
+        return json.dumps({"status": "error", "message": "_exec_memory_write missing httpx client"})
         
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
@@ -727,40 +719,35 @@ def _exec_memory_write(args: dict) -> str:
         if ttl:
             doc['expires_at'] = time.time() + int(ttl)
             
-        payload = json.dumps(doc).encode()
-        # ensure no local shadow
+        import urllib.parse
         safe_key = urllib.parse.quote(key, safe='')
-        # Q3: Use PUT for idempotent upsert with explicit _id
-        req = urllib.request.Request(f"{es_url}/{ns}/_doc/{safe_key}", data=payload, headers=headers, method='PUT')
         
-        # S2: Only disable TLS verification when explicitly configured
-        import ssl
-        ssl_ctx = None
-        if es_url.startswith('https'):
-            ssl_ctx = ssl.create_default_context()
-            if os.environ.get('ES_VERIFY_TLS', 'true').lower() == 'false':
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
+        resp = await client.put(
+            f"{es_url}/{ns}/_doc/{safe_key}",
+            json=doc,
+            headers=headers,
+            timeout=5.0
+        )
+        resp.raise_for_status()
         
-        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5):
-            logger.info({
-                "event": "memory_write",
-                "status": "success",
-                "namespace": ns,
-                "key": key
-            })
-            return json.dumps({"status": "success", "message": f"Wrote memory key {key} to {ns}"})
+        logger.info({
+            "event": "memory_write",
+            "status": "success",
+            "namespace": ns,
+            "key": key
+        })
+        return json.dumps({"status": "success", "message": f"Wrote memory key {key} to {ns}"})
             
-    except urllib.error.URLError as e:
+    except httpx.RequestError as e:
         logger.error({
             "event": "memory_write",
             "status": "failure",
             "namespace": ns,
             "key": key,
             "error": str(e),
-            "error_type": "URLError"
+            "error_type": "RequestError"
         }, exc_info=True)
-        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "URLError"})
+        return json.dumps({"status": "error", "message": f"Network error contacting Elasticsearch: {e}", "error_type": "RequestError"})
         
     except Exception as e:
         logger.error({
@@ -879,17 +866,23 @@ def _load_llm_client():
     return mod
 
 
-def _call_ollama_tools(
+async def _call_ollama_tools(
     messages: list,
     tools: list,
     model: str,
     task: Optional[dict[str, Any]] = None,
+    client: httpx.AsyncClient = None,
 ) -> Optional[dict]:
     try:
-        llm_client = _load_llm_client()
+        from utils import llm_client
+        if not client:
+            logger.error("[agent_runner] _call_ollama_tools missing httpx client")
+            return None
+            
         _task_llm_kw(task)  # resolve creds into env side-effects
         role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        res, telemetry = llm_client.chat_with_tools(
+        res, telemetry = await llm_client.chat_with_tools_async(
+            client,
             messages,
             tools,
             model=model,
@@ -903,8 +896,8 @@ def _call_ollama_tools(
         
         usage = res.get('usage', {}) if isinstance(res, dict) else {}
         if usage:
-            _emit_usage(task, usage)
-        _sync_task_execution_host(task, telemetry)
+            await _emit_usage(task, usage, client=client)
+        await _sync_task_execution_host(task, telemetry, client=client)
             
         return res
     except Exception as e:
@@ -1131,11 +1124,12 @@ def _tool_result_modified_repo(fn_name: str, tool_result: str) -> bool:
     return False
 
 
-def run_implementer(
+async def run_implementer(
     task: dict[str, Any],
     repo_path: Optional[str] = None,
     on_progress: Optional[Any] = None,
     on_thought: Optional[Any] = None,
+    client: httpx.AsyncClient = None,
 ) -> AgentResult:
     system_prompt = _load_system_prompt('implementer')
     model = task.get('preferred_model') or _current_llm_model()
@@ -1275,7 +1269,7 @@ def run_implementer(
         dynamic_tools = _IMPLEMENTER_TOOLS.copy()
         dynamic_tools.append(_ELASTRO_QUERY_TOOL)
             
-        raw = _call_ollama_tools(messages, dynamic_tools, model, task=task)
+        raw = await _call_ollama_tools(messages, dynamic_tools, model, task=task, client=client)
         if not raw:
             import random
             import os
@@ -1408,13 +1402,13 @@ def run_implementer(
                 tool_result = _exec_run_shell(fn_args, repo_path)
             elif fn_name == 'memory_read':
                 _progress(f'Reading memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
-                tool_result = _exec_memory_read(fn_args)
+                tool_result = await _exec_memory_read(fn_args, client=client)
             elif fn_name == 'memory_write':
                 _progress(f'Writing memory: {fn_args.get("namespace", "")}/{fn_args.get("key", "")}')
-                tool_result = _exec_memory_write(fn_args)
+                tool_result = await _exec_memory_write(fn_args, client=client)
             elif fn_name == 'elastro_query_ast':
                 _progress(f'Querying AST for nodes mapping: {fn_args.get("query", "")}')
-                tool_result = _exec_elastro_query_ast(fn_args, repo_path)
+                tool_result = await _exec_elastro_query_ast(fn_args, repo_path, client=client)
             elif fn_name == 'implementation_complete':
                 if task.get('requires_code') and not repo_touched:
                     tool_result = json.dumps({
@@ -1463,9 +1457,9 @@ def run_implementer(
     )
 
 
-def run_tester(task: dict[str, Any]) -> AgentResult:
+async def run_tester(task: dict[str, Any], client: httpx.AsyncClient = None) -> AgentResult:
     system_prompt = _load_system_prompt('tester')
-    response = _call_ollama(
+    response = await _call_ollama(
         system_prompt,
         {
             'instruction': (
@@ -1475,6 +1469,7 @@ def run_tester(task: dict[str, Any]) -> AgentResult:
         },
         model=task.get('preferred_model') or _current_llm_model(),
         task=task,
+        client=client,
     )
     if response and isinstance(response, dict):
         action = response.get('action', 'pass')
@@ -1489,9 +1484,9 @@ def run_tester(task: dict[str, Any]) -> AgentResult:
     return AgentResult(action='pass', summary='Testing passed by fallback policy.', metadata={'source': 'fallback'})
 
 
-def run_reviewer(task: dict[str, Any]) -> AgentResult:
+async def run_reviewer(task: dict[str, Any], client: httpx.AsyncClient = None) -> AgentResult:
     system_prompt = _load_system_prompt('reviewer')
-    response = _call_ollama(
+    response = await _call_ollama(
         system_prompt,
         {
             'instruction': 'Return JSON: {"verdict":"approved|changes_requested","summary":"..."}',
@@ -1499,6 +1494,7 @@ def run_reviewer(task: dict[str, Any]) -> AgentResult:
         },
         model=task.get('preferred_model') or _current_llm_model(),
         task=task,
+        client=client,
     )
     if response and isinstance(response, dict):
         raw_verdict = response.get('verdict', 'approved')
@@ -1538,7 +1534,7 @@ def _get_cluster_topology() -> dict[str, Any]:
         logger.warning(f"Error fetching cluster topology from ES: {e}")
         return {'available_implementers': 1, 'target_models': ['unknown']}
 
-def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
+async def run_pm_dispatcher(task: Optional[dict[str, Any]] = None, client: httpx.AsyncClient = None) -> AgentResult:
     logger.info("run_pm_dispatcher: started. getting system prompt.")
     system_prompt = _load_system_prompt('pm-dispatcher')
     logger.info("run_pm_dispatcher: getting cluster topology.")
@@ -1609,7 +1605,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
         logger.info("run_pm_dispatcher: finished _run_codex_json_task.")
     else:
         logger.info("run_pm_dispatcher: calling _call_ollama.")
-        response = _call_ollama(
+        response = await _call_ollama(
             system_prompt,
             {
                 'instruction': instruction,
@@ -1617,6 +1613,7 @@ def run_pm_dispatcher(task: Optional[dict[str, Any]] = None) -> AgentResult:
             },
             model=(task or {}).get('preferred_model') or _current_llm_model(),
             task=task,
+            client=client,
         )
         logger.info("run_pm_dispatcher: finished _call_ollama.")
     if response and isinstance(response, dict):
