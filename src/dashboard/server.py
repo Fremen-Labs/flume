@@ -221,7 +221,7 @@ def _sync_llm_runtime_env():
 
         sync_llm_env_from_workspace(WORKSPACE_ROOT)
     except Exception:
-        pass
+        logger.debug("sync_llm_env_from_workspace: failed on startup (non-critical)", exc_info=True)
 
 # --- Extracted Domain: Planning ---
 from core.planning import (
@@ -381,6 +381,7 @@ def load_snapshot():
                     'historical_burn': historical_burn,
                 }
             except Exception:
+                logger.debug("api_snapshot: token savings computation failed (best-effort)", exc_info=True)
                 return {
                     'savings': 0,
                     'baseline_tokens': 0,
@@ -461,7 +462,7 @@ def agents_status() -> dict:
                     if (now - hb).total_seconds() <= 30:
                         active_nodes += 1
                 except Exception:
-                    pass
+                    logger.debug("api_snapshot: heartbeat timestamp parse failed", exc_info=True)
 
         return {
             'running': active_nodes > 0 and status != 'paused',
@@ -510,6 +511,7 @@ def _requeue_running_tasks():
             requeued += 1
         return requeued
     except Exception:
+        logger.error("_requeue_running_tasks: ES update failed", exc_info=True)
         return 0
 
 
@@ -523,7 +525,7 @@ def agents_stop() -> dict:
                 os.kill(pid, signal.SIGTERM)
                 killed.append(pid)
             except Exception:
-                pass
+                logger.warning("agents_stop: SIGTERM failed for pid (may already be dead)", exc_info=True)
     requeued = _requeue_running_tasks()
     return {'ok': True, 'killed_pids': killed, 'requeued_tasks': requeued}
 
@@ -609,7 +611,7 @@ def restart_flume_services() -> dict:
                 'message': 'Restart scheduled. You may lose connection briefly; refresh if the page stops responding.',
             }
         except Exception:
-            pass
+            logger.warning("api_agents_restart: flume CLI restart failed, falling back to workers_only", exc_info=True)
     try:
         agents_stop()
         started = agents_start()
@@ -975,7 +977,7 @@ async def api_system_state():
                 if rc == 0:
                     telemetry = json.loads(out)
             except Exception:
-                pass  # Binary exists but call failed — don't spam logs
+                logger.debug("api_system_state: flume doctor parse failed (non-critical)", exc_info=True)
 
         return {
             "status": "online",
@@ -2057,7 +2059,7 @@ def get_system_settings():
         if doc and 'hits' in doc and doc['hits']['hits']:
             sys_conf = doc['hits']['hits'][0]['_source']
     except Exception:
-        pass
+        logger.debug("get_system_settings: ES read failed, using env defaults", exc_info=True)
         
     return {
         "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
@@ -2145,6 +2147,7 @@ def api_security():
                     for k in keys:
                         openbao_keys[k] = "secured"
         except Exception:
+            logger.warning("api_security_dashboard: OpenBao key lookup failed, using placeholder", exc_info=True)
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
         audit_logs = es_search('agent-security-audits', {
@@ -2237,6 +2240,7 @@ async def api_nodes_add(request: Request):
     try:
         body = await request.json()
     except Exception:
+        logger.debug("api_nodes_add: invalid JSON body", exc_info=True)
         return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
 
     try:
@@ -2343,6 +2347,7 @@ async def api_routing_policy_put(request: Request):
     try:
         body = await request.json()
     except Exception:
+        logger.debug("api_routing_policy_put: invalid JSON body", exc_info=True)
         return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
 
     try:
@@ -2587,6 +2592,7 @@ def get_telemetry_logs():
             try:
                 time_str = datetime.fromisoformat(t_iso.replace('Z', '+00:00')).strftime('%H:%M:%S')
             except Exception:
+                logger.debug("api_telemetry_logs: ISO timestamp parse failed, using raw string", exc_info=True)
                 time_str = t_iso
                 
             logs.append({
