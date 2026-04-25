@@ -24,6 +24,15 @@ import urllib.parse
 from urllib.parse import urlparse
 from utils.url_helpers import is_remote_url
 from utils.async_subprocess import run_cmd_async
+from api.models import (
+    BulkUpdateRequest,
+    LogLevelRequest,
+    ClientLogRequest,
+    LLMSettingsRequest,
+    LLMCredentialsActionRequest,
+    RepoSettingsRequest,
+    AgentModelsRequest,
+)
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pydantic import BaseModel
@@ -796,10 +805,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(LoggingMiddleware)
 
 @app.post('/api/settings/log-level')
-async def api_set_log_level(payload: dict):
-    level = payload.get('level', 'INFO').upper()
+async def api_set_log_level(payload: LogLevelRequest):
+    level = payload.level.upper()
     set_global_log_level(level)
-    
+
     # Proxy to Gateway
     try:
         gw_url = os.environ.get('GATEWAY_URL', 'http://gateway:8090').rstrip('/')
@@ -807,20 +816,17 @@ async def api_set_log_level(payload: dict):
             await client.post(f"{gw_url}/internal/level", json={"level": level}, timeout=2.0)
     except Exception as e:
         logger.warning(f"Failed to sync log level to gateway: {e}")
-        
+
     return {"status": "ok", "level": level}
 
 @app.post('/api/logs/client')
-async def api_client_logs(payload: dict):
+async def api_client_logs(payload: ClientLogRequest):
     """Aggregate logs from the frontend."""
-    level = payload.get('level', 'ERROR').upper()
-    message = payload.get('message', 'Unknown client error')
-    data = payload.get('data', {})
-    
+    level = payload.level.upper()
     log_func = getattr(logger, level.lower(), logger.error)
     log_func(
-        f"CLIENT_{level}: {message}",
-        extra={"structured_data": {"client_data": data}}
+        f"CLIENT_{level}: {payload.message}",
+        extra={"structured_data": {"client_data": payload.data or {}}}
     )
     return {"status": "ok"}
 # The legacy @app.on_event("startup") was migrated strictly up to the FastAPI lifespan architecture above.
@@ -884,7 +890,6 @@ class AppSettings:
 settings = AppSettings()
 
 import fastapi
-from api.models import BulkUpdateRequest
 def get_app_settings() -> AppSettings:
     return settings
 
@@ -1983,36 +1988,36 @@ def api_settings_llm():
     return get_llm_settings_response(WORKSPACE_ROOT)
 
 @app.post("/api/settings/llm")
-def api_settings_llm_update(payload: dict):
+def api_settings_llm_update(payload: LLMSettingsRequest):
     from llm_settings import validate_llm_settings, _update_env_keys  # type: ignore
-    ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
+    ok, msg, updates = validate_llm_settings(payload.model_dump(exclude_none=False), WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
         return {"ok": True, "restartRequired": False, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.put("/api/settings/llm/credentials")
-def api_settings_llm_credentials(payload: dict):
+def api_settings_llm_credentials(payload: LLMSettingsRequest):
     from llm_settings import validate_llm_settings, _update_env_keys  # type: ignore
-    ok, msg, updates = validate_llm_settings(payload, WORKSPACE_ROOT)
+    ok, msg, updates = validate_llm_settings(payload.model_dump(exclude_none=False), WORKSPACE_ROOT)
     if ok:
         _update_env_keys(WORKSPACE_ROOT, updates)
         return {"success": True, "message": "Saved"}
     return JSONResponse(status_code=400, content={"error": msg})
 
 @app.post("/api/settings/llm/credentials")
-def api_settings_llm_credentials_post(payload: dict):
+def api_settings_llm_credentials_post(payload: LLMCredentialsActionRequest):
     from llm_credentials_store import apply_credentials_action  # type: ignore
     from llm_settings import _update_env_keys  # type: ignore
     workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
-    
-    ok, msg, updates = apply_credentials_action(workspace, payload)
+
+    ok, msg, updates = apply_credentials_action(workspace, payload.model_dump(exclude_none=False))
     if not ok:
         return JSONResponse(status_code=400, content={"error": msg})
-        
+
     if updates:
         _update_env_keys(workspace, updates)
-        
+
     return {"ok": True, "message": "Action applied successfully", "restartRequired": False, "credential_id": msg if msg else ""}
 
 @app.post("/api/settings/llm/oauth/refresh")
@@ -2029,9 +2034,9 @@ def api_settings_repos():
     return get_repo_settings_response(WORKSPACE_ROOT)
 
 @app.put("/api/settings/repos")
-def api_settings_repos_update(payload: dict):
+def api_settings_repos_update(payload: RepoSettingsRequest):
     from repo_settings import update_repo_settings
-    ok, msg = update_repo_settings(WORKSPACE_ROOT, payload)
+    ok, msg = update_repo_settings(WORKSPACE_ROOT, payload.model_dump(exclude_none=False))
     if ok:
         return {"success": True, "message": msg}
     return JSONResponse(status_code=400, content={"error": msg})
@@ -2094,11 +2099,11 @@ def api_settings_agent_models():
 
 @app.put("/api/settings/agent-models")
 @app.post("/api/settings/agent-models")
-def api_settings_agent_models_update(payload: dict):
+def api_settings_agent_models_update(payload: AgentModelsRequest):
     from agent_models_settings import validate_save_agent_models, save_agent_models  # type: ignore
     import llm_credentials_store as _lcs  # type: ignore
     # Map useGlobal flag from the new frontend to Settings default credential.
-    roles = payload.get("roles") or {}
+    roles = payload.roles or {}
     for role_id, spec in list(roles.items()):
         if isinstance(spec, dict) and spec.get("useGlobal"):
             roles[role_id] = {
