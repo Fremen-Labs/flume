@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+import asyncio
 import ssl
 import hvac
 import httpx
@@ -2114,7 +2115,120 @@ async def api_frontier_models(request: Request):
         return JSONResponse(status_code=503, content={"error": "Gateway unreachable", "detail": str(e)[:200]})
 
 
-active_connections = []
+active_connections: list[WebSocket] = []
+
+# --- Telemetry push state: track previous values so we emit deltas only ---
+_telem_prev: dict = {}
+
+
+async def _gather_telemetry_events() -> list[dict]:
+    """Poll the gateway and worker state and return a list of human-readable log entries."""
+    events: list[dict] = []
+    now_str = datetime.now().strftime("%H:%M:%S")
+    global _telem_prev
+
+    # --- 1. Gateway Prometheus metrics ---
+    try:
+        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{gateway_url}/metrics", timeout=2.0)
+            if resp.status_code == 200:
+                goroutines = 0
+                alloc_mb = 0.0
+                escalations = 0
+                blocked = 0
+                throttled = 0
+                active_models: list[str] = []
+                for line in resp.text.split('\n'):
+                    if line.startswith('#') or not line.strip():
+                        continue
+                    parts = line.split(' ', 1)
+                    if len(parts) != 2:
+                        continue
+                    k, v = parts[0], parts[1]
+                    if k == 'go_goroutines':
+                        goroutines = int(float(v))
+                    elif k == 'go_memstats_alloc_bytes':
+                        alloc_mb = round(float(v) / 1048576, 1)
+                    elif k == 'flume_escalation_total':
+                        escalations = int(float(v))
+                    elif k == 'flume_tasks_blocked_total':
+                        blocked = int(float(v))
+                    elif k == 'flume_concurrency_throttled_total':
+                        throttled = int(float(v))
+                    elif k.startswith('flume_active_models{') and int(float(v)) == 1:
+                        m = re.search(r'model="([^"]+)"', k)
+                        if m:
+                            active_models.append(m.group(1))
+
+                events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
+                               "msg": f"Gateway alive — {goroutines} goroutines, {alloc_mb}MB heap"})
+
+                if active_models:
+                    models_str = ', '.join(active_models)
+                    events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
+                                   "msg": f"Active models: {models_str}"})
+
+                prev_esc = _telem_prev.get('escalations', 0)
+                if escalations > prev_esc:
+                    events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
+                                   "msg": f"Escalation events: {escalations} (+{escalations - prev_esc})"})
+                _telem_prev['escalations'] = escalations
+
+                if blocked > 0:
+                    events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
+                                   "msg": f"Blocked tasks in queue: {blocked}"})
+                if throttled > _telem_prev.get('throttled', 0):
+                    events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
+                                   "msg": f"Concurrency throttle events: {throttled}"})
+                _telem_prev['throttled'] = throttled
+    except Exception:
+        events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
+                       "msg": "Gateway metrics unreachable"})
+
+    # --- 2. Node mesh health from gateway ---
+    try:
+        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{gateway_url}/api/nodes", timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                nodes = data.get('nodes', [])
+                healthy = sum(1 for n in nodes if n.get('health', {}).get('status') == 'healthy')
+                total = len(nodes)
+                events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
+                               "msg": f"Node mesh: {healthy}/{total} healthy"})
+                for n in nodes:
+                    h = n.get('health', {})
+                    lat = h.get('latency_ms', 0)
+                    load = h.get('current_load', 0)
+                    status = h.get('status', 'unknown')
+                    models = h.get('loaded_models') or []
+                    level = "INFO" if status == 'healthy' else "WARN"
+                    models_str = ', '.join(models) if models else 'none'
+                    events.append({"id": uuid.uuid4().hex, "time": now_str, "level": level,
+                                   "msg": f"  {n['id']}: {status} | {lat}ms | load {load} | models [{models_str}]"})
+    except Exception:
+        pass  # node details are best-effort
+
+    # --- 3. Worker heartbeat summary ---
+    try:
+        workers = load_workers()
+        active = sum(1 for w in workers if w.get('status') in ('busy', 'running', 'claimed', 'active'))
+        idle = sum(1 for w in workers if w.get('status') == 'idle')
+        events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
+                       "msg": f"Workers: {active} active, {idle} standby, {len(workers)} total"})
+        for w in workers:
+            if w.get('status') in ('busy', 'running', 'claimed', 'active'):
+                task_title = w.get('current_task_title') or w.get('current_task_id') or '—'
+                events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
+                               "msg": f"  ▸ {w['name']} [{w.get('model', '?')}] → {task_title}"})
+    except Exception:
+        pass  # worker summary is best-effort
+
+    return events
+
+
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
     from starlette.websockets import WebSocketDisconnect  # noqa
@@ -2122,33 +2236,17 @@ async def websocket_telemetry(websocket: WebSocket):
     active_connections.append(websocket)
     try:
         while True:
-            data = await websocket.receive_text()
-            try:
-                parsed = json.loads(data)
-                if not isinstance(parsed, dict):
-                    parsed = {"msg": str(parsed)}
-            except json.JSONDecodeError:
-                parsed = {"msg": data}
-
-            payload = {
-                "id": parsed.get("id", uuid.uuid4().hex),
-                "msg": parsed.get("msg") or parsed.get("message") or str(parsed),
-                "time": parsed.get("time", datetime.now().strftime("%H:%M:%S")),
-                "level": parsed.get("level", "INFO").upper()
-            }
-
-            for conn in active_connections[:]:
+            # Server-push: gather real telemetry and broadcast to this client
+            events = await _gather_telemetry_events()
+            for payload in events:
                 try:
-                    await conn.send_text(json.dumps({"event": "telemetry", "data": payload}))
-                except Exception as e:
-                    logger.warning({"event": "websocket_send_failed", "client": str(conn.client), "error": str(e)})
-                    try:
-                        active_connections.remove(conn)
-                    except ValueError:
-                        pass
+                    await websocket.send_text(json.dumps({"event": "telemetry", "data": payload}))
+                except Exception:
+                    return  # connection lost
+            # Wait 3 seconds between telemetry pushes
+            await asyncio.sleep(3)
     except WebSocketDisconnect:
         # Normal browser close (tab navigation, page reload, window close).
-        # CloseCode.NO_STATUS_RCVD (1005) is the standard clean-close code — not an error.
         pass
     except Exception as e:
         logger.error({"event": "websocket_handler_crashed", "client": str(websocket.client), "error": str(e), "traceback": traceback.format_exc()})
