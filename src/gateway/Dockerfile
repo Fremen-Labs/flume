@@ -25,16 +25,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     ./src/gateway/cmd/
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Runtime stage — minimal Alpine with the binary
+# Runtime stage — zero-attack-surface distroless with the binary
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM alpine:3.19
+FROM gcr.io/distroless/static-debian12:nonroot
 
-# wget is used by the Docker healthcheck
-RUN apk add --no-cache ca-certificates wget
-
-COPY --from=builder /gateway /usr/local/bin/gateway
+COPY --from=builder /gateway /gateway
 
 EXPOSE 8090
 
-ENTRYPOINT ["gateway"]
+# Kubernetes probes use HTTP (GET /livez, GET /readyz) — no exec/wget needed.
+ENTRYPOINT ["/gateway"]

@@ -2,13 +2,18 @@ package gateway
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Fremen-Labs/flume/src/gateway/skills"
@@ -51,6 +56,10 @@ type Server struct {
 	multiRouter    *MultiNodeRouter
 	// nodeSems provides per-node concurrency semaphores for the distributed ensemble.
 	nodeSems       *NodeSemaphoreMap
+	// shuttingDown is set atomically when SIGTERM/SIGINT is received.
+	// The /readyz probe returns 503 while this is true so that
+	// Kubernetes removes the pod from Service endpoints before drain.
+	shuttingDown   atomic.Bool
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -82,6 +91,8 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /livez", s.handleLivez)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
@@ -98,7 +109,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// ListenAndServe starts the HTTP server on the given address.
+// ListenAndServe starts the HTTP server on the given address and blocks
+// until a SIGTERM or SIGINT signal is received, at which point it drains
+// in-flight requests gracefully before returning.
 func (s *Server) ListenAndServe(addr string) error {
 	srv := &http.Server{
 		Addr:         addr,
@@ -107,10 +120,52 @@ func (s *Server) ListenAndServe(addr string) error {
 		WriteTimeout: 300 * time.Second, // long writes for streaming responses
 		IdleTimeout:  120 * time.Second,
 	}
-	Log().Info("flume-gateway listening",
+
+	log := Log()
+	log.Info("flume-gateway listening",
 		slog.String("addr", addr),
 	)
-	return srv.ListenAndServe()
+
+	// ── Graceful shutdown ──────────────────────────────────────────────────
+	// Listen for SIGTERM (Kubernetes pod termination) and SIGINT (Ctrl-C).
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case sig := <-quit:
+		log.Info("shutdown signal received, draining connections",
+			slog.String("signal", sig.String()),
+		)
+	case err := <-errCh:
+		log.Error("server listen error, initiating shutdown",
+			slog.String("error", err.Error()),
+		)
+		return err
+	}
+
+	// Mark as shutting down so /readyz returns 503 immediately.
+	s.shuttingDown.Store(true)
+
+	// Allow 25s for in-flight requests (K8s default terminationGracePeriodSeconds=30).
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error("graceful shutdown incomplete, forcing exit",
+			slog.String("error", err.Error()),
+		)
+		return err
+	}
+
+	log.Info("graceful shutdown complete")
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,10 +186,27 @@ func (s *Server) acquireGlobal(ctx context.Context) bool {
 func (s *Server) releaseGlobal() { <-s.globalSem }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	s.dispatchChat(w, r, false)
+}
+
+func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
+	s.dispatchChat(w, r, true)
+}
+
+// dispatchChat is the unified handler for both /v1/chat and /v1/chat/tools.
+// The withTools flag controls tool-call semantics, guardrail sanitization,
+// and the log label. All other logic (decode, validate, route, error classify)
+// is shared to eliminate the previous 95% code duplication.
+func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools bool) {
 	requestID := shortID()
 	start := time.Now()
 
-	// ── Fix 3: global gate applied before JSON decode ──────────────────────
+	label := "chat"
+	if withTools {
+		label = "tool-call"
+	}
+
+	// ── Global gate: applied before JSON decode ──────────────────────────
 	if !s.acquireGlobal(r.Context()) {
 		s.writeError(w, http.StatusServiceUnavailable, "gateway at capacity", requestID)
 		return
@@ -150,7 +222,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Input validation: normalise and reject structurally invalid fields
+	// Input validation: normalise and reject structurally invalid fields
 	// before any config resolution, secret lookup, or provider dispatch.
 	if err := ValidateChatRequest(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "request validation failed: "+err.Error(), requestID)
@@ -160,138 +232,24 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
 
-	// ── Fix 4: refresh is now singleflight-guarded inside Refresh() ───────
 	s.config.Refresh(ctx)
 
-	log.Info("incoming chat request",
+	log.Info("incoming "+label+" request",
 		slog.Int("messages", len(req.Messages)),
+		slog.Int("tools", len(req.Tools)),
 	)
 
-	// ── Fix 1: resolve model/provider before choosing code path ───────────
-	_, provider, _ := s.config.ResolveModel(&req)
+	// Resolve model/provider before choosing code path.
+	model, provider, _ := s.config.ResolveModel(&req)
 
-	// Track active model for metrics
+	// Track active model for metrics.
 	metricModel := req.Model
 	if !s.config.IsKnownModel(metricModel) {
 		metricModel = "unknown"
 	}
 	Metrics.SetActiveModel(metricModel)
 
-	// ── Fix 1 continued: acquire Ollama slot for /chat too ────────────────
-	if provider == ProviderOllama {
-		log.Info("awaiting ollama slot",
-			slog.Int("active", s.ollamaSem.ActiveSlots()),
-			slog.Int("max", s.ollamaSem.MaxSlots()),
-		)
-		if !s.ollamaSem.Acquire(ctx) {
-			s.writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for ollama slot", requestID)
-			return
-		}
-		defer s.ollamaSem.Release()
-	}
-
-	var resp *ChatResponse
-	var err error
-
-	taskType := agentRoleToTaskType(req.AgentRole)
-	isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
-
-	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
-		// Complex tasks get distributed Ensembles across the Node Mesh!
-		resp, err = s.ExecuteEnsemble(ctx, &req, false)
-	} else if s.multiRouter != nil && s.nodeRegistry != nil {
-		// Standard tasks get Smart Routing across the mesh and frontier models
-		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, false)
-	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
-		// Legacy single-node Ensemble fallback
-		resp, err = s.ExecuteEnsemble(ctx, &req, false)
-	} else {
-		resp, err = s.router.Route(ctx, &req, false)
-	}
-
-	if err != nil {
-		log.Error("chat failed",
-			slog.String("error", err.Error()),
-			slog.Float64("duration_ms", msElapsed(start)),
-		)
-		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		
-		errStr := err.Error()
-		statusCode := http.StatusBadGateway
-		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
-			statusCode = http.StatusPaymentRequired
-		} else if strings.Contains(errStr, "HTTP 429") {
-			statusCode = http.StatusTooManyRequests
-		} else if strings.Contains(errStr, "HTTP 401") || strings.Contains(errStr, "api key unavailable") {
-			statusCode = http.StatusUnauthorized
-		} else if strings.Contains(errStr, "HTTP 404") {
-			statusCode = http.StatusNotFound
-		} else if strings.Contains(errStr, "HTTP 400") {
-			statusCode = http.StatusBadRequest
-		}
-
-		s.writeError(w, statusCode, errStr, requestID)
-		return
-	}
-
-	Metrics.RecordRequest(string(provider), true, time.Since(start))
-
-	log.Info("chat completed",
-		slog.Int("content_len", len(resp.Message.Content)),
-		slog.Float64("duration_ms", msElapsed(start)),
-	)
-
-	workerName := r.Header.Get("X-Worker-Name")
-	if workerName != "" {
-		Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	}
-
-	s.writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
-	requestID := shortID()
-	start := time.Now()
-
-	// ── Fix 3: global gate applied before JSON decode ──────────────────────
-	if !s.acquireGlobal(r.Context()) {
-		s.writeError(w, http.StatusServiceUnavailable, "gateway at capacity", requestID)
-		return
-	}
-	defer s.releaseGlobal()
-
-	// Cap body size to prevent slow-body attacks.
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-
-	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), requestID)
-		return
-	}
-
-	// ── Input validation: normalise and reject structurally invalid fields
-	// before any config resolution, secret lookup, or provider dispatch.
-	if err := ValidateChatRequest(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "request validation failed: "+err.Error(), requestID)
-		return
-	}
-
-	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
-	ctx := ContextWithLogger(r.Context(), log)
-
-	s.config.Refresh(ctx)
-
-	log.Info("incoming tool-call request",
-		slog.Int("messages", len(req.Messages)),
-		slog.Int("tools", len(req.Tools)),
-	)
-
-	// Acquire Ollama concurrency slot (blocks until available)
-	// This prevents invisible queue buildup in Ollama's serial inference engine.
-	model, provider, _ := s.config.ResolveModel(&req)
-
-	// Track active model for metrics
-	Metrics.SetActiveModel(req.Model)
+	// Acquire Ollama concurrency slot.
 	if provider == ProviderOllama {
 		log.Info("awaiting ollama slot",
 			slog.Int("active", s.ollamaSem.ActiveSlots()),
@@ -305,6 +263,7 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 		defer s.ollamaSem.Release()
 	}
 
+	// ── Route to the correct execution path ─────────────────────────────
 	var resp *ChatResponse
 	var err error
 
@@ -312,46 +271,35 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 	isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
 
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
-		resp, err = s.ExecuteEnsemble(ctx, &req, true)
+		resp, err = s.ExecuteEnsemble(ctx, &req, withTools)
 	} else if s.multiRouter != nil && s.nodeRegistry != nil {
-		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, true)
+		resp, err = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, withTools)
 	} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
-		resp, err = s.ExecuteEnsemble(ctx, &req, true)
+		resp, err = s.ExecuteEnsemble(ctx, &req, withTools)
 	} else {
-		resp, err = s.router.Route(ctx, &req, true)
+		resp, err = s.router.Route(ctx, &req, withTools)
 	}
 
 	if err != nil {
-		log.Error("tool-call failed",
+		log.Error(label+" failed",
 			slog.String("error", err.Error()),
 			slog.Float64("duration_ms", msElapsed(start)),
 		)
 		Metrics.RecordRequest(string(provider), false, time.Since(start))
-		
-		errStr := err.Error()
-		statusCode := http.StatusBadGateway
-		if strings.Contains(errStr, "HTTP 402") || strings.Contains(errStr, "credit_exhausted") || strings.Contains(errStr, "insufficient_quota") {
-			statusCode = http.StatusPaymentRequired
-		} else if strings.Contains(errStr, "HTTP 429") {
-			statusCode = http.StatusTooManyRequests
-		} else if strings.Contains(errStr, "HTTP 401") || strings.Contains(errStr, "api key unavailable") {
-			statusCode = http.StatusUnauthorized
-		} else if strings.Contains(errStr, "HTTP 404") {
-			statusCode = http.StatusNotFound
-		} else if strings.Contains(errStr, "HTTP 400") {
-			statusCode = http.StatusBadRequest
-		}
 
-		s.writeError(w, statusCode, errStr, requestID)
+		pe := ClassifyProviderError(err, string(provider))
+		s.writeError(w, pe.HTTPStatus, pe.Message, requestID)
 		return
 	}
 
 	Metrics.RecordRequest(string(provider), true, time.Since(start))
 
-	// Apply guardrails: deduplicate, filter invalid tool calls
-	SanitizeToolResponse(resp)
+	// Apply guardrails for tool-call responses.
+	if withTools {
+		SanitizeToolResponse(resp)
+	}
 
-	log.Info("tool-call completed",
+	log.Info(label+" completed",
 		slog.Int("content_len", len(resp.Message.Content)),
 		slog.Int("tools_used", len(resp.Message.ToolCalls)),
 		slog.Float64("duration_ms", msElapsed(start)),
@@ -380,6 +328,31 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		},
 	}
 	s.writeJSON(w, http.StatusOK, metrics)
+}
+
+// handleLivez is the Kubernetes liveness probe.
+// It ONLY checks if the process is alive — never dependencies.
+// Failing this probe causes Kubernetes to restart the pod.
+func (s *Server) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"alive"}`))
+}
+
+// handleReadyz is the Kubernetes readiness probe.
+// Returns 503 during shutdown so the Service removes this pod from
+// its endpoints before we finish draining in-flight requests.
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if s.shuttingDown.Load() {
+		Log().Info("readyz: returning 503 — shutdown in progress")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"shutting_down"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ready"}`))
 }
 
 // handleMetrics gates the Prometheus metrics endpoint dynamically based on config.
@@ -553,9 +526,14 @@ func agentRoleToTaskType(role string) string {
 	}
 }
 
-// shortID generates a short request ID without external deps.
+// shortID generates a short, collision-resistant request ID using crypto/rand.
 func shortID() string {
-	return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+	b := make([]byte, 8)
+	if _, err := crypto_rand.Read(b); err != nil {
+		// Fallback to timestamp if crypto/rand fails (should never happen)
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+	}
+	return hex.EncodeToString(b)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

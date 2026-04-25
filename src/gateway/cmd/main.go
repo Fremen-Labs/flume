@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/Fremen-Labs/flume/src/gateway"
+	_ "go.uber.org/automaxprocs"
 )
 
 func main() {
