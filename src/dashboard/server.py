@@ -23,6 +23,7 @@ import urllib.request
 import urllib.parse
 from urllib.parse import urlparse
 from utils.url_helpers import is_remote_url
+from utils.async_subprocess import run_cmd_async
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pydantic import BaseModel
@@ -956,7 +957,7 @@ def _flume_cli_available() -> bool:
 
 
 @app.get('/api/system-state')
-def api_system_state():
+async def api_system_state():
     try:
         workers = load_workers()
         active = sum(1 for w in workers if w.get('status') in ('busy', 'claimed'))
@@ -965,9 +966,9 @@ def api_system_state():
         telemetry = {}
         if _flume_cli_available():
             try:
-                res = subprocess.run(["flume", "doctor", "--json"], capture_output=True, text=True, timeout=5)
-                if res.returncode == 0:
-                    telemetry = json.loads(res.stdout)
+                rc, out, _err = await run_cmd_async("flume", "doctor", "--json", timeout=5)
+                if rc == 0:
+                    telemetry = json.loads(out)
             except Exception:
                 pass  # Binary exists but call failed — don't spam logs
 
@@ -1670,10 +1671,14 @@ async def api_repo_branches(project_id: str):
         }
 
     try:
-        raw = subprocess.check_output(
-            ["git", "-C", str(repo_path), "branch", "-a", "--format=%(refname:short)"],
-            stderr=subprocess.DEVNULL, timeout=10,
-        ).decode(errors="replace")
+        rc, raw, err = await run_cmd_async(
+            "git", "-C", str(repo_path), "branch", "-a", "--format=%(refname:short)",
+            timeout=10,
+        )
+        if rc == 128:
+            return JSONResponse(status_code=500, content={"error": "git branch exited 128: Repository refs may be corrupt."})
+        if rc != 0:
+            return JSONResponse(status_code=500, content={"error": f"git branch failed: {err}"})
         all_branches = [b.strip() for b in raw.splitlines() if b.strip()]
         seen: set = set()
         branches: list = []
@@ -1682,10 +1687,6 @@ async def api_repo_branches(project_id: str):
             if name and name != "HEAD" and name not in seen:
                 seen.add(name)
                 branches.append(name)
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode == 128:
-            return JSONResponse(status_code=500, content={"error": "git branch exited 128: Repository refs may be corrupt."})
-        return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
@@ -1749,12 +1750,12 @@ async def api_repo_tree(project_id: str, branch: str = ""):
         )
 
     try:
-        raw = subprocess.check_output(
-            ["git", "-C", str(repo_path), "ls-tree", "-r", "--long", "--full-tree", branch],
-            stderr=subprocess.DEVNULL, timeout=30,
-        ).decode(errors="replace")
-    except subprocess.CalledProcessError as exc:
-        return JSONResponse(status_code=400, content={"error": f"Could not read tree for branch '{branch}': {exc}"})
+        rc, raw, err = await run_cmd_async(
+            "git", "-C", str(repo_path), "ls-tree", "-r", "--long", "--full-tree", branch,
+            timeout=30,
+        )
+        if rc != 0:
+            return JSONResponse(status_code=400, content={"error": f"Could not read tree for branch '{branch}': {err}"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git ls-tree failed: {exc}"})
 
@@ -1852,12 +1853,15 @@ async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
         )
 
     try:
-        content_bytes = subprocess.check_output(
-            ["git", "-C", str(repo_path), "show", f"{branch}:{clean_path}"],
-            stderr=subprocess.DEVNULL, timeout=15,
+        rc, out, err = await run_cmd_async(
+            "git", "-C", str(repo_path), "show", f"{branch}:{clean_path}",
+            timeout=15,
         )
-    except subprocess.CalledProcessError:
-        return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
+        if rc != 0:
+            if "does not exist" in err or "exists on disk" in err or rc == 128:
+                return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
+            return JSONResponse(status_code=500, content={"error": f"git show failed: {err}"})
+        content_bytes = out.encode("utf-8")
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git show failed: {exc}"})
 
@@ -1888,7 +1892,7 @@ def _make_file_response(content_bytes: bytes, path: str) -> dict:
 
 
 @app.get("/api/repos/{project_id}/diff")
-def api_repo_diff(project_id: str, base: str = "", head: str = ""):
+async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     """Return a unified diff between two branches for a project."""
     if not base or not head:
         return JSONResponse(status_code=400, content={"error": "base and head branch parameters are required"})
@@ -1912,50 +1916,49 @@ def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     MAX_DIFF_LINES = 3000
     ref = f"{base}...{head}"
 
-    # Best-effort fetch
+    # Best-effort fetch (non-blocking)
     try:
-        subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "origin", "--quiet"],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
+        await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
+    except Exception as _e:
+        logger.debug("api_repo_diff: fetch failed (best-effort)", exc_info=True)
 
     files = []
     try:
-        stat_raw = subprocess.check_output(
-            ["git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref],
-            stderr=subprocess.DEVNULL, timeout=15,
-        ).decode(errors="replace")
-        for line in stat_raw.splitlines():
-            parts = line.strip().split("|")
-            if len(parts) != 2:
-                continue
-            path_part = parts[0].strip()
-            change_part = parts[1].strip()
-            if not path_part or path_part.startswith("changed"):
-                continue
-            ins = sum(1 for c in change_part if c == "+")
-            dels = sum(1 for c in change_part if c == "-")
-            files.append({"path": path_part, "insertions": ins, "deletions": dels, "status": "modified"})
-    except Exception:
-        pass
+        rc, stat_raw, stat_err = await run_cmd_async(
+            "git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref,
+            timeout=15,
+        )
+        if rc == 0:
+            for line in stat_raw.splitlines():
+                parts = line.strip().split("|")
+                if len(parts) != 2:
+                    continue
+                path_part = parts[0].strip()
+                change_part = parts[1].strip()
+                if not path_part or path_part.startswith("changed"):
+                    continue
+                ins = sum(1 for c in change_part if c == "+")
+                dels = sum(1 for c in change_part if c == "-")
+                files.append({"path": path_part, "insertions": ins, "deletions": dels, "status": "modified"})
+    except Exception as _e:
+        logger.debug("api_repo_diff: diff --stat failed (best-effort)", exc_info=True)
 
     diff_text = ""
     truncated = False
     try:
-        raw_diff = subprocess.check_output(
-            ["git", "-C", str(repo_path), "diff", ref],
-            stderr=subprocess.DEVNULL, timeout=30,
-        ).decode(errors="replace")
-        diff_lines = raw_diff.splitlines()
-        if len(diff_lines) > MAX_DIFF_LINES:
-            diff_text = "\n".join(diff_lines[:MAX_DIFF_LINES])
-            truncated = True
-        else:
-            diff_text = raw_diff
-    except Exception:
-        pass
+        rc, raw_diff, diff_err = await run_cmd_async(
+            "git", "-C", str(repo_path), "diff", ref,
+            timeout=30,
+        )
+        if rc == 0:
+            diff_lines = raw_diff.splitlines()
+            if len(diff_lines) > MAX_DIFF_LINES:
+                diff_text = "\n".join(diff_lines[:MAX_DIFF_LINES])
+                truncated = True
+            else:
+                diff_text = raw_diff
+    except Exception as _e:
+        logger.debug("api_repo_diff: git diff failed (best-effort)", exc_info=True)
 
     identical = not diff_text.strip() and not files
     return {
