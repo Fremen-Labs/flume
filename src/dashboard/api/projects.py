@@ -13,6 +13,7 @@ from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from core.elasticsearch import es_search
 from core.projects_store import load_projects_registry, _upsert_project, PROJECTS_INDEX, _es_projects_request
+from utils.url_helpers import is_remote_url
 
 
 logger = get_logger(__name__)
@@ -22,11 +23,10 @@ router = APIRouter()
 
 @router.post("/api/projects")
 async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks):
-    from server import _clone_and_setup_project, _deterministic_ast_ingest
+    from core.project_lifecycle import _clone_and_setup_project, _deterministic_ast_ingest
     from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url
     import ado_tokens_store
     import github_tokens_store
-    from utils.url_helpers import is_remote_url
 
     name = (payload.name or "").strip()
     if not name:

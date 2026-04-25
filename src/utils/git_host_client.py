@@ -611,14 +611,7 @@ class AzureDevOpsClient(GitHostClient):
         if not branch:
             branch = self.get_default_branch()
         clean = "/" + path.lstrip("/")
-        data = self._get("items", {
-            "path": clean,
-            "versionDescriptor.version": branch,
-            "versionDescriptor.versionType": "branch",
-            "$format": "octetStream",
-        })
         # ADO returns bytes as the response body when $format=octetStream
-        # but our _get parses JSON — we need raw bytes here
         # Use _http_raw with the built URL instead
         p = {
             "api-version": self.API_VERSION,

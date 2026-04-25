@@ -19,7 +19,9 @@ spec = json.loads(open(spec_file).read())
 now = datetime.now(timezone.utc).isoformat()
 ctx=None
 if not ES_VERIFY_TLS:
-    ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+    ctx=ssl.create_default_context()
+    ctx.check_hostname=False
+    ctx.verify_mode=ssl.CERT_NONE
 headers={'Content-Type':'application/json','Authorization':f'ApiKey {ES_API_KEY}'}
 created=[]
 

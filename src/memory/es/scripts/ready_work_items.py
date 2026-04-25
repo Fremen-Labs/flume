@@ -11,7 +11,9 @@ if not ES_API_KEY:
     raise SystemExit('ES_API_KEY is required')
 ctx=None
 if not ES_VERIFY_TLS:
-    ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+    ctx=ssl.create_default_context()
+    ctx.check_hostname=False
+    ctx.verify_mode=ssl.CERT_NONE
 body={
   'size': 100,
   'query': {'bool': {'must': [{'term': {'status': 'ready'}}]}},

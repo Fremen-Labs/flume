@@ -14,9 +14,7 @@ from core.planning import (
     _count_plan_tasks
 )
 
-def _session_payload_for_client(session: dict) -> dict:
-    from server import _session_payload_for_client as _inner
-    return _inner(session)
+from utils.session_helpers import _session_payload_for_client
 
 logger = get_logger(__name__)
 router = APIRouter()

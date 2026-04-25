@@ -6,11 +6,8 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+import httpx
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -473,7 +470,7 @@ async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: 
     # execute the resolve path side effect just in case, though unused
     _resolve_path(args.get('target_path', repo_path or '.'), repo_path)
     if not client:
-        return f"ERROR: _exec_elastro_query_ast missing httpx client"
+        return "ERROR: _exec_elastro_query_ast missing httpx client"
         
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
