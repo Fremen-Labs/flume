@@ -72,9 +72,6 @@ jobs:
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
 
-      - name: Inject Environment Targets
-        run: cp .env.example .env
-
       - name: Execute Full Cluster Boot
         run: |
           docker compose up -d
