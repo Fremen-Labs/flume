@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 import json
 import urllib.parse
-import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -15,6 +14,7 @@ from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
 from core.elasticsearch import find_task_doc_by_logical_id
 from core.tasks import task_history
+from utils.async_subprocess import run_cmd_async
 
 
 logger = get_logger(__name__)
@@ -52,7 +52,7 @@ async def api_task_diff(task_id: str):
                 proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
                 proj = proj_res.get("_source") or {}
             except Exception:
-                pass
+                logger.debug("api_task_diff: failed to fetch project doc", exc_info=True)
 
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
         repo_url = proj.get("repoUrl") or ""
@@ -76,25 +76,23 @@ async def api_task_diff(task_id: str):
             except GitHostError as e:
                 return {"diff": "", "error": str(e)[:300]}
 
-        # ── Local repo: git subprocess (clone_status='local') ────────────────
+        # ── Local repo: async git subprocess (clone_status='local') ────────────────
         local_path_str = proj.get("path") or task.get("worktree")
         if not local_path_str or not Path(local_path_str).exists():
             return {"diff": "", "error": "Repository not available locally; configure a PAT to enable API-based diff."}
 
         try:
-            ref_out = subprocess.run(
-                ["git", "-C", local_path_str, "symbolic-ref", "refs/remotes/origin/HEAD"],
-                capture_output=True, text=True, timeout=5,
+            rc, out, _err = await run_cmd_async(
+                "git", "-C", local_path_str, "symbolic-ref", "refs/remotes/origin/HEAD", timeout=5
             )
-            base = ref_out.stdout.strip().split("/")[-1] if ref_out.returncode == 0 else "main"
+            base = out.strip().split("/")[-1] if rc == 0 else "main"
         except Exception:
             base = "main"
 
-        diff_out = subprocess.run(
-            ["git", "-C", local_path_str, "diff", f"origin/{base}...{branch}"],
-            capture_output=True, text=True, timeout=15,
+        rc, out, _err = await run_cmd_async(
+            "git", "-C", local_path_str, "diff", f"origin/{base}...{branch}", timeout=15
         )
-        diff_text = diff_out.stdout if diff_out.returncode == 0 else ""
+        diff_text = out if rc == 0 else ""
         if len(diff_text) > 80_000:
             diff_text = diff_text[:80_000] + "\n\n... [diff truncated at 80k chars] ..."
         return {"diff": diff_text, "branch": branch, "base": f"origin/{base}"}
@@ -126,7 +124,7 @@ async def api_task_commits(task_id: str):
                 proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
                 proj = proj_res.get("_source") or {}
             except Exception:
-                pass
+                logger.debug("api_task_commits: failed to fetch project doc", exc_info=True)
 
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
         repo_url = proj.get("repoUrl") or ""
@@ -139,10 +137,10 @@ async def api_task_commits(task_id: str):
                     or client.get_default_branch()
                 )
                 return client.get_commits(branch=branch, base=base)
-            except GitHostError:
-                pass
-    except Exception:
-        pass
+            except GitHostError as e:
+                logger.debug(f"api_task_commits: GitHostError: {e}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"api_task_commits: unexpected error: {e}", exc_info=True)
     return []
 
 def _append_task_agent_log_note(es_id: str, note: str) -> bool:

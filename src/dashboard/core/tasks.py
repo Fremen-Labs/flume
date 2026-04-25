@@ -1,6 +1,5 @@
 import os
 import json
-import subprocess
 from utils.async_subprocess import run_cmd_async
 import re
 from datetime import datetime, timezone
@@ -93,10 +92,7 @@ async def delete_task_branches(ids: list, repo: str) -> list:
         # Delete local branch (force, since it may not be merged)
         try:
             rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-D", branch, timeout=15)
-            class _R:
-                returncode = rc
-            result = _R()
-            if result.returncode == 0:
+            if rc == 0:
                 deleted.append(branch)
         except Exception as _e:
             logger.error("Ignored exception", exc_info=True)
@@ -239,25 +235,16 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             try:
                 del_flag = '-D' if force else '-d'
                 rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", del_flag, b, timeout=15)
-                class _R:
-                    returncode = rc
-                    stderr = err.encode("utf-8")
-                result = _R()
-                if result.returncode == 0:
+                if rc == 0:
                     deleted.append(b)
                 else:
-                    stderr = (result.stderr or b'').decode(errors='replace').strip()
-                    errors.append({'branch': b, 'error': stderr[:200] or 'git branch failed'})
+                    errors.append({'branch': b, 'error': err[:200] or 'git branch failed'})
             except Exception:
                 errors.append({'branch': b, 'error': 'exception during git branch deletion'})
 
             # Best-effort: delete remote tracking branch if it exists on origin.
             try:
-                subprocess.run(
-                    ['git', '-C', str(repo_path), 'push', 'origin', '--delete', b],
-                    capture_output=True,
-                    timeout=20,
-                )
+                await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=20)
             except Exception as _e:
                 logger.error("Ignored exception", exc_info=True)
 
@@ -586,14 +573,18 @@ async def git_repo_info(repo_id, repo_path: Path):
     info['is_git'] = True
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git rev-parse failed: {err}")
         branch = out.strip()
         info['current_branch'] = branch
     except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+        logger.debug("git_repo_info: rev-parse failed", exc_info=True)
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "log", "-1", "--pretty=format:%H%n%an%n%ai%n%s")
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git log failed: {err}")
         last = out.splitlines()
         if len(last) >= 4:
             info['last_commit'] = {
@@ -603,7 +594,7 @@ async def git_repo_info(repo_id, repo_path: Path):
                 'subject': last[3],
             }
     except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+        logger.debug("git_repo_info: log failed", exc_info=True)
     return info
 
 
@@ -614,25 +605,31 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
     try:
         # Try origin/HEAD symbolic ref
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "symbolic-ref", "refs/remotes/origin/HEAD")
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git symbolic-ref failed: {err}")
         ref = out.strip()
         # refs/remotes/origin/main -> main
         return ref.split('/')[-1]
     except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+        logger.debug("resolve_default_branch: symbolic-ref fallthrough", exc_info=True)
     try:
         # Fallback: check common branch names
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-r")
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git branch -r failed: {err}")
         branches_raw = out
         for candidate in ('main', 'master', 'develop', 'trunk'):
             if f'origin/{candidate}' in branches_raw:
                 return candidate
     except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+        logger.debug("resolve_default_branch: branch -r fallthrough", exc_info=True)
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git rev-parse failed: {err}")
         current = out.strip()
         return current or 'main'
     except Exception:
@@ -703,18 +700,16 @@ async def create_task_pr(task_id: str) -> dict:
 
     try:
         rc, out, err = await run_cmd_async("gh", "pr", "create", "--base", target_branch, "--head", branch, "--title", title, "--body", body, cwd=str(repo_path), timeout=60)
-        class _R:
-            returncode = rc
-            stdout = out
-            stderr = err
-        result = _R()
-    except subprocess.TimeoutExpired:
-        return {'ok': False, 'error': 'gh pr create timed out after 60s'}
+    except Exception as e:
+        return {'ok': False, 'error': f'gh pr create failed: {e}'}
 
-    if result.returncode != 0:
-        return {'ok': False, 'error': result.stderr.strip()[:500] or result.stdout.strip()[:500]}
+    if rc == -1:
+        return {'ok': False, 'error': f'gh pr create timed out or failed: {err}'}
 
-    pr_url = result.stdout.strip()
+    if rc != 0:
+        return {'ok': False, 'error': (err.strip() or out.strip())[:500]}
+
+    pr_url = out.strip()
     # Extract PR number from URL e.g. https://github.com/org/repo/pull/42
     pr_number = None
     url_parts = pr_url.rstrip('/').split('/')
@@ -785,10 +780,11 @@ async def task_diff(task_id: str) -> dict:
     # --stat output to get per-file summary
     files = []
     try:
-        stat_raw = subprocess.check_output(
-            ['git', '-C', str(repo_path), 'diff', '--stat', '--stat-width=1000', ref],
-            stderr=subprocess.DEVNULL, timeout=15,
-        ).decode(errors='replace')
+        rc, stat_raw, stat_err = await run_cmd_async(
+            "git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref, timeout=15
+        )
+        if rc != 0:
+            raise Exception(f"git diff --stat failed: {stat_err}")
         for line in stat_raw.splitlines():
             # Format: " src/foo.py | 12 +++---"
             parts = line.strip().split('|')
@@ -816,7 +812,9 @@ async def task_diff(task_id: str) -> dict:
     truncated = False
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "diff", ref, timeout=20)
-        if rc != 0: raise Exception("git error")
+        if rc != 0:
+
+            raise Exception(f"git diff failed: {err}")
         raw = out
         lines = raw.splitlines(keepends=True)
         if len(lines) > MAX_DIFF_LINES:
@@ -831,13 +829,13 @@ async def task_diff(task_id: str) -> dict:
     if not diff_text and not files:
         try:
             ref_local = f'{target_branch}..{branch}'
-            raw = subprocess.check_output(
-                ['git', '-C', str(repo_path), 'diff', ref_local],
-                stderr=subprocess.DEVNULL, timeout=20,
-            ).decode(errors='replace')
-            lines = raw.splitlines(keepends=True)
-            diff_text = ''.join(lines[:MAX_DIFF_LINES])
-            truncated = len(lines) > MAX_DIFF_LINES
+            rc, raw, _err = await run_cmd_async(
+                "git", "-C", str(repo_path), "diff", ref_local, timeout=20
+            )
+            if rc == 0 and raw:
+                lines = raw.splitlines(keepends=True)
+                diff_text = ''.join(lines[:MAX_DIFF_LINES])
+                truncated = len(lines) > MAX_DIFF_LINES
         except Exception as _e:
             logger.error("Ignored exception", exc_info=True)
 
@@ -867,13 +865,15 @@ async def task_commits(task_id: str) -> dict:
     # Try origin/target first, fall back to local target
     for ref_target in (f'origin/{target_branch}', target_branch):
         try:
-            raw = subprocess.check_output(
-                ['git', '-C', str(repo_path), 'log',
-                 f'{ref_target}..{branch}',
-                 '--pretty=format:%H|%an|%ai|%s',
-                 '--max-count=50'],
-                stderr=subprocess.DEVNULL, timeout=15,
-            ).decode(errors='replace').strip()
+            rc, raw, _err = await run_cmd_async(
+                "git", "-C", str(repo_path), "log",
+                f"{ref_target}..{branch}",
+                "--pretty=format:%H|%an|%ai|%s",
+                "--max-count=50", timeout=15
+            )
+            if rc != 0:
+                continue
+            raw = raw.strip()
             if raw:
                 for line in raw.splitlines():
                     parts = line.split('|', 3)

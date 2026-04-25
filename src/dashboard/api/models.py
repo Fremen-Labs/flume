@@ -15,9 +15,6 @@ class BulkRequeueRequest(BaseModel):
     task_ids: List[str]
 
 class BulkUpdateRequest(BaseModel):
-    task_ids: List[str]
-    status: Optional[str] = None
-    owner: Optional[str] = None
-    priority: Optional[str] = None
-    branch: Optional[str] = None
-    action: Optional[str] = None
+    ids: List[str]
+    action: str
+    repo: Optional[str] = ""

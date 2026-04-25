@@ -1,8 +1,9 @@
 import asyncio
-import logging
 from typing import Tuple
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 async def run_cmd_async(*args: str, cwd: str | None = None, timeout: float = 15.0) -> Tuple[int, str, str]:
     """Runs a shell command asynchronously with a timeout.
@@ -31,7 +32,7 @@ async def run_cmd_async(*args: str, cwd: str | None = None, timeout: float = 15.
             proc.kill()
             await proc.communicate()
         except Exception:
-            pass
+            logger.warning(f"Failed to kill timed-out process: {' '.join(args)}", exc_info=True)
         return -1, "", f"Timeout expired after {timeout}s"
     except Exception as e:
         logger.error(f"Command execution failed: {' '.join(args)}", exc_info=True)
