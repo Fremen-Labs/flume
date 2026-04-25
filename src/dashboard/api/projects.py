@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Query, BackgroundTasks
+from api.models import ProjectCreateRequest
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
@@ -20,22 +21,23 @@ WORKSPACE_ROOT = resolve_safe_workspace()
 router = APIRouter()
 
 @router.post("/api/projects")
-async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
-    from server import _is_remote_url, _clone_and_setup_project, _deterministic_ast_ingest
+async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks):
+    from server import _clone_and_setup_project, _deterministic_ast_ingest
     from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url
     import ado_tokens_store
     import github_tokens_store
+    from utils.url_helpers import is_remote_url
 
-    name = (payload.get("name") or "").strip()
+    name = (payload.name or "").strip()
     if not name:
         return JSONResponse(status_code=400, content={"error": "Project name is required."})
 
-    repo_url = (payload.get("repoUrl") or "").strip()
-    local_path_raw = (payload.get("localPath") or "").strip()
+    repo_url = (payload.repoUrl or "").strip()
+    local_path_raw = (payload.localPath or "").strip()
 
     new_id = f"proj-{uuid.uuid4().hex[:8]}"
 
-    if _is_remote_url(repo_url):
+    if is_remote_url(repo_url):
         dest_path = Path(tempfile.mkdtemp(prefix=f"flume-reg-{new_id}-"))
         clone_status = 'cloning'
         resolved_path = None
@@ -48,8 +50,8 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         clone_status = 'no_repo'
         resolved_path = None
 
-    clone_url = strip_credentials(repo_url) if _is_remote_url(repo_url) else repo_url
-    if _is_remote_url(repo_url):
+    clone_url = strip_credentials(repo_url) if is_remote_url(repo_url) else repo_url
+    if is_remote_url(repo_url):
         repo_type = detect_repo_type(repo_url)
         pat: str = ""
         if repo_type == "ado":
@@ -178,7 +180,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
 
     http_client = request.app.state.http_client
 
-    if _is_remote_url(repo_url):
+    if is_remote_url(repo_url):
         background_tasks.add_task(
             _clone_and_setup_project,
             http_client, new_id, name, clone_url, dest_path,

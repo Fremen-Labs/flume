@@ -77,25 +77,29 @@ class TestResolveDefaultBranch:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_override_takes_precedence(self, temp_git_repo):
+    @pytest.mark.asyncio
+    async def test_override_takes_precedence(self, temp_git_repo):
         """Explicit override should always be returned."""
-        result = resolve_default_branch(temp_git_repo, override="develop")
+        result = await resolve_default_branch(temp_git_repo, override="develop")
         assert result == "develop"
 
-    def test_override_none_falls_through(self, temp_git_repo):
+    @pytest.mark.asyncio
+    async def test_override_none_falls_through(self, temp_git_repo):
         """None override should trigger git-based resolution."""
-        result = resolve_default_branch(temp_git_repo, override=None)
+        result = await resolve_default_branch(temp_git_repo, override=None)
         # Should return whatever the current branch is (likely 'main' or 'master')
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_nonexistent_path_returns_main(self):
+    @pytest.mark.asyncio
+    async def test_nonexistent_path_returns_main(self):
         """Non-existent repo path should fallback to 'main'."""
-        result = resolve_default_branch(Path("/nonexistent/path/12345"))
+        result = await resolve_default_branch(Path("/nonexistent/path/12345"))
         assert result == "main"
 
-    def test_override_empty_string_falls_through(self, temp_git_repo):
+    @pytest.mark.asyncio
+    async def test_override_empty_string_falls_through(self, temp_git_repo):
         """Empty string override should NOT be used (falsy)."""
-        result = resolve_default_branch(temp_git_repo, override="")
+        result = await resolve_default_branch(temp_git_repo, override="")
         # Empty string is falsy, so it should fall through to git resolution
         assert result != ""

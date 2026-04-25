@@ -224,7 +224,7 @@ from core.tasks import (
 )
 
 
-def load_repos(registry=None):
+async def load_repos(registry=None):
     """Return git_repo_info for locally-mounted projects only.
 
     AP-12: Remote/indexed projects have no persistent local clone — they are
@@ -241,7 +241,7 @@ def load_repos(registry=None):
             # Remote/indexed/no_repo projects don't have a local clone.
             # They appear in the dashboard via ES data only.
             continue
-        repos.append(git_repo_info(p['id'], Path(local_path)))
+        repos.append(await git_repo_info(p['id'], Path(local_path)))
     return repos
 
 
@@ -882,6 +882,7 @@ class AppSettings:
 settings = AppSettings()
 
 import fastapi
+from api.models import BulkUpdateRequest
 def get_app_settings() -> AppSettings:
     return settings
 
@@ -1119,22 +1120,6 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
         })
         return JSONResponse(status_code=500, content={"error": "An internal architectural error occurred dynamically."})
 
-def _is_remote_url(url: str) -> bool:
-    """Return True when `url` looks like an HTTPS or SSH git URL."""
-    if not url:
-        return False
-    lower = url.strip().lower()
-    return (
-        lower.startswith('https://')
-        or lower.startswith('http://')
-        or lower.startswith('git@')
-        or lower.startswith('ssh://')
-        or lower.startswith('git://')
-    )
-
-
-
-
 async def _clone_and_setup_project(
     http_client: httpx.AsyncClient,
     project_id: str,
@@ -1357,7 +1342,7 @@ def api_auto_unblock_sweep_now():
 
 
 @app.post('/api/tasks/bulk-update')
-def api_tasks_bulk_update(payload: dict):
+async def api_tasks_bulk_update(payload: BulkUpdateRequest):
     """
     Bulk archive or delete tasks from the project task list.
 
@@ -1366,7 +1351,7 @@ def api_tasks_bulk_update(payload: dict):
     """
     _MAX_BULK = 200
     ids = payload.get('ids') or []
-    action = (payload.get('action') or '').strip().lower()
+    action = (payload.action or '').strip().lower()
     repo = (payload.get('repo') or '').strip()
 
     if action not in ('archive', 'delete'):
@@ -1416,7 +1401,7 @@ def api_tasks_bulk_update(payload: dict):
 
     # delete — clean up git branches while ES rows still exist, then remove docs
     try:
-        delete_task_branches(str_ids, repo)
+        await delete_task_branches(str_ids, repo)
     except Exception as exc:
         logger.warning(f'bulk-update delete: delete_task_branches: {exc}')
 
@@ -1604,7 +1589,7 @@ async def api_tasks_resume_all(es_client: ElasticsearchClient = Depends(get_es_c
         raise HTTPException(status_code=500, detail={'error': "Database error occurred while resuming swarms.", 'correlation_id': correlation_id})
 
 @app.get("/api/repos/{project_id}/branches")
-def api_repo_branches(project_id: str):
+async def api_repo_branches(project_id: str):
     """
     Return git branches for a project.
 
@@ -1703,14 +1688,14 @@ def api_repo_branches(project_id: str):
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
-    default = resolve_default_branch(
+    default = await resolve_default_branch(
         repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
     )
     return {"gitAvailable": True, "branches": branches, "default": default}
 
 
 @app.get("/api/repos/{project_id}/tree")
-def api_repo_tree(project_id: str, branch: str = ""):
+async def api_repo_tree(project_id: str, branch: str = ""):
     """
     Return a flat list of all git-tracked files/dirs for a given branch.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
@@ -1758,7 +1743,7 @@ def api_repo_tree(project_id: str, branch: str = ""):
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
     if not branch:
-        branch = resolve_default_branch(
+        branch = await resolve_default_branch(
             repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
         )
 
@@ -1806,7 +1791,7 @@ def api_repo_tree(project_id: str, branch: str = ""):
 
 
 @app.get("/api/repos/{project_id}/file")
-def api_repo_file(project_id: str, path: str = "", branch: str = ""):
+async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     """
     Return the content of a single file from the git tree.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
@@ -1861,7 +1846,7 @@ def api_repo_file(project_id: str, path: str = "", branch: str = ""):
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
     if not branch:
-        branch = resolve_default_branch(
+        branch = await resolve_default_branch(
             repo_path, override=proj.get("gitflow", {}).get("defaultBranch")
         )
 

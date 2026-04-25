@@ -5,18 +5,17 @@ import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter
+from api.models import TaskTransitionRequest, BulkRequeueRequest
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
+from utils.url_helpers import is_remote_url
 from core.elasticsearch import es_post
 from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
 from core.elasticsearch import find_task_doc_by_logical_id
 from core.tasks import task_history
 
-def _lazy_is_remote_url(url: str) -> bool:
-    from server import _is_remote_url as _inner
-    return _inner(url)
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -29,7 +28,7 @@ def api_task_history(task_id: str):
     return data
 
 @router.get("/api/tasks/{task_id}/diff")
-def api_task_diff(task_id: str):
+async def api_task_diff(task_id: str):
     """
     Return the git diff for the branch associated with a task.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
@@ -59,7 +58,7 @@ def api_task_diff(task_id: str):
         repo_url = proj.get("repoUrl") or ""
 
         # ── Remote repo: GitHostClient REST API ──────────────────────────────
-        if clone_status in ("indexed", "cloned") and _lazy_is_remote_url(repo_url):
+        if clone_status in ("indexed", "cloned") and is_remote_url(repo_url):
             try:
                 client = get_git_client(proj)
                 base = (
@@ -111,7 +110,7 @@ def api_task_thoughts(task_id: str):
     return {"thoughts": source.get("execution_thoughts", [])}
 
 @router.get("/api/tasks/{task_id}/commits")
-def api_task_commits(task_id: str):
+async def api_task_commits(task_id: str):
     from utils.git_host_client import get_git_client, GitHostError  # noqa
 
     try:
@@ -132,7 +131,7 @@ def api_task_commits(task_id: str):
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
         repo_url = proj.get("repoUrl") or ""
 
-        if branch and clone_status in ("indexed", "cloned") and _lazy_is_remote_url(repo_url):
+        if branch and clone_status in ("indexed", "cloned") and is_remote_url(repo_url):
             try:
                 client = get_git_client(proj)
                 base = (
@@ -180,7 +179,7 @@ def _append_task_agent_log_note(es_id: str, note: str) -> bool:
 
 
 @router.post("/api/tasks/{task_id}/transition")
-def api_task_transition(task_id: str, payload: dict):
+def api_task_transition(task_id: str, payload: TaskTransitionRequest):
     """
     Transition a task to a new status.
 
@@ -198,7 +197,7 @@ def api_task_transition(task_id: str, payload: dict):
     engineers can read why the task blocked before retrying.
     """
     _ALLOWED_USER_STATUSES = {'ready', 'planned', 'inbox'}
-    status = (payload.get('status') or '').strip().lower()
+    status = (payload.status or '').strip().lower()
     if status not in _ALLOWED_USER_STATUSES:
         return JSONResponse(
             status_code=400,
@@ -209,7 +208,7 @@ def api_task_transition(task_id: str, payload: dict):
     if not es_id or src is None:
         return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
 
-    instruction = (payload.get('instruction') or '').strip()
+    instruction = (payload.instruction or '').strip()
     if len(instruction) > 8000:
         return JSONResponse(
             status_code=400,
@@ -217,7 +216,7 @@ def api_task_transition(task_id: str, payload: dict):
         )
 
     prev_status = (src.get('status') or '').strip().lower()
-    auto_recovery = payload.get('auto_recovery_prompt', True)
+    auto_recovery = payload.auto_recovery_prompt
     if isinstance(auto_recovery, str):
         auto_recovery = auto_recovery.strip().lower() not in ('0', 'false', 'no', 'off')
 
@@ -254,7 +253,7 @@ def api_task_transition(task_id: str, payload: dict):
 
 
 @router.post("/api/tasks/bulk-requeue")
-def api_tasks_bulk_requeue(payload: dict):
+def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
     """
     Requeue up to 50 blocked tasks in one call.
 
@@ -262,7 +261,7 @@ def api_tasks_bulk_requeue(payload: dict):
     Returns: { "requeued": [...], "failed": [...] }
     """
     _MAX_BULK = 50
-    task_ids = payload.get('task_ids') or []
+    task_ids = payload.task_ids or []
     if not isinstance(task_ids, list):
         return JSONResponse(status_code=400, content={'error': 'task_ids must be a list'})
     if len(task_ids) > _MAX_BULK:
