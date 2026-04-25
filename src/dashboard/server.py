@@ -9,10 +9,6 @@ import signal
 import sys
 import threading
 import time
-import uuid
-import asyncio
-import ssl
-import hvac
 import httpx
 
 
@@ -20,22 +16,13 @@ import httpx
 import subprocess
 import urllib.request
 import urllib.parse
-from urllib.parse import urlparse
 from utils.url_helpers import is_remote_url
 from utils.async_subprocess import run_cmd_async
 from api.models import (
     BulkUpdateRequest,
-    LogLevelRequest,
-    ClientLogRequest,
-    LLMSettingsRequest,
-    LLMCredentialsActionRequest,
-    RepoSettingsRequest,
-    AgentModelsRequest,
 )
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pydantic import BaseModel
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 # Flume Bootstrap Logic
@@ -50,7 +37,7 @@ if str(_SRC_ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from utils.logger import get_logger, set_global_log_level
+from utils.logger import get_logger
 logger = get_logger(__name__)
 
 from flume_secrets import apply_runtime_config, hydrate_secrets_from_openbao  # type: ignore  # noqa: E402
@@ -81,10 +68,8 @@ except Exception as _e:
     _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
 
 
-_DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
-ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
-ES_API_KEY = os.environ.get('ES_API_KEY', '')
-ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
+# ES configuration imported from core.elasticsearch (single source of truth)
+from core.elasticsearch import ES_API_KEY
 
 
 def _seed_llm_config_from_env() -> None:
@@ -122,7 +107,7 @@ def _seed_llm_config_from_env() -> None:
     # doc_as_upsert creates the doc if absent; otherwise only merges missing fields
     # because we explicitly do NOT overwrite here — we only supply missing values.
     try:
-        es_url_local = OS_ENV_ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
+        es_url_local = ES_URL
         url = f'{es_url_local}/flume-llm-config/_update/singleton'
         headers: dict = {'Content-Type': 'application/json'}
         api_key = os.environ.get('ES_API_KEY', '')
@@ -168,7 +153,6 @@ from utils.workspace import resolve_safe_workspace, WorkspaceInitializationError
 
 # Module-level paths are bounded to block AppSec Path Traversals seamlessly isolating the host
 WORKSPACE_ROOT = resolve_safe_workspace()
-from config import AppConfig, get_settings  # type: ignore
 
 # AP-2 resolved: WORKER_STATE removed — worker lifecycle state belongs in ES (flume-workers index).
 # AP-9 resolved: SESSIONS_DIR removed — plan sessions already fully migrated to agent-plan-sessions ES index.
@@ -181,12 +165,6 @@ LLM_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
 # One document per prefix (e.g. 'task', 'epic'); field `value` = highest allocated N.
 # See es_counter_increment() and es_counter_hwm() below.
 COUNTERS_INDEX = 'flume-counters'
-
-ctx = None
-if not ES_VERIFY_TLS:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
 
 
 
@@ -205,7 +183,6 @@ from core.elasticsearch import (
     es_delete_doc,
 )
 
-from core.sessions_store import _utcnow_iso
 
 def _lazy_append_task_agent_log_note(es_id: str, note: str) -> bool:
     from api.tasks import _append_task_agent_log_note
@@ -667,7 +644,7 @@ def maybe_auto_start_workers():
 
 
 
-from fastapi import FastAPI, WebSocket, Request, Depends, HTTPException, Header
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -789,7 +766,6 @@ app.add_middleware(LoggingMiddleware)
 
 
 
-from urllib.parse import urlunparse
 
 def _parse_float_env(key: str, default: float) -> float:
     val_str = os.environ.get(key)
@@ -1083,7 +1059,7 @@ async def api_repo_tree(project_id: str, branch: str = ""):
         parts = line.split("\t", 2)
         if len(parts) < 2:
             continue
-        meta, size_and_path = parts[0], parts[1] if len(parts) == 2 else parts[1]
+        meta = parts[0]
         meta_parts = meta.split()
         if len(meta_parts) < 3:
             continue

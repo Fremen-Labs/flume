@@ -1,15 +1,16 @@
-import os
 import json
-from utils.async_subprocess import run_cmd_async
+import os
 import re
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from utils.async_subprocess import run_cmd_async
+from utils.exceptions import GitOperationError
 from utils.logger import get_logger
 from core.elasticsearch import es_search, es_post
 from core.projects_store import load_projects_registry
-
 
 
 logger = get_logger(__name__)
@@ -85,23 +86,23 @@ async def delete_task_branches(ids: list, repo: str) -> list:
             }).get('hits', {}).get('hits', [])
             if remaining:
                 continue
-        except Exception:
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, Exception) as _es_err:
             # Best-effort: if ES check fails, fall back to deleting.
-            pass
+            logger.debug("delete_task_branches: ES active-task check failed, proceeding with delete", exc_info=True)
 
         # Delete local branch (force, since it may not be merged)
         try:
             rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-D", branch, timeout=15)
             if rc == 0:
                 deleted.append(branch)
-        except Exception as _e:
-            logger.error("Ignored exception", exc_info=True)
+        except (OSError, GitOperationError) as _e:
+            logger.warning({"event": "branch_local_delete_failed", "branch": branch, "repo_path": str(repo_path)}, exc_info=True)
 
         # Best-effort: delete remote tracking branch if it exists on origin
         try:
             await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", branch, timeout=20)
-        except Exception as _e:
-            logger.error("Ignored exception", exc_info=True)
+        except (OSError, GitOperationError) as _e:
+            logger.warning({"event": "branch_remote_delete_failed", "branch": branch, "repo_path": str(repo_path)}, exc_info=True)
 
     return deleted
 
@@ -161,8 +162,8 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         try:
             rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
             current_branch = out.strip() if rc == 0 else ""
-        except Exception as _e:
-            logger.error("Ignored exception", exc_info=True)
+        except (OSError, GitOperationError) as _e:
+            logger.warning({"event": "current_branch_detect_failed", "repo_path": str(repo_path)}, exc_info=True)
 
         protected = set()
         if not force:
@@ -245,8 +246,8 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             # Best-effort: delete remote tracking branch if it exists on origin.
             try:
                 await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=20)
-            except Exception as _e:
-                logger.error("Ignored exception", exc_info=True)
+            except (OSError, GitOperationError) as _e:
+                logger.warning({"event": "branch_remote_push_delete_failed", "branch": b, "repo_path": str(repo_path)}, exc_info=True)
 
         return {
             'ok': True,
@@ -281,8 +282,8 @@ def load_workers() -> list:
                             continue  # Garbage collect from UI view
                         if diff_sec > 30:
                             w['status'] = 'offline/terminated'
-                    except Exception as _e:
-                        logger.error("Ignored exception", exc_info=True)
+                    except (ValueError, TypeError) as _e:
+                        logger.warning({"event": "worker_heartbeat_parse_failed", "worker_name": w.get('name'), "heartbeat_raw": hb_str}, exc_info=True)
                 workers.append(w)
     except Exception as e:
         logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)}})
@@ -314,8 +315,8 @@ def load_workers() -> list:
         for w in workers:
             w['input_tokens'] = totals.get(w['name'], {}).get('input', 0)
             w['output_tokens'] = totals.get(w['name'], {}).get('output', 0)
-    except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as _e:
+        logger.warning({"event": "worker_token_aggregation_failed", "detail": "best-effort telemetry enrichment skipped"}, exc_info=True)
         
     return workers
 
@@ -574,8 +575,7 @@ async def git_repo_info(repo_id, repo_path: Path):
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
         if rc != 0:
-
-            raise Exception(f"git rev-parse failed: {err}")
+            raise GitOperationError("rev-parse", stderr=err, returncode=rc)
         branch = out.strip()
         info['current_branch'] = branch
     except Exception as _e:
@@ -583,8 +583,7 @@ async def git_repo_info(repo_id, repo_path: Path):
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "log", "-1", "--pretty=format:%H%n%an%n%ai%n%s")
         if rc != 0:
-
-            raise Exception(f"git log failed: {err}")
+            raise GitOperationError("log", stderr=err, returncode=rc)
         last = out.splitlines()
         if len(last) >= 4:
             info['last_commit'] = {
@@ -606,8 +605,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         # Try origin/HEAD symbolic ref
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "symbolic-ref", "refs/remotes/origin/HEAD")
         if rc != 0:
-
-            raise Exception(f"git symbolic-ref failed: {err}")
+            raise GitOperationError("symbolic-ref", stderr=err, returncode=rc)
         ref = out.strip()
         # refs/remotes/origin/main -> main
         return ref.split('/')[-1]
@@ -617,8 +615,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         # Fallback: check common branch names
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-r")
         if rc != 0:
-
-            raise Exception(f"git branch -r failed: {err}")
+            raise GitOperationError("branch -r", stderr=err, returncode=rc)
         branches_raw = out
         for candidate in ('main', 'master', 'develop', 'trunk'):
             if f'origin/{candidate}' in branches_raw:
@@ -628,8 +625,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
         if rc != 0:
-
-            raise Exception(f"git rev-parse failed: {err}")
+            raise GitOperationError("rev-parse", stderr=err, returncode=rc)
         current = out.strip()
         return current or 'main'
     except Exception:
@@ -774,8 +770,8 @@ async def task_diff(task_id: str) -> dict:
     # Try fetch to ensure remote refs are current (best-effort, silent on failure)
     try:
         await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+    except (OSError, GitOperationError) as _e:
+        logger.warning({"event": "git_fetch_best_effort_failed", "repo_path": str(repo_path)}, exc_info=True)
 
     # --stat output to get per-file summary
     files = []
@@ -784,7 +780,7 @@ async def task_diff(task_id: str) -> dict:
             "git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref, timeout=15
         )
         if rc != 0:
-            raise Exception(f"git diff --stat failed: {stat_err}")
+            raise GitOperationError("diff --stat", stderr=stat_err, returncode=rc)
         for line in stat_raw.splitlines():
             # Format: " src/foo.py | 12 +++---"
             parts = line.strip().split('|')
@@ -813,8 +809,7 @@ async def task_diff(task_id: str) -> dict:
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "diff", ref, timeout=20)
         if rc != 0:
-
-            raise Exception(f"git diff failed: {err}")
+            raise GitOperationError("diff", stderr=err, returncode=rc)
         raw = out
         lines = raw.splitlines(keepends=True)
         if len(lines) > MAX_DIFF_LINES:
@@ -836,8 +831,8 @@ async def task_diff(task_id: str) -> dict:
                 lines = raw.splitlines(keepends=True)
                 diff_text = ''.join(lines[:MAX_DIFF_LINES])
                 truncated = len(lines) > MAX_DIFF_LINES
-        except Exception as _e:
-            logger.error("Ignored exception", exc_info=True)
+        except (OSError, GitOperationError) as _e:
+            logger.warning({"event": "diff_local_fallback_failed", "branch": branch, "target_branch": target_branch, "repo_path": str(repo_path)}, exc_info=True)
 
     return {
         'branch': branch,
@@ -858,8 +853,8 @@ async def task_commits(task_id: str) -> dict:
     # Best-effort fetch
     try:
         await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except Exception as _e:
-        logger.error("Ignored exception", exc_info=True)
+    except (OSError, GitOperationError) as _e:
+        logger.warning({"event": "commits_fetch_best_effort_failed", "repo_path": str(repo_path)}, exc_info=True)
 
     commits = []
     # Try origin/target first, fall back to local target

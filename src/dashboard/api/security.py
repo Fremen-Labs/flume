@@ -21,7 +21,7 @@ import hvac
 
 from utils.logger import get_logger
 from core.elasticsearch import es_search
-from config import AppConfig, get_settings
+from config import AppConfig
 
 logger = get_logger(__name__)
 router = APIRouter()

@@ -113,6 +113,7 @@ class IntakeCommitRequest(BaseModel):
 class SystemSettingsRequest(BaseModel):
     es_url: str
     es_api_key: str
+    es_verify_tls: Optional[bool] = None
     openbao_url: str
     vault_token: str
     prometheus_enabled: bool

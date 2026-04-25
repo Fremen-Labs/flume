@@ -12,7 +12,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# --- Configuration defaults ---
+# --- Configuration defaults (single source of truth for ES connectivity) ---
 _DEFAULT_ES = "http://localhost:9200"
 if os.environ.get('FLUME_NATIVE_MODE') == '1':
     # Standalone processes can reach ES via localhost loopback normally patched via Node registries
@@ -22,13 +22,19 @@ else:
     _DEFAULT_ES = "http://elasticsearch:9200"
 
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
+ES_API_KEY = os.environ.get('ES_API_KEY', '')
+ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 
-# Provide SSL context (can be overridden by setup routines avoiding insecure cert warnings natively)
+# SSL context — respects ES_VERIFY_TLS env var to gate certificate validation.
+# Default: TLS verification OFF (self-signed ES clusters common in dev).
+# Set ES_VERIFY_TLS=true in production to enforce certificate validation.
 ctx = None
 if ES_URL.startswith("https:"):
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    if not ES_VERIFY_TLS:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    # else: default context verifies certs and hostnames
 
 # --- ES Utility Functions ---
 
@@ -38,7 +44,7 @@ def es_search(index: str, body: dict) -> dict:
         data=json.dumps(body).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method='POST',
     )
@@ -76,7 +82,7 @@ def es_index(index: str, doc: dict) -> dict:
         data=json.dumps(doc).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method='POST',
     )
@@ -89,7 +95,7 @@ def es_upsert(index: str, doc_id: str, doc: dict) -> dict:
         data=json.dumps(doc).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method='PUT',
     )
@@ -130,7 +136,7 @@ def _flush_es_bulk_unlocked():
         data=ndjson.encode('utf-8'),
         headers={
             'Content-Type': 'application/x-ndjson',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method='POST',
     )
@@ -168,7 +174,7 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
         data=json.dumps(body).encode(),
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method=method,
     )
@@ -193,7 +199,7 @@ def es_delete_doc(index: str, doc_id: str) -> bool:
         f'{ES_URL}/{index}/_doc/{safe_id}',
         headers={
             'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}',
+            'Authorization': f'ApiKey {ES_API_KEY}',
         },
         method='DELETE',
     )

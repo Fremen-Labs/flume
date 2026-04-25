@@ -18,11 +18,10 @@ from fastapi import APIRouter, WebSocket, Request, Depends, HTTPException, Heade
 from fastapi.responses import JSONResponse
 
 import httpx
-from pydantic import BaseModel
 
 from utils.logger import get_logger
 from utils.async_subprocess import run_cmd_async
-from core.elasticsearch import es_search, es_post, es_upsert, es_bulk_update_proxy
+from core.elasticsearch import es_search, es_post, es_upsert
 from core.tasks import load_workers
 from core.projects_store import load_projects_registry
 from config import AppConfig, get_settings
@@ -304,15 +303,17 @@ def api_codex_proxy_config():
 
 active_connections: list[WebSocket] = []
 
-# Track previous values so we emit deltas only
-_telem_prev: dict = {}
 
+async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
+    """Poll the gateway and worker state and return a list of human-readable log entries.
 
-async def _gather_telemetry_events() -> list[dict]:
-    """Poll the gateway and worker state and return a list of human-readable log entries."""
+    Args:
+        conn_state: Per-connection dict for tracking deltas across polling intervals.
+                    Each WebSocket client gets its own instance so escalation events
+                    are never suppressed for one client because another already saw them.
+    """
     events: list[dict] = []
     now_str = datetime.now().strftime("%H:%M:%S")
-    global _telem_prev
 
     # --- 1. Gateway Prometheus metrics ---
     try:
@@ -356,19 +357,19 @@ async def _gather_telemetry_events() -> list[dict]:
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
                                    "msg": f"Active models: {models_str}"})
 
-                prev_esc = _telem_prev.get('escalations', 0)
+                prev_esc = conn_state.get('escalations', 0)
                 if escalations > prev_esc:
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                                    "msg": f"Escalation events: {escalations} (+{escalations - prev_esc})"})
-                _telem_prev['escalations'] = escalations
+                conn_state['escalations'] = escalations
 
                 if blocked > 0:
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                                    "msg": f"Blocked tasks in queue: {blocked}"})
-                if throttled > _telem_prev.get('throttled', 0):
+                if throttled > conn_state.get('throttled', 0):
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                                    "msg": f"Concurrency throttle events: {throttled}"})
-                _telem_prev['throttled'] = throttled
+                conn_state['throttled'] = throttled
     except Exception:
         events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                        "msg": "Gateway metrics unreachable"})
@@ -421,10 +422,11 @@ async def websocket_telemetry(websocket: WebSocket):
     from starlette.websockets import WebSocketDisconnect  # noqa: PLC0415
     await websocket.accept()
     active_connections.append(websocket)
+    conn_state: dict = {}  # Per-connection delta tracking state
     try:
         while True:
             # Server-push: gather real telemetry and broadcast to this client
-            events = await _gather_telemetry_events()
+            events = await _gather_telemetry_events(conn_state)
             for payload in events:
                 try:
                     await websocket.send_text(json.dumps({"event": "telemetry", "data": payload}))

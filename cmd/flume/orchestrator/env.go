@@ -42,6 +42,7 @@ type EnvConfig struct {
 
 	ExternalElastic bool
 	ESUrl           string
+	ESVerifyTLS     bool
 
 	RepoType    string // "github" or "ado"
 	GithubToken string
@@ -111,6 +112,12 @@ func GenerateEnv(config EnvConfig) []string {
 	}
 	if config.ExternalElastic && config.ESUrl != "" {
 		env = append(env, "FLUME_ES_URL="+config.ESUrl)
+		env = append(env, "ES_URL="+config.ESUrl)
+	}
+	if config.ESVerifyTLS {
+		env = append(env, "ES_VERIFY_TLS=true")
+	} else {
+		env = append(env, "ES_VERIFY_TLS=false")
 	}
 
 	if config.RepoType == "github" && config.GithubToken != "" {

@@ -19,7 +19,7 @@ from api.models import (
 )
 from utils.logger import get_logger, set_global_log_level
 from utils.workspace import resolve_safe_workspace
-from core.elasticsearch import es_search, es_post
+from core.elasticsearch import es_search, es_post, ES_VERIFY_TLS
 
 import httpx
 
@@ -150,6 +150,7 @@ def get_system_settings():
     return {
         "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
         "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
+        "es_verify_tls": ES_VERIFY_TLS or sys_conf.get('es_verify_tls', False),
         "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
         "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else "",
         "prometheus_enabled": sys_conf.get('prometheus_enabled', True)
@@ -173,6 +174,8 @@ def update_system_settings(settings: SystemSettingsRequest):
             sys_conf['vault_token'] = settings.vault_token
 
         sys_conf['prometheus_enabled'] = settings.prometheus_enabled
+        if hasattr(settings, 'es_verify_tls') and settings.es_verify_tls is not None:
+            sys_conf['es_verify_tls'] = settings.es_verify_tls
 
         es_post('flume-settings/_doc/system', sys_conf)
         return {"status": "ok"}

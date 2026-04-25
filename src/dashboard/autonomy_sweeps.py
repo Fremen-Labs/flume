@@ -1008,8 +1008,8 @@ def _pr_reconcile_attempt_rebase(
             return False, 'clone_failed', []
 
         # Minimal identity so merge commits have an author.
-        subprocess.run(['git', '-C', str(tmp), 'config', 'user.email', 'flume-bot@local'], capture_output=True)
-        subprocess.run(['git', '-C', str(tmp), 'config', 'user.name', 'Flume Reconciliation Bot'], capture_output=True)
+        subprocess.run(['git', '-C', str(tmp), 'config', 'user.email', 'flume-bot@local'], capture_output=True, timeout=30)
+        subprocess.run(['git', '-C', str(tmp), 'config', 'user.name', 'Flume Reconciliation Bot'], capture_output=True, timeout=30)
 
         # Explicit refspec so the fetches force-update remote-tracking refs
         # even when the initial clone didn't set up tracking for every branch.
