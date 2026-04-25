@@ -41,6 +41,14 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
   const activeWorkers = data.workers.filter(w => w.status === 'claimed' || w.status === 'active');
   const idleWorkers = data.workers.filter(w => w.status === 'idle');
 
+  const sortedWorkers = [...data.workers].sort((a, b) => {
+    const aActive = a.status === 'claimed' || a.status === 'active';
+    const bActive = b.status === 'claimed' || b.status === 'active';
+    if (aActive && !bActive) return -1;
+    if (!aActive && bActive) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -92,7 +100,7 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
         <div className="lg:col-span-3">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             <AnimatePresence>
-              {data.workers.map((worker: WorkerState, i: number) => {
+              {sortedWorkers.map((worker: WorkerState, i: number) => {
             const isActive = worker.status === 'claimed' || worker.status === 'active';
             return (
               <WorkerRadarCard

@@ -285,7 +285,7 @@ def _merge_recent_task_hits_with_blocked(recent_hits: list, blocked_hits: list) 
     return [by_id[k] for k in order]
 
 
-def load_snapshot():
+async def load_snapshot():
     global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
     now = time.time()
     if _SNAPSHOT_CACHE_DATA and (now - _SNAPSHOT_CACHE_TIME) < 2.0:
@@ -402,7 +402,7 @@ def load_snapshot():
         workers_res = f_workers.result()
         projects_res = f_projects.result()
 
-    repos_res = load_repos(registry=projects_res)
+    repos_res = await load_repos(registry=projects_res)
     from api.projects import _map_task_hit_for_api
 
     result = {
@@ -906,9 +906,9 @@ async def api_exo_status(request: fastapi.Request, app_settings: AppSettings = f
         return {"active": False}
 
 @app.get('/api/snapshot')
-def api_snapshot():
+async def api_snapshot():
     try:
-        return load_snapshot()
+        return await load_snapshot()
     except Exception as e:
         return JSONResponse(status_code=502, content={'error': str(e)[:400], 'code': 'ES_CONNECTION'})
 

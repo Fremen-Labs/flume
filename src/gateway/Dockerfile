@@ -28,7 +28,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Runtime stage — zero-attack-surface distroless with the binary
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# We use alpine to ensure /bin/sh and wget are available for the docker-compose healthcheck.
+FROM alpine:latest
 
 COPY --from=builder /gateway /gateway
 
