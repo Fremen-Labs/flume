@@ -30,7 +30,7 @@ class TestProjectCreationLifecycle:
 
     def test_project_appears_in_snapshot_after_creation(self, api_client, isolated_flume_project):
         """Newly created project must appear in the /api/snapshot response."""
-        time.sleep(0.5)  # Allow ES indexing
+        time.sleep(2.5)  # Bypass 2.0s snapshot cache to ensure fresh ES read
         data = api_client.get("/snapshot").json()
         project_ids = [p.get("id") for p in data.get("projects", [])]
         assert isolated_flume_project in project_ids, (
@@ -102,7 +102,7 @@ class TestProjectDeletion:
         assert del_resp.status_code == 200
 
         # Verify removal (allow ES to propagate)
-        time.sleep(1)
+        time.sleep(2.5)
         data = api_client.get("/snapshot").json()
         project_ids = [p.get("id") for p in data.get("projects", [])]
         assert project_id not in project_ids, (

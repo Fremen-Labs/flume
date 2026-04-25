@@ -132,7 +132,7 @@ def _delete_project_from_es(project_id: str):
     """Delete a project document from ES."""
     try:
         _es_projects_request(
-            f"/{PROJECTS_INDEX}/_doc/{project_id}",
+            f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
             method="DELETE",
         )
     except Exception as e:

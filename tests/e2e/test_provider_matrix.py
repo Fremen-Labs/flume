@@ -28,7 +28,7 @@ def test_provider_planning_regression(api_client, gateway_client, flume_waiter, 
         if nodes_resp.status_code == 200:
             data = nodes_resp.json()
             if data.get("count", 0) == 0:
-                pytest.fail("Ollama is not configured (0 nodes in registry). Failing fast.")
+                pytest.skip("Ollama is not configured (0 nodes in registry). Skipping.")
             
             # Verify the specific model is loaded, or fallback to ANY available model
             model_found = False
@@ -52,7 +52,7 @@ def test_provider_planning_regression(api_client, gateway_client, flume_waiter, 
                     print(f"\n[Dynamic Fallback] Model '{model_name}' not found. Using discovered model '{first_available_model}'.")
                     actual_provider_model = f"ollama:{first_available_model}"
                 else:
-                    pytest.fail("Ollama is running, but no models are loaded on any node. Failing fast.")
+                    pytest.skip("Ollama is running, but no models are loaded on any node. Skipping.")
     else:
         # For Frontier models, we need credentials loaded
         frontier_resp = gateway_client.get("/api/frontier-models")
@@ -75,7 +75,7 @@ def test_provider_planning_regression(api_client, gateway_client, flume_waiter, 
                     provider_configured = True
 
             if not provider_configured:
-                pytest.fail(f"Frontier provider for '{model_name}' has no active credentials. Failing fast.")
+                pytest.skip(f"Frontier provider for '{model_name}' has no active credentials. Skipping.")
 
     repo_id = isolated_flume_project
     

@@ -68,7 +68,7 @@ class FlumeWaiter:
             # 2. Check terminating statuses
             if current_status in target_statuses:
                 return task
-            if current_status in ["failed", "blocked"] and "failed" not in target_statuses:
+            if current_status in ["failed", "blocked"] and current_status not in target_statuses and "failed" not in target_statuses:
                 raise Exception(f"Task {task_id} unexpectedly entered '{current_status}' state.")
                 
             time.sleep(self.poll_interval)

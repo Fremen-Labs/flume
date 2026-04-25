@@ -38,12 +38,12 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
     );
   }
 
-  const activeWorkers = data.workers.filter(w => w.status === 'claimed' || w.status === 'active');
+  const activeWorkers = data.workers.filter(w => ['claimed', 'active', 'busy', 'running'].includes(w.status));
   const idleWorkers = data.workers.filter(w => w.status === 'idle');
 
   const sortedWorkers = [...data.workers].sort((a, b) => {
-    const aActive = a.status === 'claimed' || a.status === 'active';
-    const bActive = b.status === 'claimed' || b.status === 'active';
+    const aActive = ['claimed', 'active', 'busy', 'running'].includes(a.status);
+    const bActive = ['claimed', 'active', 'busy', 'running'].includes(b.status);
     if (aActive && !bActive) return -1;
     if (!aActive && bActive) return 1;
     return a.name.localeCompare(b.name);
@@ -99,9 +99,9 @@ export function LiveMissionRadar({ cfg, roleForms, roleSaveState, roleSaveMsg, u
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
         <div className="lg:col-span-3">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            <AnimatePresence>
+            <AnimatePresence mode="popLayout">
               {sortedWorkers.map((worker: WorkerState, i: number) => {
-            const isActive = worker.status === 'claimed' || worker.status === 'active';
+            const isActive = ['claimed', 'active', 'busy', 'running'].includes(worker.status);
             return (
               <WorkerRadarCard
                 key={worker.name}
@@ -152,6 +152,7 @@ function WorkerRadarCard({ worker, isActive, i, cfg, form, saveState, saveMsg, u
   const [configOpen, setConfigOpen] = useState(false);
   return (
               <motion.div
+                layout
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
