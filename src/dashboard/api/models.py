@@ -106,3 +106,19 @@ class IntakeCommitRequest(BaseModel):
         default=None,
         description="Repo ID override; falls back to session repo"
     )
+
+
+# ── System Settings ────────────────────────────────────────────────────────────
+
+class SystemSettingsRequest(BaseModel):
+    es_url: str
+    es_api_key: str
+    openbao_url: str
+    vault_token: str
+    prometheus_enabled: bool
+
+
+# ── Task Claims ────────────────────────────────────────────────────────────────
+
+class TaskClaimRequest(BaseModel):
+    worker_id: str
