@@ -390,8 +390,8 @@ def is_openbao_installed() -> bool:
     try:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
-        logger.debug("OpenBao health check failed — treating as unavailable")
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+        logger.error(f"OpenBao health check failed for addr {addr} — treating as unavailable: {e}")
         return False
 
 

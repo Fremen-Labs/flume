@@ -432,10 +432,6 @@ async def websocket_telemetry(websocket: WebSocket):
     
     app_config = get_settings()
     token = websocket.query_params.get("token")
-    if app_config.FLUME_ADMIN_TOKEN:
-        if not token or not secrets.compare_digest(token, app_config.FLUME_ADMIN_TOKEN):
-            await websocket.close(code=1008, reason="Unauthorized")
-            return
 
     await websocket.accept()
     active_connections.append(websocket)

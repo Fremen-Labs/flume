@@ -75,7 +75,7 @@ def load_elastic_config() -> dict[str, Any]:
             if "es_api_key" in doc and doc["es_api_key"] != "***":
                 data["ES_API_KEY"] = doc["es_api_key"]
             if "openbao_url" in doc:
-                data["OPENBAO_ADDR"] = doc["openbao_url"]
+                data["OPENBAO_URL"] = doc["openbao_url"]
     except urllib.error.HTTPError as e:
         if e.code == 404:
             logger.debug("flume-settings not found, using environment defaults")
@@ -87,9 +87,14 @@ def load_elastic_config() -> dict[str, Any]:
     es_native = os.environ.get("FLUME_NATIVE_MODE") == "1"
     if es_native:
         if "ES_URL" in data and "elasticsearch" in data["ES_URL"]:
-            data["ES_URL"] = "https://localhost:9200"
-        if "OPENBAO_ADDR" in data and "openbao" in data["OPENBAO_ADDR"]:
-            data["OPENBAO_ADDR"] = "http://localhost:8200"
+            data["ES_URL"] = data["ES_URL"].replace("elasticsearch", "localhost")
+        if "OPENBAO_URL" in data and "openbao" in data["OPENBAO_URL"]:
+            data["OPENBAO_URL"] = data["OPENBAO_URL"].replace("openbao", "localhost")
+    else:
+        if "ES_URL" in data and "localhost" in data["ES_URL"]:
+            data["ES_URL"] = data["ES_URL"].replace("localhost", "elasticsearch")
+        if "OPENBAO_URL" in data and "localhost" in data["OPENBAO_URL"]:
+            data["OPENBAO_URL"] = data["OPENBAO_URL"].replace("localhost", "openbao")
             
     return data
 
