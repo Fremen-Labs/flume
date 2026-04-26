@@ -43,6 +43,8 @@ type credPayload struct {
 	ADOToken           string `json:"ado_token"`
 	ExternalElastic    bool   `json:"external_elastic"`
 	ESUrl              string `json:"es_url"`
+	ElasticPassword    string `json:"elastic_password"`
+	AdminToken         string `json:"admin_token"`
 }
 
 // credstorePath returns ~/.flume/credentials.enc.
@@ -106,6 +108,8 @@ func SaveCredentials(cfg EnvConfig) error {
 		ADOToken:           cfg.ADOToken,
 		ExternalElastic:    cfg.ExternalElastic,
 		ESUrl:              cfg.ESUrl,
+		ElasticPassword:    cfg.ElasticPassword,
+		AdminToken:         cfg.AdminToken,
 	}
 
 	plain, err := json.Marshal(payload)
@@ -206,5 +210,7 @@ func LoadCredentials() (EnvConfig, error) {
 		ADOToken:           payload.ADOToken,
 		ExternalElastic:    payload.ExternalElastic,
 		ESUrl:              payload.ESUrl,
+		ElasticPassword:    payload.ElasticPassword,
+		AdminToken:         payload.AdminToken,
 	}, nil
 }
