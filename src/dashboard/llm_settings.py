@@ -29,7 +29,7 @@ _DEFAULT_OPENAI_OAUTH_SCOPES = (
 
 
 def _openai_oauth_refresh_scopes() -> str | None:
-    raw = os.environ.get('OPENAI_OAUTH_SCOPES')
+    raw = get_settings().OPENAI_OAUTH_SCOPES
     if raw is None:
         return _DEFAULT_OPENAI_OAUTH_SCOPES
     s = str(raw).strip()
@@ -67,7 +67,7 @@ def _decode_access_token_for_oauth_ui(access_token: str) -> dict[str, Any]:
         if isinstance(roles, list):
             scopes.extend(str(x) for x in roles if x)
         out['scopes'] = scopes
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         out['parsed'] = False
     return out
 
@@ -230,7 +230,7 @@ def _normalize_ollama_base_url(base_url: str) -> str:
         if path in ("/v1", "/api"):
             parsed = parsed._replace(path="")
             return urllib.parse.urlunparse(parsed).rstrip("/")
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         logger.debug("URL parse fallback during Ollama base URL normalization")
     if raw.endswith("/v1"):
         return raw[:-3].rstrip("/")
@@ -262,7 +262,7 @@ def resolve_effective_ollama_base_url(pairs: dict[str, str]) -> str:
         local_host = urllib.parse.urlparse(local_base).hostname or ""
         if _host_is_loopback(llm_host) and not _host_is_loopback(local_host):
             return local_base
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         logger.debug("URL parse fallback during Ollama effective URL resolution")
     return llm_base
 
@@ -291,7 +291,7 @@ def _fetch_ollama_models(base_url: str, timeout: float = 5.0) -> list[dict[str, 
                     model_rows.append({"id": mid, "name": mid})
             if model_rows:
                 break
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
             errs.append(str(exc))
     if model_rows:
         return _dedupe_models(model_rows)
@@ -375,7 +375,7 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
             urllib.request.urlopen(addr.replace("openbao", "127.0.0.1") + "/v1/sys/health", timeout=1)
             addr = addr.replace("openbao", "127.0.0.1")
             pairs["OPENBAO_ADDR"] = addr
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             logger.debug("OpenBao hostname resolution to 127.0.0.1 failed — using original address")
 
     return True, pairs
@@ -384,12 +384,12 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
 def is_openbao_installed() -> bool:
     import os
     import urllib.request
-    _DEFAULT_VAULT = 'http://localhost:8200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://openbao:8200'
-    addr = os.environ.get("OPENBAO_ADDR", _DEFAULT_VAULT).rstrip("/")
+    _DEFAULT_VAULT = 'http://localhost:8200' if get_settings().FLUME_NATIVE_MODE == '1' else 'http://openbao:8200'
+    addr = get_settings().OPENBAO_URL.rstrip("/")
     try:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         logger.debug("OpenBao health check failed — treating as unavailable")
         return False
 
@@ -426,7 +426,7 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
             payload = json.loads(r.read())
             data = payload.get("data", {}).get("data", {})
             return {str(k): str(v) for k, v in data.items() if v is not None}
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.warning("Failed to read secrets from OpenBao", extra={"structured_data": {"error": str(e)}})
         return {}
 
@@ -457,7 +457,7 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
         )
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status in (200, 201, 204)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.error("Failed to write secrets to OpenBao", extra={"structured_data": {"error": str(e)}})
         return False
 
@@ -539,7 +539,7 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
         for k, v in es_config.items():
             if v and str(v).strip():
                 pairs[k] = str(v).strip()
-    except Exception as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
         logger.debug(f"AP-10: ES LLM config read skipped in load_effective_pairs: {_e}")
 
 
@@ -588,7 +588,7 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
                         os.environ[k] = str(v)
             else:
                 logger.warning("AP-10: Failed to write LLM config to ES flume-llm-config")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             logger.warning(f"AP-10: ES LLM config write failed: {e}")
 
     # 2. Write sensitive keys to OpenBao
@@ -607,6 +607,9 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
     if bootstrap_updates:
         for k, v in bootstrap_updates.items():
             os.environ[k] = str(v)
+            
+    from config import get_settings
+    get_settings.cache_clear()
 
 
 
@@ -793,7 +796,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:500]
         return False, f"OAuth refresh failed: {e.code} {body}", None
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         return False, f"OAuth refresh failed: {e}", None
 
     new_access = str(data.get("access_token") or "").strip()
@@ -906,7 +909,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             port = p.port
             base_path = (p.path or "").strip("/")
             route_type = "network" if host not in ("127.0.0.1", "localhost") else "local"
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
 
     oauth_status = get_oauth_status(workspace_root) if provider == "openai" else {}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import httpx
 import os
 import subprocess
 from pathlib import Path
@@ -259,16 +261,16 @@ def planner_chat(messages: list[dict[str, Any]], model: str, cwd: str | None = N
         try:
             if proc.stdin:
                 proc.stdin.close()
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
         try:
             proc.terminate()
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
         try:
             proc.wait(timeout=3)
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             try:
                 proc.kill()
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 pass

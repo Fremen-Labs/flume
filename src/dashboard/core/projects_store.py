@@ -12,29 +12,13 @@ PROJECTS_INDEX = "flume-projects"
 
 def _ensure_gitflow_defaults(entry: dict) -> dict:
     """Backfill gitflow + concurrency config with defaults if missing."""
-    if 'gitflow' not in entry:
-        entry['gitflow'] = {
-            'autoPrOnApprove': True,
-            'defaultBranch': None,
-            'integrationBranch': 'develop',
-            'releaseBranch': 'main',
-            'autoMergeIntegrationPr': True,
-            'ensureIntegrationBranch': True,
-        }
-    else:
-        gf = entry['gitflow']
-        if 'autoPrOnApprove' not in gf:
-            gf['autoPrOnApprove'] = True
-        if 'defaultBranch' not in gf:
-            gf['defaultBranch'] = None
-        if 'integrationBranch' not in gf:
-            gf['integrationBranch'] = 'develop'
-        if 'releaseBranch' not in gf:
-            gf['releaseBranch'] = 'main'
-        if 'autoMergeIntegrationPr' not in gf:
-            gf['autoMergeIntegrationPr'] = True
-        if 'ensureIntegrationBranch' not in gf:
-            gf['ensureIntegrationBranch'] = True
+    gf = entry.setdefault('gitflow', {})
+    gf.setdefault('autoPrOnApprove', True)
+    gf.setdefault('defaultBranch', None)
+    gf.setdefault('integrationBranch', 'develop')
+    gf.setdefault('releaseBranch', 'main')
+    gf.setdefault('autoMergeIntegrationPr', True)
+    gf.setdefault('ensureIntegrationBranch', True)
     try:
         from utils.concurrency_config import ensure_concurrency_defaults  # noqa: PLC0415
         ensure_concurrency_defaults(entry)

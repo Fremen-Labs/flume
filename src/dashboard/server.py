@@ -57,7 +57,9 @@ _startup_logger = _get_startup_logger('es_bootstrap')
 try:
     import urllib.request as _ur
     import urllib.error as _ue
-    _es_check_url = os.environ.get('ES_URL', 'http://elasticsearch:9200' if os.environ.get('FLUME_NATIVE_MODE') != '1' else 'http://localhost:9200')
+    from config import get_settings
+    _s = get_settings()
+    _es_check_url = _s.ES_URL or ('http://elasticsearch:9200' if _s.FLUME_NATIVE_MODE != '1' else 'http://localhost:9200')
     _check_req = _ur.Request(f"{_es_check_url}/agent-task-records", method='HEAD')
     # Add auth + TLS for hardened ES
     from core.elasticsearch import _get_auth_headers as _boot_auth, ctx as _boot_ctx
@@ -69,7 +71,7 @@ try:
 except _ue.HTTPError as _e:
     if _e.code == 404:
         _startup_logger.warning("ES index 'agent-task-records' not found — was `flume start` used to boot?")
-except Exception as _e:
+except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
     _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
 
 
@@ -91,9 +93,11 @@ def _seed_llm_config_from_env() -> None:
     """
     import urllib.request
     import urllib.error
-    model = os.environ.get('LLM_MODEL', '').strip()
-    provider = os.environ.get('LLM_PROVIDER', '').strip()
-    base_url = os.environ.get('LLM_BASE_URL', '').strip()
+    from config import get_settings
+    _s = get_settings()
+    model = _s.LLM_MODEL.strip()
+    provider = _s.LLM_PROVIDER.strip()
+    base_url = _s.LLM_BASE_URL.strip()
 
     if not model and not provider:
         logger.debug('_seed_llm_config_from_env: no LLM_MODEL or LLM_PROVIDER in env — skipping')
@@ -133,7 +137,7 @@ def _seed_llm_config_from_env() -> None:
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 logger.warning(f'_seed_llm_config_from_env: GET failed ({e}) — proceeding with full upsert')
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             logger.warning(f'_seed_llm_config_from_env: GET error ({e}) — proceeding with full upsert')
 
         if not doc:
@@ -144,11 +148,13 @@ def _seed_llm_config_from_env() -> None:
         req = urllib.request.Request(url, data=body, headers=headers, method='POST')
         with urllib.request.urlopen(req, timeout=5, context=_es_ctx) as r:
             logger.info(f'_seed_llm_config_from_env: seeded {list(doc.keys())} → flume-llm-config (model={model})')
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.warning(f'_seed_llm_config_from_env: non-fatal failure — {e}')
 
-HOST = os.environ.get('DASHBOARD_HOST', '0.0.0.0')
-PORT = int(os.environ.get('DASHBOARD_PORT', '8765'))
+from config import get_settings
+_s = get_settings()
+HOST = _s.DASHBOARD_HOST
+PORT = int(_s.DASHBOARD_PORT)
 # Pre-built Vite output only — editing src/frontend/src/*.tsx requires: ./flume build-ui (see install/README.md).
 STATIC_ROOT = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
 
@@ -161,8 +167,8 @@ WORKSPACE_ROOT = resolve_safe_workspace()
 # AP-9 resolved: SESSIONS_DIR removed — plan sessions already fully migrated to agent-plan-sessions ES index.
 # AP-3 resolved: PROJECTS_REGISTRY removed — projects.json migration is complete; sentinel logic deleted.
 
-LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'http://localhost:11434')
-LLM_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
+LLM_BASE_URL = _s.LLM_BASE_URL
+LLM_MODEL = _s.LLM_MODEL
 
 # AP-1: Sequence counters are now stored atomically in the ES `flume-counters` index.
 # One document per prefix (e.g. 'task', 'epic'); field `value` = highest allocated N.
@@ -195,7 +201,7 @@ def _sync_llm_runtime_env():
         from workspace_llm_env import sync_llm_env_from_workspace  # type: ignore
 
         sync_llm_env_from_workspace(WORKSPACE_ROOT)
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         logger.debug("sync_llm_env_from_workspace: failed on startup (non-critical)", exc_info=True)
 
 # --- Extracted Domain: Planning ---
@@ -352,7 +358,7 @@ async def load_snapshot():
                     'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
                     'historical_burn': historical_burn,
                 }
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 logger.debug("api_snapshot: token savings computation failed (best-effort)", exc_info=True)
                 return {
                     'savings': 0,
@@ -433,7 +439,7 @@ def agents_status() -> dict:
                     hb = datetime.fromisoformat(hb_str.replace('Z', '+00:00'))
                     if (now - hb).total_seconds() <= 30:
                         active_nodes += 1
-                except Exception:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                     logger.debug("api_snapshot: heartbeat timestamp parse failed", exc_info=True)
 
         return {
@@ -444,7 +450,7 @@ def agents_status() -> dict:
             'handler_pids': [],
             'cluster_status': status
         }
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.error("Error fetching agent status", extra={"structured_data": {"error": str(e)}})
         return {'running': False, 'error': str(e)}
 
@@ -482,7 +488,7 @@ def _requeue_running_tasks():
             })
             requeued += 1
         return requeued
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         logger.error("_requeue_running_tasks: ES update failed", exc_info=True)
         return 0
 
@@ -496,7 +502,7 @@ def agents_stop() -> dict:
             try:
                 os.kill(pid, signal.SIGTERM)
                 killed.append(pid)
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 logger.warning("agents_stop: SIGTERM failed for pid (may already be dead)", exc_info=True)
     requeued = _requeue_running_tasks()
     return {'ok': True, 'killed_pids': killed, 'requeued_tasks': requeued}
@@ -582,7 +588,7 @@ def restart_flume_services() -> dict:
                 'mode': 'flume',
                 'message': 'Restart scheduled. You may lose connection briefly; refresh if the page stops responding.',
             }
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             logger.warning("api_agents_restart: flume CLI restart failed, falling back to workers_only", exc_info=True)
     try:
         agents_stop()
@@ -593,7 +599,7 @@ def restart_flume_services() -> dict:
             'message': 'Worker processes restarted. Restart the dashboard manually if configuration still looks stale.',
             'workers': started,
         }
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         return {'ok': False, 'error': str(e)[:400]}
 
 
@@ -635,7 +641,7 @@ def maybe_auto_start_workers():
             logger.info(f'Flume: auto-started workers: {started}')
         elif result.get('already_running'):
             logger.info('Flume: workers already running (skipped auto-start).')
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.info(f'Flume: warning — could not auto-start workers: {e}')
 
 
@@ -667,7 +673,7 @@ async def lifespan(app: FastAPI):
             "source": "FLUME_WORKSPACE" if os.environ.get('FLUME_WORKSPACE') else "fallback_home",
             "status": "success"
         }))
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.error(json.dumps({
             "event": "workspace_initialization_failure",
             "path": str(WORKSPACE_ROOT),
@@ -699,7 +705,7 @@ async def lifespan(app: FastAPI):
             append_note=_lazy_append_task_agent_log_note,
             logger=logger,
         )
-    except Exception as _exc:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _exc:
         logger.warning(f'auto_unblock.start_failed: {_exc}')
 
     # Start the autonomy sweeps (parent-revival + stuck-worker watchdog +
@@ -714,7 +720,7 @@ async def lifespan(app: FastAPI):
             list_projects=load_projects_registry,
             logger=logger,
         )
-    except Exception as _exc:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _exc:
         logger.warning(f'autonomy_sweeps.start_failed: {_exc}')
 
     app.state.http_client = httpx.AsyncClient()

@@ -35,7 +35,7 @@ def es_counter_hwm(prefix: str) -> int:
     try:
         res = _es_counter_request(f'/{COUNTERS_INDEX}/_doc/{prefix}')
         return int(res.get('_source', {}).get('value', 0))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return 0
 
 def es_counter_set_hwm(prefix: str, value: int) -> None:
@@ -65,7 +65,7 @@ def es_counter_set_hwm(prefix: str, value: int) -> None:
     }
     try:
         _es_counter_request(f'/{COUNTERS_INDEX}/_update/{prefix}', body=body, method='POST')
-    except Exception as exc:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
         logger.warning(json.dumps({
             'event': 'es_counter_set_hwm_failed',
             'prefix': prefix,
@@ -96,7 +96,7 @@ def get_next_id_sequence(prefix: str) -> int:
             m = pattern.match(doc_id)
             if m:
                 max_n = max(max_n, int(m.group(1)))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         if max_n == 0:
             return int(datetime.now(timezone.utc).timestamp()) % 1_000_000 + 1
     return max_n + 1

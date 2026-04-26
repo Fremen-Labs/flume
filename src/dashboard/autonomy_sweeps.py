@@ -43,6 +43,8 @@ helpers and logger on startup.
 from __future__ import annotations
 
 import json
+import urllib.error
+import httpx
 import os
 import re
 import threading
@@ -122,7 +124,7 @@ _STATE: dict[str, Any] = {
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, '').strip() or default)
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return default
 
 
@@ -180,7 +182,7 @@ def _parse_iso(ts: str) -> float | None:
     try:
         s = ts.replace('Z', '+00:00')
         return datetime.fromisoformat(s).timestamp()
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return None
 
 
@@ -247,7 +249,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
     }
     try:
         res = es_search('agent-task-records', body)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'parent_revival.query_failed', 'error': str(e)[:200]}))
         return summary
@@ -269,7 +271,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
                     f'agent-task-records/_update/{child_id}',
                     {'doc': {'parent_revived_at': _now_iso(), 'parent_revival_reason': 'no_parent_id'}},
                 )
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 pass
             summary['parent_not_found'] += 1
             processed += 1
@@ -286,7 +288,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
                 ], 'minimum_should_match': 1}},
             })
             phits = pres.get('hits', {}).get('hits', [])
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'parent_revival.parent_lookup_failed',
@@ -302,7 +304,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
                     f'agent-task-records/_update/{child_id}',
                     {'doc': {'parent_revived_at': _now_iso(), 'parent_revival_reason': 'parent_missing'}},
                 )
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 pass
             summary['parent_not_found'] += 1
             processed += 1
@@ -326,7 +328,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
                         ),
                     }},
                 )
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 pass
             summary['parent_not_blocked'] += 1
             processed += 1
@@ -371,7 +373,7 @@ def _parent_revival_sweep(deps: dict) -> dict:
                 'parent': parent_src.get('id'),
                 'child': child_src.get('id'),
             }))
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'parent_revival.process_failed',
@@ -433,7 +435,7 @@ def _stuck_worker_watchdog(deps: dict) -> dict:
     }
     try:
         res = es_search('agent-task-records', body)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'stuck_worker.query_failed', 'error': str(e)[:200]}))
         return summary
@@ -489,7 +491,7 @@ def _stuck_worker_watchdog(deps: dict) -> dict:
                     'idle_for_min': int((time.time() - (last_ts or cutoff_ts)) / 60),
                     'active_worker': aw,
                 }))
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary['errors'] += 1
                 logger.warning(json.dumps({
                     'event': 'stuck_worker.escalate_failed',
@@ -533,7 +535,7 @@ def _stuck_worker_watchdog(deps: dict) -> dict:
                 'active_worker': aw,
                 'attempts': recovery_count + 1,
             }))
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'stuck_worker.process_failed',
@@ -585,7 +587,7 @@ def _plan_progress_scan(deps: dict) -> dict:
 
     try:
         projects = list_projects() or []
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'plan_progress.list_projects_failed', 'error': str(e)[:200]}))
         return summary
@@ -604,7 +606,7 @@ def _plan_progress_scan(deps: dict) -> dict:
                 }},
                 '_source': ['id', 'item_type', 'status', 'needs_human', 'updated_at'],
             })
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'plan_progress.query_failed',
@@ -670,7 +672,7 @@ def _plan_progress_scan(deps: dict) -> dict:
                 summary['skipped'] += 1
                 summary['skip_reasons']['recent_plan_check'] = summary['skip_reasons'].get('recent_plan_check', 0) + 1
                 continue
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             logger.warning(json.dumps({
                 'event': 'plan_progress.idempotency_check_failed',
                 'repo': repo_id, 'error': str(e)[:200],
@@ -720,7 +722,7 @@ def _plan_progress_scan(deps: dict) -> dict:
                 'plan_check_id': plan_check_id,
                 'counts': counts,
             }))
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'plan_progress.upsert_failed',
@@ -774,7 +776,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
 
     try:
         projects = list_projects() or []
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'branch_gc.list_projects_failed', 'error': str(e)[:200]}))
         return summary
@@ -787,7 +789,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
             GitHostError,
             GitHostNotFoundError,
         )
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'branch_gc.import_failed', 'error': str(e)[:200]}))
         return summary
@@ -826,7 +828,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
                     'item_type', 'owner',
                 ],
             })
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'branch_gc.query_failed', 'repo': repo_id, 'error': str(e)[:200],
@@ -840,7 +842,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
         client = None
         try:
             client = get_git_client(proj)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'branch_gc.client_failed', 'repo': repo_id, 'error': str(e)[:200],
@@ -880,7 +882,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
                             'remote_branch_deleted_reason': 'branch_gc_sweep',
                         }
                     })
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                     logger.warning(json.dumps({
                         'event': 'branch_gc.stamp_failed',
                         'task': src.get('id'), 'error': str(e)[:200],
@@ -895,7 +897,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
                             'remote_branch_deleted_reason': 'already_absent',
                         }
                     })
-                except Exception:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                     pass
                 summary['skipped'] += 1
                 summary['skip_reasons']['already_absent'] = summary['skip_reasons'].get('already_absent', 0) + 1
@@ -905,7 +907,7 @@ def _branch_gc_sweep(deps: dict) -> dict:
                     'event': 'branch_gc.delete_failed', 'repo': repo_id,
                     'branch': branch, 'error': str(e)[:200],
                 }))
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary['errors'] += 1
                 logger.warning(json.dumps({
                     'event': 'branch_gc.delete_unexpected', 'repo': repo_id,
@@ -931,7 +933,7 @@ def _pr_reconcile_find_task_by_pr(es_search, repo_id: str, pr_number: int) -> tu
                 {'term': {'pr_number': int(pr_number)}},
             ]}},
         })
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return None, {}
     hits = res.get('hits', {}).get('hits') or []
     if not hits:
@@ -972,7 +974,7 @@ def _pr_reconcile_attempt_rebase(
 
     try:
         from utils.git_host_client import _get_github_token  # type: ignore  # noqa: PLC0415
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         _get_github_token = None
 
     auth_url = repo_url
@@ -982,7 +984,7 @@ def _pr_reconcile_attempt_rebase(
             if token and '://' in repo_url:
                 prefix, rest = repo_url.split('://', 1)
                 auth_url = f'{prefix}://x-access-token:{token}@{rest}'
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         pass
 
     tmp = _Path(tempfile.mkdtemp(prefix=f'flume-reconcile-{repo_id}-'))
@@ -1043,7 +1045,7 @@ def _pr_reconcile_attempt_rebase(
         try:
             parts = (ahead_behind or '').split()
             base_ahead = int(parts[0]) if parts else 0
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             base_ahead = 1
         if base_ahead == 0:
             return False, 'already_up_to_date', []
@@ -1080,7 +1082,7 @@ def _pr_reconcile_attempt_rebase(
     finally:
         try:
             shutil.rmtree(tmp, ignore_errors=True)
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
 
 
@@ -1126,7 +1128,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
 
     try:
         projects = list_projects() or []
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'pr_reconcile.list_projects_failed', 'error': str(e)[:200]}))
         return summary
@@ -1135,7 +1137,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
         from utils.git_host_client import (  # noqa: PLC0415
             get_git_client, GitHostError, GitHostNotFoundError,
         )
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'pr_reconcile.import_failed', 'error': str(e)[:200]}))
         return summary
@@ -1156,7 +1158,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
 
         try:
             client = get_git_client(proj)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'pr_reconcile.client_failed', 'repo': repo_id, 'error': str(e)[:200],
@@ -1194,7 +1196,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                     fresh = client.get_pull_request(int(pr_number))
                     mergeable = fresh.get('mergeable')
                     state = (fresh.get('mergeable_state') or '').lower()
-                except Exception:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                     pass
 
             task_es_id, task_src = _pr_reconcile_find_task_by_pr(es_search, repo_id, int(pr_number))
@@ -1214,7 +1216,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                         client.delete_remote_branch(head_ref)
                     except GitHostNotFoundError:
                         pass
-                    except Exception as e:
+                    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                         logger.warning(json.dumps({
                             'event': 'pr_reconcile.branch_delete_failed',
                             'repo': repo_id, 'pr': pr_number,
@@ -1230,7 +1232,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                                     'merge_conflict': False,
                                 }
                             })
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                             pass
                 except GitHostError as e:
                     err = str(e).lower()
@@ -1240,7 +1242,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                                 es_post(f'agent-task-records/_update/{task_es_id}', {
                                     'doc': {'pr_status': 'merged'},
                                 })
-                            except Exception:
+                            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                                 pass
                         summary['synced_to_merged'] += 1
                     else:
@@ -1273,7 +1275,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                                     'merge_conflict': False,
                                 }
                             })
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                             pass
                     continue
 
@@ -1301,7 +1303,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                                     'needs_human': False,
                                 }
                             })
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                             pass
                 else:
                     summary['skip_reasons'][reason] = summary['skip_reasons'].get(reason, 0) + 1
@@ -1326,7 +1328,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
             '_source': ['id', 'repo', 'pr_number', 'branch'],
         })
         sync_hits = sync_res.get('hits', {}).get('hits') or []
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         sync_hits = []
         logger.warning(json.dumps({'event': 'pr_reconcile.sync_query_failed', 'error': str(e)[:200]}))
 
@@ -1351,7 +1353,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
             fresh = client.get_pull_request(int(pr_number))
         except GitHostNotFoundError:
             continue
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             continue
         state = (fresh.get('state') or '').lower()
         merged = bool(fresh.get('merged'))
@@ -1369,7 +1371,7 @@ def _pr_reconcile_sweep(deps: dict) -> dict:
                     'event': 'pr_reconcile.synced', 'task': src.get('id'),
                     'pr': pr_number, 'new_status': new_status,
                 }))
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 logger.warning(json.dumps({
                     'event': 'pr_reconcile.sync_update_failed',
                     'task': src.get('id'), 'error': str(e)[:200],
@@ -1469,7 +1471,7 @@ def _orphan_heal_sweep(deps: dict) -> dict:
 
     try:
         res = es_search('agent-task-records', body)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         summary['errors'] += 1
         logger.warning(json.dumps({'event': 'orphan_heal.query_failed', 'error': str(e)[:200]}))
         return summary
@@ -1564,7 +1566,7 @@ def _orphan_heal_sweep(deps: dict) -> dict:
                     'to_status': new_status,
                 }))
             processed += 1
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'orphan_heal.update_failed',
@@ -1601,7 +1603,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _parent_revival_sweep(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'parent_revival.crashed: {e}')
                 with _STATE_LOCK:
@@ -1616,7 +1618,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _stuck_worker_watchdog(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'stuck_worker.crashed: {e}')
                 with _STATE_LOCK:
@@ -1631,7 +1633,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _plan_progress_scan(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'plan_progress.crashed: {e}')
                 with _STATE_LOCK:
@@ -1646,7 +1648,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _branch_gc_sweep(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'branch_gc.crashed: {e}')
                 with _STATE_LOCK:
@@ -1661,7 +1663,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _pr_reconcile_sweep(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'pr_reconcile.crashed: {e}')
                 with _STATE_LOCK:
@@ -1679,7 +1681,7 @@ def _loop(deps: dict) -> None:
             started = time.time()
             try:
                 summary = _orphan_heal_sweep(deps)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary = {'errors': 1}
                 logger.exception(f'orphan_heal.crashed: {e}')
                 with _STATE_LOCK:

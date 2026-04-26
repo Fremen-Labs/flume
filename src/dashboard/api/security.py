@@ -114,7 +114,7 @@ class KillSwitchService:
         try:
             await self.es_client.update_tasks_to_halted()
             logger.info(json.dumps({"event": "kill_switch.db_update.success", "elasticsearch_status": "blocked", "correlation_id": correlation_id}))
-        except Exception as e:
+        except (KillSwitchDatabaseError, httpx.RequestError) as e:
             logger.error(json.dumps({"event": "kill_switch.db_update.failure", "error": str(e), "correlation_id": correlation_id}))
             raise KillSwitchDatabaseError(str(e))
 
@@ -131,7 +131,7 @@ class KillSwitchService:
                 }))
             logger.info(json.dumps({"event": "kill_switch.process_kill.success", "killed_pids": killed_pids, "killed_pid_count": len(killed_pids), "correlation_id": correlation_id}))
             return {"success": True, "killed_pids": killed_pids, "correlation_id": correlation_id}
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.critical(json.dumps({
                 "event": "kill_switch.invoke.partial_failure",
                 "error": str(e),
@@ -232,7 +232,9 @@ def api_security():
 
         openbao_keys = {}
         try:
-            workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+            from config import get_settings
+            _s = get_settings()
+            workspace = Path(_s.FLUME_WORKSPACE)
             enabled, pairs = _openbao_enabled(workspace)
             if enabled:
                 req = urllib.request.Request(
@@ -244,7 +246,7 @@ def api_security():
                     keys = data.get('data', {}).get('data', {})
                     for k in keys:
                         openbao_keys[k] = "secured"
-        except Exception:
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
             logger.warning("api_security_dashboard: OpenBao key lookup failed, using placeholder", exc_info=True)
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
@@ -271,7 +273,7 @@ def api_security():
             "openbao_keys": openbao_keys,
             "audit_logs": formatted_logs
         }
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
         logger.error({"event": "api_security_failed", "error": str(e)[:300]}, exc_info=True)
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
@@ -280,20 +282,22 @@ def api_security():
 
 def _get_vault_token() -> str:
     """Resolve Vault token from env or AppRole login."""
-    t = os.environ.get('VAULT_TOKEN')
+    from config import get_settings
+    _s = get_settings()
+    t = _s.VAULT_TOKEN
     if t:
         return t
 
-    role_id = os.environ.get('VAULT_ROLE_ID')
-    secret_id = os.environ.get('VAULT_SECRET_ID')
+    role_id = _s.VAULT_ROLE_ID
+    secret_id = _s.VAULT_SECRET_ID
 
     if role_id and secret_id:
         try:
-            openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+            openbao_url = _s.OPENBAO_URL
             client = hvac.Client(url=openbao_url)
             res = client.auth.approle.login(role_id=role_id, secret_id=secret_id)
             return res['auth']['client_token']
-        except Exception as e:
+        except hvac.exceptions.VaultError as e:
             logger.error({"event": "vault_approle_login_failed", "error": str(e)[:200]})
             raise RuntimeError("Critical: Failed to authenticate via Vault AppRole.")
 
@@ -302,7 +306,9 @@ def _get_vault_token() -> str:
 
 @router.get("/api/vault/status")
 def vault_status():
-    openbao_url = os.environ.get('OPENBAO_URL', 'http://127.0.0.1:8200')
+    from config import get_settings
+    _s = get_settings()
+    openbao_url = _s.OPENBAO_URL
     vault_token = _get_vault_token()
     try:
         req = urllib.request.Request(f"{openbao_url}/v1/sys/health")
@@ -321,5 +327,5 @@ def vault_status():
             else:
                 raise
         return {"status": "connected", "health": health, "keys_present": keys}
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, RuntimeError) as e:
         return {"status": "error", "message": str(e)}

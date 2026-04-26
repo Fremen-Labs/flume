@@ -39,10 +39,11 @@ async def api_set_log_level(payload: LogLevelRequest):
 
     # Proxy to Gateway
     try:
-        gw_url = os.environ.get('GATEWAY_URL', 'http://gateway:8090').rstrip('/')
+        from config import get_settings
+        gw_url = get_settings().GATEWAY_URL.rstrip('/')
         async with httpx.AsyncClient() as client:
             await client.post(f"{gw_url}/internal/level", json={"level": level}, timeout=2.0)
-    except Exception as e:
+    except httpx.RequestError as e:
         logger.warning({"event": "log_level_gateway_sync_failed", "error": str(e)[:200]})
 
     return {"ok": True, "level": level}
@@ -96,8 +97,8 @@ def api_settings_llm_credentials(payload: LLMSettingsRequest):
 @router.post("/api/settings/llm/credentials")
 def api_settings_llm_credentials_post(payload: LLMCredentialsActionRequest):
     from llm_credentials_store import apply_credentials_action  # type: ignore
-    from llm_settings import _update_env_keys  # type: ignore
-    workspace = Path(os.environ.get('FLUME_WORKSPACE', './workspace'))
+    from config import get_settings
+    workspace = Path(get_settings().FLUME_WORKSPACE)
 
     ok, msg, updates = apply_credentials_action(workspace, payload.model_dump(exclude_none=False))
     if not ok:
@@ -144,15 +145,17 @@ def get_system_settings():
         doc = es_search('flume-settings', {'query': {'term': {'_id': 'system'}}})
         if doc and 'hits' in doc and doc['hits']['hits']:
             sys_conf = doc['hits']['hits'][0]['_source']
-    except Exception:
+    except (KeyError, ValueError, TypeError):
         logger.debug("get_system_settings: ES read failed, using env defaults", exc_info=True)
 
+    from config import get_settings
+    _s = get_settings()
     return {
-        "es_url": os.environ.get('ES_URL') or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
-        "es_api_key": "***" if os.environ.get('ES_API_KEY') or sys_conf.get('es_api_key') else "",
-        "es_verify_tls": ES_VERIFY_TLS or sys_conf.get('es_verify_tls', False),
-        "openbao_url": os.environ.get('OPENBAO_URL') or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
-        "vault_token": "••••" if os.environ.get('VAULT_TOKEN') or sys_conf.get('vault_token') else "",
+        "es_url": _s.ES_URL or sys_conf.get('es_url', 'http://127.0.0.1:9200'),
+        "es_api_key": "***" if _s.ES_API_KEY or sys_conf.get('es_api_key') else "",
+        "es_verify_tls": _s.ES_VERIFY_TLS or sys_conf.get('es_verify_tls', False),
+        "openbao_url": _s.OPENBAO_URL or sys_conf.get('openbao_url', 'http://127.0.0.1:8200'),
+        "vault_token": "••••" if _s.VAULT_TOKEN or sys_conf.get('vault_token') else "",
         "prometheus_enabled": sys_conf.get('prometheus_enabled', True)
     }
 
@@ -179,7 +182,7 @@ def update_system_settings(settings: SystemSettingsRequest):
 
         es_post('flume-settings/_doc/system', sys_conf)
         return {"status": "ok"}
-    except Exception as e:
+    except (KeyError, ValueError, TypeError) as e:
         logger.error({"event": "update_system_settings_failed", "error": str(e)[:300]}, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)[:400]})
 

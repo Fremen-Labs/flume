@@ -65,7 +65,7 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
                         "project_id": new_id,
                         "hint": "OpenBao KV lookup returned placeholder. Falling back to ADO_PERSONAL_ACCESS_TOKEN env var.",
                     }))
-            except Exception as _cred_err:
+            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
                 logger.warning(json.dumps({
                     "event": "ado_pat_fetch_error",
                     "project_id": new_id,
@@ -84,7 +84,7 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
                             "project_id": new_id,
                             "hint": "PAT sourced from OpenBao ADO_TOKEN key (flume start provisioning).",
                         }))
-                except Exception:
+                except (KeyError, ValueError, ImportError):
                     pass
             if not pat:
                 _env_pat = (
@@ -115,7 +115,7 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
                         "project_id": new_id,
                         "hint": "OpenBao KV lookup returned placeholder. Falling back to GITHUB_TOKEN env var.",
                     }))
-            except Exception as _cred_err:
+            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
                 logger.warning(json.dumps({
                     "event": "gh_pat_fetch_error",
                     "project_id": new_id,
@@ -256,7 +256,7 @@ def api_project_tasks(
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': query,
         })
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
         logger.warning(json.dumps({'event': 'project_tasks_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
     hits = res.get('hits', {}).get('hits', [])
@@ -273,7 +273,7 @@ def _project_task_ids_for_repo(project_id: str) -> list[str]:
             '_source': ['id'],
             'query': {'term': {'repo': project_id}},
         })
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
         return []
     out = []
     for h in res.get('hits', {}).get('hits', []) or []:
@@ -303,7 +303,7 @@ def api_delete_project(project_id: str):
             "event": "project_deleted",
             "project_id": project_id,
         }))
-    except Exception as exc:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
         logger.warning(json.dumps({
             "event": "project_delete_es_error",
             "project_id": project_id,

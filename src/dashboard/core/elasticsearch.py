@@ -14,18 +14,20 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # --- Configuration defaults (single source of truth for ES connectivity) ---
-_DEFAULT_ES = "http://localhost:9200"
-if os.environ.get('FLUME_NATIVE_MODE') == '1':
+from config import get_settings
+_settings = get_settings()
+
+if _settings.FLUME_NATIVE_MODE == '1':
     # Standalone processes can reach ES via localhost loopback normally patched via Node registries
     _DEFAULT_ES = "http://localhost:9200"
 else:
     # Dockerized environments must route natively
     _DEFAULT_ES = "http://elasticsearch:9200"
 
-ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
-ES_API_KEY = os.environ.get('ES_API_KEY', '')
-ES_PASSWORD = os.environ.get('FLUME_ELASTIC_PASSWORD', '')
-ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
+ES_URL = _settings.ES_URL.rstrip('/') if _settings.ES_URL else _DEFAULT_ES
+ES_API_KEY = _settings.ES_API_KEY
+ES_PASSWORD = _settings.FLUME_ELASTIC_PASSWORD
+ES_VERIFY_TLS = _settings.ES_VERIFY_TLS
 
 def _get_auth_headers() -> dict:
     if ES_API_KEY:
@@ -81,7 +83,7 @@ def find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optiona
             if hits:
                 h = hits[0]
                 return h.get('_id'), h.get('_source', {})
-        except Exception:
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
             continue
     return None, None
 
@@ -157,7 +159,7 @@ def _flush_es_bulk_unlocked():
                 continue
             logger.warning(f"[ES BULK] HTTP Flush failed: {e}")
             break
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             if attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
@@ -192,7 +194,7 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
             raise
-        except Exception:
+        except (urllib.error.URLError, TimeoutError):
             if attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue

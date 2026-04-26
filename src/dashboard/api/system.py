@@ -58,7 +58,8 @@ async def api_snapshot():
     try:
         from server import load_snapshot  # noqa: PLC0415
         return await load_snapshot()
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+        logger.error(f"Snapshot failed: {e}", exc_info=True)
         return JSONResponse(status_code=502, content={'error': str(e)[:400], 'code': 'ES_CONNECTION'})
 
 
@@ -92,8 +93,8 @@ async def api_system_state():
                 rc, out, _err = await run_cmd_async("flume", "doctor", "--json", timeout=5)
                 if rc == 0:
                     telemetry = json.loads(out)
-            except Exception:
-                logger.debug("api_system_state: flume doctor parse failed (non-critical)", exc_info=True)
+            except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as e:
+                logger.debug(f"api_system_state: flume doctor parse failed: {e}", exc_info=True)
 
         return {
             "status": "online",
@@ -103,7 +104,8 @@ async def api_system_state():
             "workers": workers,
             "telemetry": telemetry
         }
-    except Exception as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+        logger.error(f"System state fetch failed: {e}", exc_info=True)
         return JSONResponse(status_code=502, content={'error': str(e)[:300]})
 
 
@@ -121,7 +123,7 @@ async def api_system_sync_ast(request: Request, x_flume_system_token: str = Head
 
     try:
         return {"success": True, "message": "Elastro RAG integration securely decoupled from built-in Flume architecture"}
-    except Exception as e:
+    except (ValueError, KeyError, TypeError) as e:
         logger.error({
             "event": "ast_system_sync_failure",
             "reason": "unhandled_exception",
@@ -208,12 +210,14 @@ def api_autonomy_status():
     try:
         import auto_unblock as _auto_unblock  # noqa: PLC0415
         out['auto_unblock'] = _auto_unblock.get_status()
-    except Exception as e:
+    except (ImportError, AttributeError, ValueError) as e:
+        logger.error(f"auto_unblock status failed: {e}", exc_info=True)
         out['auto_unblock'] = {'error': str(e)[:200]}
     try:
         import autonomy_sweeps as _autonomy  # noqa: PLC0415
         out['sweeps'] = _autonomy.get_status()
-    except Exception as e:
+    except (ImportError, AttributeError, ValueError) as e:
+        logger.error(f"autonomy sweeps status failed: {e}", exc_info=True)
         out['sweeps'] = {'error': str(e)[:200]}
     return out
 
@@ -252,8 +256,8 @@ def api_autonomy_sweep_now(sweep_name: str):
         return {'ok': True, **result}
     except ValueError as e:
         return JSONResponse(status_code=400, content={'error': str(e)})
-    except Exception as e:
-        logger.exception(f'autonomy.sweep_failed: {e}')
+    except (ImportError, AttributeError, KeyError) as e:
+        logger.error(f'autonomy.sweep_failed: {e}', exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:300]})
 
 
@@ -265,7 +269,8 @@ def api_auto_unblock_status():
     try:
         import auto_unblock as _auto_unblock  # noqa: PLC0415
         return _auto_unblock.get_status()
-    except Exception as e:
+    except (ImportError, AttributeError, ValueError) as e:
+        logger.error(f"auto_unblock.get_status failed: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:200]})
 
 
@@ -281,8 +286,8 @@ def api_auto_unblock_sweep_now():
             'logger': logger,
         })
         return {'ok': True, 'summary': summary}
-    except Exception as e:
-        logger.exception(f'auto_unblock.manual_sweep_failed: {e}')
+    except (ImportError, AttributeError, ValueError, KeyError) as e:
+        logger.error(f'auto_unblock.manual_sweep_failed: {e}', exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:300]})
 
 
@@ -318,7 +323,8 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
 
     # --- 1. Gateway Prometheus metrics ---
     try:
-        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
+        settings = get_settings()
+        gateway_url = settings.GATEWAY_URL
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{gateway_url}/metrics", timeout=2.0)
             if resp.status_code == 200:
@@ -371,13 +377,15 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                                    "msg": f"Concurrency throttle events: {throttled}"})
                 conn_state['throttled'] = throttled
-    except Exception:
+    except httpx.RequestError as e:
+        logger.error(f"Gateway metrics unreachable: {e}", exc_info=True)
         events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "WARN",
                        "msg": "Gateway metrics unreachable"})
 
     # --- 2. Node mesh health from gateway ---
     try:
-        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
+        settings = get_settings()
+        gateway_url = settings.GATEWAY_URL
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{gateway_url}/api/nodes", timeout=2.0)
             if resp.status_code == 200:
@@ -397,8 +405,8 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
                     models_str = ', '.join(models) if models else 'none'
                     events.append({"id": uuid.uuid4().hex, "time": now_str, "level": level,
                                    "msg": f"  {n['id']}: {status} | {lat}ms | load {load} | models [{models_str}]"})
-    except Exception:
-        pass  # node details are best-effort
+    except httpx.RequestError as e:
+        logger.warning(f"Node mesh health fetch failed: {e}", exc_info=True)
 
     # --- 3. Worker heartbeat summary ---
     try:
@@ -412,7 +420,7 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
                 task_title = w.get('current_task_title') or w.get('current_task_id') or '—'
                 events.append({"id": uuid.uuid4().hex, "time": now_str, "level": "INFO",
                                "msg": f"  ▸ {w['name']} [{w.get('model', '?')}] → {task_title}"})
-    except Exception:
+    except (ValueError, KeyError, TypeError):
         pass  # worker summary is best-effort
 
     return events
@@ -439,14 +447,14 @@ async def websocket_telemetry(websocket: WebSocket):
             for payload in events:
                 try:
                     await websocket.send_text(json.dumps({"event": "telemetry", "data": payload}))
-                except Exception:
+                except RuntimeError:
                     return  # connection lost
             # Wait 3 seconds between telemetry pushes
             await asyncio.sleep(3)
     except WebSocketDisconnect:
         # Normal browser close (tab navigation, page reload, window close).
         pass
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError) as e:
         logger.error({"event": "websocket_handler_crashed", "client": str(websocket.client), "error": str(e), "traceback": traceback.format_exc()})
     finally:
         try:
@@ -461,7 +469,8 @@ async def websocket_telemetry(websocket: WebSocket):
 async def get_system_telemetry():
     """Proxy metrics from Go Gateway and transform Prometheus text to JSON native dict."""
     try:
-        gateway_url = os.environ.get('FLUME_GATEWAY_URL', 'http://localhost:8090').rstrip('/')
+        settings = get_settings()
+        gateway_url = settings.GATEWAY_URL
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{gateway_url}/metrics", timeout=2.0)
             if resp.status_code != 200:
@@ -572,7 +581,7 @@ async def get_system_telemetry():
                         })
 
             return results
-    except Exception as e:
+    except (httpx.RequestError, ValueError, KeyError) as e:
         logger.error({"event": "telemetry_fetch_failed", "error": str(e), "target": "Go_Gateway_Proxy"})
         raise HTTPException(status_code=503, detail="Gateway telemetry unreachable")
 
@@ -595,7 +604,7 @@ def get_telemetry_logs():
             t_iso = src.get('timestamp', '')
             try:
                 time_str = datetime.fromisoformat(t_iso.replace('Z', '+00:00')).strftime('%H:%M:%S')
-            except Exception:
+            except (ValueError, TypeError):
                 logger.debug("api_telemetry_logs: ISO timestamp parse failed, using raw string", exc_info=True)
                 time_str = t_iso
 
@@ -607,8 +616,8 @@ def get_telemetry_logs():
             })
         logs.reverse()
         return logs
-    except Exception:
-        logger.error("Failed to query telemetry logs natively", exc_info=True)
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+        logger.error(f"Failed to query telemetry logs natively: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not load logs")
 
 

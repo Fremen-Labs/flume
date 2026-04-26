@@ -35,7 +35,7 @@ async def delete_task_branches(ids: list, repo: str) -> list:
             '_source': ['id', 'repo', 'branch'],
             'query': {'bool': {'must': query_must}},
         }).get('hits', {}).get('hits', [])
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return []
 
     registry = load_projects_registry()
@@ -145,7 +145,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "--format=%(refname:short)")
             raw = out
             local_branches = [b.strip() for b in raw.splitlines() if b.strip()]
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             local_branches = []
 
         local_set = set(local_branches)
@@ -195,7 +195,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
                     b = (src.get('branch') or '').strip()
                     if b:
                         blocked_by_tasks.add(b)
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 # If ES isn't available, don't block deletion.
                 blocked_by_tasks = set()
 
@@ -226,7 +226,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
                 try:
                     await run_cmd_async("git", "-C", str(repo_path), "switch", checkout_branch, timeout=20)
                     current_branch = checkout_branch
-                except Exception:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                     # Best-effort only; deletion may still succeed or fail.
                     pass
 
@@ -240,7 +240,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
                     deleted.append(b)
                 else:
                     errors.append({'branch': b, 'error': err[:200] or 'git branch failed'})
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 errors.append({'branch': b, 'error': 'exception during git branch deletion'})
 
             # Best-effort: delete remote tracking branch if it exists on origin.
@@ -258,7 +258,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             'missing': missing,
             'errors': errors,
         }
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         return {'ok': False, 'error': str(e)[:200], 'deleted': [], 'skipped': []}
 
 
@@ -285,7 +285,7 @@ def load_workers() -> list:
                     except (ValueError, TypeError) as _e:
                         logger.warning({"event": "worker_heartbeat_parse_failed", "worker_name": w.get('name'), "heartbeat_raw": hb_str}, exc_info=True)
                 workers.append(w)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)}})
         return []
         
@@ -578,7 +578,7 @@ async def git_repo_info(repo_id, repo_path: Path):
             raise GitOperationError("rev-parse", stderr=err, returncode=rc)
         branch = out.strip()
         info['current_branch'] = branch
-    except Exception as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
         logger.debug("git_repo_info: rev-parse failed", exc_info=True)
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "log", "-1", "--pretty=format:%H%n%an%n%ai%n%s")
@@ -592,7 +592,7 @@ async def git_repo_info(repo_id, repo_path: Path):
                 'date': last[2],
                 'subject': last[3],
             }
-    except Exception as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
         logger.debug("git_repo_info: log failed", exc_info=True)
     return info
 
@@ -609,7 +609,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         ref = out.strip()
         # refs/remotes/origin/main -> main
         return ref.split('/')[-1]
-    except Exception as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
         logger.debug("resolve_default_branch: symbolic-ref fallthrough", exc_info=True)
     try:
         # Fallback: check common branch names
@@ -620,7 +620,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         for candidate in ('main', 'master', 'develop', 'trunk'):
             if f'origin/{candidate}' in branches_raw:
                 return candidate
-    except Exception as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
         logger.debug("resolve_default_branch: branch -r fallthrough", exc_info=True)
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
@@ -628,7 +628,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
             raise GitOperationError("rev-parse", stderr=err, returncode=rc)
         current = out.strip()
         return current or 'main'
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return 'main'
 
 
@@ -696,7 +696,7 @@ async def create_task_pr(task_id: str) -> dict:
 
     try:
         rc, out, err = await run_cmd_async("gh", "pr", "create", "--base", target_branch, "--head", branch, "--title", title, "--body", body, cwd=str(repo_path), timeout=60)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         return {'ok': False, 'error': f'gh pr create failed: {e}'}
 
     if rc == -1:
@@ -799,7 +799,7 @@ async def task_diff(task_id: str) -> dict:
                 'deletions': minus_count,
                 'status': 'modified',
             })
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         # Fall back to local diff if fetch/remote unavailable
         ref = f'{target_branch}...{branch}'
 
@@ -817,7 +817,7 @@ async def task_diff(task_id: str) -> dict:
             truncated = True
         else:
             diff_text = raw
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         diff_text = ''
 
     # If remote three-dot ref failed, fall back to local two-dot
@@ -881,7 +881,7 @@ async def task_commits(task_id: str) -> dict:
                             'message': message.strip(),
                         })
             break
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             continue
 
     return {

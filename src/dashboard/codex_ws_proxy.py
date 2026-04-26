@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import urllib.error
+import httpx
 import threading
 import traceback
 from typing import Any
@@ -85,7 +87,7 @@ def get_proxy_config(host_header: str | None = None) -> dict[str, Any]:
             "proxyBind": bind,
             "clientWsUrl": client_ws_url,
             "upstreamListenUrl": upstream,
-            "workspaceRoot": os.environ.get("LOOM_WORKSPACE", ""),
+            "workspaceRoot": __import__("config").get_settings().LOOM_WORKSPACE or "",
             "websocketsInstalled": False,
             "websocketsImportError": WEBSOCKETS_IMPORT_ERROR,
             "installHint": pip_hint,
@@ -102,7 +104,7 @@ def get_proxy_config(host_header: str | None = None) -> dict[str, Any]:
             "proxyBind": bind,
             "clientWsUrl": client_ws_url,
             "upstreamListenUrl": upstream,
-            "workspaceRoot": os.environ.get("LOOM_WORKSPACE", ""),
+            "workspaceRoot": __import__("config").get_settings().LOOM_WORKSPACE or "",
             "websocketsInstalled": True,
             "websocketsImportError": None,
             "installHint": None,
@@ -120,7 +122,7 @@ def get_proxy_config(host_header: str | None = None) -> dict[str, Any]:
         "proxyBind": bind,
         "clientWsUrl": client_ws_url,
         "upstreamListenUrl": upstream,
-        "workspaceRoot": os.environ.get("LOOM_WORKSPACE", ""),
+            "workspaceRoot": __import__("config").get_settings().LOOM_WORKSPACE or "",
         "websocketsInstalled": True,
         "websocketsImportError": None,
         "installHint": None,
@@ -159,9 +161,9 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
             finally:
                 try:
                     await browser_ws.close()
-                except Exception:
+                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                     pass
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         try:
             reason = str(e)[:120]
             logger.warning(
@@ -169,7 +171,7 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
                 extra={"structured_data": {"upstream": upstream_uri, "error": str(e)}},
             )
             await browser_ws.close(code=1011, reason=reason)
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
 
 
@@ -216,7 +218,7 @@ async def _async_main() -> None:
             extra={"structured_data": {"bind": f"{host}:{port}", "error": _proxy_listen_error}},
         )
         _serve_ready.set()
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         _proxy_listen_error = traceback.format_exc()[-500:]
         logger.error(
             "Codex WebSocket proxy crashed",
@@ -242,7 +244,7 @@ def start_codex_ws_proxy_background() -> None:
     def runner() -> None:
         try:
             asyncio.run(_async_main())
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             global _proxy_listen_error
             _proxy_listen_error = traceback.format_exc()[-500:]
             logger.error(

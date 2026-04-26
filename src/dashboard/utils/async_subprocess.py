@@ -31,9 +31,9 @@ async def run_cmd_async(*args: str, cwd: str | None = None, timeout: float = 15.
         try:
             proc.kill()
             await proc.communicate()
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             logger.warning(f"Failed to kill timed-out process: {' '.join(args)}", exc_info=True)
         return -1, "", f"Timeout expired after {timeout}s"
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.error(f"Command execution failed: {' '.join(args)}", exc_info=True)
         return -1, "", str(e)

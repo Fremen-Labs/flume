@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import httpx
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -50,7 +52,7 @@ def _provider_is_configured_env(workspace_root: Path, provider_id: str, pairs: d
             return True
         try:
             return bool(get_oauth_status(workspace_root).get("configured"))
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             return False
 
     if pid == "openai_compatible":
@@ -102,7 +104,7 @@ def provider_is_configured(
 def _oauth_configured(workspace_root: Path) -> bool:
     try:
         return bool(get_oauth_status(workspace_root).get("configured"))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return False
 
 
