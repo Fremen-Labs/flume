@@ -90,7 +90,8 @@ def log(msg, **kwargs):
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}'}
+    from utils.es_auth import get_es_auth_headers
+    headers = dict(get_es_auth_headers())
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -218,9 +219,8 @@ def append_execution_thought(es_id: str, thought: str) -> None:
 def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
     """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"ApiKey {api_key}"
+    from utils.es_auth import get_es_auth_headers
+    headers.update(get_es_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"
@@ -3121,9 +3121,10 @@ def main():
     hydrate_secrets_from_openbao()
         
     if 'https' in os.environ.get("ES_URL", "") and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
-        raise SystemExit(
-            'ES_API_KEY is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
-        )
+        if not os.environ.get("FLUME_ELASTIC_PASSWORD"):
+            raise SystemExit(
+                'ES_API_KEY or FLUME_ELASTIC_PASSWORD is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
+            )
     target_worker = sys.argv[1] if len(sys.argv) > 1 else None
     if target_worker:
         log(f'worker handler spawned targeting explicitly [{target_worker}]')

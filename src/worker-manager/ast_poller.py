@@ -20,13 +20,11 @@ def json_log(level: str, msg: str, **kwargs):
 
 def init_es_client() -> OpenSearch:
     target = os.environ.get('ES_URL', 'http://localhost:9200').rstrip('/')
-    api_key = os.environ.get('ES_API_KEY', '')
     verify_certs = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
     ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
     
-    headers = {}
-    if api_key:
-        headers['Authorization'] = f'ApiKey {api_key}'
+    from utils.es_auth import get_es_auth_headers
+    headers = get_es_auth_headers()
     
     kwargs = {
         "hosts": [target],

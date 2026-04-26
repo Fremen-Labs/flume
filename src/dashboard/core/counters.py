@@ -6,7 +6,7 @@ import urllib.request
 import urllib.error
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search, ES_URL, ctx
+from core.elasticsearch import es_search, ES_URL, ctx, _get_auth_headers
 
 logger = get_logger(__name__)
 COUNTERS_INDEX = 'flume-counters'
@@ -14,9 +14,7 @@ COUNTERS_INDEX = 'flume-counters'
 def _es_counter_request(path: str, body=None, method: str = 'GET') -> dict:
     """Thin HTTP helper scoped to the flume-counters ES index."""
     headers = {'Content-Type': 'application/json'}
-    api_key = os.environ.get('ES_API_KEY', '')
-    if api_key:
-        headers['Authorization'] = f'ApiKey {api_key}'
+    headers.update(_get_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == 'GET':
         method = 'POST'

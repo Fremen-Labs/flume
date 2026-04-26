@@ -82,7 +82,6 @@ async def _emit_usage(
         from datetime import datetime, timezone
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        es_key = os.environ.get('ES_API_KEY', '')
 
         # P4: Ollama returns prompt_eval_count/eval_count, OpenAI uses
         # prompt_tokens/completion_tokens. Accept both key conventions.
@@ -111,9 +110,9 @@ async def _emit_usage(
             'actual_tokens_sent': actual_tokens_sent,
             'created_at': ts
         }
+        from utils.es_auth import get_es_auth_headers
         hdrs = {'Content-Type': 'application/json'}
-        if es_key:
-            hdrs['Authorization'] = f'ApiKey {es_key}'
+        hdrs.update(get_es_auth_headers())
             
         await client.post(
             f"{es_url}/agent-token-telemetry/_doc",
@@ -137,10 +136,9 @@ async def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: d
     try:
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        es_key = os.environ.get('ES_API_KEY', '')
+        from utils.es_auth import get_es_auth_headers
         hdrs = {'Content-Type': 'application/json'}
-        if es_key:
-            hdrs['Authorization'] = f'ApiKey {es_key}'
+        hdrs.update(get_es_auth_headers())
             
         doc = {'execution_host': host}
         if model:
@@ -474,10 +472,9 @@ async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: 
         
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        es_api_key = os.environ.get('ES_API_KEY', '')
+        from utils.es_auth import get_es_auth_headers as _ast_auth
         headers = {'Content-Type': 'application/json'}
-        if es_api_key:
-            headers['Authorization'] = f'ApiKey {es_api_key}'
+        headers.update(_ast_auth())
 
         # Schema: file_path, content, functions_defined, functions_called, chunk_name, chunk_type, extension, repo_name
         query_payload = {
@@ -600,8 +597,7 @@ async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: 
                 'created_at': ts,
             }
             tel_hdrs = {'Content-Type': 'application/json'}
-            if es_api_key:
-                tel_hdrs['Authorization'] = f'ApiKey {es_api_key}'
+            tel_hdrs.update(_ast_auth())
             try:
                 await client.post(
                     f"{es_url}/agent-token-telemetry/_doc",
@@ -634,8 +630,9 @@ async def _exec_memory_read(args: dict, client: httpx.AsyncClient = None) -> str
         
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
-        api_key = os.environ.get('ES_API_KEY', '')
-        headers = {'Authorization': f'ApiKey {api_key}', 'Content-Type': 'application/json'}
+        from utils.es_auth import get_es_auth_headers as _mem_auth
+        headers = {'Content-Type': 'application/json'}
+        headers.update(_mem_auth())
         query_payload = {'query': {'term': {'_id': key}}}
         
         resp = await client.post(
@@ -705,11 +702,9 @@ async def _exec_memory_write(args: dict, client: httpx.AsyncClient = None) -> st
         
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
-        api_key = os.environ.get('ES_API_KEY', '')
-        # S1: Only send Authorization header when an API key is present
+        from utils.es_auth import get_es_auth_headers as _mw_auth
         headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'ApiKey {api_key}'
+        headers.update(_mw_auth())
         
         import time
         doc = {'key': key, 'value': val, 'updated_at': time.time()}

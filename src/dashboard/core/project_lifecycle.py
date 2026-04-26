@@ -13,16 +13,13 @@ from core.projects_store import _update_project_registry_field
 logger = get_logger(__name__)
 WORKSPACE_ROOT = resolve_safe_workspace()
 
-_DEFAULT_ES = 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200'
-ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
-ES_API_KEY = os.environ.get('ES_API_KEY', '')
+from core.elasticsearch import ES_URL, _get_auth_headers
 
 async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: str) -> tuple[bool, str]:
     try:
         es_url = ES_URL
-        api_key = os.environ.get('ES_API_KEY', '')
         headers = {'Content-Type': 'application/json'}
-        if api_key: headers['Authorization'] = f'ApiKey {api_key}'
+        headers.update(_get_auth_headers())
 
         elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
         query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
@@ -79,7 +76,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             # into os.environ at startup — matching the clone process secret path.
             elastro_env = os.environ.copy()
             resolved_es_url = ES_URL or os.environ.get("ES_URL", "http://elasticsearch:9200")
-            resolved_api_key = ES_API_KEY or os.environ.get("ES_API_KEY", "")
+            resolved_api_key = os.environ.get("ES_API_KEY", "")
             
             # Elastro native env vars (elastro/config/defaults.py reads ELASTIC_URL)
             elastro_env["ELASTIC_URL"] = resolved_es_url

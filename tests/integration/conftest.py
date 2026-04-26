@@ -3,7 +3,7 @@ Shared integration test configuration.
 
 All integration tests assume the Flume stack is running:
   - Dashboard: http://localhost:8765
-  - Elasticsearch: http://localhost:9200
+  - Elasticsearch: https://localhost:9200 (TLS + Basic Auth)
   - Gateway: http://localhost:8090
   - OpenBao: http://localhost:8200
 """
@@ -16,7 +16,8 @@ import httpx
 
 # ─── API Base URLs ───────────────────────────────────────────────────────────
 FLUME_API_BASE = os.environ.get("FLUME_API_BASE", "http://localhost:8765/api")
-FLUME_ES_URL = os.environ.get("FLUME_ES_URL", "http://localhost:9200")
+FLUME_ES_URL = os.environ.get("FLUME_ES_URL", "https://localhost:9200")
+FLUME_ES_PASSWORD = os.environ.get("FLUME_ELASTIC_PASSWORD", "")
 FLUME_GATEWAY_URL = os.environ.get("FLUME_GATEWAY_URL", "http://localhost:8090")
 FLUME_OPENBAO_URL = os.environ.get("FLUME_OPENBAO_URL", "http://localhost:8200")
 
@@ -30,8 +31,19 @@ def api_client():
 
 @pytest.fixture(scope="session")
 def es_client():
-    """Session-scoped HTTP client bound to the Elasticsearch instance."""
-    with httpx.Client(base_url=FLUME_ES_URL, timeout=10.0) as client:
+    """Session-scoped HTTP client bound to the Elasticsearch instance.
+
+    Uses HTTPS with self-signed cert verification disabled (verify=False)
+    and Basic Auth via the FLUME_ELASTIC_PASSWORD env var, matching the
+    TLS-enabled docker-compose configuration.
+    """
+    auth = ("elastic", FLUME_ES_PASSWORD) if FLUME_ES_PASSWORD else None
+    with httpx.Client(
+        base_url=FLUME_ES_URL,
+        timeout=10.0,
+        verify=False,
+        auth=auth,
+    ) as client:
         yield client
 
 

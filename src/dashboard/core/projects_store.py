@@ -5,7 +5,7 @@ import urllib.error
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
-from core.elasticsearch import ES_URL, ctx
+from core.elasticsearch import ES_URL, ctx, _get_auth_headers
 
 logger = get_logger(__name__)
 
@@ -46,9 +46,7 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
 def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
     """Low-level ES request scoped to the projects index."""
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"ApiKey {api_key}"
+    headers.update(_get_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"

@@ -58,7 +58,11 @@ try:
     import urllib.error as _ue
     _es_check_url = os.environ.get('ES_URL', 'http://elasticsearch:9200' if os.environ.get('FLUME_NATIVE_MODE') != '1' else 'http://localhost:9200')
     _check_req = _ur.Request(f"{_es_check_url}/agent-task-records", method='HEAD')
-    with _ur.urlopen(_check_req, timeout=3) as _r:
+    # Add auth + TLS for hardened ES
+    from core.elasticsearch import _get_auth_headers as _boot_auth, ctx as _boot_ctx
+    for _k, _v in _boot_auth().items():
+        _check_req.add_header(_k, _v)
+    with _ur.urlopen(_check_req, timeout=3, context=_boot_ctx) as _r:
         if _r.status == 200:
             _startup_logger.info("ES index verification passed — agent-task-records exists")
 except _ue.HTTPError as _e:
@@ -69,7 +73,7 @@ except Exception as _e:
 
 
 # ES configuration imported from core.elasticsearch (single source of truth)
-from core.elasticsearch import ES_API_KEY
+from core.elasticsearch import ES_API_KEY, ES_URL, _get_auth_headers, ctx as _es_ctx
 
 
 def _seed_llm_config_from_env() -> None:
@@ -110,9 +114,7 @@ def _seed_llm_config_from_env() -> None:
         es_url_local = ES_URL
         url = f'{es_url_local}/flume-llm-config/_update/singleton'
         headers: dict = {'Content-Type': 'application/json'}
-        api_key = os.environ.get('ES_API_KEY', '')
-        if api_key and 'bypass' not in api_key:
-            headers['Authorization'] = f'ApiKey {api_key}'
+        headers.update(_get_auth_headers())
 
         # Fetch first to check if values already set — never clobber user changes
         get_req = urllib.request.Request(
@@ -120,7 +122,7 @@ def _seed_llm_config_from_env() -> None:
             headers=headers, method='GET',
         )
         try:
-            with urllib.request.urlopen(get_req, timeout=5) as r:
+            with urllib.request.urlopen(get_req, timeout=5, context=_es_ctx) as r:
                 import json as _json
                 existing_src = _json.loads(r.read()).get('_source', {})
                 # Remove fields already present in ES so we don't overwrite them
@@ -139,7 +141,7 @@ def _seed_llm_config_from_env() -> None:
 
         body = json.dumps({'doc': doc, 'doc_as_upsert': True}).encode()
         req = urllib.request.Request(url, data=body, headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with urllib.request.urlopen(req, timeout=5, context=_es_ctx) as r:
             logger.info(f'_seed_llm_config_from_env: seeded {list(doc.keys())} → flume-llm-config (model={model})')
     except Exception as e:
         logger.warning(f'_seed_llm_config_from_env: non-fatal failure — {e}')

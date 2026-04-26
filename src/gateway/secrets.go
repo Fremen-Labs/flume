@@ -261,6 +261,8 @@ func (s *SecretStore) auditAccess(ctx context.Context, secretPath string, data m
 	apiKey := os.Getenv("ES_API_KEY")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
 	resp, err := s.httpClient.Do(req)
