@@ -5,3 +5,6 @@ Before executing any architectural change, identify the current application you 
 You MUST structurally execute the MCP tool `list_available_skills("<App Name>")` to index the available SKILL standards from the Fremen Agent Skills network. Subsequently, you must execute `get_project_skill("<App Name>", "<Skill ID>")` for the precise sub-skill matching your target stack before executing code modifications. 
 
 Do not author or modify code arbitrarily without verifying the Elite Engineering standards for the current application.
+
+# Local Secrets & Credentials Anti-Pattern
+Never generate, read, or write `.env` files in any part of Flume. The Flume architecture strictly forbids `.env` to prevent credentials from being leaked to the local file system. Any configuration values that should be supplied during `flume start` MUST go into a YAML file (e.g. `flume-mesh.yml`). Dynamically generated secrets (like `FLUME_ADMIN_TOKEN` or `FLUME_ELASTIC_PASSWORD`) must remain entirely in-memory and be injected directly into subprocesses (e.g. `c.Env = fullEnv`). Saving credentials to the local file system in plaintext is an anti-pattern for enterprise apps.

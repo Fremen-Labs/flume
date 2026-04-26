@@ -609,7 +609,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         ref = out.strip()
         # refs/remotes/origin/main -> main
         return ref.split('/')[-1]
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError, GitOperationError, OSError) as _e:
         logger.debug("resolve_default_branch: symbolic-ref fallthrough", exc_info=True)
     try:
         # Fallback: check common branch names
@@ -620,7 +620,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         for candidate in ('main', 'master', 'develop', 'trunk'):
             if f'origin/{candidate}' in branches_raw:
                 return candidate
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError, GitOperationError, OSError) as _e:
         logger.debug("resolve_default_branch: branch -r fallthrough", exc_info=True)
     try:
         rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
@@ -628,7 +628,7 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
             raise GitOperationError("rev-parse", stderr=err, returncode=rc)
         current = out.strip()
         return current or 'main'
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError, GitOperationError, OSError):
         return 'main'
 
 

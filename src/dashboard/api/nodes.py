@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _gateway_base() -> str:
     from config import get_settings
     return get_settings().GATEWAY_URL.rstrip('/')
 

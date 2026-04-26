@@ -719,6 +719,33 @@ class AzureDevOpsClient(GitHostClient):
             )
             return False
 
+    def list_pull_requests(
+        self,
+        state: str = "open",
+        *,
+        base: str | None = None,
+        per_page: int = 50,
+    ) -> list[dict]:
+        """
+        List pull requests in the ADO repo. Used by the PR reconciliation sweep.
+        """
+        # ADO states: active, completed, abandoned, all. Map "open" to "active"
+        ado_state = "active" if state == "open" else state
+        params: dict[str, Any] = {"searchCriteria.status": ado_state, "$top": per_page}
+        if base:
+            params["searchCriteria.targetRefName"] = f"refs/heads/{base}"
+        
+        data = self._get("pullrequests", params=params)
+        # To match GitHub semantics expected by sweeps, map ADO fields:
+        # e.g., 'number' -> 'pullRequestId', 'html_url' -> 'url'
+        results = []
+        for pr in data.get("value", []):
+            pr_copy = dict(pr)
+            pr_copy["number"] = pr.get("pullRequestId")
+            pr_copy["html_url"] = pr.get("url")
+            results.append(pr_copy)
+        return results
+
     def create_pull_request(self, title: str, body: str, head: str, base: str) -> dict:
         data = self._post("pullrequests", {
             "title": title,

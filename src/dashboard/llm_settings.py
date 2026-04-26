@@ -13,6 +13,7 @@ from flume_secrets import resolve_oauth_state_path
 from openai_oauth_state import load_state_from_env_or_file, save_state_to_env_or_file
 from typing import Any, Optional
 
+from config import get_settings
 import llm_credentials_store
 
 import urllib.error
