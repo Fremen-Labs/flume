@@ -37,6 +37,7 @@ type EnvConfig struct {
 	LocalOllamaBaseURL string
 	Host               string
 	AdminToken         string
+	ElasticPassword    string
 	Model              string
 	IsNative           bool
 
@@ -63,6 +64,15 @@ func GenerateAdminToken() (string, error) {
 	return "flume_adm_" + hex.EncodeToString(bytes), nil
 }
 
+// GenerateElasticPassword creates a secure, deterministic password for the internal Elasticsearch 'elastic' user.
+func GenerateElasticPassword() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return "flume_es_" + hex.EncodeToString(bytes), nil
+}
+
 // RewriteLoopbackForDockerEnv replaces 127.0.0.1 / localhost with
 // host.docker.internal for Docker container accessibility.
 func RewriteLoopbackForDockerEnv(url string) string {
@@ -82,6 +92,9 @@ func GenerateEnv(config EnvConfig) []string {
 
 	if config.AdminToken != "" {
 		env = append(env, "FLUME_ADMIN_TOKEN="+config.AdminToken)
+	}
+	if config.ElasticPassword != "" {
+		env = append(env, "FLUME_ELASTIC_PASSWORD="+config.ElasticPassword)
 	}
 
 	if config.Provider != "" {

@@ -27,16 +27,15 @@ services:
     profiles: ["managed_elastic"]
     environment:
       - discovery.type=single-node
-      # DEVELOPMENT ISOLATION TOPOLOGY: Single-node container domains disable xpack.security natively bypassing volatile self-signed certificate overheads natively.
-      - xpack.security.enabled=false
       - "cluster.routing.allocation.disk.threshold_enabled=false"
+      - "ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}"
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "${ES_PORT:-9200}:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"' > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -k -s -u \"elastic:${FLUME_ELASTIC_PASSWORD}\" https://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"' > /dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -57,7 +56,7 @@ services:
     extra_hosts:
       - "${LOCAL_LLM_HOST:-host.docker.internal}:host-gateway"
     environment:
-      - ES_URL=http://elasticsearch:9200
+      - ES_URL=https://elasticsearch:9200
       - OPENBAO_ADDR=http://openbao:8200
       - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
@@ -119,6 +118,7 @@ services:
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
       - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - FLUME_ADMIN_TOKEN
+      - FLUME_ELASTIC_PASSWORD
       - LLM_PROVIDER
       - LLM_BASE_URL
       - LLM_HOST
@@ -215,6 +215,7 @@ services:
       - VAULT_SECRET_ID=${BAO_SECRET_ID:-flume-client-secret}
       - OPENBAO_TOKEN=${OPENBAO_TOKEN}
       - FLUME_ADMIN_TOKEN
+      - FLUME_ELASTIC_PASSWORD
       - LLM_PROVIDER
       - LLM_BASE_URL
       - LLM_HOST
@@ -248,7 +249,7 @@ services:
       # ES_URL: must match the service name in this compose file.
       # worker_handlers.py, agent_runner.py, and es_credential_store.py all
       # read ES_URL; without it they fall back to 127.0.0.1:9200 (broken inside Docker).
-      - ES_URL=http://elasticsearch:9200
+      - ES_URL=https://elasticsearch:9200
       # Shared branch per story + single auto-PR when the story completes (override with task to restore per-task behavior)
       - FLUME_BRANCH_SCOPE=${FLUME_BRANCH_SCOPE:-story}
       - FLUME_AUTO_PR_SCOPE=${FLUME_AUTO_PR_SCOPE:-story}

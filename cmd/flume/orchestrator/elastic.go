@@ -3,11 +3,13 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -38,9 +40,16 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -395,7 +404,12 @@ var allTemplates = []templateDef{
 func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 	log.Info("[ES INDEX BOOTSTRAP] Creating all Elasticsearch indices", "url", esURL, "indices", len(allIndices), "templates", len(allTemplates))
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 
 	// 1. Apply index templates first (they govern indices matching patterns)
 	for _, tpl := range allTemplates {
@@ -413,6 +427,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		req.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			req.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			req.SetBasicAuth("elastic", esPass)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -445,6 +461,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		headReq.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			headReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			headReq.SetBasicAuth("elastic", esPass)
 		}
 		headResp, err := client.Do(headReq)
 		if err != nil {
@@ -466,6 +484,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 						mReq.Header.Set("Content-Type", "application/json")
 						if apiKey != "" {
 							mReq.Header.Set("Authorization", "ApiKey "+apiKey)
+						} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+							mReq.SetBasicAuth("elastic", esPass)
 						}
 						mResp, mErr := client.Do(mReq)
 						if mErr == nil {
@@ -512,6 +532,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		putReq.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			putReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			putReq.SetBasicAuth("elastic", esPass)
 		}
 		putResp, err := client.Do(putReq)
 		if err != nil {

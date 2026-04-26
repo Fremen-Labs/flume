@@ -3,6 +3,7 @@ import os
 import ssl
 import threading
 import time
+import base64
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,7 +24,16 @@ else:
 
 ES_URL = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
 ES_API_KEY = os.environ.get('ES_API_KEY', '')
+ES_PASSWORD = os.environ.get('FLUME_ELASTIC_PASSWORD', '')
 ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
+
+def _get_auth_headers() -> dict:
+    if ES_API_KEY:
+        return {'Authorization': f'ApiKey {ES_API_KEY}'}
+    if ES_PASSWORD:
+        b64 = base64.b64encode(f"elastic:{ES_PASSWORD}".encode()).decode()
+        return {'Authorization': f'Basic {b64}'}
+    return {}
 
 # SSL context — respects ES_VERIFY_TLS env var to gate certificate validation.
 # Default: TLS verification OFF (self-signed ES clusters common in dev).
@@ -39,13 +49,12 @@ if ES_URL.startswith("https:"):
 # --- ES Utility Functions ---
 
 def es_search(index: str, body: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f"{ES_URL}/{index}/_search",
         data=json.dumps(body).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method='POST',
     )
     try:
@@ -77,26 +86,24 @@ def find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optiona
     return None, None
 
 def es_index(index: str, doc: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f"{ES_URL}/{index}/_doc",
         data=json.dumps(doc).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method='POST',
     )
     with urllib.request.urlopen(req, context=ctx) as resp:
         return json.loads(resp.read().decode())
 
 def es_upsert(index: str, doc_id: str, doc: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f"{ES_URL}/{index}/_doc/{urllib.parse.quote(str(doc_id), safe='')}",
         data=json.dumps(doc).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method='PUT',
     )
     with urllib.request.urlopen(req, context=ctx) as resp:
@@ -131,13 +138,12 @@ def _flush_es_bulk_unlocked():
         ndjson += json.dumps({'doc': op['doc']}) + "\n"
     ndjson += "\n"
     
+    headers = {'Content-Type': 'application/x-ndjson'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f"{ES_URL}/_bulk",
         data=ndjson.encode('utf-8'),
-        headers={
-            'Content-Type': 'application/x-ndjson',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method='POST',
     )
     for attempt in range(4):
@@ -169,13 +175,12 @@ def es_bulk_update_proxy(path: str, body: dict, method: str = 'POST') -> dict:
     return es_post(path, body, method)
 
 def es_post(path: str, body: dict, method: str = 'POST') -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f"{ES_URL}/{path}",
         data=json.dumps(body).encode(),
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method=method,
     )
     for attempt in range(4):
@@ -195,12 +200,11 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
 
 def es_delete_doc(index: str, doc_id: str) -> bool:
     safe_id = urllib.parse.quote(str(doc_id), safe='')
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
     req = urllib.request.Request(
         f'{ES_URL}/{index}/_doc/{safe_id}',
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'ApiKey {ES_API_KEY}',
-        },
+        headers=headers,
         method='DELETE',
     )
     try:

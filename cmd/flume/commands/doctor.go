@@ -344,7 +344,7 @@ var DoctorCmd = &cobra.Command{
 }
 
 func init() {
-	DoctorCmd.Flags().StringP("es-url", "e", "http://localhost:9200", "Elasticsearch Diagnostic Endpoint")
+	DoctorCmd.Flags().StringP("es-url", "e", "https://localhost:9200", "Elasticsearch Diagnostic Endpoint")
 	DoctorCmd.Flags().StringP("vault-url", "v", "http://localhost:8200", "OpenBao Telemetry Endpoint")
 	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://localhost:8765", "Flume API Dashboard Endpoint")
 	DoctorCmd.Flags().StringP("llm-url", "l", "http://host.docker.internal:52415/v1", "Local LLM Inference Engine Endpoint")

@@ -147,7 +147,8 @@ type DeploymentSummary struct {
 	NativeMode bool
 
 	// Secrets
-	AdminToken string
+	AdminToken      string
+	ElasticPassword string
 
 	// LLM configuration
 	Provider   string
@@ -295,7 +296,8 @@ func PrintDeploymentSummary(s DeploymentSummary) {
 	add(sectionStyle.Render("  KILL SWITCH AUTHENTICATION"))
 	add(divider)
 	add(row("Flume Admin Token", secureStyle.Render(s.AdminToken)))
-	add("  " + styleError.Render("⚠") + "  " + dimStyle.Render("This token grants root kill-switch control over your orchestration layer."))
+	add(row("Elastic TLS Password", secureStyle.Render(s.ElasticPassword)))
+	add("  " + styleError.Render("⚠") + "  " + dimStyle.Render("These tokens grant root control over your orchestration layer and local data indices."))
 	add("  " + styleError.Render("⚠") + "  " + dimStyle.Render("It was generated purely in-memory and has skipped persistent disk storage."))
 	add("  " + styleError.Render("⚠") + "  " + styleWarning.Render("SAVE IT TO A PASSWORD MANAGER NOW. IT WILL NOT BE DISPLAYED AGAIN."))
 
