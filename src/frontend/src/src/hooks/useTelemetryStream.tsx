@@ -13,7 +13,11 @@ export function useTelemetryStream() {
   useEffect(() => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // Use the actual backend orchestrator port (typically 8765) if in dev or use current host if proxied
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/telemetry`;
+    let wsUrl = `${wsProtocol}//${window.location.host}/ws/telemetry`;
+    const token = localStorage.getItem('flume-admin-token');
+    if (token) {
+      wsUrl += `?token=${encodeURIComponent(token)}`;
+    }
     let ws: WebSocket | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
 

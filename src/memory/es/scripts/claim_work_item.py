@@ -18,7 +18,9 @@ execution_host = sys.argv[3] if len(sys.argv) > 3 else None
 now = datetime.now(timezone.utc).isoformat()
 ctx=None
 if not ES_VERIFY_TLS:
-    ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+    ctx=ssl.create_default_context()
+    ctx.check_hostname=False
+    ctx.verify_mode=ssl.CERT_NONE
 headers={'Content-Type':'application/json','Authorization':f'ApiKey {ES_API_KEY}'}
 get_req=urllib.request.Request(f"{ES_URL}/{INDEX}/_doc/{item_id}", headers=headers, method='GET')
 with urllib.request.urlopen(get_req, context=ctx) as resp:

@@ -53,7 +53,7 @@ export default function QueuePage() {
   const { toast } = useToast();
   const [isHalting, setIsHalting] = useState(false);
   const [dialogAction, setDialogAction] = useState<'halt' | 'resume' | null>(null);
-  const [adminToken, setAdminToken] = useState('');
+  const [adminToken, setAdminToken] = useState(() => localStorage.getItem('flume-admin-token') || '');
   const [thoughtTaskId, setThoughtTaskId] = useState<string | null>(null);
   const [thoughtTaskTitle, setThoughtTaskTitle] = useState<string | undefined>(undefined);
   const [thoughtTaskStatus, setThoughtTaskStatus] = useState<string | undefined>(undefined);
@@ -111,7 +111,6 @@ export default function QueuePage() {
       });
       if (res.ok) {
         mutate();
-        setAdminToken('');
         toast({ title: dialogAction === 'halt' ? "Swarms Halted" : "Swarms Resumed", description: dialogAction === 'halt' ? "All active tasks successfully halted." : "Blocked tasks restored successfully." });
       } else {
         const errorBody = await res.json().catch(() => ({}));
@@ -144,7 +143,10 @@ export default function QueuePage() {
                 type="password" 
                 placeholder="Flume Admin Token" 
                 value={adminToken} 
-                onChange={(e) => setAdminToken(e.target.value)} 
+                onChange={(e) => {
+                  setAdminToken(e.target.value);
+                  localStorage.setItem('flume-admin-token', e.target.value);
+                }} 
                 className="w-full"
               />
             </DialogDescription>

@@ -9,7 +9,7 @@ from typing import Optional
 from utils.async_subprocess import run_cmd_async
 from utils.exceptions import GitOperationError
 from utils.logger import get_logger
-from core.elasticsearch import es_search, es_post
+from core.elasticsearch import es_search, es_post, find_task_doc_by_logical_id
 from core.projects_store import load_projects_registry
 
 

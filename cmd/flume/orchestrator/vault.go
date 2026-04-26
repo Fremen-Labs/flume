@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,15 +21,6 @@ import (
 type VaultKeys struct {
 	KeysB64   []string `json:"keys_base64"`
 	RootToken string   `json:"root_token"`
-}
-
-// GenerateESAPIKey securely generates a 32-byte hex entropy key.
-func GenerateESAPIKey() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(bytes), nil
 }
 
 // AwaitOpenBao gracefully awaits native OpenBao cluster locks indefinitely.
@@ -289,7 +279,7 @@ func GenerateRootToken(ctx context.Context, vaultURL string) (string, error) {
 
 
 // ConfigureSecretsEngine structures the KeyVault KV topology dynamically natively.
-func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken string, envCfg EnvConfig) error {
+func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL string, envCfg EnvConfig) error {
 	// 1. Enable KV v2 natively at "secret/"
 	sysMountsResp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/mounts", vaultURL), rootToken, nil)
 	if err != nil {
@@ -343,12 +333,21 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken string, env
 	}
 
 	// 2. Resolve KV payload
-	esKey, _ := GenerateESAPIKey()
+	esKey := ""
+	if esURL != "" {
+		mintedKey, err := MintElasticsearchAPIKey(ctx, esURL)
+		if err != nil {
+			log.Warn("Failed to mint Elasticsearch API Key natively. Flume dashboard will rely on FLUME_ELASTIC_PASSWORD", "error", err)
+		} else {
+			esKey = mintedKey
+		}
+	}
 
 	// OpenBao holds ONLY actual secrets — LLM config (model/provider/baseUrl) is non-sensitive
 	// and is written to ES flume-llm-config by SeedLLMConfig during startup.
-	kvPayload := map[string]string{
-		"ES_API_KEY": esKey,
+	kvPayload := map[string]string{}
+	if esKey != "" {
+		kvPayload["ES_API_KEY"] = esKey
 	}
 
 	// Explicit bindings properly stripped natively
@@ -504,7 +503,7 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 }
 
 // DeployVaultTopology sequences the Native HTTP Client bootstrap without containerizing natively.
-func DeployVaultTopology(ctx context.Context, vaultPort string, envCfg EnvConfig) (string, string, error) {
+func DeployVaultTopology(ctx context.Context, vaultPort string, esURL string, envCfg EnvConfig) (string, string, error) {
 	vaultURL := fmt.Sprintf("http://localhost:%s", vaultPort)
 
 	if err := AwaitOpenBao(ctx, vaultURL); err != nil {
@@ -516,7 +515,7 @@ func DeployVaultTopology(ctx context.Context, vaultPort string, envCfg EnvConfig
 		return "", "", err
 	}
 
-	if err := ConfigureSecretsEngine(ctx, vaultURL, rootToken, envCfg); err != nil {
+	if err := ConfigureSecretsEngine(ctx, vaultURL, rootToken, esURL, envCfg); err != nil {
 		return "", "", err
 	}
 

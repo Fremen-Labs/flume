@@ -14,7 +14,8 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, Request, Depends, HTTPException, Header
+from fastapi import APIRouter, Request, WebSocket, Depends, HTTPException, Header
+# ruff: noqa: E402
 from fastapi.responses import JSONResponse
 
 import httpx
@@ -420,6 +421,14 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
 @router.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
     from starlette.websockets import WebSocketDisconnect  # noqa: PLC0415
+    
+    app_config = get_settings()
+    token = websocket.query_params.get("token")
+    if app_config.FLUME_ADMIN_TOKEN:
+        if not token or not secrets.compare_digest(token, app_config.FLUME_ADMIN_TOKEN):
+            await websocket.close(code=1008, reason="Unauthorized")
+            return
+
     await websocket.accept()
     active_connections.append(websocket)
     conn_state: dict = {}  # Per-connection delta tracking state

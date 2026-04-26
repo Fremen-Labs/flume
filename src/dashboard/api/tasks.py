@@ -4,7 +4,7 @@ import urllib.parse
 from pathlib import Path
 
 from fastapi import APIRouter
-from api.models import TaskTransitionRequest, BulkRequeueRequest
+from api.models import TaskTransitionRequest, BulkRequeueRequest, BulkUpdateRequest
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
@@ -12,8 +12,8 @@ from utils.url_helpers import is_remote_url
 from core.elasticsearch import es_post
 from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
-from core.elasticsearch import find_task_doc_by_logical_id
-from core.tasks import task_history
+from core.elasticsearch import find_task_doc_by_logical_id, es_delete_doc
+from core.tasks import task_history, delete_task_branches
 from utils.async_subprocess import run_cmd_async
 
 
@@ -314,4 +314,87 @@ def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
     logger.info(f'bulk-requeue: requeued={len(requeued)} failed={len(failed)}')
     return {'requeued': requeued, 'failed': failed}
 
+@router.post('/api/tasks/bulk-update')
+async def api_tasks_bulk_update(payload: BulkUpdateRequest):
+    """
+    Bulk archive or delete tasks from the project task list.
 
+    Body: { "ids": ["task-1", ...], "action": "archive" | "delete", "repo": "<project id>" }
+    When `repo` is set, tasks whose `repo` field does not match are skipped (failed).
+    """
+    _MAX_BULK = 200
+    ids = payload.ids or []
+    action = (payload.action or '').strip().lower()
+    repo = (payload.repo or '').strip()
+
+    if action not in ('archive', 'delete'):
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'action must be "archive" or "delete", got {action!r}'},
+        )
+    if not isinstance(ids, list):
+        return JSONResponse(status_code=400, content={'error': 'ids must be a list'})
+    if not ids:
+        return JSONResponse(status_code=400, content={'error': 'ids must not be empty'})
+    if len(ids) > _MAX_BULK:
+        return JSONResponse(
+            status_code=400,
+            content={'error': f'bulk limit is {_MAX_BULK} tasks per call'},
+        )
+
+    str_ids = [str(i) for i in ids]
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    ok, failed = [], []
+
+    if action == 'archive':
+        for task_id in str_ids:
+            try:
+                es_id, src = find_task_doc_by_logical_id(task_id)
+                if not es_id or src is None:
+                    failed.append({'task_id': task_id, 'error': 'not found'})
+                    continue
+                logical_repo = (src.get('repo') or '').strip()
+                if repo and logical_repo != repo:
+                    failed.append({'task_id': task_id, 'error': 'repo mismatch'})
+                    continue
+                doc = {
+                    'status': 'archived',
+                    'active_worker': None,
+                    'needs_human': False,
+                    'updated_at': now,
+                    'last_update': now,
+                }
+                es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+                ok.append({'task_id': task_id})
+            except Exception as exc:
+                logger.error(f'bulk-update archive: task {task_id} failed: {exc}')
+                failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+        logger.info(f'bulk-update archive: ok={len(ok)} failed={len(failed)}')
+        return {'archived': ok, 'failed': failed}
+
+    # delete — clean up git branches while ES rows still exist, then remove docs
+    try:
+        await delete_task_branches(str_ids, repo)
+    except Exception as exc:
+        logger.warning(f'bulk-update delete: delete_task_branches: {exc}')
+
+    for task_id in str_ids:
+        try:
+            es_id, src = find_task_doc_by_logical_id(task_id)
+            if not es_id or src is None:
+                failed.append({'task_id': task_id, 'error': 'not found'})
+                continue
+            logical_repo = (src.get('repo') or '').strip()
+            if repo and logical_repo != repo:
+                failed.append({'task_id': task_id, 'error': 'repo mismatch'})
+                continue
+            if es_delete_doc('agent-task-records', es_id):
+                ok.append({'task_id': task_id})
+            else:
+                failed.append({'task_id': task_id, 'error': 'not found in index'})
+        except Exception as exc:
+            logger.error(f'bulk-update delete: task {task_id} failed: {exc}')
+            failed.append({'task_id': task_id, 'error': str(exc)[:200]})
+
+    logger.info(f'bulk-update delete: deleted={len(ok)} failed={len(failed)}')
+    return {'deleted': ok, 'failed': failed}

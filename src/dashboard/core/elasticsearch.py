@@ -148,7 +148,7 @@ def _flush_es_bulk_unlocked():
     )
     for attempt in range(4):
         try:
-            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            with urllib.request.urlopen(req, context=ctx, timeout=15):
                 pass
             break
         except urllib.error.HTTPError as e:

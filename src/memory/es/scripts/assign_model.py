@@ -17,7 +17,9 @@ item_id, preferred_model = sys.argv[1:3]
 now = datetime.now(timezone.utc).isoformat()
 ctx=None
 if not ES_VERIFY_TLS:
-    ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+    ctx=ssl.create_default_context()
+    ctx.check_hostname=False
+    ctx.verify_mode=ssl.CERT_NONE
 headers={'Content-Type':'application/json','Authorization':f'ApiKey {ES_API_KEY}'}
 body={'doc':{'preferred_model':preferred_model,'updated_at':now,'last_update':now}}
 req=urllib.request.Request(f"{ES_URL}/{INDEX}/_update/{item_id}", data=json.dumps(body).encode(), headers=headers, method='POST')

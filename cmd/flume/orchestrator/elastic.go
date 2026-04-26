@@ -68,6 +68,46 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	return respBody, resp.StatusCode, nil
 }
 
+// MintElasticsearchAPIKey natively mints a new API key scoped to the flume_role.
+func MintElasticsearchAPIKey(ctx context.Context, esURL string) (string, error) {
+	log.Debug("[ELASTICSEARCH SEC] Minting dynamic Elasticsearch API Key via xpack.security...")
+
+	payload := map[string]interface{}{
+		"name": "flume-swarm-key",
+		"role_descriptors": map[string]interface{}{
+			"flume_role": map[string]interface{}{
+				"cluster": []string{"all"},
+				"index": []map[string]interface{}{
+					{
+						"names":      []string{"*"},
+						"privileges": []string{"all"},
+					},
+				},
+			},
+		},
+	}
+
+	// We don't have the API key yet, so pass empty string to force esRequest
+	// to fall back to FLUME_ELASTIC_PASSWORD basic auth.
+	respBody, status, err := esRequest(ctx, esURL, "", "_security/api_key", "POST", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to mint ES API key natively: %w", err)
+	}
+	if status != 200 {
+		return "", fmt.Errorf("unexpected status %d minting ES API key: %s", status, string(respBody))
+	}
+
+	var resData struct {
+		Encoded string `json:"encoded"`
+	}
+	if err := json.Unmarshal(respBody, &resData); err != nil {
+		return "", fmt.Errorf("failed to parse ES API key response natively: %w", err)
+	}
+
+	log.Info("[ELASTICSEARCH SEC] ✅ Elasticsearch API key minted successfully")
+	return resData.Encoded, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Centralized ES Index Bootstrap
 //

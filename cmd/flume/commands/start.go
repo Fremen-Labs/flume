@@ -204,7 +204,12 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
+			esUrl := "https://localhost:" + esPort
+			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+				esUrl = envCfg.ESUrl
+			}
+
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -214,7 +219,6 @@ var StartCmd = &cobra.Command{
 
 			// Bootstrap ALL ES indices before any application containers start.
 			// Must run after OpenBao is deployed (some indices store credential metadata).
-			esUrl := "https://localhost:" + esPort
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
 				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
 			}
@@ -293,7 +297,12 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
+			esUrl := "https://localhost:" + esPort
+			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+				esUrl = envCfg.ESUrl
+			}
+
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -307,7 +316,6 @@ var StartCmd = &cobra.Command{
 			// Bootstrap ALL ES indices before any application containers start.
 			// Must run after OpenBao is deployed (some indices store credential metadata).
 			// Use localhost since we're still on the host machine at this point in boot.
-			esUrl := "https://localhost:" + esPort
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
 				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
 			}

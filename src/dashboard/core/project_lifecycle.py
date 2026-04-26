@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import traceback
 import httpx
+# ruff: noqa: E402
 from pathlib import Path
 
 from utils.logger import get_logger

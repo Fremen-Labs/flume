@@ -406,7 +406,6 @@ def _stuck_worker_watchdog(deps: dict) -> dict:
     }
 
     cutoff_ts = time.time() - idle_min * 60
-    cutoff_iso = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
 
     body = {
         'size': max_rows * 3,
@@ -570,9 +569,7 @@ def _plan_progress_scan(deps: dict) -> dict:
     """
     logger = deps['logger']
     es_search = deps['es_search']
-    es_post = deps['es_post']
     es_upsert = deps['es_upsert']
-    append_note = deps['append_note']
     list_projects = deps.get('list_projects')
     if list_projects is None:
         return {'scanned': 0, 'nudged': 0, 'skipped': 0, 'errors': 0, 'nudged_ids': []}
@@ -963,10 +960,11 @@ def _pr_reconcile_attempt_rebase(
       'unknown'             # catchall
     }
     """
-    import subprocess  # noqa: PLC0415
+    import asyncio     # noqa: PLC0415
     import tempfile    # noqa: PLC0415
     import shutil      # noqa: PLC0415
     from pathlib import Path as _Path  # noqa: PLC0415
+    from utils.async_subprocess import run_cmd_async  # noqa: PLC0415
 
     repo_url = (proj.get('repoUrl') or proj.get('repo_url') or '').strip()
     if not repo_url:
@@ -992,96 +990,89 @@ def _pr_reconcile_attempt_rebase(
         # --no-single-branch so subsequent fetches can create remote-tracking
         # refs for the integration and feature branches. --depth alone sets
         # single-branch mode in modern git which breaks `origin/<branch>`.
-        try:
-            subprocess.run(
-                [
-                    'git', 'clone', '--no-tags', '--no-single-branch',
-                    '--depth=200', '--', auth_url, str(tmp),
-                ],
-                check=True, capture_output=True, timeout=300,
-            )
-        except subprocess.CalledProcessError as e:
+        rc, out, err = asyncio.run(run_cmd_async(
+            'git', 'clone', '--no-tags', '--no-single-branch',
+            '--depth=200', '--', auth_url, str(tmp),
+            timeout=300
+        ))
+        if rc != 0:
             logger.warning(json.dumps({
                 'event': 'pr_reconcile.clone_failed', 'repo': repo_id,
-                'error': (e.stderr or b'').decode(errors='replace')[:300],
+                'error': (err or out)[:300],
             }))
             return False, 'clone_failed', []
 
         # Minimal identity so merge commits have an author.
-        subprocess.run(['git', '-C', str(tmp), 'config', 'user.email', 'flume-bot@local'], capture_output=True, timeout=30)
-        subprocess.run(['git', '-C', str(tmp), 'config', 'user.name', 'Flume Reconciliation Bot'], capture_output=True, timeout=30)
+        asyncio.run(run_cmd_async('git', '-C', str(tmp), 'config', 'user.email', 'flume-bot@local', timeout=30))
+        asyncio.run(run_cmd_async('git', '-C', str(tmp), 'config', 'user.name', 'Flume Reconciliation Bot', timeout=30))
 
         # Explicit refspec so the fetches force-update remote-tracking refs
         # even when the initial clone didn't set up tracking for every branch.
-        try:
-            subprocess.run(
-                [
-                    'git', '-C', str(tmp), 'fetch', '--depth=200', 'origin',
-                    f'+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}',
-                    f'+refs/heads/{feature_branch}:refs/remotes/origin/{feature_branch}',
-                ],
-                check=True, capture_output=True, timeout=120,
-            )
-        except subprocess.CalledProcessError as e:
+        rc, out, err = asyncio.run(run_cmd_async(
+            'git', '-C', str(tmp), 'fetch', '--depth=200', 'origin',
+            f'+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}',
+            f'+refs/heads/{feature_branch}:refs/remotes/origin/{feature_branch}',
+            timeout=120
+        ))
+        if rc != 0:
             logger.warning(json.dumps({
                 'event': 'pr_reconcile.fetch_failed', 'repo': repo_id,
                 'feature': feature_branch, 'base': base_branch,
-                'error': (e.stderr or b'').decode(errors='replace')[:300],
+                'error': (err or out)[:300],
             }))
             return False, 'clone_failed', []
 
-        try:
-            subprocess.run(
-                ['git', '-C', str(tmp), 'checkout', '-B', feature_branch, f'refs/remotes/origin/{feature_branch}'],
-                check=True, capture_output=True, timeout=60,
-            )
-        except subprocess.CalledProcessError as e:
+        rc, out, err = asyncio.run(run_cmd_async(
+            'git', '-C', str(tmp), 'checkout', '-B', feature_branch, f'refs/remotes/origin/{feature_branch}',
+            timeout=60
+        ))
+        if rc != 0:
             logger.warning(json.dumps({
                 'event': 'pr_reconcile.checkout_failed', 'repo': repo_id,
                 'feature': feature_branch,
-                'error': (e.stderr or b'').decode(errors='replace')[:300],
+                'error': (err or out)[:300],
             }))
             return False, 'clone_failed', []
 
         # Already up to date?
-        ahead_behind = subprocess.run(
-            ['git', '-C', str(tmp), 'rev-list', '--left-right', '--count',
-             f'refs/remotes/origin/{base_branch}...{feature_branch}'],
-            capture_output=True, text=True, timeout=30,
-        )
+        rc, ahead_behind, err = asyncio.run(run_cmd_async(
+            'git', '-C', str(tmp), 'rev-list', '--left-right', '--count',
+            f'refs/remotes/origin/{base_branch}...{feature_branch}',
+            timeout=30
+        ))
         try:
-            parts = (ahead_behind.stdout or '').split()
+            parts = (ahead_behind or '').split()
             base_ahead = int(parts[0]) if parts else 0
         except Exception:
             base_ahead = 1
         if base_ahead == 0:
             return False, 'already_up_to_date', []
 
-        merge = subprocess.run(
-            ['git', '-C', str(tmp), 'merge', '--no-edit',
-             '-m', f'chore: merge {base_branch} into {feature_branch} (Flume auto-reconcile)',
-             f'refs/remotes/origin/{base_branch}'],
-            capture_output=True, text=True, timeout=120,
-        )
-        if merge.returncode != 0:
+        rc, out, err = asyncio.run(run_cmd_async(
+            'git', '-C', str(tmp), 'merge', '--no-edit',
+            '-m', f'chore: merge {base_branch} into {feature_branch} (Flume auto-reconcile)',
+            f'refs/remotes/origin/{base_branch}',
+            timeout=120
+        ))
+        if rc != 0:
             # Collect the conflicting file list before aborting.
-            unmerged = subprocess.run(
-                ['git', '-C', str(tmp), 'diff', '--name-only', '--diff-filter=U'],
-                capture_output=True, text=True, timeout=30,
-            )
-            files = [f.strip() for f in (unmerged.stdout or '').splitlines() if f.strip()]
-            subprocess.run(['git', '-C', str(tmp), 'merge', '--abort'], capture_output=True, timeout=30)
+            rc2, unmerged, err2 = asyncio.run(run_cmd_async(
+                'git', '-C', str(tmp), 'diff', '--name-only', '--diff-filter=U',
+                timeout=30
+            ))
+            files = [f.strip() for f in (unmerged or '').splitlines() if f.strip()]
+            asyncio.run(run_cmd_async('git', '-C', str(tmp), 'merge', '--abort', timeout=30))
             return False, 'merge_conflict', files[:15]
 
-        push = subprocess.run(
-            ['git', '-C', str(tmp), 'push', 'origin', feature_branch],
-            capture_output=True, text=True, timeout=120,
-        )
-        if push.returncode != 0:
+        rc, out, err = asyncio.run(run_cmd_async(
+            'git', '-C', str(tmp), 'push', 'origin', feature_branch,
+            timeout=120
+        ))
+        if rc != 0:
             logger.warning(json.dumps({
                 'event': 'pr_reconcile.push_failed', 'repo': repo_id,
                 'feature': feature_branch,
-                'error': (push.stderr or push.stdout or '')[:300],
+                'error': (err or out)[:300],
             }))
             return False, 'push_failed', []
 
