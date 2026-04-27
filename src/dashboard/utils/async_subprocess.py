@@ -1,5 +1,6 @@
 import asyncio
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 from typing import Tuple
 
 from utils.logger import get_logger
@@ -32,9 +33,9 @@ async def run_cmd_async(*args: str, cwd: str | None = None, timeout: float = 15.
         try:
             proc.kill()
             await proc.communicate()
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             logger.warning(f"Failed to kill timed-out process: {' '.join(args)}", exc_info=True)
         return -1, "", f"Timeout expired after {timeout}s"
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.error(f"Command execution failed: {' '.join(args)}", exc_info=True)
         return -1, "", str(e)

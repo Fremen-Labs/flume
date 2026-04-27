@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 import os
 import subprocess
 from pathlib import Path
@@ -260,16 +261,16 @@ def planner_chat(messages: list[dict[str, Any]], model: str, cwd: str | None = N
         try:
             if proc.stdin:
                 proc.stdin.close()
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             pass
         try:
             proc.terminate()
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             pass
         try:
             proc.wait(timeout=3)
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             try:
                 proc.kill()
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+            except SAFE_EXCEPTIONS:
                 pass

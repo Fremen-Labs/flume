@@ -5,7 +5,7 @@ so callers can catch specific failures instead of broad ``Exception``.
 
 Usage::
 
-    from utils.exceptions import GitOperationError
+    from utils.exceptions import GitOperationError, SAFE_EXCEPTIONS
 
     try:
         rc, out, err = await run_cmd_async("git", "diff", ...)
@@ -15,9 +15,32 @@ Usage::
         logger.warning({"event": "git_diff_failed", "error": str(e)})
 """
 
+import urllib.error
+
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Centralised safe-exception tuple ─────────────────────────────────────────
+#
+# Previously copy-pasted 139 times across the dashboard as:
+#   except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError)
+#
+# This constant ADDS ``urllib.error.HTTPError`` (a subclass of URLError) so
+# that HTTP 401 / 403 / 500 responses from Elasticsearch or the Gateway are
+# caught instead of propagating as unhandled exceptions.
+#
+# Import and use as:
+#   from utils.exceptions import SAFE_EXCEPTIONS
+#   except SAFE_EXCEPTIONS as e: ...
+SAFE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    ValueError,
+    KeyError,
+    TypeError,
+    urllib.error.URLError,
+    urllib.error.HTTPError,
+    TimeoutError,
+)
 
 
 class FlumeError(Exception):
@@ -40,4 +63,5 @@ class ElasticsearchQueryError(FlumeError):
 
 class WorkerHeartbeatError(FlumeError):
     """Worker heartbeat timestamp parsing or staleness detection failed."""
+
 

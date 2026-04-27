@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 import os
 import threading
 import time
@@ -64,7 +65,7 @@ _SKIP_ITEM_TYPES = {'epic', 'feature', 'story'}  # rollups unblock when children
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, '').strip() or default)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         return default
 
 
@@ -85,7 +86,7 @@ def _parse_iso(ts: str) -> float | None:
     try:
         s = ts.replace('Z', '+00:00')
         return datetime.fromisoformat(s).timestamp()
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         return None
 
 
@@ -152,7 +153,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_failure'] = hits[0].get('_source') or {}
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         pass
     # Most recent handoff
     try:
@@ -164,7 +165,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_handoff'] = hits[0].get('_source') or {}
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         pass
     # Most recent review
     try:
@@ -176,7 +177,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_review'] = hits[0].get('_source') or {}
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         pass
     return ctx
 
@@ -253,7 +254,7 @@ def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str,
     )
     try:
         from utils import llm_client  # lazy: imports settings
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         return canned, False
 
     prompt_user = _build_user_prompt(src, ctx)
@@ -268,7 +269,7 @@ def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str,
             timeout_seconds=timeout_seconds,
             agent_role='auto_unblocker',
         )
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         return canned + f'\n\n(LLM unavailable: {str(e)[:120]})', False
 
     plan = (reply or '').strip()
@@ -392,7 +393,7 @@ def _sweep_once(deps: dict) -> dict:
                 }
             },
         })
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.warning(json.dumps({'event': 'auto_unblock.query_failed', 'error': str(e)[:200]}))
         summary['errors'] += 1
         return summary
@@ -417,7 +418,7 @@ def _sweep_once(deps: dict) -> dict:
                 summary['escalated'] += 1
                 summary['ids_escalated'].append(src.get('id'))
                 processed += 1
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+            except SAFE_EXCEPTIONS as e:
                 summary['errors'] += 1
                 logger.warning(json.dumps({
                     'event': 'auto_unblock.escalate_failed',
@@ -440,7 +441,7 @@ def _sweep_once(deps: dict) -> dict:
             summary['unblocked'] += 1
             summary['ids_unblocked'].append(src.get('id'))
             processed += 1
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+        except SAFE_EXCEPTIONS as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'auto_unblock.process_failed',
@@ -461,7 +462,7 @@ def _loop(deps: dict) -> None:
         summary = {}
         try:
             summary = _sweep_once(deps)
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+        except SAFE_EXCEPTIONS as e:
             with _STATE_LOCK:
                 _STATE['errors_total'] += 1
                 _STATE['last_error'] = str(e)[:300]

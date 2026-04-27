@@ -1,4 +1,5 @@
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,7 +14,7 @@ def load_session(session_id: str) -> Optional[dict]:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             return hits[0].get('_source')
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.error("Error loading session from ES", extra={"structured_data": {"session_id": session_id, "error": str(e)}})
     return None
 
@@ -22,7 +23,7 @@ def save_session(session: dict) -> None:
     try:
         session['updated_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         es_post(f'agent-plan-sessions/_doc/{session["id"]}?refresh=true', session)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.error("Error saving session to ES", extra={"structured_data": {"error": str(e)}})
 
 
@@ -36,5 +37,5 @@ def _iso_elapsed_seconds(started_at: Optional[str]) -> Optional[float]:
     try:
         started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
         return round((datetime.now(timezone.utc) - started).total_seconds(), 3)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         return None

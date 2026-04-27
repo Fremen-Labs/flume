@@ -1,6 +1,7 @@
 import json
 import urllib.request
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 import uuid
 import threading
 import time
@@ -144,7 +145,7 @@ def _test_planner_connection(status: dict) -> dict:
             import pathlib
             bao = _openbao_get_all(pathlib.Path(get_settings().FLUME_DATA_DIR))
             api_key = bao.get('LLM_API_KEY', '').strip()
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             pass
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
@@ -167,7 +168,7 @@ def _test_planner_connection(status: dict) -> dict:
                 parsed = urlparse(gw_url)
                 if parsed.hostname:
                     socket.gethostbyname(parsed.hostname)
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+            except SAFE_EXCEPTIONS:
                 gw_url = gw_url.replace('gateway', '127.0.0.1')
                 
         url = f"{gw_url}/api/nodes"
@@ -239,7 +240,7 @@ def _test_planner_connection(status: dict) -> dict:
              status['connectionTestResult'] = f'NODE MESH connection FAILED — Gateway HTTP {he.code}: {he.reason}'
         else:
              status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {url} returned HTTP {he.code}: {he.reason}'
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+    except SAFE_EXCEPTIONS as exc:
         status['connectionTestOk']     = False
         if provider == 'ollama':
              status['connectionTestResult'] = f'NODE MESH connection FAILED — {exc}'
@@ -345,7 +346,7 @@ def _planner_should_use_codex_app_server() -> bool:
 
         st = codex_app_server.status()
         return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         return False
 
 
@@ -434,6 +435,13 @@ def parse_llm_response(raw_text):
 
 def _planner_llm_error_hint(err: str) -> str:
     """Short user-facing hint after a planner LLM call fails (OAuth, connectivity, etc.)."""
+    timeout_secs = _planner_request_timeout_seconds()
+    if 'timed out' in err.lower() or 'TimeoutError' in err or 'Read timed out' in err:
+        return (
+            f' Planning exceeded the {timeout_secs}s timeout. Your model may be too slow for complex plans. '
+            f'Try: (1) use a smaller/faster model, (2) simplify your prompt, or '
+            f'(3) increase the timeout with `flume start --planner-timeout {timeout_secs * 2}`.'
+        )
     if 'Connection refused' in err or 'Errno 111' in err:
         return (
             ' Check that LLM_PROVIDER/LLM_BASE_URL match your setup (e.g. OpenAI + gpt-5.4, not Ollama on localhost). '
@@ -526,7 +534,7 @@ def _run_initial_planning(session: dict):
     try:
         raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         llm_error = str(e)[:300]
 
     if llm_error:
@@ -588,7 +596,7 @@ def refine_session(session_id, user_text, current_plan):
     try:
         raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         err = str(e)[:300]
         hint = _planner_llm_error_hint(err)
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import urllib.error
 import urllib.parse
+from utils.exceptions import SAFE_EXCEPTIONS
 from pathlib import Path
 import httpx
 
@@ -53,7 +54,7 @@ async def api_task_diff(task_id: str):
             try:
                 proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
                 proj = proj_res.get("_source") or {}
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+            except SAFE_EXCEPTIONS:
                 logger.debug("api_task_diff: failed to fetch project doc", exc_info=True)
 
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
@@ -88,7 +89,7 @@ async def api_task_diff(task_id: str):
                 "git", "-C", local_path_str, "symbolic-ref", "refs/remotes/origin/HEAD", timeout=5
             )
             base = out.strip().split("/")[-1] if rc == 0 else "main"
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             base = "main"
 
         rc, out, _err = await run_cmd_async(
@@ -98,7 +99,7 @@ async def api_task_diff(task_id: str):
         if len(diff_text) > 80_000:
             diff_text = diff_text[:80_000] + "\n\n... [diff truncated at 80k chars] ..."
         return {"diff": diff_text, "branch": branch, "base": f"origin/{base}"}
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.warning({"event": "task_diff_error", "task_id": task_id, "error": str(e)})
         return {"diff": "", "error": str(e)}
 
@@ -125,7 +126,7 @@ async def api_task_commits(task_id: str):
             try:
                 proj_res = _es_projects_request(f"/{PROJECTS_INDEX}/_doc/{repo_id}")
                 proj = proj_res.get("_source") or {}
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+            except SAFE_EXCEPTIONS:
                 logger.debug("api_task_commits: failed to fetch project doc", exc_info=True)
 
         clone_status = proj.get("clone_status") or proj.get("cloneStatus") or ""
@@ -141,7 +142,7 @@ async def api_task_commits(task_id: str):
                 return client.get_commits(branch=branch, base=base)
             except GitHostError as e:
                 logger.debug(f"api_task_commits: GitHostError: {e}", exc_info=True)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.warning(f"api_task_commits: unexpected error: {e}", exc_info=True)
     return []
 
@@ -378,7 +379,7 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
     # delete — clean up git branches while ES rows still exist, then remove docs
     try:
         await delete_task_branches(str_ids, repo)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+    except SAFE_EXCEPTIONS as exc:
         logger.warning(f'bulk-update delete: delete_task_branches: {exc}')
 
     for task_id in str_ids:
