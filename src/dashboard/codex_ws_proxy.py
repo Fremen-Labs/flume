@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
+from utils.exceptions import SAFE_EXCEPTIONS
 import threading
 import traceback
 from typing import Any
@@ -160,9 +161,9 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
             finally:
                 try:
                     await browser_ws.close()
-                except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+                except SAFE_EXCEPTIONS:
                     pass
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         try:
             reason = str(e)[:120]
             logger.warning(
@@ -170,7 +171,7 @@ async def _relay(browser_ws: Any, upstream_uri: str) -> None:
                 extra={"structured_data": {"upstream": upstream_uri, "error": str(e)}},
             )
             await browser_ws.close(code=1011, reason=reason)
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             pass
 
 
@@ -217,7 +218,7 @@ async def _async_main() -> None:
             extra={"structured_data": {"bind": f"{host}:{port}", "error": _proxy_listen_error}},
         )
         _serve_ready.set()
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         _proxy_listen_error = traceback.format_exc()[-500:]
         logger.error(
             "Codex WebSocket proxy crashed",
@@ -243,7 +244,7 @@ def start_codex_ws_proxy_background() -> None:
     def runner() -> None:
         try:
             asyncio.run(_async_main())
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             global _proxy_listen_error
             _proxy_listen_error = traceback.format_exc()[-500:]
             logger.error(

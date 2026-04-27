@@ -19,6 +19,7 @@ import llm_credentials_store
 import urllib.error
 import urllib.parse
 import urllib.request
+from utils.exceptions import SAFE_EXCEPTIONS
 
 from utils.logger import get_logger
 
@@ -68,7 +69,7 @@ def _decode_access_token_for_oauth_ui(access_token: str) -> dict[str, Any]:
         if isinstance(roles, list):
             scopes.extend(str(x) for x in roles if x)
         out['scopes'] = scopes
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         out['parsed'] = False
     return out
 
@@ -231,7 +232,7 @@ def _normalize_ollama_base_url(base_url: str) -> str:
         if path in ("/v1", "/api"):
             parsed = parsed._replace(path="")
             return urllib.parse.urlunparse(parsed).rstrip("/")
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         logger.debug("URL parse fallback during Ollama base URL normalization")
     if raw.endswith("/v1"):
         return raw[:-3].rstrip("/")
@@ -263,7 +264,7 @@ def resolve_effective_ollama_base_url(pairs: dict[str, str]) -> str:
         local_host = urllib.parse.urlparse(local_base).hostname or ""
         if _host_is_loopback(llm_host) and not _host_is_loopback(local_host):
             return local_base
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+    except SAFE_EXCEPTIONS:
         logger.debug("URL parse fallback during Ollama effective URL resolution")
     return llm_base
 
@@ -292,7 +293,7 @@ def _fetch_ollama_models(base_url: str, timeout: float = 5.0) -> list[dict[str, 
                     model_rows.append({"id": mid, "name": mid})
             if model_rows:
                 break
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+        except SAFE_EXCEPTIONS as exc:
             errs.append(str(exc))
     if model_rows:
         return _dedupe_models(model_rows)
@@ -376,7 +377,7 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
             urllib.request.urlopen(addr.replace("openbao", "127.0.0.1") + "/v1/sys/health", timeout=1)
             addr = addr.replace("openbao", "127.0.0.1")
             pairs["OPENBAO_ADDR"] = addr
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             logger.debug("OpenBao hostname resolution to 127.0.0.1 failed — using original address")
 
     return True, pairs
@@ -389,7 +390,7 @@ def is_openbao_installed() -> bool:
     try:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.error(json.dumps({"event": "openbao_health_check_failed", "addr": addr, "error": str(e)[:200]}))
         return False
 
@@ -438,7 +439,7 @@ def _openbao_get_all(workspace_root: Path) -> dict[str, str]:
             payload = json.loads(r.read())
             data = payload.get("data", {}).get("data", {})
             return {str(k): str(v) for k, v in data.items() if v is not None}
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.warning("Failed to read secrets from OpenBao", extra={"structured_data": {"error": str(e)}})
         return {}
 
@@ -469,7 +470,7 @@ def _openbao_put_many(workspace_root: Path, updates: dict[str, str]) -> bool:
         )
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status in (200, 201, 204)
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         logger.error("Failed to write secrets to OpenBao", extra={"structured_data": {"error": str(e)}})
         return False
 
@@ -551,7 +552,7 @@ def load_effective_pairs(workspace_root: Path) -> dict[str, str]:
         for k, v in es_config.items():
             if v and str(v).strip():
                 pairs[k] = str(v).strip()
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _e:
+    except SAFE_EXCEPTIONS as _e:
         logger.debug(f"AP-10: ES LLM config read skipped in load_effective_pairs: {_e}")
 
 
@@ -600,7 +601,7 @@ def _update_env_keys(workspace_root: Path, updates: dict[str, str]) -> None:
                         os.environ[k] = str(v)
             else:
                 logger.warning("AP-10: Failed to write LLM config to ES flume-llm-config")
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+        except SAFE_EXCEPTIONS as e:
             logger.warning(f"AP-10: ES LLM config write failed: {e}")
 
     # 2. Write sensitive keys to OpenBao
@@ -808,7 +809,7 @@ def do_oauth_refresh(workspace_root: Path) -> tuple[bool, str, Optional[dict]]:
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:500]
         return False, f"OAuth refresh failed: {e.code} {body}", None
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except SAFE_EXCEPTIONS as e:
         return False, f"OAuth refresh failed: {e}", None
 
     new_access = str(data.get("access_token") or "").strip()
@@ -921,7 +922,7 @@ def get_llm_settings_response(workspace_root: Path) -> dict[str, Any]:
             port = p.port
             base_path = (p.path or "").strip("/")
             route_type = "network" if host not in ("127.0.0.1", "localhost") else "local"
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             pass
 
     oauth_status = get_oauth_status(workspace_root) if provider == "openai" else {}
