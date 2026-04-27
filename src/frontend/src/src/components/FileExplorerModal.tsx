@@ -522,7 +522,7 @@ interface FileExplorerModalProps {
 
 type ModalMode = 'browse' | 'compare';
 
-type CloneStatus = 'cloning' | 'pending' | 'cloned' | 'failed' | 'local' | 'no_repo' | 'unknown';
+type CloneStatus = 'cloning' | 'pending' | 'cloned' | 'indexed' | 'failed' | 'local' | 'no_repo' | 'unknown';
 
 interface CloneStatusResponse {
   clone_status: CloneStatus;
@@ -594,7 +594,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
       if (!s) return;
       setCloneStatus(s.clone_status);
       setCloneError(s.clone_error);
-      if (s.clone_status === 'cloned') {
+      if (s.clone_status === 'cloned' || s.clone_status === 'indexed') {
         stopClonePolling();
         setBranches([]);
         setBranch('');
@@ -677,7 +677,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           }
           return;
         }
-        setCloneStatus('cloned');
+        setCloneStatus('indexed');
         const list = data.branches ?? [];
         setBranches(list);
         setBranch(data.default ?? '');

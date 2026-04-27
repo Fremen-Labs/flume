@@ -29,7 +29,7 @@ function timeAgo(ts: string) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-type CloneStatus = 'cloning' | 'pending' | 'cloned' | 'local' | 'no_repo' | 'failed' | 'unknown';
+type CloneStatus = 'cloning' | 'pending' | 'cloned' | 'indexed' | 'local' | 'no_repo' | 'failed' | 'unknown';
 
 interface CloneStatusBadgeProps {
   status: CloneStatus;
@@ -44,11 +44,11 @@ function CloneStatusBadge({ status }: CloneStatusBadgeProps) {
       </span>
     );
   }
-  if (status === 'cloned') {
+  if (status === 'cloned' || status === 'indexed') {
     return (
       <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-medium shrink-0">
         <CheckCircle2 className="w-2.5 h-2.5" />
-        Cloned
+        {status === 'indexed' ? 'Indexed' : 'Cloned'}
       </span>
     );
   }
@@ -252,7 +252,7 @@ export default function ProjectsPage() {
               const cloneStatus = ((project as ApiProject & { clone_status?: string }).clone_status ?? 'unknown') as CloneStatus;
               const isCloning = cloneStatus === 'cloning' || cloneStatus === 'pending';
               const hasFailed = cloneStatus === 'failed';
-              const isReady = cloneStatus === 'cloned' || cloneStatus === 'local';
+              const isReady = cloneStatus === 'cloned' || cloneStatus === 'indexed' || cloneStatus === 'local';
 
               return (
                 <motion.div

@@ -723,7 +723,8 @@ async def lifespan(app: FastAPI):
     except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as _exc:
         logger.warning(f'autonomy_sweeps.start_failed: {_exc}')
 
-    app.state.http_client = httpx.AsyncClient()
+    from core.elasticsearch import _get_httpx_verify
+    app.state.http_client = httpx.AsyncClient(verify=_get_httpx_verify())
     yield
     await app.state.http_client.aclose()
     agents_stop()
