@@ -231,7 +231,7 @@ wheels = [
 
 [[package]]
 name = "elastro-client"
-version = "1.3.51"
+version = "1.3.52"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -250,9 +250,9 @@ dependencies = [
     { name = "tree-sitter-typescript" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/37/e5/8b8228042ac5926da59606625dc299557a90cd890f35c4e836aee2f5cd7f/elastro_client-1.3.51.tar.gz", hash = "sha256:050a88d3b2f9677e9b0dd4a9e70a737318aa7932ee4c9a247d490f6c2994ccbc", size = 275789, upload-time = "2026-03-17T05:07:00.828Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/de/47/a0b89cd07516312a87d97e749df0f56367252347dd7c1e0203a58d10f0c6/elastro_client-1.3.52.tar.gz", hash = "sha256:61f7e22d8fafead609b16301f26e3d7dc5dbbb8f4695b2700b5ceb92b721c5fb", size = 277129, upload-time = "2026-04-27T18:26:58.712Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/28/9c96a1d556304655a7039679ee7ec82e3d4138132306a0e05ea91a4a0fd3/elastro_client-1.3.51-py3-none-any.whl", hash = "sha256:13d1e00959dbeec983221ab2d1a2d7e641587632c21c1f655c28b8c5301c408b", size = 230656, upload-time = "2026-03-17T05:06:59.48Z" },
+    { url = "https://files.pythonhosted.org/packages/01/ad/bd0760d3b6c65cac8184291151c0c5b4f65278a3708e35abc2977e05e6ee/elastro_client-1.3.52-py3-none-any.whl", hash = "sha256:0c0984acd7a5a579a34c90679c786c65e989a4d3127687f631a3e3452c6b55ed", size = 231908, upload-time = "2026-04-27T18:26:57.426Z" },
 ]
 
 [[package]]
@@ -293,7 +293,7 @@ wheels = [
 
 [[package]]
 name = "flume"
-version = "0.1.84"
+version = "0.1.87"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -326,7 +326,7 @@ dev = [
 requires-dist = [
     { name = "click" },
     { name = "elasticsearch" },
-    { name = "elastro-client", specifier = ">=1.3.0" },
+    { name = "elastro-client", specifier = ">=1.3.52" },
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hvac", specifier = ">=2.1.0" },

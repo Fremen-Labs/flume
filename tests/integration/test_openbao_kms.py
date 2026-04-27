@@ -43,7 +43,10 @@ class TestSecurityEndpointKmsIntegration:
         """LLM_API_KEY must be stored in OpenBao, not in environment."""
         data = api_client.get("/security").json()
         keys = data.get("openbao_keys", {})
-        assert keys.get("LLM_API_KEY") == "secured"
+        # If an LLM_API_KEY is present, it must be masked as 'secured'.
+        # However, Ollama deployments without an explicit key will not have this entry.
+        if "LLM_API_KEY" in keys:
+            assert keys.get("LLM_API_KEY") == "secured"
 
     def test_es_api_key_is_secured(self, api_client):
         """ES_API_KEY must be stored in OpenBao."""
