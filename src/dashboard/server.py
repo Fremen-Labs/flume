@@ -53,6 +53,8 @@ hydrate_secrets_from_openbao()
 # The dashboard only verifies indices exist at startup — it does NOT create them.
 # This eliminates the boot-race where workers hit 404s before the dashboard finishes bootstrapping.
 from utils.logger import get_logger as _get_startup_logger
+from utils.exceptions import SAFE_EXCEPTIONS
+
 _startup_logger = _get_startup_logger('es_bootstrap')
 try:
     import urllib.request as _ur
@@ -77,7 +79,6 @@ except SAFE_EXCEPTIONS as _e:
 
 # ES configuration imported from core.elasticsearch (single source of truth)
 from core.elasticsearch import ES_API_KEY, ES_URL, _get_auth_headers, ctx as _es_ctx
-from utils.exceptions import SAFE_EXCEPTIONS
 
 
 def _seed_llm_config_from_env() -> None:

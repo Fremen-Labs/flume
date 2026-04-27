@@ -179,9 +179,9 @@ class TestSecurityContract:
         data = api_client.get("/security").json()
         assert "openbao_keys" in data
         keys = data["openbao_keys"]
-        # At minimum, LLM_API_KEY and ES_API_KEY should be secured
-        assert "LLM_API_KEY" in keys
         assert "ES_API_KEY" in keys
+        # LLM_API_KEY is only present if the provider requires one (e.g. OpenAI/Anthropic).
+        # Ollama deployments may not have an LLM_API_KEY.
 
     def test_security_keys_are_masked(self, api_client):
         """Key values must not be exposed — only status like 'secured'."""

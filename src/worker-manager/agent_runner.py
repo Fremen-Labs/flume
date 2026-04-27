@@ -23,6 +23,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(1, str(BASE))
 import llm_credentials_store as lcs  # noqa: E402
 import codex_app_server_bridge as codex_bridge  # noqa: E402
+from utils.es_auth import get_es_auth_headers  # noqa: E402
 
 AGENTS_ROOT = BASE / 'agents'
 
@@ -110,7 +111,6 @@ async def _emit_usage(
             'actual_tokens_sent': actual_tokens_sent,
             'created_at': ts
         }
-        from utils.es_auth import get_es_auth_headers
         hdrs = {'Content-Type': 'application/json'}
         hdrs.update(get_es_auth_headers())
             
@@ -136,7 +136,6 @@ async def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: d
     try:
         import os
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        from utils.es_auth import get_es_auth_headers
         hdrs = {'Content-Type': 'application/json'}
         hdrs.update(get_es_auth_headers())
             
@@ -472,9 +471,8 @@ async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: 
         
     try:
         es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        from utils.es_auth import get_es_auth_headers as _ast_auth
         headers = {'Content-Type': 'application/json'}
-        headers.update(_ast_auth())
+        headers.update(get_es_auth_headers())
 
         # Schema: file_path, content, functions_defined, functions_called, chunk_name, chunk_type, extension, repo_name
         query_payload = {
@@ -597,7 +595,7 @@ async def _exec_elastro_query_ast(args: dict, repo_path: Optional[str], client: 
                 'created_at': ts,
             }
             tel_hdrs = {'Content-Type': 'application/json'}
-            tel_hdrs.update(_ast_auth())
+            tel_hdrs.update(get_es_auth_headers())
             try:
                 await client.post(
                     f"{es_url}/agent-token-telemetry/_doc",
@@ -630,9 +628,8 @@ async def _exec_memory_read(args: dict, client: httpx.AsyncClient = None) -> str
         
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
-        from utils.es_auth import get_es_auth_headers as _mem_auth
         headers = {'Content-Type': 'application/json'}
-        headers.update(_mem_auth())
+        headers.update(get_es_auth_headers())
         query_payload = {'query': {'term': {'_id': key}}}
         
         resp = await client.post(
@@ -702,9 +699,8 @@ async def _exec_memory_write(args: dict, client: httpx.AsyncClient = None) -> st
         
     try:
         es_url = os.environ.get('ES_URL', 'https://localhost:9200').rstrip('/')
-        from utils.es_auth import get_es_auth_headers as _mw_auth
         headers = {'Content-Type': 'application/json'}
-        headers.update(_mw_auth())
+        headers.update(get_es_auth_headers())
         
         import time
         doc = {'key': key, 'value': val, 'updated_at': time.time()}
