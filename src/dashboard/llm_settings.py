@@ -125,9 +125,11 @@ PROVIDER_CATALOG = [
             {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
             {"id": "o1", "name": "o1"},
             {"id": "o1-mini", "name": "o1 Mini"},
-            {"id": "gpt-5.4", "name": "GPT-5.4 (Codex)"},
-            {"id": "gpt-5.3", "name": "GPT-5.3 (Codex)"},
-            {"id": "gpt-5.2", "name": "GPT-5.2 (Codex)"},
+            # ── Codex models (require OAuth or API key with Codex scope) ──────
+            {"id": "codex-mini-latest", "name": "Codex Mini (Latest) ⚡ recommended"},
+            {"id": "codex-mini-2025-01-01", "name": "Codex Mini (2025-01-01)"},
+            {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex"},
+            {"id": "gpt-5.3-codex-spark", "name": "GPT-5.3 Codex Spark"},
         ],
     },
     {
@@ -342,6 +344,7 @@ _ES_LLM_CONFIG_KEYS = frozenset({
 # Keys that must only live in OpenBao (secrets)
 _OPENBAO_SENSITIVE_KEYS = frozenset({
     "LLM_API_KEY",
+    "CODEX_API_KEY",
     "OPENAI_OAUTH_STATE_FILE",
     "OPENAI_OAUTH_STATE_JSON",
     "OPENAI_OAUTH_TOKEN_URL",

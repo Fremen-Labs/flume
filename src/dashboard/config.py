@@ -40,6 +40,7 @@ class AppConfig(BaseSettings):
     LLM_MODEL: str = "llama3.2"
     LLM_PROVIDER: str = ""
     LLM_API_KEY: str = ""
+    CODEX_API_KEY: str = ""
     OPENAI_OAUTH_SCOPES: str = ""
     OPENAI_OAUTH_STATE_FILE: str = ""
     OPENAI_OAUTH_STATE_JSON: str = ""
