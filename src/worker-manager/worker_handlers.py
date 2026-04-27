@@ -153,6 +153,24 @@ def emit_task_event(task_id: str, event_type: str, details: dict):
     except Exception as e:
         _handlers_logger.error(f"Event Sourcing Failure: Could not emit event for task {task_id}: {e}")
 
+def log_task_state_transition(task_id: str, prev_status: str, new_status: str, role: str, worker_name: str, project: str = ""):
+    """Emit a flat state transition event for the lifecycle observer."""
+    event = {
+        'task_id': task_id,
+        'previous_status': prev_status,
+        'new_status': new_status,
+        'role': role,
+        'worker_name': worker_name,
+        'owner': role,
+        'project': project,
+        'timestamp': now_iso()
+    }
+    try:
+        es_request('/flume-task-events/_doc', body=event, method='POST')
+        _handlers_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
+    except Exception as e:
+        _handlers_logger.error(f"Lifecycle Event Failure: Could not emit transition for task {task_id}: {e}")
+
 
 class KillSwitchAbortError(Exception):
     pass
@@ -161,18 +179,21 @@ class KillSwitchAbortError(Exception):
 def check_kill_switch(es_id: str):
     """Enforce native state bounding to synchronously interrupt stray execution loops."""
     try:
-        res = es_request(f'/{TASK_INDEX}/_doc/{es_id}?_source=status')
-        if res.get('_source', {}).get('status') == 'blocked':
+        res = es_request(f'/{TASK_INDEX}/_doc/{es_id}?_source=status,repo,owner,assigned_agent_role,active_worker')
+        src = res.get('_source', {})
+        if src.get('status') == 'blocked':
             _handlers_logger.warning("Kill Switch Engaged: Worker thread aborting immediately for blocked task.")
             raise KillSwitchAbortError("Task was halted via Kill Switch")
+        return src
     except KillSwitchAbortError as e:
         raise e
     except Exception as e:
         _handlers_logger.debug(f"Non-fatal failure checking kill switch for {es_id}: {e}")
+        return {}
 
 
 def update_task_doc(es_id, doc):
-    check_kill_switch(es_id)
+    old_src = check_kill_switch(es_id) or {}
     doc['updated_at'] = now_iso()
     doc['last_update'] = now_iso()
     
@@ -180,6 +201,14 @@ def update_task_doc(es_id, doc):
     emit_task_event(es_id, 'doc_update', doc)
     
     es_request(f'/{TASK_INDEX}/_update/{es_id}', {'doc': doc}, method='POST')
+    
+    new_status = doc.get('status')
+    old_status = old_src.get('status')
+    if new_status and old_status and new_status != old_status:
+        role = doc.get('assigned_agent_role') or old_src.get('assigned_agent_role') or ''
+        worker = doc.get('active_worker') or old_src.get('active_worker') or ''
+        repo = old_src.get('repo', '')
+        log_task_state_transition(es_id, old_status, new_status, role, worker, repo)
 
 
 def write_doc(index, doc):

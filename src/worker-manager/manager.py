@@ -111,6 +111,24 @@ def log(msg, **kwargs):
     else:
         _manager_logger.info(str(msg))
 
+def log_task_state_transition(task_id: str, prev_status: str, new_status: str, role: str, worker_name: str, project: str = ""):
+    """Emit a flat state transition event for the lifecycle observer."""
+    event = {
+        'task_id': task_id,
+        'previous_status': prev_status,
+        'new_status': new_status,
+        'role': role,
+        'worker_name': worker_name,
+        'owner': role,
+        'project': project,
+        'timestamp': now_iso()
+    }
+    try:
+        es_request('/flume-task-events/_doc', body=event, method='POST')
+        _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
+    except Exception as e:
+        _manager_logger.error(f"Lifecycle Event Failure: Could not emit transition for task {task_id}: {e}")
+
 def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
     ts = now_iso()
     doc = {
@@ -862,6 +880,17 @@ def try_atomic_claim(
                 "task_claimed", 
                 f"Claimed task {claimed_doc_id} in {roundtrip_ms}ms (queue delay: {queue_delay_ms}ms)",
                 level="INFO"
+            )
+
+            # Emit state transition for observability
+            claimed_project = claimed_src.get('repo', '')
+            log_task_state_transition(
+                task_id=claimed_doc_id,
+                prev_status=target_status,
+                new_status=new_status,
+                role=role,
+                worker_name=worker_name,
+                project=claimed_project
             )
 
             # Dedup gate: if an identical task is already active, release this claim

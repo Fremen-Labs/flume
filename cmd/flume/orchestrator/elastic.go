@@ -329,7 +329,7 @@ var allIndices = []indexDef{
 	{Name: "agent_knowledge", Mapping: nil},
 
 	// ── Task events ──────────────────────────────────────────────────────
-	{Name: "flume-task-events", Mapping: nil},
+	// flume-task-events is bootstrapped as an ILM alias in BootstrapElasticsearch
 
 	// ── Kubernetes-grade credential metadata stores (secrets in OpenBao) ─
 	{Name: "flume-llm-credentials", Mapping: map[string]interface{}{
@@ -755,7 +755,57 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-records-template' created")
 	}
 
-	// 3. Create ALL indices (centralized — replaces es_bootstrap.py, config.go, node_registry.go)
+	// 3. Create Index Template for flume-task-events (using the same ILM policy)
+	eventsTemplate := map[string]interface{}{
+		"index_patterns": []string{"flume-task-events-*"},
+		"template": map[string]interface{}{
+			"settings": map[string]interface{}{
+				"number_of_shards":               1,
+				"number_of_replicas":             0,
+				"index.lifecycle.name":           "flume-task-records-policy",
+				"index.lifecycle.rollover_alias": "flume-task-events",
+			},
+			"mappings": map[string]interface{}{
+				"dynamic": false,
+				"properties": map[string]interface{}{
+					"task_id":         map[string]interface{}{"type": "keyword"},
+					"previous_status": map[string]interface{}{"type": "keyword"},
+					"new_status":      map[string]interface{}{"type": "keyword"},
+					"role":            map[string]interface{}{"type": "keyword"},
+					"worker_name":     map[string]interface{}{"type": "keyword"},
+					"owner":           map[string]interface{}{"type": "keyword"},
+					"project":         map[string]interface{}{"type": "keyword"},
+					"timestamp":       map[string]interface{}{"type": "date"},
+				},
+			},
+		},
+	}
+	_, _, err = esRequest(ctx, esURL, apiKey, "_index_template/flume-task-events-template", "PUT", eventsTemplate)
+	if err != nil {
+		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create flume-task-events Index Template", "error", err)
+	} else {
+		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-events-template' created")
+	}
+
+	// 4. Create the initial ILM write index for flume-task-events if it doesn't exist
+	initialEventsIndex := map[string]interface{}{
+		"aliases": map[string]interface{}{
+			"flume-task-events": map[string]interface{}{
+				"is_write_index": true,
+			},
+		},
+	}
+	_, status, _ := esRequest(ctx, esURL, apiKey, "flume-task-events-000001", "HEAD", nil)
+	if status == 404 {
+		_, _, err = esRequest(ctx, esURL, apiKey, "flume-task-events-000001", "PUT", initialEventsIndex)
+		if err != nil {
+			log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create initial flume-task-events index", "error", err)
+		} else {
+			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Initial flume-task-events index created")
+		}
+	}
+
+	// 5. Create ALL indices (centralized — replaces es_bootstrap.py, config.go, node_registry.go)
 	if err := EnsureAllIndices(ctx, esURL, apiKey); err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Some indices failed to create", "error", err)
 		// Non-fatal: continue boot — existing indices will work
