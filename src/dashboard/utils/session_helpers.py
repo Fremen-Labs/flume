@@ -16,10 +16,12 @@ def _session_messages_for_client(session: dict) -> list:
 
 def _session_payload_for_client(session: dict) -> dict:
     status = dict(session.get('planningStatus') or {})
-    started_at = status.get('requestStartedAt')
-    elapsed = _iso_elapsed_seconds(started_at)
-    if elapsed is not None:
-        status['requestElapsedSeconds'] = elapsed
+    stage = status.get('stage')
+    if stage in ('testing_connection', 'requesting_plan'):
+        started_at = status.get('requestStartedAt')
+        elapsed = _iso_elapsed_seconds(started_at)
+        if elapsed is not None:
+            status['requestElapsedSeconds'] = elapsed
     return {
         'sessionId': session['id'],
         'status': status.get('stage') or session.get('status') or 'active',

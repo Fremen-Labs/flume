@@ -157,8 +157,7 @@ def _test_planner_connection(status: dict) -> dict:
     if provider == 'ollama':
         # Ollama local inference is orchestrated by the Flume Gateway Node Mesh.
         # Test the Gateway's registry endpoint to confirm mesh connectivity.
-        from server import _gateway_base
-        gw_url = _gateway_base()
+        gw_url = get_settings().GATEWAY_URL
         
         # Fallback to localhost if running outside Docker or during DNS race condition
         if 'gateway:' in gw_url:
@@ -183,6 +182,15 @@ def _test_planner_connection(status: dict) -> dict:
             return status
 
         # Apply specific routing rules, identical to how tests were previously performed
+        # If base_url is still the Ollama default but provider is cloud, override it
+        if base_url == "http://localhost:11434" and provider not in ("ollama", "exo"):
+            if provider in ("xai", "grok"):
+                base_url = "https://api.x.ai"
+            elif provider == "openai":
+                base_url = "https://api.openai.com"
+            elif provider == "anthropic":
+                base_url = "https://api.anthropic.com"
+                
         if provider == 'exo':
             norm = base_url
             if norm.endswith('/v1'):
@@ -218,7 +226,7 @@ def _test_planner_connection(status: dict) -> dict:
     # ── Execute the probe ──────────────────────────────────────────────────
     try:
         req = urllib.request.Request(url, headers=headers, method='GET')
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
             status_code = getattr(resp, 'status', 200)
             status['connectionTestOk']     = True
             if provider == 'ollama':
@@ -486,6 +494,16 @@ def create_planning_session(repo, prompt):
         'updated_at': _utcnow_iso(),
     }
     save_session(session)
+    
+    # Run connection test synchronously to fail fast
+    status = _update_planning_status(session, stage='testing_connection')
+    _test_planner_connection(status)
+    if status.get('connectionTestOk') is False:
+        status['stage'] = 'failed'
+        status['failureText'] = status.get('connectionTestResult') or 'Connection test failed.'
+        save_session(session)
+        raise ValueError(status['failureText'])
+
     session_copy = dict(session)
     threading.Thread(target=_run_initial_planning, args=(session_copy,), daemon=True).start()
     return session
@@ -494,9 +512,9 @@ def create_planning_session(repo, prompt):
 def _run_initial_planning(session: dict):
     if not session:
         return
-    status = _update_planning_status(session, stage='testing_connection')
-    _test_planner_connection(status)
-    save_session(session)
+
+    # Skip testing connection, already done
+    status = session.get('planningStatus', {})
 
     llm_messages = build_llm_messages(session)
     timeout_seconds = _planner_request_timeout_seconds(status)
@@ -554,8 +572,13 @@ def refine_session(session_id, user_text, current_plan):
     if current_plan:
         session['draftPlan'] = current_plan
 
-    _update_planning_status(session, stage='testing_connection')
-    _test_planner_connection(session['planningStatus'])
+    status = _update_planning_status(session, stage='testing_connection')
+    _test_planner_connection(status)
+    if status.get('connectionTestOk') is False:
+        status['stage'] = 'failed'
+        status['failureText'] = status.get('connectionTestResult') or 'Connection test failed.'
+        save_session(session)
+        raise ValueError(status['failureText'])
     save_session(session)
 
     llm_messages = build_llm_messages(session)

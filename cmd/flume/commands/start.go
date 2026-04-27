@@ -358,7 +358,9 @@ var StartCmd = &cobra.Command{
 
 		var seedEntries []orchestrator.NodeSeedEntry
 
-		if envCfg.Provider == "ollama" || envCfg.Provider == "exo" {
+		// Only seed the primary host if they actually configured one, which is indicated by Host != "" or model != ""
+		// Wait, if it's external, Host might be "" but we don't want to seed an empty host. 
+		if (envCfg.Provider == "ollama" || envCfg.Provider == "exo") || (envCfg.Host != "") {
 			// Always register the primary Ollama host so it appears on the Node Mesh page.
 			primaryHost := envCfg.Host
 			if primaryHost == "" {
@@ -371,9 +373,18 @@ var StartCmd = &cobra.Command{
 			if !envCfg.IsNative && (primaryHost == "127.0.0.1" || primaryHost == "localhost") {
 				primaryHost = "host.docker.internal"
 			}
+			
+			// Extract port if provided, otherwise default to 11434
+			hostPort := "11434"
+			if strings.Contains(primaryHost, ":") {
+				parts := strings.Split(primaryHost, ":")
+				primaryHost = parts[0]
+				hostPort = parts[1]
+			}
+			
 			primaryEntry := orchestrator.NodeSeedEntry{
 				ID:       "primary",
-				Host:     fmt.Sprintf("%s:11434", primaryHost),
+				Host:     fmt.Sprintf("%s:%s", primaryHost, hostPort),
 				ModelTag: envCfg.Model,
 			}
 			// ReasoningScore and MaxContext are left at zero — the health checker
