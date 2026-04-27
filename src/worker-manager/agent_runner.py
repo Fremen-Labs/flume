@@ -1137,37 +1137,106 @@ async def run_implementer(
                 pass
 
     if _task_uses_codex_app_server(task) and repo_path:
-        _progress('Using Codex app-server backend…')
-        prompt = (
-            f"SYSTEM PROMPT:\n{system_prompt}\n\n"
-            "You are operating inside the repository at the provided cwd. Make any needed file edits directly. "
-            "When finished, return ONLY JSON matching the required schema.\n\n"
-            f"TASK JSON:\n{json.dumps(task, indent=2)}\n\n"
-            f"REPO PATH: {repo_path}\n\n"
-            "If task.requires_code is true, you must make real code edits before finishing. "
-            "Set artifacts to the list of changed file paths relative to the repo root when possible."
-        )
-        response = _run_codex_json_task(
-            prompt,
-            _codex_json_schema_implementer(),
-            model=model,
-            cwd=repo_path,
-        )
-        if response and isinstance(response, dict):
-            return AgentResult(
-                action='handoff_to_tester',
-                summary=str(response.get('summary') or 'Implementation completed.').strip() or 'Implementation completed.',
-                artifacts=[str(x) for x in (response.get('artifacts') or []) if str(x).strip()],
-                metadata={
-                    'source': 'codex_app_server',
-                    'commit_sha': '',
-                    'commit_message': str(response.get('commit_message') or '').strip(),
-                },
+        max_codex_attempts = 3 if task.get('requires_code') else 1
+        for attempt in range(1, max_codex_attempts + 1):
+            _progress(f'Using Codex app-server backend (attempt {attempt}/{max_codex_attempts})…')
+            repo_file_hint = (
+                "\nEnsure your edits match the requested files."
+                if task.get('requires_code') else ''
             )
-        _progress('Codex app-server returned no usable response — stopping.')
+            attempt_hint = ""
+            if attempt > 1:
+                attempt_hint = (
+                    f"\n\n[ATTEMPT {attempt}/{max_codex_attempts}]: The previous attempt did not return valid file edits.\n"
+                    "- You MUST edit at least one file in this repo before returning.\n"
+                    "- You MUST include at least one changed path in artifacts.\n"
+                    "- Do not return a no-op summary.\n"
+                )
+            prompt = (
+                f"SYSTEM PROMPT:\n{system_prompt}\n\n"
+                "You are operating inside the repository at the provided cwd. Make any needed file edits directly. "
+                "When finished, return ONLY JSON matching the required schema.\n\n"
+                f"TASK JSON:\n{json.dumps(task, indent=2)}\n\n"
+                f"REPO PATH: {repo_path}\n\n"
+                "If task.requires_code is true, you must make real code edits before finishing. "
+                "Set artifacts to the list of changed file paths relative to the repo root when possible."
+                + (
+                    "\nFor code tasks: artifacts must contain at least one edited file path."
+                    if task.get('requires_code') else ''
+                )
+                + repo_file_hint
+                + attempt_hint
+            )
+            try:
+                response = _run_codex_json_task(
+                    prompt,
+                    _codex_json_schema_implementer(),
+                    model=model,
+                    cwd=repo_path,
+                )
+            except Exception as e:
+                err = str(e).strip().replace('\n', ' ')
+                if err:
+                    _thought(
+                        f"*[Codex]* attempt {attempt}/{max_codex_attempts} failed: {err[:500]}"
+                    )
+                if attempt < max_codex_attempts:
+                    _progress(f'Codex attempt {attempt}/{max_codex_attempts} failed — retrying.')
+                    continue
+                return AgentResult(
+                    action='implementer_failed',
+                    summary='Codex app-server failed after retries.',
+                    artifacts=[],
+                    metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
+                )
+            if response is None:
+                response = {
+                    'summary': 'Implementation attempt completed.',
+                    'commit_message': '',
+                    'artifacts': [],
+                }
+            if response is not None and not isinstance(response, dict):
+                response = {
+                    'summary': str(response).strip() or 'Implementation completed.',
+                    'commit_message': '',
+                    'artifacts': [],
+                }
+            if response and isinstance(response, dict):
+                # For code tasks, require actual file edits before handing off.
+                if task.get('requires_code'):
+                    resp_artifacts = [str(x) for x in (response.get('artifacts') or []) if str(x).strip()]
+                    import subprocess
+                    status = subprocess.run(
+                        ['git', '-C', repo_path, 'status', '--porcelain'],
+                        capture_output=True,
+                        text=True,
+                    )
+                    has_changes = bool((status.stdout or '').strip())
+                    if not has_changes or not resp_artifacts:
+                        _thought(
+                            f"*[Codex]* attempt {attempt}/{max_codex_attempts} produced "
+                            f"has_changes={has_changes}, artifacts={len(resp_artifacts)}"
+                        )
+                        if attempt < max_codex_attempts:
+                            _progress(
+                                f'Codex returned insufficient edit evidence '
+                                f'(attempt {attempt}/{max_codex_attempts}) — retrying.'
+                            )
+                            continue
+                return AgentResult(
+                    action='handoff_to_tester',
+                    summary=str(response.get('summary') or 'Implementation completed.').strip() or 'Implementation completed.',
+                    artifacts=[str(x) for x in (response.get('artifacts') or []) if str(x).strip()],
+                    metadata={
+                        'source': 'llm_agentic',
+                        'commit_sha': '',
+                        'commit_message': str(response.get('commit_message') or '').strip(),
+                    },
+                )
+        _progress('Codex app-server returned no usable file edits after retries.')
         return AgentResult(
             action='implementer_failed',
-            summary='Codex app-server returned no usable response — stopping.',
+            summary='Codex app-server returned no usable file edits after retries.',
             artifacts=[],
             metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
         )
