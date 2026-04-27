@@ -1,4 +1,5 @@
 import asyncio
+import urllib.error
 from typing import Tuple
 
 from utils.logger import get_logger

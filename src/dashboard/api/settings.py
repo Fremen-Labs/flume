@@ -2,7 +2,6 @@
 
 Extracted from server.py as part of the modular router decomposition.
 """
-import os
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -19,7 +18,7 @@ from api.models import (
 )
 from utils.logger import get_logger, set_global_log_level
 from utils.workspace import resolve_safe_workspace
-from core.elasticsearch import es_search, es_post, ES_VERIFY_TLS
+from core.elasticsearch import es_search, es_post
 
 import httpx
 
@@ -97,6 +96,7 @@ def api_settings_llm_credentials(payload: LLMSettingsRequest):
 @router.post("/api/settings/llm/credentials")
 def api_settings_llm_credentials_post(payload: LLMCredentialsActionRequest):
     from llm_credentials_store import apply_credentials_action  # type: ignore
+    from llm_settings import _update_env_keys
     from config import get_settings
     workspace = Path(get_settings().FLUME_WORKSPACE)
 

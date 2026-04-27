@@ -383,7 +383,6 @@ def _openbao_enabled(workspace_root: Path) -> tuple[bool, dict[str, str]]:
 
 
 def is_openbao_installed() -> bool:
-    import os
     import urllib.request
     _DEFAULT_VAULT = 'http://localhost:8200' if get_settings().FLUME_NATIVE_MODE == '1' else 'http://openbao:8200'
     addr = get_settings().OPENBAO_URL.rstrip("/")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import urllib.error
-import httpx
 import os
 import subprocess
 from pathlib import Path

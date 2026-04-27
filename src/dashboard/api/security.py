@@ -5,7 +5,6 @@ Includes the admin authentication infrastructure and ElasticsearchClient
 for the kill-switch stop-all/resume-all endpoints.
 """
 import json
-import os
 import secrets
 import uuid
 import urllib.request

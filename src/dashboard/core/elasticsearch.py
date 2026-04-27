@@ -1,5 +1,4 @@
 import json
-import os
 import ssl
 import threading
 import time
@@ -7,6 +6,7 @@ import base64
 import urllib.error
 import urllib.parse
 import urllib.request
+import httpx
 from typing import Optional, Tuple
 
 from utils.logger import get_logger
@@ -14,7 +14,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # --- Configuration defaults (single source of truth for ES connectivity) ---
-from config import get_settings
+from config import get_settings  # noqa: E402
 _settings = get_settings()
 
 if _settings.FLUME_NATIVE_MODE == '1':
@@ -48,6 +48,13 @@ if ES_URL.startswith("https:"):
         ctx.verify_mode = ssl.CERT_NONE
     # else: default context verifies certs and hostnames
 
+def _get_httpx_verify():
+    if ctx is not None:
+        if not ES_VERIFY_TLS:
+            return False
+        return ctx
+    return True
+
 # --- ES Utility Functions ---
 
 def es_search(index: str, body: dict) -> dict:
@@ -66,6 +73,38 @@ def es_search(index: str, body: dict) -> dict:
         if e.code == 404:
             return {}
         raise
+
+async def async_es_delete_doc(index: str, doc_id: str) -> bool:
+    safe_id = urllib.parse.quote(str(doc_id), safe='')
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
+    async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+        try:
+            resp = await client.delete(
+                f"{ES_URL}/{index}/_doc/{safe_id}",
+                headers=headers
+            )
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return True
+            raise
+
+async def async_es_search(index: str, body: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
+    async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+        resp = await client.post(
+            f"{ES_URL}/{index}/_search",
+            json=body,
+            headers=headers
+        )
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+        return resp.json()
+
 
 def find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optional[dict]]:
     tid = (logical_id or '').strip()
@@ -99,6 +138,19 @@ def es_index(index: str, doc: dict) -> dict:
     with urllib.request.urlopen(req, context=ctx) as resp:
         return json.loads(resp.read().decode())
 
+async def async_es_index(index: str, doc: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
+    async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+        resp = await client.post(
+            f"{ES_URL}/{index}/_doc",
+            json=doc,
+            headers=headers
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 def es_upsert(index: str, doc_id: str, doc: dict) -> dict:
     headers = {'Content-Type': 'application/json'}
     headers.update(_get_auth_headers())
@@ -110,6 +162,19 @@ def es_upsert(index: str, doc_id: str, doc: dict) -> dict:
     )
     with urllib.request.urlopen(req, context=ctx) as resp:
         return json.loads(resp.read().decode())
+
+async def async_es_upsert(index: str, doc_id: str, doc: dict) -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
+    async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+        resp = await client.put(
+            f"{ES_URL}/{index}/_doc/{urllib.parse.quote(str(doc_id), safe='')}",
+            json=doc,
+            headers=headers
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 # --- ES Bulk Buffering & Connection Resiliency ---
 
@@ -199,6 +264,34 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
             raise
+
+import asyncio
+
+async def async_es_post(path: str, body: dict, method: str = 'POST') -> dict:
+    headers = {'Content-Type': 'application/json'}
+    headers.update(_get_auth_headers())
+    async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+        for attempt in range(4):
+            try:
+                resp = await client.request(
+                    method=method,
+                    url=f"{ES_URL}/{path}",
+                    json=body,
+                    headers=headers,
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 503, 504) and attempt < 3:
+                    await asyncio.sleep((2 ** attempt) * 0.1)
+                    continue
+                raise
+            except httpx.RequestError:
+                if attempt < 3:
+                    await asyncio.sleep((2 ** attempt) * 0.1)
+                    continue
+                raise
 
 def es_delete_doc(index: str, doc_id: str) -> bool:
     safe_id = urllib.parse.quote(str(doc_id), safe='')

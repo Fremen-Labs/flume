@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
-import httpx
 import threading
 import traceback
 from typing import Any

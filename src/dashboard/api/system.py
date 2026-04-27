@@ -11,6 +11,8 @@ import re
 import uuid
 import traceback
 import secrets
+import subprocess
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -429,9 +431,6 @@ async def _gather_telemetry_events(conn_state: dict) -> list[dict]:
 @router.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
     from starlette.websockets import WebSocketDisconnect  # noqa: PLC0415
-    
-    app_config = get_settings()
-    token = websocket.query_params.get("token")
 
     await websocket.accept()
     active_connections.append(websocket)

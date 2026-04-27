@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import urllib.error
-import httpx
 import shutil
 import socket
 import subprocess

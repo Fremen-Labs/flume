@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import urllib.error
-import httpx
 import re
 from pathlib import Path
 from typing import Any, Optional

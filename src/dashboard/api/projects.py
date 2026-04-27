@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import tempfile
+import httpx
+import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 

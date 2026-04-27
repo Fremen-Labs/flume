@@ -5,13 +5,12 @@ All writes are forwarded to the Go Gateway, which persists to Elasticsearch
 
 Extracted from server.py as part of the modular router decomposition.
 """
-import os
 import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-
 import httpx
+import json
 
 from utils.logger import get_logger
 

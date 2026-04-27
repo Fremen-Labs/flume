@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 import json
 import urllib.error
-import httpx
 import urllib.parse
 from pathlib import Path
 
