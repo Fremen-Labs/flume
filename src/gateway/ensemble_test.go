@@ -349,9 +349,9 @@ func TestGlobalSemaphore_BlocksFlood(t *testing.T) {
 // TestModelVRAMEstimateGB verifies the parameter-suffix heuristic.
 func TestModelVRAMEstimateGB(t *testing.T) {
 	tests := []struct {
-		model    string
-		minVRAM  float64
-		maxVRAM  float64
+		model   string
+		minVRAM float64
+		maxVRAM float64
 	}{
 		{"qwen2.5-coder:7b", 4.0, 5.5},
 		{"qwen3-coder:30b", 9.0, 11.0},
@@ -485,9 +485,9 @@ func TestFrontierQueue_Backpressure(t *testing.T) {
 	q := NewFrontierQueue(maxConcurrent)
 
 	var (
-		active    atomic.Int32
-		maxSeen   atomic.Int32
-		wg        sync.WaitGroup
+		active  atomic.Int32
+		maxSeen atomic.Int32
+		wg      sync.WaitGroup
 	)
 
 	for i := 0; i < 6; i++ {

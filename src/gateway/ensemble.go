@@ -284,7 +284,7 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 		if withTools {
 			taskType = "tool_call"
 		}
-		
+
 		metricModel := req.Model
 		if !s.config.IsKnownModel(metricModel) {
 			metricModel = "unknown"

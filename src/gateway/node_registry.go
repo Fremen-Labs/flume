@@ -36,10 +36,10 @@ const (
 	nodeRegistryIndex = "flume-node-registry"
 
 	// Scoring weights for SelectNode (must sum to 1.0).
-	weightModelFit          = 0.4
-	weightLoadInverse       = 0.3
-	weightLatencyInverse    = 0.2
-	weightEnsembleEligible  = 0.1
+	weightModelFit         = 0.4
+	weightLoadInverse      = 0.3
+	weightLatencyInverse   = 0.2
+	weightEnsembleEligible = 0.1
 
 	// Health status constants.
 	NodeStatusHealthy  = "healthy"
@@ -49,16 +49,16 @@ const (
 
 // Node represents a single Ollama inference endpoint in the mesh.
 type Node struct {
-	ID           string           `json:"id"`
-	Host         string           `json:"host"`           // "192.168.1.50:11434"
-	ModelTag     string           `json:"model_tag"`      // primary model: "qwen2.5-coder:32b"
-	Capabilities NodeCapabilities `json:"capabilities"`
-	Health       NodeHealth       `json:"health"`
+	ID             string           `json:"id"`
+	Host           string           `json:"host"`      // "192.168.1.50:11434"
+	ModelTag       string           `json:"model_tag"` // primary model: "qwen2.5-coder:32b"
+	Capabilities   NodeCapabilities `json:"capabilities"`
+	Health         NodeHealth       `json:"health"`
 	ConcurrencyCap int              `json:"concurrency_cap"`
 	// AuthToken is resolved from OpenBao at runtime — never persisted to ES or logged.
-	AuthToken    string           `json:"-"`
+	AuthToken string `json:"-"`
 	// AuthSecretPath is the OpenBao path for this node's bearer token.
-	AuthSecretPath string         `json:"auth_secret_path,omitempty"`
+	AuthSecretPath string `json:"auth_secret_path,omitempty"`
 }
 
 // NodeCapabilities describes the hardware and model characteristics of a node.
@@ -74,7 +74,7 @@ type NodeCapabilities struct {
 
 // NodeHealth is the live operational state of a node, updated by the HealthChecker.
 type NodeHealth struct {
-	Status       string    `json:"status"`        // "healthy", "degraded", "offline"
+	Status       string    `json:"status"` // "healthy", "degraded", "offline"
 	LastSeen     time.Time `json:"last_seen"`
 	CurrentLoad  float64   `json:"current_load"`  // 0.0-1.0
 	LoadedModels []string  `json:"loaded_models"` // discovered via /api/tags
@@ -95,8 +95,8 @@ func NewNodeRegistry(esURL string) *NodeRegistry {
 		esURL = "http://elasticsearch:9200"
 	}
 	return &NodeRegistry{
-		nodes:      make(map[string]*Node),
-		esURL:      strings.TrimRight(esURL, "/"),
+		nodes: make(map[string]*Node),
+		esURL: strings.TrimRight(esURL, "/"),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -544,10 +544,10 @@ func (r *NodeRegistry) AutoRepairModelTag(ctx context.Context, nodeID, newTag st
 		r.mu.Unlock()
 		return nil // No op
 	}
-	
+
 	// Update in-memory state
 	node.ModelTag = newTag
-	
+
 	// Copy node context to avoid race conditions during ES network call
 	clone := *node
 	r.mu.Unlock()

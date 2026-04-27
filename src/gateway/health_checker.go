@@ -31,10 +31,10 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	defaultHealthInterval     = 15 * time.Second
-	offlineProbeInterval      = 60 * time.Second
-	circuitOpenThreshold      = 3
-	circuitHalfOpenSuccesses  = 2
+	defaultHealthInterval    = 15 * time.Second
+	offlineProbeInterval     = 60 * time.Second
+	circuitOpenThreshold     = 3
+	circuitHalfOpenSuccesses = 2
 )
 
 // HealthChecker runs background health probes against all registered nodes.
@@ -721,7 +721,7 @@ func roundToConfig(estimatedGB float64, configs []float64) float64 {
 func modelSupportsTools(modelTag string, architecture string) bool {
 	tagLower := strings.ToLower(modelTag)
 	archLower := strings.ToLower(architecture)
-	
+
 	// Fast-path blacklist for known tool-incapable models that frequently trigger
 	// the HTTP 400 "does not support tools" error in Ollama.
 	// We only strictly block the raw `qwen` tag (since older deployments fail).
@@ -748,13 +748,12 @@ func modelSupportsTools(modelTag string, architecture string) bool {
 		"mistral-nemo", "mixtral",
 		"command-r", "tools",
 	}
-	
+
 	for _, f := range families {
 		if strings.Contains(tagLower, f) {
 			return true
 		}
 	}
-	
+
 	return false
 }
-

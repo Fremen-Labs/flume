@@ -366,7 +366,7 @@ func (r *ProviderRouter) ollamaNonStream(
 		content, _ = msg["content"].(string)
 	}
 
-	// Route non-streamed responses through the ThinkMill to securely strip 
+	// Route non-streamed responses through the ThinkMill to securely strip
 	// `<think>` blocks before sending to JSON-expecting consumers (like agent_runner.py)
 	mill := NewThinkMill()
 	mill.Process([]byte(content))
@@ -420,7 +420,7 @@ func (r *ProviderRouter) openaiCompat(
 			baseURL = os.Getenv("LLM_BASE_URL")
 		}
 	}
-	
+
 	normBase := strings.TrimRight(baseURL, "/")
 	if strings.HasSuffix(normBase, "/v1") {
 		normBase = strings.TrimSuffix(normBase, "/v1")

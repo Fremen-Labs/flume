@@ -95,9 +95,15 @@ type ConsoleHandler struct {
 	inner slog.Handler
 }
 
-func (h *ConsoleHandler) Enabled(ctx context.Context, l slog.Level) bool { return h.inner.Enabled(ctx, l) }
-func (h *ConsoleHandler) WithAttrs(as []slog.Attr) slog.Handler         { return &ConsoleHandler{inner: h.inner.WithAttrs(as)} }
-func (h *ConsoleHandler) WithGroup(n string) slog.Handler             { return &ConsoleHandler{inner: h.inner.WithGroup(n)} }
+func (h *ConsoleHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.inner.Enabled(ctx, l)
+}
+func (h *ConsoleHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	return &ConsoleHandler{inner: h.inner.WithAttrs(as)}
+}
+func (h *ConsoleHandler) WithGroup(n string) slog.Handler {
+	return &ConsoleHandler{inner: h.inner.WithGroup(n)}
+}
 
 func (h *ConsoleHandler) Handle(ctx context.Context, r slog.Record) error {
 	level := r.Level.String()

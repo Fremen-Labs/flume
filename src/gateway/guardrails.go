@@ -43,7 +43,7 @@ var allowedProviders = map[string]bool{
 	ProviderGemini:       true,
 	ProviderXAI:          true,
 	ProviderGrok:         true,
-	"": true, // empty = resolved from config
+	"":                   true, // empty = resolved from config
 }
 
 // ValidateChatRequest validates and normalises an inbound ChatRequest.
@@ -175,6 +175,7 @@ func ValidateToolMessages(messages []Message) error {
 	}
 	return nil
 }
+
 // DeduplicateToolCalls removes duplicate tool calls based on function name +
 // arguments content hash. Gemma and other small models frequently emit the
 // same tool call 2-3 times in a single response.
