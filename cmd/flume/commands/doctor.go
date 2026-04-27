@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os/exec"
 	"runtime"
@@ -71,6 +73,14 @@ type DiagnosticsReport struct {
 	LlmOnline   bool   `json:"llmOnline"`
 	LlmTarget   string `json:"llmTarget"`
 	LlmLatency  string `json:"llmLatency"`
+
+	// Deep probe results (only populated with --deep)
+	DeepProbeRan     bool    `json:"deepProbeRan"`
+	DeepProbeOk      bool    `json:"deepProbeOk"`
+	DeepProbeLatency string  `json:"deepProbeLatency,omitempty"`
+	DeepProbeTokens  int     `json:"deepProbeTokens,omitempty"`
+	DeepProbeTPS     float64 `json:"deepProbeTps,omitempty"`
+	DeepProbeError   string  `json:"deepProbeError,omitempty"`
 
 	NativeDeterminism DeterminismStatus `json:"nativeDeterminism"`
 
@@ -229,6 +239,86 @@ func fetchNativeDeterminism(client *http.Client, dispatcherURL string, report *D
 	}
 }
 
+// fetchDeepLLMProbe sends a timed test prompt through the Gateway /v1/chat/completions
+// endpoint and measures actual inference speed (tokens/sec). This catches slow
+// models that would exceed the planner timeout before users hit "Plan New Work".
+func fetchDeepLLMProbe(gatewayURL string, report *DiagnosticsReport, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// Use a generous timeout — the whole point is measuring slow models.
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	payload := map[string]interface{}{
+		"model": "auto",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Respond with exactly one sentence: What is 2+2?"},
+		},
+		"max_tokens": 50,
+		"temperature": 0.0,
+	}
+	body, _ := json.Marshal(payload)
+
+	start := time.Now()
+	resp, err := client.Post(gatewayURL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	latency := time.Since(start)
+
+	report.mu.Lock()
+	defer report.mu.Unlock()
+
+	report.DeepProbeRan = true
+
+	if err != nil {
+		report.DeepProbeError = fmt.Sprintf("Gateway unreachable: %v", err)
+		report.Suggestions = append(report.Suggestions,
+			"Deep LLM probe failed — Gateway did not respond within 60s. Check that Ollama is loaded and responsive.")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		report.DeepProbeError = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBytes(respBody, 200))
+		report.Suggestions = append(report.Suggestions,
+			fmt.Sprintf("Deep LLM probe returned HTTP %d. Ensure your model is loaded in Ollama.", resp.StatusCode))
+		return
+	}
+
+	var result struct {
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+		report.DeepProbeTokens = result.Usage.CompletionTokens
+		if result.Usage.CompletionTokens > 0 {
+			report.DeepProbeTPS = float64(result.Usage.CompletionTokens) / latency.Seconds()
+		}
+	}
+
+	report.DeepProbeOk = true
+	report.DeepProbeLatency = latency.Truncate(time.Millisecond).String()
+
+	// Warn if inference is dangerously slow for planning workloads.
+	if latency > 30*time.Second {
+		report.Suggestions = append(report.Suggestions,
+			fmt.Sprintf("LLM inference took %s for a trivial prompt. Planning complex tasks will likely exceed the 300s timeout. Consider using a smaller/faster model or increasing FLUME_PLANNER_TIMEOUT_SECONDS.",
+				latency.Truncate(time.Second)))
+	} else if latency > 10*time.Second {
+		report.Suggestions = append(report.Suggestions,
+			fmt.Sprintf("LLM inference took %s — adequate but slow. Complex plans may approach the 300s timeout.",
+				latency.Truncate(time.Second)))
+	}
+}
+
+// truncateBytes returns the first n bytes of b as a string.
+func truncateBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
+}
+
 // Presentation Layer Mapping
 func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 	if jsonOutput {
@@ -295,6 +385,29 @@ func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 	fmt.Println(renderRow("Agents Ready (Standby):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsReady))))
 	fmt.Println(renderRow("Agents Executing (Busy):", valueStyle.Render(fmt.Sprintf("%d", report.AgentsBusy))))
 	fmt.Println(renderRow("Determinism Loop:", valueStyle.Render(fmt.Sprintf("%s (%s)", report.NativeDeterminism.Status, report.NativeDeterminism.Description))))
+
+	// Deep LLM probe results
+	if report.DeepProbeRan {
+		fmt.Println(borderStyle.Render("├─────────────────────────────────────────────────────────────────┤"))
+		if report.DeepProbeOk {
+			tpsStr := fmt.Sprintf("%.1f tok/s", report.DeepProbeTPS)
+			if report.DeepProbeTPS < 5 {
+				tpsStr = errStyle.Render(tpsStr + " (SLOW)")
+			} else if report.DeepProbeTPS < 15 {
+				tpsStr = warnStyle.Render(tpsStr + " (moderate)")
+			} else {
+				tpsStr = valueStyle.Render(tpsStr + " (fast)")
+			}
+			fmt.Println(renderRow("Deep LLM Probe:", valueStyle.Render("PASS")))
+			fmt.Println(renderRow("Inference Latency:", valueStyle.Render(report.DeepProbeLatency)))
+			fmt.Println(renderRow("Throughput:", tpsStr))
+			fmt.Println(renderRow("Completion Tokens:", valueStyle.Render(fmt.Sprintf("%d", report.DeepProbeTokens))))
+		} else {
+			fmt.Println(renderRow("Deep LLM Probe:", errStyle.Render("FAIL")))
+			fmt.Println(renderRow("Error:", errStyle.Render(report.DeepProbeError)))
+		}
+	}
+
 	fmt.Println(borderStyle.Render("└─────────────────────────────────────────────────────────────────┘"))
 
 	if len(report.Suggestions) > 0 {
@@ -311,6 +424,11 @@ func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 var DoctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Diagnose Flume internal components & swarm health natively",
+	Long: `Diagnose Flume internal components & swarm health natively.
+
+Use --deep to send a timed test prompt through the LLM and measure
+actual inference speed. This catches slow models that would exceed
+the planner timeout before users hit "Plan New Work".`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Externalized Configurations
 		esURL, _ := cmd.Flags().GetString("es-url")
@@ -318,6 +436,8 @@ var DoctorCmd = &cobra.Command{
 		dashboardURL, _ := cmd.Flags().GetString("dashboard-url")
 		llmURL, _ := cmd.Flags().GetString("llm-url")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
+		deepProbe, _ := cmd.Flags().GetBool("deep")
+		gatewayURL, _ := cmd.Flags().GetString("gateway-url")
 
 		client := &http.Client{Timeout: 3 * time.Second}
 		report := &DiagnosticsReport{}
@@ -328,13 +448,24 @@ var DoctorCmd = &cobra.Command{
 		}
 
 		// Parallel Telemetry Execution Maps (Goroutines)
-		wg.Add(6)
+		probeCount := 6
+		if deepProbe {
+			probeCount = 7
+		}
+		wg.Add(probeCount)
 		go fetchDocker(report, &wg)
 		go fetchVault(client, vaultURL, report, &wg)
 		go fetchElasticsearch(client, esURL, report, &wg)
 		go fetchDashboard(client, dashboardURL, report, &wg)
 		go fetchLlmGateway(client, llmURL, report, &wg)
 		go fetchNativeDeterminism(client, "http://localhost:8766", report, &wg)
+
+		if deepProbe {
+			if !jsonOutput {
+				fmt.Println(ui.WarningGold("Deep LLM inference probe active — sending test prompt..."))
+			}
+			go fetchDeepLLMProbe(gatewayURL, report, &wg)
+		}
 
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
@@ -348,5 +479,7 @@ func init() {
 	DoctorCmd.Flags().StringP("vault-url", "v", "http://localhost:8200", "OpenBao Telemetry Endpoint")
 	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://localhost:8765", "Flume API Dashboard Endpoint")
 	DoctorCmd.Flags().StringP("llm-url", "l", "http://host.docker.internal:52415/v1", "Local LLM Inference Engine Endpoint")
+	DoctorCmd.Flags().StringP("gateway-url", "g", "http://localhost:8090", "Flume Gateway Endpoint (used by --deep)")
 	DoctorCmd.Flags().BoolP("json", "j", false, "Output explicit raw JSON payload without any rendering")
+	DoctorCmd.Flags().Bool("deep", false, "Run a timed LLM inference probe to measure model speed")
 }
