@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
 from core.tasks import load_workers
-from core.elasticsearch import es_post
+from core.elasticsearch import async_es_post
 from core.sessions_store import _utcnow_iso
 
 logger = get_logger(__name__)
@@ -39,20 +39,22 @@ def api_workflow_agents_status():
 
 
 @router.post('/api/workflow/agents/start')
-def api_workflow_agents_start():
+async def api_workflow_agents_start():
+    import httpx
     try:
-        es_post('agent-system-cluster/_doc/config', {'status': 'running', 'updated_at': _utcnow_iso()})
+        await async_es_post('agent-system-cluster/_doc/config', {'status': 'running', 'updated_at': _utcnow_iso()})
         return {'status': 'ok'}
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
         logger.error({"event": "workflow_agents_start_failed", "error": str(e)[:200]})
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
 
 @router.post('/api/workflow/agents/stop')
-def api_workflow_agents_stop():
+async def api_workflow_agents_stop():
+    import httpx
     try:
-        es_post('agent-system-cluster/_doc/config', {'status': 'paused', 'updated_at': _utcnow_iso()})
+        await async_es_post('agent-system-cluster/_doc/config', {'status': 'paused', 'updated_at': _utcnow_iso()})
         return {'status': 'ok'}
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
         logger.error({"event": "workflow_agents_stop_failed", "error": str(e)[:200]})
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})

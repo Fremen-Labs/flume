@@ -19,7 +19,7 @@ import httpx
 import hvac
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search
+from core.elasticsearch import async_es_search
 from config import AppConfig
 
 logger = get_logger(__name__)
@@ -224,10 +224,11 @@ async def api_tasks_resume_all(es_client: ElasticsearchClient = Depends(get_es_c
 # ── Security Posture Dashboard ─────────────────────────────────────────────────
 
 @router.get('/api/security')
-def api_security():
+async def api_security():
+    import httpx
     try:
-        from llm_settings import is_openbao_installed, _openbao_enabled, _openbao_secret_ref  # type: ignore
-        vault_active = is_openbao_installed()
+        from llm_settings import async_is_openbao_installed, _openbao_enabled, _openbao_secret_ref  # type: ignore
+        vault_active = await async_is_openbao_installed()
 
         openbao_keys = {}
         try:
@@ -236,24 +237,27 @@ def api_security():
             workspace = Path(_s.FLUME_WORKSPACE)
             enabled, pairs = _openbao_enabled(workspace)
             if enabled:
-                req = urllib.request.Request(
-                    f"{pairs['OPENBAO_ADDR'].rstrip('/')}/v1/{_openbao_secret_ref(pairs)}",
-                    headers={"X-Vault-Token": pairs["OPENBAO_TOKEN"]}
-                )
-                with urllib.request.urlopen(req) as res:
-                    data = json.loads(res.read().decode())
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(
+                        f"{pairs['OPENBAO_ADDR'].rstrip('/')}/v1/{_openbao_secret_ref(pairs)}",
+                        headers={"X-Vault-Token": pairs["OPENBAO_TOKEN"]},
+                        timeout=5.0
+                    )
+                    res.raise_for_status()
+                    data = res.json()
                     keys = data.get('data', {}).get('data', {})
                     for k in keys:
                         openbao_keys[k] = "secured"
-        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
-            logger.warning("api_security_dashboard: OpenBao key lookup failed, using placeholder", exc_info=True)
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
+            logger.warning(json.dumps({"event": "openbao_key_lookup_failed", "error": str(e)[:200]}), exc_info=True)
             openbao_keys = {"ES_API_KEY": "secured", "OPENAI_API_KEY": "secured"}
 
-        audit_logs = es_search('agent-security-audits', {
+        res = await async_es_search('agent-security-audits', {
             'size': 15,
             'sort': [{'@timestamp': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': {'match_all': {}}
-        }).get('hits', {}).get('hits', [])
+        })
+        audit_logs = res.get('hits', {}).get('hits', [])
 
         formatted_logs = []
         for log in audit_logs[:10]:

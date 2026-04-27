@@ -126,6 +126,28 @@ def find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optiona
             continue
     return None, None
 
+async def async_find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optional[dict]]:
+    tid = (logical_id or '').strip()
+    if not tid:
+        return None, None
+    attempts = [
+        {'ids': {'values': [tid]}},
+        {'term': {'id': tid}},
+        {'term': {'id.keyword': tid}},
+        {'match_phrase': {'id': tid}},
+    ]
+    import httpx
+    for query in attempts:
+        try:
+            res = await async_es_search('agent-task-records', {'size': 1, 'query': query})
+            hits = res.get('hits', {}).get('hits', [])
+            if hits:
+                h = hits[0]
+                return h.get('_id'), h.get('_source', {})
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError):
+            continue
+    return None, None
+
 def es_index(index: str, doc: dict) -> dict:
     headers = {'Content-Type': 'application/json'}
     headers.update(_get_auth_headers())
@@ -265,7 +287,7 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
                 continue
             raise
 
-import asyncio
+import asyncio  # noqa: E402
 
 async def async_es_post(path: str, body: dict, method: str = 'POST') -> dict:
     headers = {'Content-Type': 'application/json'}

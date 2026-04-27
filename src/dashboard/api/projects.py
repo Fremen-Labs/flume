@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
-from core.elasticsearch import es_search
+from core.elasticsearch import async_es_search
 from core.projects_store import load_projects_registry, _upsert_project, PROJECTS_INDEX, _es_projects_request
 from utils.url_helpers import is_remote_url
 
@@ -253,12 +253,12 @@ def api_project_tasks(
                     'must_not': [{'term': {'status': 'archived'}}],
                 },
             }
-        res = es_search('agent-task-records', {
+        res = await async_es_search('agent-task-records', {
             'size': 5000,
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': query,
         })
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
         logger.warning(json.dumps({'event': 'project_tasks_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
     hits = res.get('hits', {}).get('hits', [])
@@ -268,14 +268,14 @@ def api_project_tasks(
         'tasks': [_map_task_hit_for_api(h) for h in hits],
     }
 
-def _project_task_ids_for_repo(project_id: str) -> list[str]:
+async def _project_task_ids_for_repo(project_id: str) -> list[str]:
     try:
-        res = es_search('agent-task-records', {
+        res = await async_es_search('agent-task-records', {
             'size': 5000,
             '_source': ['id'],
             'query': {'term': {'repo': project_id}},
         })
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError):
         return []
     out = []
     for h in res.get('hits', {}).get('hits', []) or []:

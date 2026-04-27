@@ -390,7 +390,19 @@ def is_openbao_installed() -> bool:
         urllib.request.urlopen(f"{addr}/v1/sys/health", timeout=1.5)
         return True
     except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
-        logger.error(f"OpenBao health check failed for addr {addr} — treating as unavailable: {e}")
+        logger.error(json.dumps({"event": "openbao_health_check_failed", "addr": addr, "error": str(e)[:200]}))
+        return False
+
+async def async_is_openbao_installed() -> bool:
+    import httpx
+    addr = get_settings().OPENBAO_URL.rstrip("/")
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(f"{addr}/v1/sys/health", timeout=1.5)
+            res.raise_for_status()
+            return True
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
+        logger.error(json.dumps({"event": "openbao_health_check_failed_async", "addr": addr, "error": str(e)[:200]}))
         return False
 
 

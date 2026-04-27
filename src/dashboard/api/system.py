@@ -24,7 +24,7 @@ import httpx
 
 from utils.logger import get_logger
 from utils.async_subprocess import run_cmd_async
-from core.elasticsearch import es_search, es_post, es_upsert
+from core.elasticsearch import async_es_search, es_search, es_post, es_upsert
 from core.tasks import load_workers
 from core.projects_store import load_projects_registry
 from config import AppConfig, get_settings
@@ -584,14 +584,15 @@ async def get_system_telemetry():
 # ── Telemetry Logs ─────────────────────────────────────────────────────────────
 
 @router.get("/api/logs")
-def get_telemetry_logs():
+async def get_telemetry_logs():
+    import httpx
     try:
         body = {
             "size": 60,
             "sort": [{"timestamp": {"order": "desc"}}],
             "query": {"match_all": {}}
         }
-        res = es_search('flume-telemetry', body)
+        res = await async_es_search('flume-telemetry', body)
         hits = res.get('hits', {}).get('hits', [])
         logs = []
         for h in hits:
@@ -611,8 +612,8 @@ def get_telemetry_logs():
             })
         logs.reverse()
         return logs
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
-        logger.error(f"Failed to query telemetry logs natively: {e}", exc_info=True)
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
+        logger.error(json.dumps({"event": "telemetry_logs_query_failed", "error": str(e)[:300]}), exc_info=True)
         raise HTTPException(status_code=500, detail="Could not load logs")
 
 

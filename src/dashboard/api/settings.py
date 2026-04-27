@@ -18,7 +18,7 @@ from api.models import (
 )
 from utils.logger import get_logger, set_global_log_level
 from utils.workspace import resolve_safe_workspace
-from core.elasticsearch import es_search, es_post
+from core.elasticsearch import async_es_search, async_es_post
 
 import httpx
 
@@ -139,13 +139,14 @@ def api_settings_repos_update(payload: RepoSettingsRequest):
 # ── System Settings ────────────────────────────────────────────────────────────
 
 @router.get("/api/settings/system")
-def get_system_settings():
+async def get_system_settings():
+    import httpx
     sys_conf = {}
     try:
-        doc = es_search('flume-settings', {'query': {'term': {'_id': 'system'}}})
+        doc = await async_es_search('flume-settings', {'query': {'term': {'_id': 'system'}}})
         if doc and 'hits' in doc and doc['hits']['hits']:
             sys_conf = doc['hits']['hits'][0]['_source']
-    except (KeyError, ValueError, TypeError):
+    except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError, TypeError):
         logger.debug("get_system_settings: ES read failed, using env defaults", exc_info=True)
 
     from config import get_settings
@@ -161,9 +162,10 @@ def get_system_settings():
 
 
 @router.put("/api/settings/system")
-def update_system_settings(settings: SystemSettingsRequest):
+async def update_system_settings(settings: SystemSettingsRequest):
+    import httpx
     try:
-        doc = es_search('flume-settings', {'query': {'term': {'_id': 'system'}}})
+        doc = await async_es_search('flume-settings', {'query': {'term': {'_id': 'system'}}})
         sys_conf = {}
         if doc and 'hits' in doc and doc['hits']['hits']:
             sys_conf = doc['hits']['hits'][0]['_source']
@@ -180,9 +182,9 @@ def update_system_settings(settings: SystemSettingsRequest):
         if hasattr(settings, 'es_verify_tls') and settings.es_verify_tls is not None:
             sys_conf['es_verify_tls'] = settings.es_verify_tls
 
-        es_post('flume-settings/_doc/system', sys_conf)
+        await async_es_post('flume-settings/_doc/system', sys_conf)
         return {"status": "ok"}
-    except (KeyError, ValueError, TypeError) as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, KeyError, ValueError, TypeError) as e:
         logger.error({"event": "update_system_settings_failed", "error": str(e)[:300]}, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)[:400]})
 

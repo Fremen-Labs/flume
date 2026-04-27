@@ -10,10 +10,10 @@ from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
 from utils.url_helpers import is_remote_url
-from core.elasticsearch import es_post
+from core.elasticsearch import async_es_post
 from core.projects_store import PROJECTS_INDEX, _es_projects_request
 
-from core.elasticsearch import find_task_doc_by_logical_id, es_delete_doc
+from core.elasticsearch import async_find_task_doc_by_logical_id, async_es_delete_doc
 from core.tasks import task_history, delete_task_branches
 from utils.async_subprocess import run_cmd_async
 
@@ -38,7 +38,7 @@ async def api_task_diff(task_id: str):
     from utils.git_host_client import get_git_client, GitHostError  # noqa
 
     try:
-        es_id, task = find_task_doc_by_logical_id(task_id)
+        es_id, task = await async_find_task_doc_by_logical_id(task_id)
         if not task:
             return {"diff": "", "error": "Task not found"}
 
@@ -102,8 +102,8 @@ async def api_task_diff(task_id: str):
         return {"diff": "", "error": str(e)}
 
 @router.get("/api/tasks/{task_id}/thoughts")
-def api_task_thoughts(task_id: str):
-    _, source = find_task_doc_by_logical_id(task_id)
+async def api_task_thoughts(task_id: str):
+    _, source = await async_find_task_doc_by_logical_id(task_id)
     if not source:
         return {"thoughts": []}
     return {"thoughts": source.get("execution_thoughts", [])}
@@ -113,7 +113,7 @@ async def api_task_commits(task_id: str):
     from utils.git_host_client import get_git_client, GitHostError  # noqa
 
     try:
-        _, task = find_task_doc_by_logical_id(task_id)
+        _, task = await async_find_task_doc_by_logical_id(task_id)
         if not task:
             return []
 
@@ -144,18 +144,19 @@ async def api_task_commits(task_id: str):
         logger.warning(f"api_task_commits: unexpected error: {e}", exc_info=True)
     return []
 
-def _append_task_agent_log_note(es_id: str, note: str) -> bool:
+async def _async_append_task_agent_log_note(es_id: str, note: str) -> bool:
     """
     Append one entry to task.agent_log (same shape as worker append_agent_note).
     Used for human guidance when unblocking from the dashboard.
     """
+    import httpx
     note = (note or '').strip()
     if not note:
         return False
     ts = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     safe_id = urllib.parse.quote(str(es_id), safe='')
     try:
-        es_post(
+        await async_es_post(
             f'agent-task-records/_update/{safe_id}',
             {
                 'script': {
@@ -172,13 +173,13 @@ def _append_task_agent_log_note(es_id: str, note: str) -> bool:
             },
         )
         return True
-    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
         logger.warning(json.dumps({'event': 'append_task_agent_log_failed', 'error': str(e)[:300]}))
         return False
 
 
 @router.post("/api/tasks/{task_id}/transition")
-def api_task_transition(task_id: str, payload: TaskTransitionRequest):
+async def api_task_transition(task_id: str, payload: TaskTransitionRequest):
     """
     Transition a task to a new status.
 
@@ -203,7 +204,7 @@ def api_task_transition(task_id: str, payload: TaskTransitionRequest):
             content={'error': f'status must be one of {sorted(_ALLOWED_USER_STATUSES)}, got {status!r}'},
         )
 
-    es_id, src = find_task_doc_by_logical_id(task_id)
+    es_id, src = await async_find_task_doc_by_logical_id(task_id)
     if not es_id or src is None:
         return JSONResponse(status_code=404, content={'error': f'task {task_id!r} not found'})
 
@@ -220,9 +221,9 @@ def api_task_transition(task_id: str, payload: TaskTransitionRequest):
         auto_recovery = auto_recovery.strip().lower() not in ('0', 'false', 'no', 'off')
 
     if instruction:
-        _append_task_agent_log_note(es_id, f'[Human guidance] {instruction}')
+        await _async_append_task_agent_log_note(es_id, f'[Human guidance] {instruction}')
     elif status == 'ready' and prev_status == 'blocked' and auto_recovery:
-        _append_task_agent_log_note(
+        await _async_append_task_agent_log_note(
             es_id,
             '[Recovery] Re-queued after blocked. Read prior agent_log and execution_thoughts; '
             'fix the root cause, run or add tests, and iterate until acceptance criteria are met.',
@@ -246,13 +247,13 @@ def api_task_transition(task_id: str, payload: TaskTransitionRequest):
         doc['owner'] = owner
         doc['assigned_agent_role'] = owner
 
-    es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+    await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
     logger.info(f'task transition: {task_id} → {status} (role={owner})')
     return {'success': True, 'task_id': task_id, 'status': status, 'owner': owner, '_id': es_id}
 
 
 @router.post("/api/tasks/bulk-requeue")
-def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
+async def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
     """
     Requeue up to 50 blocked tasks in one call.
 
@@ -271,13 +272,13 @@ def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
 
     for task_id in task_ids:
         try:
-            es_id, src = find_task_doc_by_logical_id(str(task_id))
+            es_id, src = await async_find_task_doc_by_logical_id(str(task_id))
             if not es_id or src is None:
                 failed.append({'task_id': task_id, 'error': 'not found'})
                 continue
             prev = (src.get('status') or '').strip().lower()
             if prev == 'blocked':
-                _append_task_agent_log_note(
+                await _async_append_task_agent_log_note(
                     es_id,
                     '[Recovery] Bulk re-queue after blocked. Read prior agent_log and execution_thoughts; '
                     'fix root cause, run tests, and iterate until done.',
@@ -306,9 +307,9 @@ def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
                 doc['status'] = 'ready'
             doc['owner'] = role
             doc['assigned_agent_role'] = role
-            es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+            await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
             requeued.append({'task_id': task_id, 'owner': role, 'status': doc['status']})
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+        except Exception as exc:
             logger.error(f'bulk-requeue: task {task_id} failed: {exc}')
             failed.append({'task_id': task_id, 'error': str(exc)[:200]})
 
@@ -350,7 +351,7 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
     if action == 'archive':
         for task_id in str_ids:
             try:
-                es_id, src = find_task_doc_by_logical_id(task_id)
+                es_id, src = await async_find_task_doc_by_logical_id(task_id)
                 if not es_id or src is None:
                     failed.append({'task_id': task_id, 'error': 'not found'})
                     continue
@@ -365,9 +366,9 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
                     'updated_at': now,
                     'last_update': now,
                 }
-                es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+                await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
                 ok.append({'task_id': task_id})
-            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+            except Exception as exc:
                 logger.error(f'bulk-update archive: task {task_id} failed: {exc}')
                 failed.append({'task_id': task_id, 'error': str(exc)[:200]})
         logger.info(f'bulk-update archive: ok={len(ok)} failed={len(failed)}')
@@ -381,7 +382,7 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
 
     for task_id in str_ids:
         try:
-            es_id, src = find_task_doc_by_logical_id(task_id)
+            es_id, src = await async_find_task_doc_by_logical_id(task_id)
             if not es_id or src is None:
                 failed.append({'task_id': task_id, 'error': 'not found'})
                 continue
@@ -389,11 +390,11 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
             if repo and logical_repo != repo:
                 failed.append({'task_id': task_id, 'error': 'repo mismatch'})
                 continue
-            if es_delete_doc('agent-task-records', es_id):
+            if await async_es_delete_doc('agent-task-records', es_id):
                 ok.append({'task_id': task_id})
             else:
                 failed.append({'task_id': task_id, 'error': 'not found in index'})
-        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
+        except Exception as exc:
             logger.error(f'bulk-update delete: task {task_id} failed: {exc}')
             failed.append({'task_id': task_id, 'error': str(exc)[:200]})
 
