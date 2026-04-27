@@ -19,10 +19,11 @@ import (
 )
 
 var (
-	ProviderFlag string
-	NativeFlag   bool
-	WorkersFlag  string
-	ConfigFlag   string
+	ProviderFlag       string
+	NativeFlag         bool
+	WorkersFlag        string
+	ConfigFlag         string
+	PlannerTimeoutFlag int
 )
 
 func isHeadlessEnv(getenv func(string) string, getstat func() (os.FileInfo, error)) bool {
@@ -76,6 +77,11 @@ var StartCmd = &cobra.Command{
 			"VAULT_PORT="+vaultPort,
 			"ES_PORT="+esPort,
 		)
+
+		if PlannerTimeoutFlag > 0 {
+			portEnvOverrides = append(portEnvOverrides,
+				fmt.Sprintf("FLUME_PLANNER_TIMEOUT_SECONDS=%d", PlannerTimeoutFlag))
+		}
 
 		envCfg := orchestrator.EnvConfig{
 			Provider:           ProviderFlag,
@@ -450,4 +456,5 @@ func init() {
 	StartCmd.Flags().BoolVarP(&NativeFlag, "native", "n", false, "Launch Flume utilizing OS-native High-Performance Git Worktrees")
 	StartCmd.Flags().StringVar(&WorkersFlag, "workers", "", `Number of workers: "2" (default), "4", "auto" (detect from hardware)`)
 	StartCmd.Flags().StringVarP(&ConfigFlag, "config", "c", "", "Path to flume-mesh.yml IaC document for programmatic booting")
+	StartCmd.Flags().IntVar(&PlannerTimeoutFlag, "planner-timeout", 0, "Override the LLM planner timeout in seconds (default: 300). Increase for slow local models.")
 }
