@@ -14,7 +14,7 @@ class AppConfig(BaseSettings):
     FLUME_ELASTIC_PASSWORD: str = ""
     ES_VERIFY_TLS: bool = False
     
-    OPENBAO_URL: str = "http://localhost:8200"
+    OPENBAO_URL: str = Field(default="http://localhost:8200", alias="OPENBAO_ADDR")
     VAULT_TOKEN: str = ""
     VAULT_ROLE_ID: str = ""
     VAULT_SECRET_ID: str = ""

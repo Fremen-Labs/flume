@@ -817,7 +817,7 @@ func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) err
 
 	// Prefer the Docker-rewritten base URL for container access; fall back to host value.
 	baseURL := cfg.BaseURL
-	if baseURL == "" {
+	if baseURL == "" && provider == "ollama" {
 		baseURL = cfg.LocalOllamaBaseURL
 	}
 	if baseURL != "" {

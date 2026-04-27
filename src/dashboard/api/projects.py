@@ -218,7 +218,7 @@ def _map_task_hit_for_api(h: dict) -> dict:
     return res
 
 @router.get("/api/projects/{project_id}/tasks")
-def api_project_tasks(
+async def api_project_tasks(
     project_id: str,
     archived: str = Query(
         'exclude',

@@ -95,6 +95,10 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
                 elastro_env["ELASTIC_ELASTICSEARCH_AUTH_API_KEY"] = resolved_api_key
                 elastro_env["ELASTIC_ELASTICSEARCH_AUTH_TYPE"] = "api_key"
                 
+            # Disable verify_certs for self-signed TLS certificates
+            elastro_env["ELASTIC_ELASTICSEARCH_VERIFY_CERTS"] = "false"
+            elastro_env["ELASTIC_VERIFY_CERTS"] = "false"
+                
             logger.info(json.dumps({"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)}))
             
             proc = await asyncio.create_subprocess_exec(

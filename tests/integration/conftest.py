@@ -23,10 +23,9 @@ FLUME_GATEWAY_URL = os.environ.get("FLUME_GATEWAY_URL", "http://localhost:8090")
 FLUME_OPENBAO_URL = os.environ.get("FLUME_OPENBAO_URL", "http://localhost:8200")
 
 def get_elastic_password() -> str:
-    pwd = os.environ.get("FLUME_ELASTIC_PASSWORD")
-    if pwd:
-        return pwd
-    # Fallback to Go orchestrator snapshot via hidden testenv command
+    # Always use the fresh Go orchestrator snapshot via hidden testenv command.
+    # Ignoring os.environ prevents stale passwords in the developer shell
+    # from causing 401 Unauthorized errors after a stack rebuild.
     try:
         res = subprocess.run(["./flume", "_testenv"], capture_output=True, text=True, check=True)
         stdout = res.stdout
