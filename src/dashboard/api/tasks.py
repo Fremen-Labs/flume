@@ -3,6 +3,7 @@ import json
 import urllib.error
 import urllib.parse
 from pathlib import Path
+import httpx
 
 from fastapi import APIRouter
 from api.models import TaskTransitionRequest, BulkRequeueRequest, BulkUpdateRequest
@@ -309,7 +310,7 @@ async def api_tasks_bulk_requeue(payload: BulkRequeueRequest):
             doc['assigned_agent_role'] = role
             await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
             requeued.append({'task_id': task_id, 'owner': role, 'status': doc['status']})
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, httpx.RequestError, httpx.HTTPStatusError) as exc:
             logger.error(f'bulk-requeue: task {task_id} failed: {exc}')
             failed.append({'task_id': task_id, 'error': str(exc)[:200]})
 
@@ -368,7 +369,7 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
                 }
                 await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
                 ok.append({'task_id': task_id})
-            except Exception as exc:
+            except (ValueError, KeyError, TypeError, httpx.RequestError, httpx.HTTPStatusError) as exc:
                 logger.error(f'bulk-update archive: task {task_id} failed: {exc}')
                 failed.append({'task_id': task_id, 'error': str(exc)[:200]})
         logger.info(f'bulk-update archive: ok={len(ok)} failed={len(failed)}')
@@ -394,7 +395,7 @@ async def api_tasks_bulk_update(payload: BulkUpdateRequest):
                 ok.append({'task_id': task_id})
             else:
                 failed.append({'task_id': task_id, 'error': 'not found in index'})
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, httpx.RequestError, httpx.HTTPStatusError) as exc:
             logger.error(f'bulk-update delete: task {task_id} failed: {exc}')
             failed.append({'task_id': task_id, 'error': str(exc)[:200]})
 

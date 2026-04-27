@@ -22,7 +22,7 @@ def _ensure_gitflow_defaults(entry: dict) -> dict:
     try:
         from utils.concurrency_config import ensure_concurrency_defaults  # noqa: PLC0415
         ensure_concurrency_defaults(entry)
-    except Exception:
+    except (ImportError, ValueError, TypeError):
         pass
     return entry
 
@@ -52,8 +52,8 @@ def load_projects_registry() -> list:
         )
         hits = res.get("hits", {}).get("hits", [])
         return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
-    except Exception as e:
-        logger.warning({"event": "projects_load_error", "error": str(e)})
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.warning(json.dumps({"event": "projects_load_error", "error": str(e)}))
         return []
 
 def save_projects_registry(registry: list):
@@ -71,8 +71,8 @@ def save_projects_registry(registry: list):
                 entry,
                 method="PUT",
             )
-        except Exception as e:
-            logger.warning({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)})
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+            logger.warning(json.dumps({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)}))
 
 def _upsert_project(entry: dict):
     """Upsert a single project document to ES.
@@ -116,5 +116,5 @@ def _delete_project_from_es(project_id: str):
             f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
             method="DELETE",
         )
-    except Exception as e:
-        logger.warning({"event": "projects_delete_error", "id": project_id, "error": str(e)})
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.warning(json.dumps({"event": "projects_delete_error", "id": project_id, "error": str(e)}))

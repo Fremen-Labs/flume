@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import json
+import urllib.error
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -30,8 +32,8 @@ def api_intake_start_session(payload: IntakeSessionRequest):
     try:
         session = create_planning_session(repo, prompt)
         return _session_payload_for_client(session)
-    except Exception as e:
-        logger.exception('Failed to create intake session')
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.error(json.dumps({"event": "intake_session_create_failed", "error": str(e)[:400]}), exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.get('/api/intake/session/{session_id}')
@@ -52,8 +54,8 @@ def api_intake_message(session_id: str, payload: IntakeMessageRequest):
         if not session:
             return JSONResponse(status_code=404, content={'error': 'session not found'})
         return _session_payload_for_client(session)
-    except Exception as e:
-        logger.exception('Failed to refine intake session')
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.error(json.dumps({"event": "intake_session_refine_failed", "error": str(e)[:400]}), exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.post('/api/intake/session/{session_id}/commit')
@@ -83,6 +85,6 @@ def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
             'created': len(docs),
             'taskIds': [d.get('id') for d in docs if d.get('item_type') == 'task'],
         }
-    except Exception as e:
-        logger.exception('Failed to commit intake plan')
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.error(json.dumps({"event": "intake_plan_commit_failed", "error": str(e)[:400]}), exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})

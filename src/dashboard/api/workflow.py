@@ -5,6 +5,7 @@ Extracted from server.py as part of the modular router decomposition.
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+import json
 from utils.logger import get_logger
 from core.tasks import load_workers
 from core.elasticsearch import async_es_post
@@ -33,8 +34,8 @@ def api_workflow_workers():
 def api_workflow_agents_status():
     try:
         return _agents_status()
-    except Exception as e:
-        logger.error({"event": "workflow_agents_status_failed", "error": str(e)[:200]})
+    except (RuntimeError, ValueError, OSError) as e:
+        logger.error(json.dumps({"event": "workflow_agents_status_failed", "error": str(e)[:200]}))
         return JSONResponse(status_code=502, content={'error': str(e)[:200]})
 
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pathlib import Path
+import asyncio
 
 from utils.logger import get_logger
 from utils.url_helpers import is_remote_url
@@ -66,7 +67,7 @@ async def api_repo_branches(project_id: str):
             })
         except GitHostError as e:
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
-        except Exception as e:
+        except (ValueError, TypeError, OSError) as e:
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
 
     # ── Local repo path: original git subprocess (clone_status='local') ─────────
@@ -109,7 +110,7 @@ async def api_repo_branches(project_id: str):
             if name and name != "HEAD" and name not in seen:
                 seen.add(name)
                 branches.append(name)
-    except Exception as exc:
+    except (ValueError, TypeError, OSError) as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
     default = await resolve_default_branch(
@@ -178,7 +179,7 @@ async def api_repo_tree(project_id: str, branch: str = ""):
         )
         if rc != 0:
             return JSONResponse(status_code=400, content={"error": f"Could not read tree for branch '{branch}': {err}"})
-    except Exception as exc:
+    except (ValueError, TypeError, OSError) as exc:
         return JSONResponse(status_code=500, content={"error": f"git ls-tree failed: {exc}"})
 
     entries = []
@@ -284,7 +285,7 @@ async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
                 return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
             return JSONResponse(status_code=500, content={"error": f"git show failed: {err}"})
         content_bytes = out.encode("utf-8")
-    except Exception as exc:
+    except (ValueError, TypeError, OSError) as exc:
         return JSONResponse(status_code=500, content={"error": f"git show failed: {exc}"})
 
     # Detect binary by sniffing for null bytes in the first 8KB
@@ -341,7 +342,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     # Best-effort fetch (non-blocking)
     try:
         await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except Exception as _e:
+    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
         logger.debug("api_repo_diff: fetch failed (best-effort)", exc_info=True)
 
     files = []
@@ -362,7 +363,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
                 ins = sum(1 for c in change_part if c == "+")
                 dels = sum(1 for c in change_part if c == "-")
                 files.append({"path": path_part, "insertions": ins, "deletions": dels, "status": "modified"})
-    except Exception as _e:
+    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
         logger.debug("api_repo_diff: diff --stat failed (best-effort)", exc_info=True)
 
     diff_text = ""
@@ -379,7 +380,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
                 truncated = True
             else:
                 diff_text = raw_diff
-    except Exception as _e:
+    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
         logger.debug("api_repo_diff: git diff failed (best-effort)", exc_info=True)
 
     identical = not diff_text.strip() and not files

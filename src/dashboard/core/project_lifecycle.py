@@ -31,8 +31,8 @@ async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: 
         data = response.json()
         exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
         return exists, ("Found mapping records" if exists else "No logical paths matched")
-    except Exception as e:
-        logger.error({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)})
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
+        logger.error(json.dumps({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)}))
         return False, str(e)
 
 
@@ -49,7 +49,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
         exists, details = await _check_ast_exists_natively(http_client, local_path)
             
         if not exists:
-            logger.info({"event": "ast_ingest_start", "repo": local_path, "project": project_name})
+            logger.info(json.dumps({"event": "ast_ingest_start", "repo": local_path, "project": project_name}))
             elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
             # Use the venv binary directly — avoids uv run re-installing elastro
             # on every call and works reliably inside the non-interactive container.
@@ -95,7 +95,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
                 elastro_env["ELASTIC_ELASTICSEARCH_AUTH_API_KEY"] = resolved_api_key
                 elastro_env["ELASTIC_ELASTICSEARCH_AUTH_TYPE"] = "api_key"
                 
-            logger.info({"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)})
+            logger.info(json.dumps({"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)}))
             
             proc = await asyncio.create_subprocess_exec(
                 str(elastro_bin), "rag", "ingest", local_path, "-i", elastro_index,
@@ -108,24 +108,24 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             if proc.returncode != 0:
                 raise subprocess.CalledProcessError(proc.returncode, "elastro", stdout, stderr)
                 
-            logger.info({"event": "ast_ingest_success", "repo": local_path, "project": project_name})
+            logger.info(json.dumps({"event": "ast_ingest_success", "repo": local_path, "project": project_name}))
             return True
 
         else:
-            logger.info({"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"})
+            logger.info(json.dumps({"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"}))
             return True
 
     except subprocess.CalledProcessError as e:
-        logger.error({
+        logger.error(json.dumps({
             "event": "ast_ingest_failure", 
             "repo": repo_path, 
             "error": "subprocess_error",
             "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
             "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
-        })
+        }))
         return False
-    except Exception as e:
-        logger.error({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()})
+    except (asyncio.TimeoutError, ValueError, OSError, RuntimeError) as e:
+        logger.error(json.dumps({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()}))
         return False
 
 async def _clone_and_setup_project(
@@ -248,7 +248,7 @@ async def _clone_and_setup_project(
             ast_indexed=ast_ok,  # Workers check this at task-claim time
         )
 
-    except Exception as exc:
+    except (asyncio.TimeoutError, RuntimeError, OSError, ValueError) as exc:
         err_str = str(exc)[:500]
         logger.error(json.dumps({
             "event": "project_clone_failure",
