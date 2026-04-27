@@ -6,6 +6,7 @@ from opensearchpy import OpenSearch
 from utils.workspace import resolve_safe_workspace
 
 from utils.logger import get_logger
+from utils.es_auth import get_es_auth_headers
 
 logger = get_logger("ast-poller")
 
@@ -23,7 +24,6 @@ def init_es_client() -> OpenSearch:
     verify_certs = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
     ca_certs = os.environ.get('ES_CA_CERTS', '').strip()
     
-    from utils.es_auth import get_es_auth_headers
     headers = get_es_auth_headers()
     
     kwargs = {

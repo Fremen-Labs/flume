@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from utils.es_auth import get_es_auth_headers
 
 import uuid
 import socket
@@ -90,7 +91,6 @@ def log(msg, **kwargs):
 
 
 def es_request(path, body=None, method='GET'):
-    from utils.es_auth import get_es_auth_headers
     headers = dict(get_es_auth_headers())
     data = None
     if body is not None:
@@ -219,7 +219,6 @@ def append_execution_thought(es_id: str, thought: str) -> None:
 def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
     """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
     headers = {"Content-Type": "application/json"}
-    from utils.es_auth import get_es_auth_headers
     headers.update(get_es_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":

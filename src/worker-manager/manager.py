@@ -22,6 +22,7 @@ if str(_WS) not in sys.path:
 from flume_secrets import apply_runtime_config  # noqa: E402
 from workspace_llm_env import resolve_cloud_agent_model, sync_llm_env_from_workspace  # noqa: E402
 import llm_credentials_store as lcs  # noqa: E402
+from utils.es_auth import get_es_auth_headers  # noqa: E402
 
 apply_runtime_config(_WS)
 
@@ -153,7 +154,6 @@ def load_agent_role_defs():
     # 1. Try ES flume-config first (K8s-native, replica-safe)
     try:
         es_url = ES_URL
-        from utils.es_auth import get_es_auth_headers
         headers = {'Content-Type': 'application/json'}
         headers.update(get_es_auth_headers())
         req = urllib.request.Request(
@@ -271,12 +271,11 @@ def build_workers():
     return workers
 
 
-def es_request(path, body=None, method='GET'):
-    from utils.es_auth import get_es_auth_headers
+def es_request(path: str, body: dict = None, method: str = 'POST') -> dict:
     headers = dict(get_es_auth_headers())
+    headers['Content-Type'] = 'application/json'
     data = None
     if body is not None:
-        headers['Content-Type'] = 'application/json'
         data = json.dumps(body).encode()
         # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
         if method == 'GET':
@@ -817,11 +816,14 @@ def try_atomic_claim(
     }
 
     try:
+        start_ms = int(time.time() * 1000)
         res = es_request(
             f'/{TASK_INDEX}/_update_by_query?conflicts=proceed&refresh=true',
             body,
             method='POST',
         )
+        roundtrip_ms = int(time.time() * 1000) - start_ms
+
         updated = res.get('updated', 0)
         if updated != 1:
             # 0 updated: either no ready tasks or lost a benign race — both are fine
@@ -844,6 +846,24 @@ def try_atomic_claim(
             claimed_src = claimed.get('_source', {})
             claimed_title = claimed_src.get('title', '')
             claimed_doc_id = claimed.get('_id', '')
+            
+            # Emit telemetry for claim latency
+            queue_delay_ms = 0
+            if 'created_at' in claimed_src:
+                try:
+                    # Parse created_at. Example format: '2026-04-18T20:21:40.457813+00:00'
+                    created_at_dt = datetime.fromisoformat(claimed_src['created_at'].replace('Z', '+00:00'))
+                    queue_delay_ms = int((datetime.now(timezone.utc) - created_at_dt).total_seconds() * 1000)
+                except Exception:
+                    pass
+
+            log_telemetry_event(
+                worker_name, 
+                "task_claimed", 
+                f"Claimed task {claimed_doc_id} in {roundtrip_ms}ms (queue delay: {queue_delay_ms}ms)",
+                level="INFO"
+            )
+
             # Dedup gate: if an identical task is already active, release this claim
             if claimed_title and _is_duplicate_task(claimed_title, claimed_doc_id):
                 _dedup_skip_task(claimed_doc_id, f'Duplicate of existing active task with title: {claimed_title}')
