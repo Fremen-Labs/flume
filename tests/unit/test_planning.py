@@ -200,8 +200,11 @@ class TestPlannerRequestTimeout:
         """Non-Ollama providers should use the env-configured default."""
         config = {"provider": "openai", "baseUrl": "https://api.openai.com"}
         with patch.dict(os.environ, {"FLUME_PLANNER_TIMEOUT_SECONDS": "120"}):
+            from config import get_settings
+            get_settings.cache_clear()
             timeout = _planner_request_timeout_seconds(config)
             assert timeout == 120
+            get_settings.cache_clear()
 
     def test_ollama_in_base_url_triggers_minimum(self):
         """Even if provider isn't 'ollama', an ollama URL should trigger the 300s floor."""
@@ -215,8 +218,11 @@ class TestPlannerRequestTimeout:
         with patch.dict(os.environ, {}, clear=True):
             # Remove the env var if it exists
             os.environ.pop("FLUME_PLANNER_TIMEOUT_SECONDS", None)
+            from config import get_settings
+            get_settings.cache_clear()
             timeout = _planner_request_timeout_seconds(config)
             assert timeout == 300
+            get_settings.cache_clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

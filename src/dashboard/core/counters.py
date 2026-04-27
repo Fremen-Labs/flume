@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timezone
 import json
 import re
@@ -6,7 +5,7 @@ import urllib.request
 import urllib.error
 
 from utils.logger import get_logger
-from core.elasticsearch import es_search, ES_URL, ctx
+from core.elasticsearch import es_search, ES_URL, ctx, _get_auth_headers
 
 logger = get_logger(__name__)
 COUNTERS_INDEX = 'flume-counters'
@@ -14,9 +13,7 @@ COUNTERS_INDEX = 'flume-counters'
 def _es_counter_request(path: str, body=None, method: str = 'GET') -> dict:
     """Thin HTTP helper scoped to the flume-counters ES index."""
     headers = {'Content-Type': 'application/json'}
-    api_key = os.environ.get('ES_API_KEY', '')
-    if api_key:
-        headers['Authorization'] = f'ApiKey {api_key}'
+    headers.update(_get_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == 'GET':
         method = 'POST'
@@ -38,7 +35,7 @@ def es_counter_hwm(prefix: str) -> int:
     try:
         res = _es_counter_request(f'/{COUNTERS_INDEX}/_doc/{prefix}')
         return int(res.get('_source', {}).get('value', 0))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return 0
 
 def es_counter_set_hwm(prefix: str, value: int) -> None:
@@ -68,7 +65,7 @@ def es_counter_set_hwm(prefix: str, value: int) -> None:
     }
     try:
         _es_counter_request(f'/{COUNTERS_INDEX}/_update/{prefix}', body=body, method='POST')
-    except Exception as exc:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
         logger.warning(json.dumps({
             'event': 'es_counter_set_hwm_failed',
             'prefix': prefix,
@@ -99,7 +96,7 @@ def get_next_id_sequence(prefix: str) -> int:
             m = pattern.match(doc_id)
             if m:
                 max_n = max(max_n, int(m.group(1)))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         if max_n == 0:
             return int(datetime.now(timezone.utc).timestamp()) % 1_000_000 + 1
     return max_n + 1

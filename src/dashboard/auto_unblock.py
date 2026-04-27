@@ -34,6 +34,7 @@ writes outside of the helpers it receives from the dashboard server module.
 from __future__ import annotations
 
 import json
+import urllib.error
 import os
 import threading
 import time
@@ -63,7 +64,7 @@ _SKIP_ITEM_TYPES = {'epic', 'feature', 'story'}  # rollups unblock when children
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, '').strip() or default)
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return default
 
 
@@ -84,7 +85,7 @@ def _parse_iso(ts: str) -> float | None:
     try:
         s = ts.replace('Z', '+00:00')
         return datetime.fromisoformat(s).timestamp()
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return None
 
 
@@ -151,7 +152,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_failure'] = hits[0].get('_source') or {}
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         pass
     # Most recent handoff
     try:
@@ -163,7 +164,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_handoff'] = hits[0].get('_source') or {}
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         pass
     # Most recent review
     try:
@@ -175,7 +176,7 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
         hits = res.get('hits', {}).get('hits', [])
         if hits:
             ctx['last_review'] = hits[0].get('_source') or {}
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         pass
     return ctx
 
@@ -252,7 +253,7 @@ def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str,
     )
     try:
         from utils import llm_client  # lazy: imports settings
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return canned, False
 
     prompt_user = _build_user_prompt(src, ctx)
@@ -267,7 +268,7 @@ def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str,
             timeout_seconds=timeout_seconds,
             agent_role='auto_unblocker',
         )
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         return canned + f'\n\n(LLM unavailable: {str(e)[:120]})', False
 
     plan = (reply or '').strip()
@@ -391,7 +392,7 @@ def _sweep_once(deps: dict) -> dict:
                 }
             },
         })
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         logger.warning(json.dumps({'event': 'auto_unblock.query_failed', 'error': str(e)[:200]}))
         summary['errors'] += 1
         return summary
@@ -416,7 +417,7 @@ def _sweep_once(deps: dict) -> dict:
                 summary['escalated'] += 1
                 summary['ids_escalated'].append(src.get('id'))
                 processed += 1
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
                 summary['errors'] += 1
                 logger.warning(json.dumps({
                     'event': 'auto_unblock.escalate_failed',
@@ -439,7 +440,7 @@ def _sweep_once(deps: dict) -> dict:
             summary['unblocked'] += 1
             summary['ids_unblocked'].append(src.get('id'))
             processed += 1
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             summary['errors'] += 1
             logger.warning(json.dumps({
                 'event': 'auto_unblock.process_failed',
@@ -460,7 +461,7 @@ def _loop(deps: dict) -> None:
         summary = {}
         try:
             summary = _sweep_once(deps)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
             with _STATE_LOCK:
                 _STATE['errors_total'] += 1
                 _STATE['last_error'] = str(e)[:300]

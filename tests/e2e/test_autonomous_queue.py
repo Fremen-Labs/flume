@@ -28,7 +28,6 @@ def test_complex_task_creation_and_queue_progression(api_client, isolated_flume_
     assert res.returncode == 0
     
     # Check tasks array in snapshot for our projected project
-    snapshot = api_client.get("snapshot").json()
     # all_tasks unused
     
     # Note: Elasticsearch might be slow to index, so we allow eventual consistency

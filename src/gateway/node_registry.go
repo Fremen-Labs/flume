@@ -2,12 +2,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -95,7 +97,22 @@ func NewNodeRegistry(esURL string) *NodeRegistry {
 	return &NodeRegistry{
 		nodes:      make(map[string]*Node),
 		esURL:      strings.TrimRight(esURL, "/"),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
+	}
+}
+
+// esSetAuth adds ES authentication headers to a request.
+// Prefers ES_API_KEY; falls back to FLUME_ELASTIC_PASSWORD Basic Auth.
+func esSetAuth(req *http.Request) {
+	if apiKey := os.Getenv("ES_API_KEY"); apiKey != "" && !strings.Contains(apiKey, "bypass") {
+		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 }
 
@@ -113,6 +130,7 @@ func (r *NodeRegistry) RefreshFromES(ctx context.Context) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	esSetAuth(req)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -434,6 +452,7 @@ func (r *NodeRegistry) UpsertNodeToES(ctx context.Context, node *Node) error {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	esSetAuth(req)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -469,6 +488,7 @@ func (r *NodeRegistry) DeleteNodeFromES(ctx context.Context, nodeID string) erro
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
+	esSetAuth(req)
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -501,6 +521,7 @@ func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	esSetAuth(req)
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		return err

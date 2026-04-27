@@ -6,8 +6,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-# Reuse the same settings helpers from llm_settings.py
-from llm_settings import load_effective_pairs  # type: ignore
 
 import ado_tokens_store as ats  # type: ignore
 import github_tokens_store as gts  # type: ignore
@@ -18,7 +16,6 @@ MASK = "***"
 def get_repo_settings_response(workspace_root: Path) -> dict[str, Any]:
     gts.ensure_migrated_from_env(workspace_root)
     ats.ensure_migrated_from_env(workspace_root)
-    pairs = load_effective_pairs(workspace_root)
 
     active_gh = gts.get_active_token_plain(workspace_root)
     gh_mask = MASK if active_gh else ""

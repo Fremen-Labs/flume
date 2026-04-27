@@ -611,14 +611,7 @@ class AzureDevOpsClient(GitHostClient):
         if not branch:
             branch = self.get_default_branch()
         clean = "/" + path.lstrip("/")
-        data = self._get("items", {
-            "path": clean,
-            "versionDescriptor.version": branch,
-            "versionDescriptor.versionType": "branch",
-            "$format": "octetStream",
-        })
         # ADO returns bytes as the response body when $format=octetStream
-        # but our _get parses JSON — we need raw bytes here
         # Use _http_raw with the built URL instead
         p = {
             "api-version": self.API_VERSION,
@@ -725,6 +718,33 @@ class AzureDevOpsClient(GitHostClient):
                 extra={"structured_data": {"branch": name, "error": str(e)[:200]}},
             )
             return False
+
+    def list_pull_requests(
+        self,
+        state: str = "open",
+        *,
+        base: str | None = None,
+        per_page: int = 50,
+    ) -> list[dict]:
+        """
+        List pull requests in the ADO repo. Used by the PR reconciliation sweep.
+        """
+        # ADO states: active, completed, abandoned, all. Map "open" to "active"
+        ado_state = "active" if state == "open" else state
+        params: dict[str, Any] = {"searchCriteria.status": ado_state, "$top": per_page}
+        if base:
+            params["searchCriteria.targetRefName"] = f"refs/heads/{base}"
+        
+        data = self._get("pullrequests", params=params)
+        # To match GitHub semantics expected by sweeps, map ADO fields:
+        # e.g., 'number' -> 'pullRequestId', 'html_url' -> 'url'
+        results = []
+        for pr in data.get("value", []):
+            pr_copy = dict(pr)
+            pr_copy["number"] = pr.get("pullRequestId")
+            pr_copy["html_url"] = pr.get("url")
+            results.append(pr_copy)
+        return results
 
     def create_pull_request(self, title: str, body: str, head: str, base: str) -> dict:
         data = self._post("pullrequests", {

@@ -10,7 +10,7 @@ authentication paths, including timing-safe comparison behavior.
 import pytest
 
 # Path setup and module mocking handled by conftest.py
-from server import AdminAuthorizer, AuthConfigurationError, InvalidCredentialsError
+from api.security import AdminAuthorizer, AuthConfigurationError, InvalidCredentialsError
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

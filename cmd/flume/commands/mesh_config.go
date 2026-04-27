@@ -24,8 +24,9 @@ type MeshConfigYaml struct {
 		} `yaml:"local_nodes"`
 	} `yaml:"mesh"`
 	Elastic struct {
-		External bool   `yaml:"external"`
-		URL      string `yaml:"url"`
+		External  bool   `yaml:"external"`
+		URL       string `yaml:"url"`
+		VerifyTLS bool   `yaml:"verify_tls"`
 	} `yaml:"elastic"`
 	Repo struct {
 		Type       string `yaml:"type"`       // "github" or "ado"
@@ -73,6 +74,7 @@ func parseMeshConfig(path string) (orchestrator.EnvConfig, error) {
 
 	envCfg.ExternalElastic = m.Elastic.External
 	envCfg.ESUrl = m.Elastic.URL
+	envCfg.ESVerifyTLS = m.Elastic.VerifyTLS
 
 	envCfg.RepoType = m.Repo.Type
 	envCfg.ADOOrg = m.Repo.AdoOrg

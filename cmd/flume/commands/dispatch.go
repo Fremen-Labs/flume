@@ -64,7 +64,7 @@ var DispatchCmd = &cobra.Command{
 }
 
 func init() {
-	DispatchCmd.Flags().StringP("es-url", "e", "http://localhost:9200", "Elasticsearch Endpoint")
+	DispatchCmd.Flags().StringP("es-url", "e", "https://localhost:9200", "Elasticsearch Endpoint")
 }
 
 func serveControlPlane(wakeCh chan struct{}) {

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -122,7 +123,12 @@ func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 		Credentials:     make(map[string]CredentialMeta),
 		cacheTTL:        cacheTTL,
 		esURL:           strings.TrimRight(esURL, "/"),
-		httpClient:      &http.Client{Timeout: 3 * time.Second},
+		httpClient: &http.Client{
+			Timeout: 3 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
 		EnsembleTimeout: 90 * time.Second,
 	}
 }
@@ -462,6 +468,8 @@ func (c *Config) esGet(ctx context.Context, path string) (map[string]interface{}
 	apiKey := os.Getenv("ES_API_KEY")
 	if apiKey != "" && !strings.Contains(apiKey, "bypass") {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
 	resp, err := c.httpClient.Do(req)

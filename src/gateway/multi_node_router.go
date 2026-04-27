@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -268,8 +269,15 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 			reqES.Header.Set("Content-Type", "application/json")
 			if apiKey := os.Getenv("ES_API_KEY"); apiKey != "" {
 				reqES.Header.Set("Authorization", "ApiKey "+apiKey)
+			} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+				reqES.SetBasicAuth("elastic", esPass)
 			}
-			client := &http.Client{Timeout: 3 * time.Second}
+			client := &http.Client{
+				Timeout: 3 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
 			resp, err := client.Do(reqES)
 			if err != nil {
 				Log().Warn("failed to update execution telemetry on ES", slog.String("task_id", taskID), slog.String("error", err.Error()))

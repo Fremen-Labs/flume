@@ -107,7 +107,11 @@ Worker count options:
 		// ── Phase 6: Re-provision AppRole (OpenBao KV data preserved) ─────────
 		fmt.Print(ui.WarningGold("  Re-provisioning AppRole credentials... "))
 		vaultPort := "8200"
-		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
+		esUrl := "https://localhost:9200"
+		if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+			esUrl = envCfg.ESUrl
+		}
+		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 		if vaultErr != nil {
 			return fmt.Errorf("vault provisioning failed: %w", vaultErr)
 		}
@@ -226,7 +230,11 @@ func runStartSequence(ctx context.Context, envCfg orchestrator.EnvConfig, worker
 		return fmt.Errorf("data grid boot failed: %w", err)
 	}
 
-	secretID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, "8200", envCfg)
+	esUrl := "https://localhost:9200"
+	if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+		esUrl = envCfg.ESUrl
+	}
+	secretID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, "8200", esUrl, envCfg)
 	if vErr != nil {
 		return vErr
 	}

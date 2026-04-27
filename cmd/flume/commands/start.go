@@ -94,6 +94,14 @@ var StartCmd = &cobra.Command{
 		}
 		envCfg.AdminToken = adminToken
 
+		esPass, esErr := orchestrator.GenerateElasticPassword()
+		if esErr != nil {
+			log.Error("Failed to generate Elasticsearch password natively", "error", esErr)
+			return esErr
+		}
+		envCfg.ElasticPassword = esPass
+		os.Setenv("FLUME_ELASTIC_PASSWORD", esPass)
+
 		if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" && ConfigFlag == "" {
 			log.Error("Non-interactive terminal detected without an explicit Provider or Config flag. Please pass -p [provider] or --config natively to prevent pipeline hanging.")
 			return fmt.Errorf("headless tty pseudo-hang prevented")
@@ -196,7 +204,12 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
+			esUrl := "https://localhost:" + esPort
+			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+				esUrl = envCfg.ESUrl
+			}
+
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -206,7 +219,6 @@ var StartCmd = &cobra.Command{
 
 			// Bootstrap ALL ES indices before any application containers start.
 			// Must run after OpenBao is deployed (some indices store credential metadata).
-			esUrl := "http://localhost:" + esPort
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
 				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
 			}
@@ -227,7 +239,7 @@ var StartCmd = &cobra.Command{
 				dash := exec.CommandContext(ctx, "uv", "run", "src/dashboard/server.py")
 
 				dashEnv := append(os.Environ(), portEnvOverrides...)
-				dashEnv = append(dashEnv, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=http://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
+				dashEnv = append(dashEnv, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=https://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
 				dashEnv = append(dashEnv, generatedEnv...)
 				dash.Env = dashEnv
 
@@ -285,7 +297,12 @@ var StartCmd = &cobra.Command{
 				return err
 			}
 
-			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, envCfg)
+			esUrl := "https://localhost:" + esPort
+			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+				esUrl = envCfg.ESUrl
+			}
+
+			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
 				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
 				return vErr
@@ -299,7 +316,6 @@ var StartCmd = &cobra.Command{
 			// Bootstrap ALL ES indices before any application containers start.
 			// Must run after OpenBao is deployed (some indices store credential metadata).
 			// Use localhost since we're still on the host machine at this point in boot.
-			esUrl := "http://localhost:" + esPort
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
 				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
 			}
@@ -396,6 +412,7 @@ var StartCmd = &cobra.Command{
 		ui.PrintDeploymentSummary(ui.DeploymentSummary{
 			NativeMode:      NativeFlag,
 			AdminToken:      envCfg.AdminToken,
+			ElasticPassword: envCfg.ElasticPassword,
 			Provider:        envCfg.Provider,
 			Model:           envCfg.Model,
 			OllamaHost:      envCfg.Host,

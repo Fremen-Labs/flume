@@ -17,6 +17,8 @@ import os
 import urllib.request
 import urllib.error
 import time
+import httpx
+import asyncio
 
 from utils.logger import get_logger
 
@@ -346,3 +348,227 @@ def chat_with_tools(
     if return_telemetry:
         return leg_result, {}
     return leg_result
+
+# ---------------------------------------------------------------------------
+# Async API
+# ---------------------------------------------------------------------------
+
+async def _post_gateway_async(client: httpx.AsyncClient, path: str, payload: dict, timeout: int = 180, max_retries: int = 3) -> dict:
+    import random
+    url = f'{_gateway_url()}{path}'
+    worker_name = os.environ.get('FLUME_WORKER_NAME', 'unknown')
+    backoffs = [30, 60, 120]
+    
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={'X-Worker-Name': worker_name},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (400, 401, 402, 403, 404, 429):
+                logger.error(f"Gateway rejected request (HTTP {e.response.status_code}): {e.response.text}")
+                raise Exception(f"Gateway HTTP {e.response.status_code}: {e.response.reason_phrase}") from e
+            if attempt < max_retries:
+                base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
+                jitter = base_sleep * 0.1 * (random.random() * 2 - 1)
+                sleep_time = max(1.0, base_sleep + jitter)
+                logger.warning(f"Gateway HTTP error (attempt {attempt + 1}/{max_retries + 1}): {e}. Backing off {sleep_time:.1f}s.")
+                await asyncio.sleep(sleep_time)
+            else:
+                logger.error(f"Gateway connection permanently failed: {e}")
+                raise e
+        except httpx.RequestError as e:
+            if isinstance(e, httpx.ReadTimeout) and timeout >= 60:
+                logger.error(f"Gateway request timed out after {timeout}s.")
+                raise e
+            if attempt < max_retries:
+                base_sleep = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
+                jitter = base_sleep * 0.1 * (random.random() * 2 - 1)
+                sleep_time = max(1.0, base_sleep + jitter)
+                logger.warning(f"Gateway connection issue (attempt {attempt + 1}/{max_retries + 1}): {e}. Backing off {sleep_time:.1f}s.")
+                await asyncio.sleep(sleep_time)
+            else:
+                logger.error(f"Gateway connection permanently failed: {e}")
+                raise e
+
+async def chat_async(
+    client: httpx.AsyncClient,
+    messages,
+    model=None,
+    *,
+    temperature=0.3,
+    max_tokens=8192,
+    provider_override=None,
+    base_url_override=None,
+    timeout_seconds=120,
+    return_usage=False,
+    return_telemetry=False,
+    ollama_think=False,
+    agent_role='',
+    task_id=None,
+):
+    if _gateway_available():
+        try:
+            payload = {
+                'messages': messages,
+                'model': model or '',
+                'provider': provider_override or '',
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'think': ollama_think,
+                'agent_role': agent_role,
+            }
+            if task_id:
+                payload['task_id'] = task_id
+            resp = await _post_gateway_async(client, '/v1/chat', payload, timeout=timeout_seconds)
+            
+            telemetry = resp.get('telemetry', {})
+            if telemetry:
+                logger.info("Gateway telemetry retrieved: node_id=%s, node_host=%s", 
+                            telemetry.get('node_id'), telemetry.get('node_host'))
+            
+            content = resp.get('message', {}).get('content', '')
+            if return_telemetry and return_usage:
+                return content, resp.get('usage', {}), resp.get('telemetry', {})
+            if return_telemetry:
+                return content, resp.get('telemetry', {})
+            if return_usage:
+                return content, resp.get('usage', {})
+            return content
+        except Exception as e:
+            leg = _legacy()
+            p = provider_override or leg._provider()
+            m = model or leg._default_model()
+            b = base_url_override or leg._base_url(p, base_url_override)
+            try:
+                from utils.llm_client_fallback import resolve_fallback_model
+                fallback = resolve_fallback_model(p, m, b)
+            except ImportError:
+                fallback = None
+
+            if fallback:
+                logger.warning(f"Gateway chat request failed for model '{m}': {e}. Intelligently downgrading to '{fallback}'.")
+                try:
+                    payload['model'] = fallback
+                    resp = await _post_gateway_async(client, '/v1/chat', payload, timeout=timeout_seconds)
+                    content = resp.get('message', {}).get('content', '')
+                    if return_telemetry and return_usage:
+                        return content, resp.get('usage', {}), resp.get('telemetry', {})
+                    if return_telemetry:
+                        return content, resp.get('telemetry', {})
+                    if return_usage:
+                        return content, resp.get('usage', {})
+                    return content
+                except Exception as e2:
+                    logger.warning(f"Gateway fallback chat request also failed: {e2}. Proceeding to legacy client.")
+            else:
+                logger.warning(f"Gateway chat request failed: {e}. No fallback resolved. Proceeding to legacy client.")
+            pass  # Fall through to legacy
+
+    # Fallback to direct provider calls via thread pool
+    leg = _legacy()
+    leg_result = await asyncio.to_thread(
+        leg.chat,
+        messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        provider_override=provider_override,
+        base_url_override=base_url_override,
+        timeout_seconds=timeout_seconds,
+        return_usage=return_usage,
+        ollama_think=ollama_think,
+    )
+    if return_telemetry and return_usage:
+        return leg_result[0], leg_result[1], {}
+    if return_telemetry:
+        return leg_result, {}
+    return leg_result
+
+
+async def chat_with_tools_async(
+    client: httpx.AsyncClient,
+    messages,
+    tools,
+    model=None,
+    *,
+    temperature=0.2,
+    max_tokens=4096,
+    provider_override=None,
+    base_url_override=None,
+    return_telemetry=False,
+    ollama_think=False,
+    agent_role='',
+    task_id=None,
+):
+    if _gateway_available():
+        try:
+            payload = {
+                'messages': messages,
+                'tools': tools,
+                'model': model or '',
+                'provider': provider_override or '',
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'think': ollama_think,
+                'agent_role': agent_role,
+            }
+            if task_id:
+                payload['task_id'] = task_id
+            resp = await _post_gateway_async(client, '/v1/chat/tools', payload, timeout=180)
+            
+            telemetry = resp.get('telemetry', {})
+            if telemetry:
+                logger.info("Gateway telemetry retrieved (tools): node_id=%s, node_host=%s", 
+                            telemetry.get('node_id'), telemetry.get('node_host'))
+            
+            if return_telemetry:
+                return resp, resp.get('telemetry', {})
+            return resp
+        except Exception as e:
+            leg = _legacy()
+            p = provider_override or leg._provider()
+            m = model or leg._default_model()
+            b = base_url_override or leg._base_url(p, base_url_override)
+            try:
+                from utils.llm_client_fallback import resolve_fallback_model
+                fallback = resolve_fallback_model(p, m, b)
+            except ImportError:
+                fallback = None
+
+            if fallback:
+                logger.warning(f"Gateway chat_with_tools request failed for model '{m}': {e}. Intelligently downgrading to '{fallback}'.")
+                try:
+                    payload['model'] = fallback
+                    resp = await _post_gateway_async(client, '/v1/chat/tools', payload, timeout=180)
+                    if return_telemetry:
+                        return resp, resp.get('telemetry', {})
+                    return resp
+                except Exception as e2:
+                    logger.warning(f"Gateway fallback chat_with_tools request also failed: {e2}. Proceeding to legacy client.")
+            else:
+                logger.warning(f"Gateway chat_with_tools request failed: {e}. No fallback resolved. Proceeding to legacy client.")
+            pass  # Fall through to legacy
+
+    # Fallback to direct provider calls via thread pool
+    leg = _legacy()
+    leg_result = await asyncio.to_thread(
+        leg.chat_with_tools,
+        messages,
+        tools,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        provider_override=provider_override,
+        base_url_override=base_url_override,
+        ollama_think=ollama_think,
+    )
+    if return_telemetry:
+        return leg_result, {}
+    return leg_result
+

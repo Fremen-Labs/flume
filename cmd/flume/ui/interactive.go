@@ -123,7 +123,7 @@ func InitialPromptModel(cfg *PromptConfig, exoActive bool) promptModel {
 			ti.EchoCharacter = '*'
 		}
 		if i == StepElasticURL {
-			ti.Placeholder = "http://localhost:9200"
+			ti.Placeholder = "https://localhost:9200"
 		}
 		if i == StepExoPrompt || i == StepElasticMenu || i == StepRepoMenu || i == StepCloudMore {
 			ti.Placeholder = "1"

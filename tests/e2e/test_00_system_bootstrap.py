@@ -103,10 +103,23 @@ class TestRoutingPolicyBootstrap:
         assert data["mode"] in ("hybrid", "frontier_only", "local_only")
 
     def test_frontier_mix_has_active_provider(self, api_client):
-        """At least one frontier provider should be configured."""
+        """Frontier providers should be configured when mode expects them.
+
+        When routing mode is 'local_only', an empty frontier_mix is valid —
+        no cloud providers are needed. This test only asserts frontier content
+        when the mode is 'frontier_only' or 'hybrid'.
+        """
         data = api_client.get("/routing-policy").json()
+        mode = data.get("mode", "local_only")
         mix = data.get("frontier_mix", [])
-        assert len(mix) > 0, "No frontier providers configured"
+
+        if mode == "local_only":
+            # No frontier providers expected in local_only mode
+            return
+
+        assert len(mix) > 0, (
+            f"No frontier providers configured but routing mode is '{mode}'"
+        )
         # The configured provider should not have an open circuit
         provider = mix[0]
         assert provider["circuit_open"] is False, (

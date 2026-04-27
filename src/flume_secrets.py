@@ -14,6 +14,8 @@ if str(_BS_WS) not in sys.path:
 from utils.logger import get_logger  # noqa: E402
 logger = get_logger("flume_secrets")
 
+_DEFAULT_ES = os.environ.get('ES_URL', 'http://localhost:9200' if os.environ.get('FLUME_NATIVE_MODE') == '1' else 'http://elasticsearch:9200').rstrip('/')
+
 class FlumeSettings(BaseSettings):
     LLM_PROVIDER: str = "ollama"
     LLM_MODEL: str = "llama3.2"
@@ -21,7 +23,7 @@ class FlumeSettings(BaseSettings):
     LLM_API_KEY: str = ""
     GIT_USER_NAME: str = "FlumeAgent"
     GIT_USER_EMAIL: str = "agent@flume.local"
-    ES_URL: str = "http://localhost:9200" if os.environ.get("FLUME_NATIVE_MODE") == "1" else "http://elasticsearch:9200"
+    ES_URL: str = _DEFAULT_ES
     ES_API_KEY: str = ""
     ES_VERIFY_TLS: str = "false"
     OPENBAO_ADDR: str = "http://localhost:8200" if os.environ.get("FLUME_NATIVE_MODE") == "1" else "http://openbao:8200"
@@ -57,13 +59,15 @@ def load_elastic_config() -> dict[str, Any]:
     data = {}
     
     # Elasticsearch connection bounding
-    es_native = os.environ.get("FLUME_NATIVE_MODE") == "1"
-    es_url = "http://localhost:9200" if es_native else "http://elasticsearch:9200"
-    
+    es_url = os.environ.get('ES_URL', _DEFAULT_ES).rstrip('/')
+
     # Query system settings from elastic cluster natively
     try:
+        from utils.es_auth import get_es_auth_headers, get_es_ssl_context
         req = urllib.request.Request(f"{es_url}/flume-settings/_doc/system")
-        with urllib.request.urlopen(req, timeout=1.5) as r:
+        for _k, _v in get_es_auth_headers().items():
+            req.add_header(_k, _v)
+        with urllib.request.urlopen(req, timeout=1.5, context=get_es_ssl_context()) as r:
             res = json.loads(r.read())
             doc = res.get("_source", {})
             if "es_url" in doc:
@@ -71,7 +75,7 @@ def load_elastic_config() -> dict[str, Any]:
             if "es_api_key" in doc and doc["es_api_key"] != "***":
                 data["ES_API_KEY"] = doc["es_api_key"]
             if "openbao_url" in doc:
-                data["OPENBAO_ADDR"] = doc["openbao_url"]
+                data["OPENBAO_URL"] = doc["openbao_url"]
     except urllib.error.HTTPError as e:
         if e.code == 404:
             logger.debug("flume-settings not found, using environment defaults")
@@ -80,11 +84,17 @@ def load_elastic_config() -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"Failed to bootstrap configuration natively from Elasticsearch: {e}")
 
+    es_native = os.environ.get("FLUME_NATIVE_MODE") == "1"
     if es_native:
         if "ES_URL" in data and "elasticsearch" in data["ES_URL"]:
-            data["ES_URL"] = "http://localhost:9200"
-        if "OPENBAO_ADDR" in data and "openbao" in data["OPENBAO_ADDR"]:
-            data["OPENBAO_ADDR"] = "http://localhost:8200"
+            data["ES_URL"] = data["ES_URL"].replace("elasticsearch", "localhost")
+        if "OPENBAO_URL" in data and "openbao" in data["OPENBAO_URL"]:
+            data["OPENBAO_URL"] = data["OPENBAO_URL"].replace("openbao", "localhost")
+    else:
+        if "ES_URL" in data and "localhost" in data["ES_URL"]:
+            data["ES_URL"] = data["ES_URL"].replace("localhost", "elasticsearch")
+        if "OPENBAO_URL" in data and "localhost" in data["OPENBAO_URL"]:
+            data["OPENBAO_URL"] = data["OPENBAO_URL"].replace("localhost", "openbao")
             
     return data
 
@@ -157,10 +167,17 @@ def fetch_openbao_kv(addr: str, token: str, mount: str, path: str) -> dict[str, 
                 max_retries = 5
                 for attempt in range(max_retries):
                     try:
+                        audit_headers = {"Content-Type": "application/json"}
+                        try:
+                            from utils.es_auth import get_es_auth_headers as _audit_auth
+                            audit_headers.update(_audit_auth())
+                        except Exception:
+                            if es_key:
+                                audit_headers["Authorization"] = f"ApiKey {es_key}"
                         audit_req = urllib.request.Request(
                             f"{es_url.rstrip('/')}/agent-security-audits/_doc",
                             data=json.dumps(audit_doc).encode("utf-8"),
-                            headers={"Content-Type": "application/json", "Authorization": f"ApiKey {es_key}"},
+                            headers=audit_headers,
                             method="POST"
                         )
                         ctx = ssl.create_default_context()

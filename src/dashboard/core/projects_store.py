@@ -1,11 +1,10 @@
-import os
 import json
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
-from core.elasticsearch import ES_URL, ctx
+from core.elasticsearch import ES_URL, ctx, _get_auth_headers
 
 logger = get_logger(__name__)
 
@@ -13,42 +12,24 @@ PROJECTS_INDEX = "flume-projects"
 
 def _ensure_gitflow_defaults(entry: dict) -> dict:
     """Backfill gitflow + concurrency config with defaults if missing."""
-    if 'gitflow' not in entry:
-        entry['gitflow'] = {
-            'autoPrOnApprove': True,
-            'defaultBranch': None,
-            'integrationBranch': 'develop',
-            'releaseBranch': 'main',
-            'autoMergeIntegrationPr': True,
-            'ensureIntegrationBranch': True,
-        }
-    else:
-        gf = entry['gitflow']
-        if 'autoPrOnApprove' not in gf:
-            gf['autoPrOnApprove'] = True
-        if 'defaultBranch' not in gf:
-            gf['defaultBranch'] = None
-        if 'integrationBranch' not in gf:
-            gf['integrationBranch'] = 'develop'
-        if 'releaseBranch' not in gf:
-            gf['releaseBranch'] = 'main'
-        if 'autoMergeIntegrationPr' not in gf:
-            gf['autoMergeIntegrationPr'] = True
-        if 'ensureIntegrationBranch' not in gf:
-            gf['ensureIntegrationBranch'] = True
+    gf = entry.setdefault('gitflow', {})
+    gf.setdefault('autoPrOnApprove', True)
+    gf.setdefault('defaultBranch', None)
+    gf.setdefault('integrationBranch', 'develop')
+    gf.setdefault('releaseBranch', 'main')
+    gf.setdefault('autoMergeIntegrationPr', True)
+    gf.setdefault('ensureIntegrationBranch', True)
     try:
         from utils.concurrency_config import ensure_concurrency_defaults  # noqa: PLC0415
         ensure_concurrency_defaults(entry)
-    except Exception:
+    except (ImportError, ValueError, TypeError):
         pass
     return entry
 
 def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
     """Low-level ES request scoped to the projects index."""
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"ApiKey {api_key}"
+    headers.update(_get_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"
@@ -71,8 +52,8 @@ def load_projects_registry() -> list:
         )
         hits = res.get("hits", {}).get("hits", [])
         return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
-    except Exception as e:
-        logger.warning({"event": "projects_load_error", "error": str(e)})
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.warning(json.dumps({"event": "projects_load_error", "error": str(e)}))
         return []
 
 def save_projects_registry(registry: list):
@@ -90,8 +71,8 @@ def save_projects_registry(registry: list):
                 entry,
                 method="PUT",
             )
-        except Exception as e:
-            logger.warning({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)})
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+            logger.warning(json.dumps({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)}))
 
 def _upsert_project(entry: dict):
     """Upsert a single project document to ES.
@@ -132,8 +113,8 @@ def _delete_project_from_es(project_id: str):
     """Delete a project document from ES."""
     try:
         _es_projects_request(
-            f"/{PROJECTS_INDEX}/_doc/{project_id}",
+            f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
             method="DELETE",
         )
-    except Exception as e:
-        logger.warning({"event": "projects_delete_error", "id": project_id, "error": str(e)})
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.warning(json.dumps({"event": "projects_delete_error", "id": project_id, "error": str(e)}))

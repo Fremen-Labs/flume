@@ -37,11 +37,13 @@ type EnvConfig struct {
 	LocalOllamaBaseURL string
 	Host               string
 	AdminToken         string
+	ElasticPassword    string
 	Model              string
 	IsNative           bool
 
 	ExternalElastic bool
 	ESUrl           string
+	ESVerifyTLS     bool
 
 	RepoType    string // "github" or "ado"
 	GithubToken string
@@ -60,6 +62,15 @@ func GenerateAdminToken() (string, error) {
 		return "", err
 	}
 	return "flume_adm_" + hex.EncodeToString(bytes), nil
+}
+
+// GenerateElasticPassword creates a secure, deterministic password for the internal Elasticsearch 'elastic' user.
+func GenerateElasticPassword() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return "flume_es_" + hex.EncodeToString(bytes), nil
 }
 
 // RewriteLoopbackForDockerEnv replaces 127.0.0.1 / localhost with
@@ -81,6 +92,9 @@ func GenerateEnv(config EnvConfig) []string {
 
 	if config.AdminToken != "" {
 		env = append(env, "FLUME_ADMIN_TOKEN="+config.AdminToken)
+	}
+	if config.ElasticPassword != "" {
+		env = append(env, "FLUME_ELASTIC_PASSWORD="+config.ElasticPassword)
 	}
 
 	if config.Provider != "" {
@@ -111,6 +125,12 @@ func GenerateEnv(config EnvConfig) []string {
 	}
 	if config.ExternalElastic && config.ESUrl != "" {
 		env = append(env, "FLUME_ES_URL="+config.ESUrl)
+		env = append(env, "ES_URL="+config.ESUrl)
+	}
+	if config.ESVerifyTLS {
+		env = append(env, "ES_VERIFY_TLS=true")
+	} else {
+		env = append(env, "ES_VERIFY_TLS=false")
 	}
 
 	if config.RepoType == "github" && config.GithubToken != "" {

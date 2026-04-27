@@ -15,6 +15,8 @@ import urllib.request
 
 import uuid
 import socket
+import asyncio
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +43,11 @@ from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 apply_runtime_config(_WS)
 
 from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402  # type: ignore
+
+async def _run_with_client(func, *args, **kwargs):
+    async with httpx.AsyncClient() as client:
+        kwargs['client'] = client
+        return await func(*args, **kwargs)
 
 BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace  # noqa: E402
@@ -83,7 +90,8 @@ def log(msg, **kwargs):
 
 
 def es_request(path, body=None, method='GET'):
-    headers = {'Authorization': f'ApiKey {os.environ.get("ES_API_KEY", "")}'}
+    from utils.es_auth import get_es_auth_headers
+    headers = dict(get_es_auth_headers())
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -211,9 +219,8 @@ def append_execution_thought(es_id: str, thought: str) -> None:
 def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
     """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"ApiKey {api_key}"
+    from utils.es_auth import get_es_auth_headers
+    headers.update(get_es_auth_headers())
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"
@@ -1953,7 +1960,7 @@ def handle_pm_dispatcher_worker(task):
         append_execution_thought(es_id, f"*[PM Dispatcher]* Sending to LLM for decomposition analysis (model: `{active_model}`)…")
 
     try:
-        result = run_pm_dispatcher(task)
+        result = asyncio.run(_run_with_client(run_pm_dispatcher, task))
     except Exception as e:
         log(f"pm-dispatcher: Execution Trap mapping decomposition on {task_id} natively: {e}")
         if es_id:
@@ -2344,7 +2351,7 @@ def handle_implementer_worker(task, es_id):
     released = False
 
     try:
-        result = run_implementer(task, repo_path=repo_path, on_progress=_on_progress, on_thought=_on_thought)
+        result = asyncio.run(_run_with_client(run_implementer, task, repo_path=repo_path, on_progress=_on_progress, on_thought=_on_thought))
         implementer_model = task.get('preferred_model') or _get_active_llm_model()
 
 
@@ -2670,7 +2677,7 @@ def handle_tester_worker(task, es_id):
         log(f"tester: task={task_id} blocked after {next_retries} retry loops (cap={_TESTER_RETRY_CAP})")
         return True
 
-    result = run_tester(task)
+    result = asyncio.run(_run_with_client(run_tester, task))
     tester_model = task.get('preferred_model') or _get_active_llm_model()
 
     if result.action == 'fail':
@@ -2828,7 +2835,7 @@ def handle_reviewer_worker(task, es_id):
         log(f"reviewer: task={task.get('id')} has no commit_sha — blocked; cleared claim so task stops re-looping")
         return True
 
-    result = run_reviewer(task)
+    result = asyncio.run(_run_with_client(run_reviewer, task))
     reviewer_model = task.get('preferred_model') or _get_active_llm_model()
 
     verdict = result.verdict or 'approved'
@@ -3114,9 +3121,10 @@ def main():
     hydrate_secrets_from_openbao()
         
     if 'https' in os.environ.get("ES_URL", "") and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
-        raise SystemExit(
-            'ES_API_KEY is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
-        )
+        if not os.environ.get("FLUME_ELASTIC_PASSWORD"):
+            raise SystemExit(
+                'ES_API_KEY or FLUME_ELASTIC_PASSWORD is required for TLS clusters. Use OpenBao KV (secret/flume) or .env'
+            )
     target_worker = sys.argv[1] if len(sys.argv) > 1 else None
     if target_worker:
         log(f'worker handler spawned targeting explicitly [{target_worker}]')

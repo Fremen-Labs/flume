@@ -13,7 +13,9 @@ if not ES_API_KEY:
     raise SystemExit('ES_API_KEY is required')
 ctx=None
 if not ES_VERIFY_TLS:
-    ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+    ctx=ssl.create_default_context()
+    ctx.check_hostname=False
+    ctx.verify_mode=ssl.CERT_NONE
 headers={'Content-Type':'application/json','Authorization':f'ApiKey {ES_API_KEY}'}
 search_body={'size':500,'query':{'match_all':{}},'sort':[{'updated_at':{'order':'desc','unmapped_type':'date'}}]}
 req=urllib.request.Request(f"{ES_URL}/{INDEX}/_search", data=json.dumps(search_body).encode(), headers=headers, method='GET')

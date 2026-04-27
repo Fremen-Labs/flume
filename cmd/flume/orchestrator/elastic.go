@@ -3,11 +3,13 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -38,9 +40,16 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -57,6 +66,46 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	}
 
 	return respBody, resp.StatusCode, nil
+}
+
+// MintElasticsearchAPIKey natively mints a new API key scoped to the flume_role.
+func MintElasticsearchAPIKey(ctx context.Context, esURL string) (string, error) {
+	log.Debug("[ELASTICSEARCH SEC] Minting dynamic Elasticsearch API Key via xpack.security...")
+
+	payload := map[string]interface{}{
+		"name": "flume-swarm-key",
+		"role_descriptors": map[string]interface{}{
+			"flume_role": map[string]interface{}{
+				"cluster": []string{"all"},
+				"index": []map[string]interface{}{
+					{
+						"names":      []string{"*"},
+						"privileges": []string{"all"},
+					},
+				},
+			},
+		},
+	}
+
+	// We don't have the API key yet, so pass empty string to force esRequest
+	// to fall back to FLUME_ELASTIC_PASSWORD basic auth.
+	respBody, status, err := esRequest(ctx, esURL, "", "_security/api_key", "POST", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to mint ES API key natively: %w", err)
+	}
+	if status != 200 {
+		return "", fmt.Errorf("unexpected status %d minting ES API key: %s", status, string(respBody))
+	}
+
+	var resData struct {
+		Encoded string `json:"encoded"`
+	}
+	if err := json.Unmarshal(respBody, &resData); err != nil {
+		return "", fmt.Errorf("failed to parse ES API key response natively: %w", err)
+	}
+
+	log.Info("[ELASTICSEARCH SEC] ✅ Elasticsearch API key minted successfully")
+	return resData.Encoded, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,7 +444,12 @@ var allTemplates = []templateDef{
 func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 	log.Info("[ES INDEX BOOTSTRAP] Creating all Elasticsearch indices", "url", esURL, "indices", len(allIndices), "templates", len(allTemplates))
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 
 	// 1. Apply index templates first (they govern indices matching patterns)
 	for _, tpl := range allTemplates {
@@ -413,6 +467,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		req.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			req.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			req.SetBasicAuth("elastic", esPass)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -445,6 +501,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		headReq.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			headReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			headReq.SetBasicAuth("elastic", esPass)
 		}
 		headResp, err := client.Do(headReq)
 		if err != nil {
@@ -466,6 +524,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 						mReq.Header.Set("Content-Type", "application/json")
 						if apiKey != "" {
 							mReq.Header.Set("Authorization", "ApiKey "+apiKey)
+						} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+							mReq.SetBasicAuth("elastic", esPass)
 						}
 						mResp, mErr := client.Do(mReq)
 						if mErr == nil {
@@ -512,6 +572,8 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		putReq.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
 			putReq.Header.Set("Authorization", "ApiKey "+apiKey)
+		} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+			putReq.SetBasicAuth("elastic", esPass)
 		}
 		putResp, err := client.Do(putReq)
 		if err != nil {
@@ -755,7 +817,7 @@ func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) err
 
 	// Prefer the Docker-rewritten base URL for container access; fall back to host value.
 	baseURL := cfg.BaseURL
-	if baseURL == "" {
+	if baseURL == "" && provider == "ollama" {
 		baseURL = cfg.LocalOllamaBaseURL
 	}
 	if baseURL != "" {

@@ -153,10 +153,9 @@ def load_agent_role_defs():
     # 1. Try ES flume-config first (K8s-native, replica-safe)
     try:
         es_url = ES_URL
-        api_key = os.environ.get('ES_API_KEY', '')
+        from utils.es_auth import get_es_auth_headers
         headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'ApiKey {api_key}'
+        headers.update(get_es_auth_headers())
         req = urllib.request.Request(
             f'{es_url}/flume-config/_doc/{AGENT_MODELS_ES_ID}',
             headers=headers, method='GET',
@@ -273,8 +272,8 @@ def build_workers():
 
 
 def es_request(path, body=None, method='GET'):
-    es_key_val = os.environ.get("ES_API_KEY", "")
-    headers = {'Authorization': f'ApiKey {es_key_val}'}
+    from utils.es_auth import get_es_auth_headers
+    headers = dict(get_es_auth_headers())
     data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
@@ -1501,9 +1500,10 @@ def main():
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
     if 'https' in ES_URL and (not os.environ.get("ES_API_KEY") or os.environ.get("ES_API_KEY") == 'AUTO_GENERATED_BY_INSTALLER'):
-        raise SystemExit(
-            'ES_API_KEY is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
-        )
+        if not os.environ.get("FLUME_ELASTIC_PASSWORD"):
+            raise SystemExit(
+                'ES_API_KEY or FLUME_ELASTIC_PASSWORD is required for TLS clusters. Store it in OpenBao (KV secret/flume) or .env'
+            )
         
     def ping_local_llm():
         raw = os.environ.get("LLM_BASE_URL") or os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://host.docker.internal:11434")

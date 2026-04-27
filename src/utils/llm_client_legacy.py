@@ -35,6 +35,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import time
 
 from utils.logger import get_logger
 
@@ -97,7 +98,7 @@ def _base_url(provider=None, base_url_override=None):
     return _base_url_env()
 
 
-import time
+
 
 # ---------------------------------------------------------------------------
 # Thinking-model helpers

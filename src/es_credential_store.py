@@ -90,11 +90,15 @@ def _es_url() -> str:
 
 
 def _es_headers() -> dict[str, str]:
+    from utils.es_auth import get_es_auth_headers
     h: dict[str, str] = {"Content-Type": "application/json"}
-    api_key = os.environ.get("ES_API_KEY", "")
-    if api_key and "bypass" not in api_key:
-        h["Authorization"] = f"ApiKey {api_key}"
+    h.update(get_es_auth_headers())
     return h
+
+
+def _es_ssl_ctx():
+    from utils.es_auth import get_es_ssl_context
+    return get_es_ssl_context()
 
 
 def _request(method: str, path: str, body: Any = None, timeout: int = 5) -> dict[str, Any] | None:
@@ -107,7 +111,7 @@ def _request(method: str, path: str, body: Any = None, timeout: int = 5) -> dict
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=_es_headers(), method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=_es_ssl_ctx()) as r:
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
@@ -129,7 +133,7 @@ def _index_exists(index: str, timeout: int = 5) -> bool:
     url = f"{_es_url()}/{index}"
     req = urllib.request.Request(url, headers=_es_headers(), method="HEAD")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=_es_ssl_ctx()) as r:
             return r.status == 200
     except urllib.error.HTTPError as e:
         if e.code == 404:

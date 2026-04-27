@@ -2,16 +2,20 @@ import os
 import json
 import uuid
 import tempfile
+import httpx
+import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Query, BackgroundTasks
+from api.models import ProjectCreateRequest
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
-from core.elasticsearch import es_search
+from core.elasticsearch import async_es_search
 from core.projects_store import load_projects_registry, _upsert_project, PROJECTS_INDEX, _es_projects_request
+from utils.url_helpers import is_remote_url
 
 
 logger = get_logger(__name__)
@@ -20,22 +24,22 @@ WORKSPACE_ROOT = resolve_safe_workspace()
 router = APIRouter()
 
 @router.post("/api/projects")
-async def api_create_project(request: Request, payload: dict, background_tasks: BackgroundTasks):
-    from server import _is_remote_url, _clone_and_setup_project, _deterministic_ast_ingest
+async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks):
+    from core.project_lifecycle import _clone_and_setup_project, _deterministic_ast_ingest
     from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url
     import ado_tokens_store
     import github_tokens_store
 
-    name = (payload.get("name") or "").strip()
+    name = (payload.name or "").strip()
     if not name:
         return JSONResponse(status_code=400, content={"error": "Project name is required."})
 
-    repo_url = (payload.get("repoUrl") or "").strip()
-    local_path_raw = (payload.get("localPath") or "").strip()
+    repo_url = (payload.repoUrl or "").strip()
+    local_path_raw = (payload.localPath or "").strip()
 
     new_id = f"proj-{uuid.uuid4().hex[:8]}"
 
-    if _is_remote_url(repo_url):
+    if is_remote_url(repo_url):
         dest_path = Path(tempfile.mkdtemp(prefix=f"flume-reg-{new_id}-"))
         clone_status = 'cloning'
         resolved_path = None
@@ -48,8 +52,8 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
         clone_status = 'no_repo'
         resolved_path = None
 
-    clone_url = strip_credentials(repo_url) if _is_remote_url(repo_url) else repo_url
-    if _is_remote_url(repo_url):
+    clone_url = strip_credentials(repo_url) if is_remote_url(repo_url) else repo_url
+    if is_remote_url(repo_url):
         repo_type = detect_repo_type(repo_url)
         pat: str = ""
         if repo_type == "ado":
@@ -63,7 +67,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                         "project_id": new_id,
                         "hint": "OpenBao KV lookup returned placeholder. Falling back to ADO_PERSONAL_ACCESS_TOKEN env var.",
                     }))
-            except Exception as _cred_err:
+            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
                 logger.warning(json.dumps({
                     "event": "ado_pat_fetch_error",
                     "project_id": new_id,
@@ -82,7 +86,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                             "project_id": new_id,
                             "hint": "PAT sourced from OpenBao ADO_TOKEN key (flume start provisioning).",
                         }))
-                except Exception:
+                except (KeyError, ValueError, ImportError):
                     pass
             if not pat:
                 _env_pat = (
@@ -113,7 +117,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
                         "project_id": new_id,
                         "hint": "OpenBao KV lookup returned placeholder. Falling back to GITHUB_TOKEN env var.",
                     }))
-            except Exception as _cred_err:
+            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
                 logger.warning(json.dumps({
                     "event": "gh_pat_fetch_error",
                     "project_id": new_id,
@@ -178,7 +182,7 @@ async def api_create_project(request: Request, payload: dict, background_tasks: 
 
     http_client = request.app.state.http_client
 
-    if _is_remote_url(repo_url):
+    if is_remote_url(repo_url):
         background_tasks.add_task(
             _clone_and_setup_project,
             http_client, new_id, name, clone_url, dest_path,
@@ -214,7 +218,7 @@ def _map_task_hit_for_api(h: dict) -> dict:
     return res
 
 @router.get("/api/projects/{project_id}/tasks")
-def api_project_tasks(
+async def api_project_tasks(
     project_id: str,
     archived: str = Query(
         'exclude',
@@ -249,12 +253,12 @@ def api_project_tasks(
                     'must_not': [{'term': {'status': 'archived'}}],
                 },
             }
-        res = es_search('agent-task-records', {
+        res = await async_es_search('agent-task-records', {
             'size': 5000,
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': query,
         })
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
         logger.warning(json.dumps({'event': 'project_tasks_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
     hits = res.get('hits', {}).get('hits', [])
@@ -264,14 +268,14 @@ def api_project_tasks(
         'tasks': [_map_task_hit_for_api(h) for h in hits],
     }
 
-def _project_task_ids_for_repo(project_id: str) -> list[str]:
+async def _project_task_ids_for_repo(project_id: str) -> list[str]:
     try:
-        res = es_search('agent-task-records', {
+        res = await async_es_search('agent-task-records', {
             'size': 5000,
             '_source': ['id'],
             'query': {'term': {'repo': project_id}},
         })
-    except Exception:
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError):
         return []
     out = []
     for h in res.get('hits', {}).get('hits', []) or []:
@@ -301,7 +305,7 @@ def api_delete_project(project_id: str):
             "event": "project_deleted",
             "project_id": project_id,
         }))
-    except Exception as exc:
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
         logger.warning(json.dumps({
             "event": "project_delete_es_error",
             "project_id": project_id,

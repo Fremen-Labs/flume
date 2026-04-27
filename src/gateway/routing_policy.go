@@ -143,6 +143,8 @@ func LoadRoutingPolicyFromES(ctx context.Context, esURL string, httpClient *http
 	apiKey := os.Getenv("ES_API_KEY")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
 	resp, err := httpClient.Do(req)
@@ -231,6 +233,8 @@ func (p *RoutingPolicy) PersistToES(ctx context.Context, esURL string, httpClien
 	apiKey := os.Getenv("ES_API_KEY")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
 	}
 
 	resp, err := httpClient.Do(req)

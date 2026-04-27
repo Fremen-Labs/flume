@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import urllib.error
 import shutil
 import socket
 import subprocess
@@ -34,7 +35,7 @@ def _codex_binary() -> str:
 def _parse_ws_host_port(listen_url: str) -> tuple[str, int] | tuple[None, None]:
     try:
         u = urlparse(listen_url)
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return None, None
     if u.scheme != 'ws' or not u.hostname or not u.port:
         return None, None

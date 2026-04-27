@@ -1,4 +1,3 @@
-import os
 import json
 import urllib.request
 import urllib.error
@@ -12,6 +11,7 @@ from typing import Optional
 
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
+from config import get_settings
 from core.elasticsearch import es_upsert
 from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
 from core.counters import get_next_id_sequence, es_counter_set_hwm
@@ -33,12 +33,12 @@ def _planner_runtime_config() -> dict:
     from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url
     _sync_llm_runtime_env()
     pairs = load_effective_pairs(WORKSPACE_ROOT)
-    provider = (pairs.get('LLM_PROVIDER') or os.environ.get('LLM_PROVIDER') or 'ollama').strip().lower()
-    model = (pairs.get('LLM_MODEL') or os.environ.get('LLM_MODEL') or LLM_MODEL).strip()
+    provider = (pairs.get('LLM_PROVIDER') or get_settings().LLM_PROVIDER or 'ollama').strip().lower()
+    model = (pairs.get('LLM_MODEL') or get_settings().LLM_MODEL or LLM_MODEL).strip()
     # FLUME_PLANNER_MODEL lets operators use a lighter/faster model for planning
     # independently of the agent model (e.g. qwen2.5-coder:7b for planning speed
     # while gemma4:26b handles code implementation).
-    planner_model_override = os.environ.get('FLUME_PLANNER_MODEL', '').strip()
+    planner_model_override = get_settings().FLUME_PLANNER_MODEL.strip()
     if planner_model_override:
         model = planner_model_override
     if provider == 'ollama':
@@ -47,8 +47,8 @@ def _planner_runtime_config() -> dict:
         # explicitly handle None to allow "" (empty string) to pass natively to llm_client
         if pairs.get('LLM_BASE_URL') is not None:
             base_url = str(pairs.get('LLM_BASE_URL')).strip()
-        elif os.environ.get('LLM_BASE_URL') is not None:
-            base_url = os.environ.get('LLM_BASE_URL').strip()
+        elif get_settings().LLM_BASE_URL is not None:
+            base_url = get_settings().LLM_BASE_URL.strip()
         else:
             base_url = ''
         # When base_url is empty for a managed provider, resolve the provider's
@@ -79,9 +79,9 @@ def _planner_runtime_config() -> dict:
         provider=provider,
         model=model,
         baseUrl=base_url,
-        envProvider=(os.environ.get('LLM_PROVIDER') or '').strip(),
-        envModel=(os.environ.get('LLM_MODEL') or '').strip(),
-        envBaseUrl=(os.environ.get('LLM_BASE_URL') or '').strip(),
+        envProvider=(get_settings().LLM_PROVIDER or '').strip(),
+        envModel=(get_settings().LLM_MODEL or '').strip(),
+        envBaseUrl=(get_settings().LLM_BASE_URL or '').strip(),
         pairProvider=(pairs.get('LLM_PROVIDER') or '').strip(),
         pairModel=(pairs.get('LLM_MODEL') or '').strip(),
         pairBaseUrl=(pairs.get('LLM_BASE_URL') or '').strip(),
@@ -94,7 +94,7 @@ def _planner_request_timeout_seconds(config: Optional[dict] = None) -> int:
     cfg = config or _planner_runtime_config()
     provider = (cfg.get('provider') or '').lower()
     base_url = (cfg.get('baseUrl') or '').lower()
-    default_timeout = int(os.environ.get('FLUME_PLANNER_TIMEOUT_SECONDS', '300'))
+    default_timeout = int(str(get_settings().FLUME_PLANNER_TIMEOUT_SECONDS))
     if provider == 'ollama' or ('11434' in base_url) or ('ollama' in base_url):
         return max(default_timeout, 300)
     return default_timeout
@@ -137,14 +137,14 @@ def _test_planner_connection(status: dict) -> dict:
     """Probe the configured LLM endpoint and update status with the result."""
     provider  = (status.get('provider') or '').lower().strip()
     base_url  = (status.get('baseUrl') or '').rstrip('/')
-    api_key   = (os.environ.get('LLM_API_KEY') or '').strip()
+    api_key   = (get_settings().LLM_API_KEY or '').strip()
     if not api_key:
         try:
             from llm_settings import _openbao_get_all
             import pathlib
-            bao = _openbao_get_all(pathlib.Path(os.environ.get('FLUME_DATA_DIR', '/app')))
+            bao = _openbao_get_all(pathlib.Path(get_settings().FLUME_DATA_DIR))
             api_key = bao.get('LLM_API_KEY', '').strip()
-        except Exception:
+        except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
             pass
     started = time.time()
     status['connectionTestStartedAt'] = _utcnow_iso()
@@ -168,7 +168,7 @@ def _test_planner_connection(status: dict) -> dict:
                 parsed = urlparse(gw_url)
                 if parsed.hostname:
                     socket.gethostbyname(parsed.hostname)
-            except Exception:
+            except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
                 gw_url = gw_url.replace('gateway', '127.0.0.1')
                 
         url = f"{gw_url}/api/nodes"
@@ -231,7 +231,7 @@ def _test_planner_connection(status: dict) -> dict:
              status['connectionTestResult'] = f'NODE MESH connection FAILED — Gateway HTTP {he.code}: {he.reason}'
         else:
              status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {url} returned HTTP {he.code}: {he.reason}'
-    except Exception as exc:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as exc:
         status['connectionTestOk']     = False
         if provider == 'ollama':
              status['connectionTestResult'] = f'NODE MESH connection FAILED — {exc}'
@@ -320,14 +320,14 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
 
 
 def _planner_should_use_codex_app_server() -> bool:
-    provider = (os.environ.get('LLM_PROVIDER') or '').strip().lower()
+    provider = (get_settings().LLM_PROVIDER or '').strip().lower()
     if provider != 'openai':
         return False
-    force = (os.environ.get('FLUME_PLANNER_USE_CODEX_APP_SERVER') or 'auto').strip().lower()
+    force = (get_settings().FLUME_PLANNER_USE_CODEX_APP_SERVER or 'auto').strip().lower()
     if force in ('0', 'false', 'off', 'no'):
         return False
-    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
-    api_key = (os.environ.get('LLM_API_KEY') or '').strip()
+    has_oauth = bool((get_settings().OPENAI_OAUTH_STATE_FILE or '').strip() or (get_settings().OPENAI_OAUTH_STATE_JSON or '').strip())
+    api_key = (get_settings().LLM_API_KEY or '').strip()
     if not has_oauth and force not in ('1', 'true', 'on', 'yes'):
         return False
     if api_key.startswith('sk-') or api_key.startswith('sk_'):
@@ -337,7 +337,7 @@ def _planner_should_use_codex_app_server() -> bool:
 
         st = codex_app_server.status()
         return bool(st.get('codexAuthFilePresent')) and bool(st.get('codexOnPath') or st.get('npxOnPath'))
-    except Exception:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError):
         return False
 
 
@@ -508,7 +508,7 @@ def _run_initial_planning(session: dict):
     try:
         raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         llm_error = str(e)[:300]
 
     if llm_error:
@@ -565,7 +565,7 @@ def refine_session(session_id, user_text, current_plan):
     try:
         raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, urllib.error.URLError, TimeoutError) as e:
         err = str(e)[:300]
         hint = _planner_llm_error_hint(err)
         message = f"I encountered an issue processing your request. Please try again. (Error: {err}){hint}"
@@ -707,7 +707,7 @@ def commit_plan(repo: str, plan: dict):
 
     # ── Adaptive LLM Routing ────────────────────────────────────────────────
     complexity_score = plan.get('complexityScore', 5)
-    fast_model = os.environ.get('FLUME_FAST_MODEL') or 'o3-mini'
+    fast_model = get_settings().FLUME_FAST_MODEL or 'o3-mini'
     routing_model = fast_model if complexity_score <= 3 else None
     if routing_model:
         logger.info(f"Adaptive Routing: complexity={complexity_score}, routing tasks to {routing_model}")
