@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useState } from 'react';
 import { Loader2, AlertCircle, GitBranch, ShieldAlert } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
@@ -267,78 +267,82 @@ export default function QueuePage() {
                 </div>
 
                 <div className="space-y-2 min-h-[200px]">
-                  {items.map((item, i) => {
-                    const worker = workers.find(w => w.current_task_id === item.id);
-                    const openThoughts = () => {
-                      setThoughtTaskId(item.id);
-                      setThoughtTaskTitle(item.title);
-                      setThoughtTaskStatus(item.status);
-                      setDrawerOpen(true);
-                    };
-                    const cardInner = (
-                      <>
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.work_item_type ?? item.item_type ?? 'task']}`}>
-                            {(item.work_item_type ?? item.item_type ?? 'task').toUpperCase()}
-                          </span>
-                          <StatusBadge status={item.priority} />
-                        </div>
-                        <p className="text-xs text-foreground font-medium truncate">{item.title}</p>
-                        <div className="flex items-start justify-between mt-2">
-                          <span className="text-[10px] text-muted-foreground truncate">{item.repo}</span>
-                          {worker && (
-                            <div className="flex flex-col items-end shrink-0 ml-2">
-                              <span className="text-[10px] font-medium text-primary truncate">{worker.name}</span>
-                              <span className="text-[9px] text-muted-foreground truncate mt-0.5" title="Execution Node">{worker.execution_host || 'localhost'}</span>
-                              <span className="text-[9px] text-muted-foreground truncate" title="Model">{worker.model || worker.preferred_model}</span>
+                  <AnimatePresence mode="popLayout">
+                    {items.map((item, i) => {
+                      const worker = workers.find(w => w.current_task_id === item.id);
+                      const openThoughts = () => {
+                        setThoughtTaskId(item.id);
+                        setThoughtTaskTitle(item.title);
+                        setThoughtTaskStatus(item.status);
+                        setDrawerOpen(true);
+                      };
+                      const cardInner = (
+                        <>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${typeColors[item.work_item_type ?? item.item_type ?? 'task']}`}>
+                              {(item.work_item_type ?? item.item_type ?? 'task').toUpperCase()}
+                            </span>
+                            <StatusBadge status={item.priority} />
+                          </div>
+                          <p className="text-xs text-foreground font-medium truncate">{item.title}</p>
+                          <div className="flex items-start justify-between mt-2">
+                            <span className="text-[10px] text-muted-foreground truncate">{item.repo}</span>
+                            {worker && (
+                              <div className="flex flex-col items-end shrink-0 ml-2">
+                                <span className="text-[10px] font-medium text-primary truncate">{worker.name}</span>
+                                <span className="text-[9px] text-muted-foreground truncate mt-0.5" title="Execution Node">{worker.execution_host || 'localhost'}</span>
+                                <span className="text-[9px] text-muted-foreground truncate" title="Model">{worker.model || worker.preferred_model}</span>
+                              </div>
+                            )}
+                          </div>
+                          {item.branch && (
+                            <div className="flex items-center gap-1 mt-1">
+                              <GitBranch className="w-2.5 h-2.5 text-primary/50" />
+                              <code className="text-[9px] text-muted-foreground truncate">{item.branch}</code>
                             </div>
                           )}
-                        </div>
-                        {item.branch && (
-                          <div className="flex items-center gap-1 mt-1">
-                            <GitBranch className="w-2.5 h-2.5 text-primary/50" />
-                            <code className="text-[9px] text-muted-foreground truncate">{item.branch}</code>
-                          </div>
-                        )}
-                        <div className="text-[9px] text-muted-foreground/50 mt-1">{timeAgo(item.last_update || item.updated_at)}</div>
-                      </>
-                    );
-                    return (
-                      <motion.div
-                        key={item._id}
-                        initial={{ opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: stageIdx * 0.05 + i * 0.03 }}
-                        whileHover={{ y: -2, transition: { duration: 0.15 } }}
-                        className={`glass-card overflow-hidden flex flex-col ${stage.id === 'blocked' ? 'p-0' : 'p-3 hover-lift cursor-pointer'}`}
-                        onClick={stage.id === 'blocked' ? undefined : openThoughts}
-                      >
-                        {stage.id === 'blocked' ? (
-                          <>
-                            <button
-                              type="button"
-                              className="p-3 text-left w-full hover:bg-muted/10 transition-colors"
-                              onClick={openThoughts}
-                            >
-                              {cardInner}
-                            </button>
-                            <div className="flex gap-2 px-3 py-2 border-t border-border/30 bg-destructive/[0.03]">
+                          <div className="text-[9px] text-muted-foreground/50 mt-1">{timeAgo(item.last_update || item.updated_at)}</div>
+                        </>
+                      );
+                      return (
+                        <motion.div
+                          layoutId={`task-card-${item._id}`}
+                          key={item._id}
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.2 } }}
+                          transition={{ type: "spring", stiffness: 350, damping: 25 }}
+                          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+                          className={`glass-card overflow-hidden flex flex-col ${stage.id === 'blocked' ? 'p-0' : 'p-3 hover-lift cursor-pointer'}`}
+                          onClick={stage.id === 'blocked' ? undefined : openThoughts}
+                        >
+                          {stage.id === 'blocked' ? (
+                            <>
                               <button
                                 type="button"
-                                className="text-[10px] px-2.5 py-1 rounded-md bg-warning/15 border border-warning/25 text-warning font-medium hover:bg-warning/25 transition-colors"
-                                onClick={() => { setUnblockTarget(item); setUnblockQueueNote(''); }}
+                                className="p-3 text-left w-full hover:bg-muted/10 transition-colors"
+                                onClick={openThoughts}
                               >
-                                Unblock…
+                                {cardInner}
                               </button>
-                              <span className="text-[9px] text-muted-foreground self-center flex-1">Add guidance, then resume the same role</span>
-                            </div>
-                          </>
-                        ) : (
-                          cardInner
-                        )}
-                      </motion.div>
-                    );
-                  })}
+                              <div className="flex gap-2 px-3 py-2 border-t border-border/30 bg-destructive/[0.03]">
+                                <button
+                                  type="button"
+                                  className="text-[10px] px-2.5 py-1 rounded-md bg-warning/15 border border-warning/25 text-warning font-medium hover:bg-warning/25 transition-colors"
+                                  onClick={() => { setUnblockTarget(item); setUnblockQueueNote(''); }}
+                                >
+                                  Unblock…
+                                </button>
+                                <span className="text-[9px] text-muted-foreground self-center flex-1">Add guidance, then resume the same role</span>
+                              </div>
+                            </>
+                          ) : (
+                            cardInner
+                          )}
+                        </motion.div>
+                      );
+                    })}
+                  </AnimatePresence>
                   {items.length === 0 && (
                     <div className="glass-surface p-4 text-center text-xs text-muted-foreground">Empty</div>
                   )}

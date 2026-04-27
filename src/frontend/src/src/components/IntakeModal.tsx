@@ -545,13 +545,30 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                         <div><span className="text-foreground/80">Provider:</span> {planningStatus.provider ?? '—'} {planningStatus.model ? `· ${planningStatus.model}` : ''}</div>
                         <div><span className="text-foreground/80">Host:</span> {planningStatus.host ?? planningStatus.baseUrl ?? '—'}</div>
                         <div><span className="text-foreground/80">Connection test:</span> {planningStatus.connectionTestOk == null ? 'pending' : planningStatus.connectionTestOk ? 'ok' : 'failed'}{connectionElapsed ? ` · ${connectionElapsed}` : ''}</div>
-                        <div><span className="text-foreground/80">Planner request:</span> {requestElapsed ? `${requestElapsed} elapsed` : 'queued'}{planningStatus.timeoutSeconds ? ` · timeout ${planningStatus.timeoutSeconds}s` : ''}</div>
+                      </div>
+                      <div className="pt-1">
+                        <div className="flex justify-between text-[11px] mb-1">
+                          <span className="text-foreground/80">Planning Progress</span>
+                          <span className="text-muted-foreground">
+                            {planningStatus.requestElapsedSeconds?.toFixed(0) ?? 0}s / {planningStatus.timeoutSeconds ?? 300}s
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full bg-black/40 rounded-full overflow-hidden border border-white/5">
+                          <div 
+                            className={cn("h-full transition-all duration-1000", planningStatus.stage === 'failed' ? "bg-destructive" : "bg-primary")} 
+                            style={{ width: `${Math.min(((planningStatus.requestElapsedSeconds ?? 0) / (planningStatus.timeoutSeconds ?? 300)) * 100, 100)}%` }} 
+                          />
+                        </div>
                       </div>
                       {planningStatus.connectionTestResult && (
                         <div className="text-[11px] text-muted-foreground break-all">{planningStatus.connectionTestResult}</div>
                       )}
                       {planningStatus.failureText && (
-                        <div className="text-[11px] text-destructive break-all">{planningStatus.failureText}</div>
+                        <div className="text-[11px] text-destructive break-all bg-destructive/10 p-2 rounded border border-destructive/20 mt-2">
+                          {planningStatus.failureText.includes('timeout') || ((planningStatus.requestElapsedSeconds ?? 0) >= (planningStatus.timeoutSeconds ?? 300))
+                            ? `Planning timed out after ${planningStatus.timeoutSeconds ?? 300} seconds. The model took too long to respond.`
+                            : planningStatus.failureText}
+                        </div>
                       )}
                     </div>
                   )}
@@ -601,8 +618,33 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     {phase === 'chat' && (
                       <div className="border-t border-white/8 p-3 space-y-2">
                         {error && (
-                          <div className="flex items-center gap-1.5 text-destructive text-[11px]">
-                            <AlertCircle className="w-3 h-3 shrink-0" />{error}
+                          <div className="flex flex-col gap-2 p-2.5 bg-destructive/10 border border-destructive/20 rounded-lg">
+                            <div className="flex items-center gap-1.5 text-destructive text-[11px]">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />{error}
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={startSession}
+                                className="text-[10px] px-3 py-1.5 bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md font-medium transition-colors"
+                              >
+                                Retry Planning
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {!error && planSource === 'placeholder' && (
+                          <div className="flex flex-col gap-2 p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                            <div className="flex items-center gap-1.5 text-amber-500 text-[11px]">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />The model failed to generate a plan.
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={startSession}
+                                className="text-[10px] px-3 py-1.5 bg-amber-500 text-amber-950 hover:bg-amber-400 rounded-md font-medium transition-colors"
+                              >
+                                Retry Planning
+                              </button>
+                            </div>
                           </div>
                         )}
                         <div className="flex gap-2">
