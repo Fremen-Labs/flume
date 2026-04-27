@@ -240,23 +240,23 @@ func (g *gaugeVec) snapshot() map[string]float64 {
 
 // Metrics is the global metrics registry for the Flume Gateway.
 var Metrics = &metricsRegistry{
-	EnsembleRequests:     newCounterVec(),
-	EnsembleScores:       newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
-	EnsembleDuration:     newHistogram([]float64{0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0}),
-	EscalationTotal:      &simpleCounter{},
-	LocalRequests:        newCounterVec(),
-	VRAMPressureEvents:   &simpleCounter{},
-	RequestDuration:      newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
-	ActiveModels:         newGaugeVec(),
-	NodeRequests:         newCounterVec(),
-	RoutingDecisions:     newCounterVec(),
-	NodeLoad:             newGaugeVec(),
-	NodeHealthGauge:      newGaugeVec(),
-	LocalOffloadPct:      newGaugeVec(),
-	WorkerTokens:         newCounterVec(),
-	FrontierSpend:        newCounterVec(),
+	EnsembleRequests:      newCounterVec(),
+	EnsembleScores:        newHistogram([]float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
+	EnsembleDuration:      newHistogram([]float64{0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0}),
+	EscalationTotal:       &simpleCounter{},
+	LocalRequests:         newCounterVec(),
+	VRAMPressureEvents:    &simpleCounter{},
+	RequestDuration:       newHistogram([]float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0}),
+	ActiveModels:          newGaugeVec(),
+	NodeRequests:          newCounterVec(),
+	RoutingDecisions:      newCounterVec(),
+	NodeLoad:              newGaugeVec(),
+	NodeHealthGauge:       newGaugeVec(),
+	LocalOffloadPct:       newGaugeVec(),
+	WorkerTokens:          newCounterVec(),
+	FrontierSpend:         newCounterVec(),
 	FrontierCircuitBreaks: newCounterVec(),
-	
+
 	ConcurrencyThrottledTotal: &simpleCounter{},
 	BackoffEventsTotal:        &simpleCounter{},
 	TasksBlockedTotal:         &simpleCounter{},
@@ -314,13 +314,13 @@ type metricsRegistry struct {
 
 	// flume_frontier_circuit_breaks_total{provider, model}
 	FrontierCircuitBreaks *counterVec
-	
+
 	// flume_concurrency_throttled_total
 	ConcurrencyThrottledTotal *simpleCounter
-	
+
 	// flume_backoff_events_total
 	BackoffEventsTotal *simpleCounter
-	
+
 	// flume_tasks_blocked_total
 	TasksBlockedTotal *simpleCounter
 }
@@ -528,7 +528,7 @@ func HandleMetrics() http.HandlerFunc {
 		buf = append(buf, "go_memstats_alloc_bytes "...)
 		buf = strconv.AppendUint(buf, mem.Alloc, 10)
 		buf = append(buf, '\n')
-		
+
 		buf = append(buf, "# HELP go_memstats_sys_bytes Number of bytes obtained from system.\n"...)
 		buf = append(buf, "# TYPE go_memstats_sys_bytes gauge\n"...)
 		buf = append(buf, "go_memstats_sys_bytes "...)
@@ -653,9 +653,9 @@ func HandleMetrics() http.HandlerFunc {
 		for labels, val := range Metrics.LocalOffloadPct.snapshot() {
 			buf = append(buf, "flume_local_offload_percentage"...)
 			if labels != "" {
-				buf = append(buf, '{')  
+				buf = append(buf, '{')
 				buf = append(buf, labels...)
-				buf = append(buf, '}')  
+				buf = append(buf, '}')
 			}
 			buf = append(buf, ' ')
 			buf = strconv.AppendFloat(buf, val, 'f', 1, 64)

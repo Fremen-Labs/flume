@@ -23,7 +23,7 @@ func TestIsValidNodeID(t *testing.T) {
 		{"worker01", true},
 		{"a", true},
 		{"some-very-long-node-id-that-is-still-under-64-characters-012345", true},
-		{"", false}, // empty
+		{"", false},       // empty
 		{"node_1", false}, // underscores not allowed
 		{"Node-1", false}, // uppercase not allowed
 		{"node@1", false}, // special chars not allowed
@@ -47,12 +47,12 @@ func TestIsValidNodeHost(t *testing.T) {
 		{"192.168.1.50:11434", true},
 		{"ollama.internal:11434", true},
 		{"10.0.0.5:80", true},
-		{"", false}, // empty
-		{"192.168.1.50", false}, // no port
-		{"localhost:11434", true}, // localhost allowed for local node registration
-		{"127.0.0.1:11434", true}, // loopback allowed
-		{"[::1]:11434", false}, // ipv6 loopback - currently fails net.SplitHostPort format unless it's correctly bracketed, actually net.SplitHostPort handles it, but let's test it as true
-		{"0.0.0.0:11434", true}, // wildcard allowed
+		{"", false},                   // empty
+		{"192.168.1.50", false},       // no port
+		{"localhost:11434", true},     // localhost allowed for local node registration
+		{"127.0.0.1:11434", true},     // loopback allowed
+		{"[::1]:11434", false},        // ipv6 loopback - currently fails net.SplitHostPort format unless it's correctly bracketed, actually net.SplitHostPort handles it, but let's test it as true
+		{"0.0.0.0:11434", true},       // wildcard allowed
 		{"169.254.169.254:80", false}, // link local metadata
 	}
 
@@ -156,13 +156,13 @@ func TestHandleDeleteNode(t *testing.T) {
 	// However, httptest.NewRequest doesn't easily populate PathValue without a real mux routing.
 	// We will just test the invalid ID logic by passing a bad ID in PathValue if possible,
 	// or we can just test the HTTP mux integration.
-	
+
 	srv.mux.HandleFunc("DELETE /api/nodes/{id}", srv.handleDeleteNode)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/nodes/Invalid_ID!", nil)
 	req = req.WithContext(ContextWithLogger(req.Context(), Log()))
 	w := httptest.NewRecorder()
-	
+
 	srv.mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {

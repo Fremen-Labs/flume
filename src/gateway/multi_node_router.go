@@ -153,7 +153,7 @@ func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, t
 		slog.String("task_type", taskType),
 	)
 	Metrics.RecordRoutingDecision("hybrid_local", taskType)
-	
+
 	resp, err := m.executeLocalOnly(ctx, req, taskType, withTools, log)
 	if err != nil {
 		// HA Fallback: If local mesh actively drops the request because all nodes are offline,
@@ -166,7 +166,7 @@ func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, t
 			fallbackModel := policy.SelectWeightedFrontier(req.AgentRole)
 			if fallbackModel != nil {
 				Metrics.RecordRoutingDecision("hybrid_ha_failover", taskType)
-				
+
 				cloned := cloneChatRequest(req)
 				cloned.Model = fallbackModel.Model
 				cloned.Provider = fallbackModel.Provider

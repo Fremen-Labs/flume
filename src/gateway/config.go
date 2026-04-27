@@ -119,10 +119,10 @@ func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 	}
 	return &Config{
 		PrometheusEnabled: true,
-		AgentModels:     make(map[string]AgentModelConfig),
-		Credentials:     make(map[string]CredentialMeta),
-		cacheTTL:        cacheTTL,
-		esURL:           strings.TrimRight(esURL, "/"),
+		AgentModels:       make(map[string]AgentModelConfig),
+		Credentials:       make(map[string]CredentialMeta),
+		cacheTTL:          cacheTTL,
+		esURL:             strings.TrimRight(esURL, "/"),
 		httpClient: &http.Client{
 			Timeout: 3 * time.Second,
 			Transport: &http.Transport{
@@ -376,7 +376,7 @@ func (c *Config) loadSystemConfig(ctx context.Context, log *slog.Logger) {
 	if !ok {
 		return
 	}
-	
+
 	if enabled, ok := src["prometheus_enabled"].(bool); ok {
 		c.PrometheusEnabled = enabled
 	} else if enabledStr, ok := src["prometheus_enabled"].(string); ok {

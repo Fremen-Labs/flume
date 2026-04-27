@@ -25,7 +25,7 @@ func CleanJSONResponse(raw string) string {
 			return strings.TrimSpace(after[:end])
 		}
 	}
-	
+
 	// Optional fallback code fence if they used ``` without json
 	if strings.HasPrefix(s, "```") && strings.HasSuffix(s, "```") {
 		s = strings.TrimPrefix(s, "```")
@@ -35,20 +35,20 @@ func CleanJSONResponse(raw string) string {
 
 	// 2. Direct bracket wrapping (already valid or close to it)
 	if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
-	   (strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+		(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
 		return s
 	}
 
 	// 3. Fallback: Find the largest bounding box of { ... } or [ ... ]
 	firstBrace := strings.Index(s, "{")
 	lastBrace := strings.LastIndex(s, "}")
-	
+
 	firstBracket := strings.Index(s, "[")
 	lastBracket := strings.LastIndex(s, "]")
-	
+
 	hasObj := firstBrace != -1 && lastBrace != -1 && lastBrace > firstBrace
 	hasArr := firstBracket != -1 && lastBracket != -1 && lastBracket > firstBracket
-	
+
 	if hasObj && hasArr {
 		if firstBrace < firstBracket && lastBrace > lastBracket {
 			return strings.TrimSpace(s[firstBrace : lastBrace+1])
@@ -61,7 +61,7 @@ func CleanJSONResponse(raw string) string {
 	} else if hasArr {
 		return strings.TrimSpace(s[firstBracket : lastBracket+1])
 	}
-	
+
 	// If all else fails, return the original string
 	return s
 }

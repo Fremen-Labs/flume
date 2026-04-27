@@ -45,15 +45,15 @@ const (
 // FrontierModelWeight represents a single frontier model in the weighted mix,
 // including its spend budget and circuit-breaker state.
 type FrontierModelWeight struct {
-	Provider     string  `json:"provider"`       // "openai", "anthropic", "gemini", "xai"
-	Model        string  `json:"model"`          // "gpt-5", "claude-opus-4.7", etc.
-	CredentialID string  `json:"credential_id"`  // links to flume-llm-credentials
-	Weight       float64 `json:"weight"`         // 0.0–1.0, normalized at runtime
+	Provider     string  `json:"provider"`      // "openai", "anthropic", "gemini", "xai"
+	Model        string  `json:"model"`         // "gpt-5", "claude-opus-4.7", etc.
+	CredentialID string  `json:"credential_id"` // links to flume-llm-credentials
+	Weight       float64 `json:"weight"`        // 0.0–1.0, normalized at runtime
 
 	// Spend Controls
 	BudgetUSD   float64 `json:"budget_usd"`   // User-configurable spend cap ($)
-	SpentUSD    float64 `json:"spent_usd"`     // Cumulative spend tracked by gateway
-	CircuitOpen bool    `json:"circuit_open"`  // True when budget exhausted
+	SpentUSD    float64 `json:"spent_usd"`    // Cumulative spend tracked by gateway
+	CircuitOpen bool    `json:"circuit_open"` // True when budget exhausted
 
 	// Live Telemetry (updated by active background probes)
 	LimitTokens       int64  `json:"limit_tokens,omitempty"`       // Max tokens allowed (typically per minute/day)
@@ -70,8 +70,8 @@ type RoutingPolicy struct {
 
 	Mode                RoutingMode           `json:"mode"`
 	FrontierMix         []FrontierModelWeight `json:"frontier_mix"`
-	FrontierLocalRatio  float64               `json:"frontier_local_ratio"`  // 0.0=all local, 1.0=all frontier
-	ComplexityThreshold int                   `json:"complexity_threshold"`  // 1-10 scale
+	FrontierLocalRatio  float64               `json:"frontier_local_ratio"` // 0.0=all local, 1.0=all frontier
+	ComplexityThreshold int                   `json:"complexity_threshold"` // 1-10 scale
 
 	// Per-role frontier pinning: role → model name
 	RolePinning map[string]string `json:"role_pinning,omitempty"`
@@ -84,29 +84,29 @@ type RoutingPolicy struct {
 // cost in USD. Updated April 2026 from official provider pricing pages.
 var CostPerMillionTokens = map[string]struct{ Input, Output float64 }{
 	// ── OpenAI (April 2026) ──────────────────────────────────────────
-	"gpt-5":        {1.25, 10.00},  // Current flagship
-	"gpt-4.1":      {2.00, 8.00},   // Production / 1M context
-	"gpt-4.1-mini": {0.10, 0.40},   // Budget tier
-	"gpt-4.1-nano": {0.10, 0.40},   // Ultra-budget tier
-	"o3":           {2.00, 8.00},   // Reasoning model
-	"o4-mini":      {1.10, 4.40},   // Lightweight reasoning
-	"gpt-4o":       {2.50, 10.00},  // Previous-gen flagship
-	"gpt-4o-mini":  {0.15, 0.60},   // Previous-gen budget
+	"gpt-5":        {1.25, 10.00}, // Current flagship
+	"gpt-4.1":      {2.00, 8.00},  // Production / 1M context
+	"gpt-4.1-mini": {0.10, 0.40},  // Budget tier
+	"gpt-4.1-nano": {0.10, 0.40},  // Ultra-budget tier
+	"o3":           {2.00, 8.00},  // Reasoning model
+	"o4-mini":      {1.10, 4.40},  // Lightweight reasoning
+	"gpt-4o":       {2.50, 10.00}, // Previous-gen flagship
+	"gpt-4o-mini":  {0.15, 0.60},  // Previous-gen budget
 
 	// ── Anthropic (April 2026) ───────────────────────────────────────
-	"claude-opus-4.7":  {5.00, 25.00},  // Latest flagship (Apr 16 2026)
-	"claude-sonnet-4.6":{3.00, 15.00},  // Balanced performance
-	"claude-haiku-4.5": {1.00, 5.00},   // Fast / cost-effective
+	"claude-opus-4.7":   {5.00, 25.00}, // Latest flagship (Apr 16 2026)
+	"claude-sonnet-4.6": {3.00, 15.00}, // Balanced performance
+	"claude-haiku-4.5":  {1.00, 5.00},  // Fast / cost-effective
 
 	// ── Google Gemini (April 2026) ───────────────────────────────────
-	"gemini-2.5-pro":       {1.25, 10.00},  // ≤200k context
-	"gemini-2.5-flash":     {0.30, 2.50},   // Fast multimodal
-	"gemini-2.5-flash-lite":{0.10, 0.40},   // Ultra-budget
+	"gemini-2.5-pro":        {1.25, 10.00}, // ≤200k context
+	"gemini-2.5-flash":      {0.30, 2.50},  // Fast multimodal
+	"gemini-2.5-flash-lite": {0.10, 0.40},  // Ultra-budget
 
 	// ── xAI Grok (April 2026) ────────────────────────────────────────
-	"grok-4.20":    {2.00, 6.00},   // Latest flagship (2M context)
-	"grok-4":       {3.00, 15.00},  // Premium w/ web search
-	"grok-4.1-fast":{0.20, 0.50},   // High-volume budget
+	"grok-4.20":     {2.00, 6.00},  // Latest flagship (2M context)
+	"grok-4":        {3.00, 15.00}, // Premium w/ web search
+	"grok-4.1-fast": {0.20, 0.50},  // High-volume budget
 }
 
 // DefaultRoutingPolicy returns the safe default: local_only mode with no

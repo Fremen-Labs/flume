@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -40,26 +41,26 @@ type Server struct {
 	// globalSem is a provider-agnostic gate applied before JSON decode.
 	// It prevents floods of non-Ollama requests from overwhelming the gateway
 	// before any per-provider semaphore has a chance to protect anything.
-	globalSem  chan struct{}
+	globalSem chan struct{}
 	// frontierQ gates concurrent cloud LLM escalation calls from the ensemble
 	// to prevent rate-limit cascades and unexpected cost spikes.
-	frontierQ  *FrontierQueue
+	frontierQ *FrontierQueue
 	// skills is the registry of Inception Skill handlers.
-	skills     *skills.SkillRegistry
+	skills *skills.SkillRegistry
 	// nodeRegistry manages the distributed Ollama node mesh.
-	nodeRegistry   *NodeRegistry
+	nodeRegistry *NodeRegistry
 	// healthChecker probes node health in the background.
-	healthChecker  *HealthChecker
+	healthChecker *HealthChecker
 	// frontierProber periodically polls active cloud models for token limits.
 	frontierProber *FrontierProber
 	// multiRouter coordinates smart routing across the node mesh.
-	multiRouter    *MultiNodeRouter
+	multiRouter *MultiNodeRouter
 	// nodeSems provides per-node concurrency semaphores for the distributed ensemble.
-	nodeSems       *NodeSemaphoreMap
+	nodeSems *NodeSemaphoreMap
 	// shuttingDown is set atomically when SIGTERM/SIGINT is received.
 	// The /readyz probe returns 503 while this is true so that
 	// Kubernetes removes the pod from Service endpoints before drain.
-	shuttingDown   atomic.Bool
+	shuttingDown atomic.Bool
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -84,9 +85,9 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		router:    router,
 		config:    config,
 		mux:       http.NewServeMux(),
-		ollamaSem:  NewOllamaSemaphore(maxConcurrent),
-		globalSem:  make(chan struct{}, globalMaxConcurrent()),
-		frontierQ:  NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
+		ollamaSem: NewOllamaSemaphore(maxConcurrent),
+		globalSem: make(chan struct{}, globalMaxConcurrent()),
+		frontierQ: NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -232,6 +233,16 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
 
+	// Apply request-level timeout if provided by the client
+	if timeoutStr := r.Header.Get("X-Timeout-Seconds"); timeoutStr != "" {
+		var timeoutSecs int
+		if _, err := fmt.Sscanf(timeoutStr, "%d", &timeoutSecs); err == nil && timeoutSecs > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
+			defer cancel()
+		}
+	}
+
 	s.config.Refresh(ctx)
 
 	log.Info("incoming "+label+" request",
@@ -327,6 +338,49 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"max":    cap(s.globalSem),
 		},
 	}
+
+	// Add node latency metrics
+	var latencies []int64
+	if s.nodeRegistry != nil {
+		for _, n := range s.nodeRegistry.AllNodes() {
+			if n.Health.Status == NodeStatusHealthy {
+				latencies = append(latencies, n.Health.LatencyMs)
+			}
+		}
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	var p50, p95, p99 int64
+	if len(latencies) > 0 {
+		p50 = latencies[int(float64(len(latencies))*0.50)]
+		p95 = latencies[int(float64(len(latencies))*0.95)]
+		p99 = latencies[int(float64(len(latencies))*0.99)]
+	}
+
+	metrics["node_mesh"] = map[string]interface{}{
+		"online_nodes": len(latencies),
+		"latency_ms": map[string]int64{
+			"p50": p50,
+			"p95": p95,
+			"p99": p99,
+		},
+	}
+
+	// Add circuit breakers from routing policy
+	policy := s.config.GetRoutingPolicy()
+	var circuitBreakers []map[string]interface{}
+	for _, m := range policy.FrontierMix {
+		circuitBreakers = append(circuitBreakers, map[string]interface{}{
+			"provider":     m.Provider,
+			"model":        m.Model,
+			"circuit_open": m.CircuitOpen,
+			"api_status":   m.APIStatus,
+			"spent_usd":    m.SpentUSD,
+			"budget_usd":   m.BudgetUSD,
+		})
+	}
+	metrics["circuit_breakers"] = circuitBreakers
+
 	s.writeJSON(w, http.StatusOK, metrics)
 }
 
@@ -732,7 +786,7 @@ func isValidNodeHost(host string) bool {
 	}
 
 	lowerHost := strings.ToLower(h)
-	
+
 	// Pre-filter outright path traversal or spaces
 	if strings.ContainsAny(lowerHost, "/\\?#& ") {
 		return false
@@ -837,7 +891,7 @@ type FrontierProviderCatalogEntry struct {
 	ID          string                 `json:"id"`
 	Label       string                 `json:"label"`
 	Models      []string               `json:"models"`
-	Credentials []CredentialPublicInfo  `json:"credentials"`
+	Credentials []CredentialPublicInfo `json:"credentials"`
 }
 
 // CredentialPublicInfo is the public (non-secret) info about a credential.
