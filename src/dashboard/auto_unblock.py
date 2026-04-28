@@ -35,8 +35,12 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -90,6 +94,8 @@ EVENT_PROCESS_FAILED = "auto_unblock.process_failed"
 EVENT_SWEEP = "auto_unblock.sweep"
 EVENT_STARTED = "auto_unblock.started"
 EVENT_SWEEP_CRASHED = "auto_unblock.sweep_crashed"
+EVENT_PARALLELISM_RESOLVED = "auto_unblock.parallelism_resolved"
+EVENT_PARALLELISM_FALLBACK = "auto_unblock.parallelism_fallback"
 
 # Rollup item types that unblock when children do — never auto-unblocked.
 _SKIP_ITEM_TYPES = frozenset({"epic", "feature", "story"})
@@ -107,6 +113,19 @@ _CLIP_REVIEW_LIMIT = 300
 # Context collection limits.
 _AGENT_LOG_TAIL_SIZE = 6
 _EXECUTION_THOUGHTS_TAIL_SIZE = 4
+
+# Dynamic parallelism — derived from the live node mesh at sweep time.
+# The backoff default (1 = sequential) is used when the gateway is
+# unreachable or reports zero healthy nodes.  The hard cap prevents
+# a large mesh from overwhelming the dashboard container's thread pool.
+_PARALLELISM_BACKOFF_DEFAULT = 1
+_PARALLELISM_HARD_CAP = 8
+_GATEWAY_HEALTH_TIMEOUT_SEC = 3
+
+# ES pagination — search_after page size and max pages to prevent
+# unbounded queries on very large blocked-task backlogs.
+_ES_PAGE_SIZE = 100
+_ES_MAX_CANDIDATE_PAGES = 10
 
 # Skip reason constants.
 SKIP_NOT_BLOCKED = "not_blocked"
@@ -462,23 +481,106 @@ def _escalate_task(
     )
 
 
-# ─── Sweep Orchestration ──────────────────────────────────────────────────────
+# ─── Dynamic Parallelism ──────────────────────────────────────────────────────
 
 
-def _sweep_once(
-    *,
-    es_search: Callable[[str, dict], dict],
-    es_post: Callable[[str, dict], Any],
-    append_note: Callable[[str, str], bool],
-) -> SweepSummary:
-    """Execute a single sweep. Returns a validated summary."""
-    config = AutoUnblockConfig.from_env()
-    summary = SweepSummary()
+def _resolve_parallelism(batch_limit: int) -> int:
+    """Derive thread-pool size from the live node mesh.
 
+    Queries the Go gateway's ``/health`` endpoint to read the
+    effective slot counts across all 3 operating modes:
+
+    * **Frontier-only** → ``frontier.frontier_max_slots``
+    * **Local-only**    → ``ollama.max_slots``
+    * **Hybrid**        → sum of frontier + ollama slots
+
+    The total available slots across the mesh are capped by the batch
+    limit and a hard ceiling to prevent thread-pool explosion.
+
+    Falls back to ``_PARALLELISM_BACKOFF_DEFAULT`` (sequential) when
+    the gateway is unreachable — this is the panic / degraded-mode
+    default.
+    """
     try:
-        res = es_search(ES_TASK_INDEX, {
-            "size": 200,
-            "sort": [{"updated_at": {"order": "asc"}}],
+        from config import get_settings  # noqa: PLC0415
+        gateway_url = get_settings().GATEWAY_URL
+
+        req = urllib.request.Request(
+            f"{gateway_url}/health",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        ctx = ssl._create_unverified_context()  # noqa: S323  — internal mesh only
+        with urllib.request.urlopen(
+            req, timeout=_GATEWAY_HEALTH_TIMEOUT_SEC, context=ctx
+        ) as resp:
+            data = json.loads(resp.read())
+
+        frontier_slots = int(
+            (data.get("frontier") or {}).get("frontier_max_slots") or 0
+        )
+        ollama_slots = int(
+            (data.get("ollama") or {}).get("max_slots") or 0
+        )
+        total_slots = frontier_slots + ollama_slots
+
+        if total_slots <= 0:
+            logger.debug(
+                "Gateway reports zero inference slots — sequential fallback",
+                extra={"structured_data": {
+                    "event": EVENT_PARALLELISM_FALLBACK,
+                    "frontier_slots": frontier_slots,
+                    "ollama_slots": ollama_slots,
+                }},
+            )
+            return _PARALLELISM_BACKOFF_DEFAULT
+
+        workers = min(total_slots, batch_limit, _PARALLELISM_HARD_CAP)
+        logger.debug(
+            "Dynamic parallelism resolved from mesh",
+            extra={"structured_data": {
+                "event": EVENT_PARALLELISM_RESOLVED,
+                "frontier_slots": frontier_slots,
+                "ollama_slots": ollama_slots,
+                "total_slots": total_slots,
+                "workers": workers,
+            }},
+        )
+        return workers
+
+    except SAFE_EXCEPTIONS:
+        logger.debug(
+            "Gateway unreachable — sequential fallback",
+            extra={"structured_data": {"event": EVENT_PARALLELISM_FALLBACK}},
+        )
+        return _PARALLELISM_BACKOFF_DEFAULT
+
+
+# ─── Paginated Candidate Fetch ────────────────────────────────────────────────
+
+
+def _fetch_blocked_candidates(
+    es_search: Callable[[str, dict], dict],
+    *,
+    max_candidates: int,
+) -> list[dict]:
+    """Paginate blocked tasks using ``search_after`` to eliminate the
+    previous 200-doc hard ceiling.
+
+    Stops when either ``max_candidates`` hits are collected or there
+    are no more results.  A tiebreaker sort on the task ``id`` field
+    guarantees deterministic page boundaries.
+    """
+    all_hits: list[dict] = []
+    search_after: Optional[list] = None
+
+    for _ in range(_ES_MAX_CANDIDATE_PAGES):
+        body: dict[str, Any] = {
+            "size": _ES_PAGE_SIZE,
+            "sort": [
+                {"updated_at": {"order": "asc", "unmapped_type": "date"}},
+                {"id": {"order": "asc", "unmapped_type": "keyword"}},
+            ],
             "query": {
                 "bool": {
                     "must": [{"term": {"status": STATUS_BLOCKED}}],
@@ -488,7 +590,136 @@ def _sweep_once(
                     ],
                 }
             },
-        })
+        }
+        if search_after is not None:
+            body["search_after"] = search_after
+
+        res = es_search(ES_TASK_INDEX, body)
+        hits = res.get("hits", {}).get("hits", []) or []
+        if not hits:
+            break
+
+        all_hits.extend(hits)
+        if len(all_hits) >= max_candidates:
+            break
+
+        search_after = hits[-1].get("sort")
+        if not search_after:
+            break
+
+    return all_hits
+
+
+# ─── Single-Task Processor ────────────────────────────────────────────────────
+
+
+def _process_task_item(
+    *,
+    hit: dict,
+    config: AutoUnblockConfig,
+    es_search: Callable[[str, dict], dict],
+    es_post: Callable[[str, dict], Any],
+    append_note: Callable[[str, str], bool],
+) -> tuple[str, Optional[str]]:
+    """Process a single blocked task.
+
+    Returns ``(action, task_id)`` where action is one of:
+    ``"escalated"``, ``"unblocked"``, ``"error"``.
+
+    Designed to be submitted to a ``ThreadPoolExecutor`` — all I/O
+    is self-contained per task and thread-safe (each task has a
+    unique ES doc ID).
+    """
+    es_id = hit.get("_id")
+    src = hit.get("_source") or {}
+    task_id = src.get("id")
+    reason = _should_skip(src, grace_sec=config.grace_sec, max_attempts=config.max_attempts)
+
+    if reason == SKIP_MAX_ATTEMPTS:
+        try:
+            _escalate_task(
+                es_id=es_id,
+                src=src,
+                max_attempts=config.max_attempts,
+                es_post=es_post,
+                append_note=append_note,
+            )
+            return "escalated", task_id
+        except SAFE_EXCEPTIONS as e:
+            logger.warning(
+                "Auto-unblock escalation failed",
+                extra={"structured_data": {
+                    "event": EVENT_ESCALATE_FAILED,
+                    "task_id": task_id,
+                    "error": str(e)[:200],
+                }},
+            )
+            return "error", task_id
+
+    # This branch should not be reached because the caller pre-filters
+    # skippable tasks, but guard defensively.
+    if reason:
+        return f"skipped:{reason}", task_id
+
+    try:
+        ctx = _collect_context(src, es_search)
+        plan, llm_ok = _llm_recovery_plan(src, ctx, timeout_seconds=config.llm_timeout_sec)
+        _requeue_task(
+            es_id=es_id,
+            src=src,
+            plan=plan,
+            llm_ok=llm_ok,
+            es_post=es_post,
+            append_note=append_note,
+        )
+        return "unblocked", task_id
+    except SAFE_EXCEPTIONS as e:
+        logger.warning(
+            "Auto-unblock task processing failed",
+            extra={"structured_data": {
+                "event": EVENT_PROCESS_FAILED,
+                "task_id": task_id,
+                "error": str(e)[:300],
+            }},
+        )
+        return "error", task_id
+
+
+# ─── Sweep Orchestration ──────────────────────────────────────────────────────
+
+
+def _sweep_once(
+    *,
+    es_search: Callable[[str, dict], dict],
+    es_post: Callable[[str, dict], Any],
+    append_note: Callable[[str, str], bool],
+) -> SweepSummary:
+    """Execute a single sweep with dynamic parallelism.
+
+    **Phase 1 — Fetch**: Paginate through blocked tasks using
+    ``search_after`` to eliminate the old 200-doc hard ceiling.
+
+    **Phase 2 — Triage**: Pre-filter candidates synchronously (no I/O)
+    to separate processable tasks from skips.  Only processable tasks
+    are submitted to the thread pool.
+
+    **Phase 3 — Process**: Submit processable tasks to a
+    ``ThreadPoolExecutor`` whose size is dynamically derived from the
+    live node mesh via ``_resolve_parallelism``.  The Go gateway
+    distributes the LLM calls across all available inference nodes.
+    """
+    config = AutoUnblockConfig.from_env()
+    summary = SweepSummary()
+
+    # ── Phase 1: Paginated fetch ───────────────────────────────────────
+    # Fetch more candidates than the batch limit to account for skips.
+    # E.g., if batch=10 but 40% of candidates are in grace window,
+    # we need ~17 candidates to fill 10 processable slots.
+    max_candidates = config.batch * 5
+    try:
+        all_hits = _fetch_blocked_candidates(
+            es_search, max_candidates=max_candidates,
+        )
     except SAFE_EXCEPTIONS as e:
         logger.warning(
             "Auto-unblock ES query failed",
@@ -497,68 +728,73 @@ def _sweep_once(
         summary.errors += 1
         return summary
 
-    hits = res.get("hits", {}).get("hits", []) or []
-    summary.scanned = len(hits)
+    summary.scanned = len(all_hits)
 
-    processed = 0
-    for h in hits:
-        if processed >= config.batch:
+    # ── Phase 2: Synchronous triage (no I/O) ───────────────────────────
+    processable: list[dict] = []
+    for h in all_hits:
+        if len(processable) >= config.batch:
             break
-        es_id = h.get("_id")
         src = h.get("_source") or {}
         reason = _should_skip(src, grace_sec=config.grace_sec, max_attempts=config.max_attempts)
-        if reason == SKIP_MAX_ATTEMPTS:
-            try:
-                _escalate_task(
-                    es_id=es_id,
-                    src=src,
-                    max_attempts=config.max_attempts,
-                    es_post=es_post,
-                    append_note=append_note,
-                )
-                summary.escalated += 1
-                summary.ids_escalated.append(src.get("id"))
-                processed += 1
-            except SAFE_EXCEPTIONS as e:
-                summary.errors += 1
-                logger.warning(
-                    "Auto-unblock escalation failed",
-                    extra={"structured_data": {
-                        "event": EVENT_ESCALATE_FAILED,
-                        "task_id": src.get("id"),
-                        "error": str(e)[:200],
-                    }},
-                )
-            continue
-        if reason:
+        if reason and reason != SKIP_MAX_ATTEMPTS:
             summary.skipped += 1
             summary.skip_reasons[reason] = summary.skip_reasons.get(reason, 0) + 1
             continue
+        # SKIP_MAX_ATTEMPTS tasks go to processable — they need escalation.
+        processable.append(h)
 
-        try:
-            ctx = _collect_context(src, es_search)
-            plan, llm_ok = _llm_recovery_plan(src, ctx, timeout_seconds=config.llm_timeout_sec)
-            _requeue_task(
-                es_id=es_id,
-                src=src,
-                plan=plan,
-                llm_ok=llm_ok,
+    if not processable:
+        return summary
+
+    # ── Phase 3: Parallel processing ───────────────────────────────────
+    parallelism = _resolve_parallelism(len(processable))
+
+    with ThreadPoolExecutor(
+        max_workers=parallelism,
+        thread_name_prefix="flume-unblock",
+    ) as pool:
+        futures = {
+            pool.submit(
+                _process_task_item,
+                hit=h,
+                config=config,
+                es_search=es_search,
                 es_post=es_post,
                 append_note=append_note,
-            )
-            summary.unblocked += 1
-            summary.ids_unblocked.append(src.get("id"))
-            processed += 1
-        except SAFE_EXCEPTIONS as e:
-            summary.errors += 1
-            logger.warning(
-                "Auto-unblock task processing failed",
-                extra={"structured_data": {
-                    "event": EVENT_PROCESS_FAILED,
-                    "task_id": src.get("id"),
-                    "error": str(e)[:300],
-                }},
-            )
+            ): h
+            for h in processable
+        }
+
+        for future in as_completed(futures):
+            try:
+                action, task_id = future.result()
+            except SAFE_EXCEPTIONS as e:
+                summary.errors += 1
+                logger.warning(
+                    "Auto-unblock future raised unexpected error",
+                    extra={"structured_data": {
+                        "event": EVENT_PROCESS_FAILED,
+                        "error": str(e)[:300],
+                    }},
+                )
+                continue
+
+            if action == "escalated":
+                summary.escalated += 1
+                summary.ids_escalated.append(task_id)
+            elif action == "unblocked":
+                summary.unblocked += 1
+                summary.ids_unblocked.append(task_id)
+            elif action == "error":
+                summary.errors += 1
+            elif action.startswith("skipped:"):
+                # Defensive: pre-filter should have caught this.
+                reason_key = action.split(":", 1)[1]
+                summary.skipped += 1
+                summary.skip_reasons[reason_key] = (
+                    summary.skip_reasons.get(reason_key, 0) + 1
+                )
 
     return summary
 
