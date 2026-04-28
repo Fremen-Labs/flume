@@ -705,7 +705,6 @@ async def lifespan(app: FastAPI):
             es_search=es_search,
             es_post=es_bulk_update_proxy,
             append_note=_lazy_append_task_agent_log_note,
-            logger=logger,
         )
     except SAFE_EXCEPTIONS as _exc:
         logger.warning(f'auto_unblock.start_failed: {_exc}')
