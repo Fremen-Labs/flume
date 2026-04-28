@@ -133,8 +133,11 @@ def _build_implementer_instruction(task: dict[str, Any]) -> str:
         " Use elastro_query_ast when looking for existing code symbols. "
         "For new docs/files or when AST is not relevant, explore with "
         "list_directory/read_file. Then call implementation_complete with a clear summary."
-        " If task.agent_log contains [Human guidance] or [Recovery], read those entries "
-        "first and align your work with them."
+        " If task.agent_log contains [Human guidance], [Recovery], or [Auto-recovery], "
+        "read those entries first and align your work with them. "
+        "[Auto-recovery] entries include a diagnostic plan from the auto-unblocker — "
+        "if the plan mentions an offline or degraded node, note that the gateway has "
+        "already rerouted traffic so focus on the code-level fix."
         " After a blocked/retry cycle, prefer validating with tests and fixing failures "
         "before handing off."
     )
