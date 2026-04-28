@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import importlib.util
 import json
 import os
 import re
@@ -21,9 +20,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 if str(BASE) not in sys.path:
     sys.path.insert(1, str(BASE))
-import llm_credentials_store as lcs  # noqa: E402
-import codex_app_server_bridge as codex_bridge  # noqa: E402
 from utils.es_auth import get_es_auth_headers  # noqa: E402
+from providers import get_registry  # noqa: E402
+from providers.registry import LLMResponse  # noqa: E402
 
 AGENTS_ROOT = BASE / 'agents'
 
@@ -56,205 +55,12 @@ class AgentResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-async def _emit_usage(
-    task: Optional[dict[str, Any]],
-    usage: dict,
-    *,
-    baseline_tokens: int = 0,
-    baseline_full_context_tokens: int = 0,
-    actual_tokens_sent: int = 0,
-    savings: int = 0,
-    client: httpx.AsyncClient = None,
-):
-    """Emit a token-usage telemetry document to agent-token-telemetry.
-
-    Args:
-        task: The active task dict (source of worker/role/model metadata).
-        usage: Raw usage dict from the LLM response (prompt_tokens, completion_tokens, etc.).
-        baseline_tokens: Tokens a Naive RAG approach would have consumed.
-        baseline_full_context_tokens: Tokens if the LLM received all blast-radius files.
-        actual_tokens_sent: Tokens actually consumed via Elastro's targeted results.
-        savings: Honest delta: baseline_tokens - actual_tokens_sent (>= 0).
-        client: Shared httpx.AsyncClient.
-    """
-    if not task or not usage or not client:
-        return
-    try:
-        from datetime import datetime, timezone
-        import os
-        es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-
-        # P4: Ollama returns prompt_eval_count/eval_count, OpenAI uses
-        # prompt_tokens/completion_tokens. Accept both key conventions.
-        input_tokens = (
-            usage.get('prompt_tokens')
-            or usage.get('prompt_eval_count')
-            or 0
-        )
-        output_tokens = (
-            usage.get('completion_tokens')
-            or usage.get('eval_count')
-            or 0
-        )
-        ts = datetime.now(timezone.utc).isoformat()
-        doc = {
-            '@timestamp': ts,
-            'worker_name': task.get('active_worker') or task.get('assigned_agent') or 'unknown-worker',
-            'worker_role': task.get('assigned_agent_role') or task.get('owner') or 'generic',
-            'provider': task.get('preferred_llm_provider') or task.get('llm_provider') or 'ollama',
-            'model': task.get('preferred_model') or task.get('llm_model') or 'unknown',
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens,
-            'savings': savings,
-            'baseline_tokens': baseline_tokens,
-            'baseline_full_context_tokens': baseline_full_context_tokens,
-            'actual_tokens_sent': actual_tokens_sent,
-            'created_at': ts
-        }
-        hdrs = {'Content-Type': 'application/json'}
-        hdrs.update(get_es_auth_headers())
-            
-        await client.post(
-            f"{es_url}/agent-token-telemetry/_doc",
-            json=doc,
-            headers=hdrs,
-            timeout=2.0
-        )
-    except Exception as e:
-        logger.warning(f"[metrics] Telemetry delivery aborted: {e}")
-
-async def _sync_task_execution_host(task: Optional[dict[str, Any]], telemetry: dict, client: httpx.AsyncClient = None):
-    if not task or not telemetry or not client:
-        return
-    tid = task.get('id', task.get('_id'))
-    if not tid:
-        return
-    host = telemetry.get('node_host')
-    model = telemetry.get('model')
-    if not host:
-        return
-    try:
-        import os
-        es_url = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-        hdrs = {'Content-Type': 'application/json'}
-        hdrs.update(get_es_auth_headers())
-            
-        doc = {'execution_host': host}
-        if model:
-            doc['model'] = model
-            
-        await client.post(
-            f"{es_url}/{os.environ.get('ES_INDEX_TASKS', 'agent-task-records')}/_update/{tid}",
-            json={'doc': doc},
-            headers=hdrs,
-            timeout=2.0
-        )
-        logger.info(f"Synchronized execution telemetry to core worker registry for task {tid}")
-    except Exception as e:
-        logger.warning(f"Failed to sync execution host to task: {e}")
 
 def _load_system_prompt(role: str) -> str:
     prompt_path = AGENTS_ROOT / role / 'SYSTEM_PROMPT.md'
     if prompt_path.exists():
         return prompt_path.read_text()
     return f"You are the {role} agent. Produce concise, actionable outputs."
-
-
-def _task_llm_kw(task: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """Route LLM calls per task: saved credential (API key + provider) or preferred_llm_provider."""
-    if not task:
-        return {}
-    cred_id = str(task.get('preferred_llm_credential_id') or '').strip()
-    if cred_id and cred_id != lcs.SETTINGS_DEFAULT_CREDENTIAL_ID:
-        resolved = lcs.get_resolved_for_worker(BASE, cred_id)
-        if resolved:
-            bu = (resolved.get('base_url') or '').strip() or None
-            return {
-                'provider_override': resolved['provider'],
-                'base_url_override': bu,
-                'api_key_override': resolved.get('api_key', ''),
-            }
-    pov = (task.get('preferred_llm_provider') or '').strip().lower()
-    if not pov:
-        return {}
-    return {'provider_override': pov, 'base_url_override': None}
-
-
-def _task_uses_codex_app_server(task: Optional[dict[str, Any]]) -> bool:
-    if not task:
-        return False
-    cred_id = str(task.get('preferred_llm_credential_id') or '').strip()
-    if cred_id == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
-        return codex_bridge.codex_auth_present() and codex_bridge.codex_available()
-    if cred_id and cred_id not in ('', lcs.SETTINGS_DEFAULT_CREDENTIAL_ID):
-        return False
-    provider = (task.get('preferred_llm_provider') or '').strip().lower()
-    if provider and provider != 'openai':
-        return False
-    api_key = (os.environ.get('LLM_API_KEY') or '').strip()
-    has_oauth = bool((os.environ.get('OPENAI_OAUTH_STATE_FILE') or '').strip() or (os.environ.get('OPENAI_OAUTH_STATE_JSON') or '').strip())
-    if provider == 'openai' and has_oauth and not (api_key.startswith('sk-') or api_key.startswith('sk_')):
-        return codex_bridge.codex_auth_present() and codex_bridge.codex_available()
-    return False
-
-
-async def _call_ollama(
-    system_prompt: str,
-    user_payload: dict[str, Any],
-    model: Optional[str] = None,
-    task: Optional[dict[str, Any]] = None,
-    client: httpx.AsyncClient = None,
-) -> Optional[dict[str, Any]]:
-    from utils import llm_client
-    messages = [
-        {'role': 'system', 'content': system_prompt},
-        {'role': 'user', 'content': json.dumps(user_payload, indent=2)},
-    ]
-    if not client:
-        logger.error("[agent_runner] _call_ollama missing httpx client")
-        return None
-        
-    try:
-        kw = _task_llm_kw(task)
-        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        content, usage, telemetry = await llm_client.chat_async(
-            client,
-            messages,
-            model=model or _current_llm_model(),
-            temperature=0.2,
-            max_tokens=8192,
-            return_usage=True,
-            return_telemetry=True,
-            timeout_seconds=300,
-            ollama_think=False,
-            agent_role=role,
-            task_id=task.get('id', task.get('_id')) if task else None,
-            **kw,
-        )
-        await _emit_usage(task, usage, client=client)
-        await _sync_task_execution_host(task, telemetry, client=client)
-        content = content.strip()
-        try:
-            val = content
-            # P3: Robust JSON fence extraction — handle trailing prose after
-            # closing fence, case-insensitive language tags, and nested fences.
-            if val.startswith('```'):
-                # Find the opening fence line and skip it
-                first_nl = val.index('\n') if '\n' in val else len(val)
-                inner = val[first_nl + 1:]
-                # Find the LAST closing fence
-                last_fence = inner.rfind('```')
-                if last_fence != -1:
-                    inner = inner[:last_fence]
-                val = inner.strip()
-            return json.loads(val)
-        except json.JSONDecodeError:
-            logger.warning(f'[agent_runner] LLM JSON parse failed — raw response (first 2000 chars): {content[:2000]}')
-            return None
-    except Exception as e:
-        logger.error(f"LLM Execution Trap: {e}", exc_info=True)
-        raise e
-
 
 
 
@@ -838,62 +644,12 @@ def _exec_run_shell(args: dict, repo_path: Optional[str]) -> str:
         return json.dumps({"status": "error", "message": f"Execution failed: {e}", "error_type": type(e).__name__})
 
 
-_LLM_CLIENT = None
 
+# ── JSON Response Schemas ────────────────────────────────────────────────
+# These schemas define the expected JSON output structure for each agent role.
+# They are passed to the provider via json_schema= to enforce structured output.
 
-def _load_llm_client():
-    global _LLM_CLIENT
-    if _LLM_CLIENT and getattr(_LLM_CLIENT, '__file__', '') == str(HERE.parent / 'utils' / 'llm_client.py'):
-        return _LLM_CLIENT
-    path = HERE.parent / 'utils' / 'llm_client.py'
-    spec = importlib.util.spec_from_file_location('worker_manager_llm_client', path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(mod)
-    _LLM_CLIENT = mod
-    return mod
-
-
-async def _call_ollama_tools(
-    messages: list,
-    tools: list,
-    model: str,
-    task: Optional[dict[str, Any]] = None,
-    client: httpx.AsyncClient = None,
-) -> Optional[dict]:
-    try:
-        from utils import llm_client
-        if not client:
-            logger.error("[agent_runner] _call_ollama_tools missing httpx client")
-            return None
-            
-        _task_llm_kw(task)  # resolve creds into env side-effects
-        role = task.get('assigned_agent_role') or task.get('owner') or '' if task else ''
-        res, telemetry = await llm_client.chat_with_tools_async(
-            client,
-            messages,
-            tools,
-            model=model,
-            temperature=0.2,
-            max_tokens=4096,
-            return_telemetry=True,
-            ollama_think=True,
-            agent_role=role,
-            task_id=task.get('id', task.get('_id')) if task else None,
-        )
-        
-        usage = res.get('usage', {}) if isinstance(res, dict) else {}
-        if usage:
-            await _emit_usage(task, usage, client=client)
-        await _sync_task_execution_host(task, telemetry, client=client)
-            
-        return res
-    except Exception as e:
-
-        logger.error(f"[agent_runner] _call_ollama_tools error: {type(e).__name__}: {e}", exc_info=True)
-        return None
-
-def _codex_json_schema_implementer() -> dict[str, Any]:
+def _json_schema_implementer() -> dict[str, Any]:
     return {
         'type': 'object',
         'properties': {
@@ -906,7 +662,7 @@ def _codex_json_schema_implementer() -> dict[str, Any]:
     }
 
 
-def _codex_json_schema_tester() -> dict[str, Any]:
+def _json_schema_tester() -> dict[str, Any]:
     return {
         'type': 'object',
         'properties': {
@@ -931,7 +687,7 @@ def _codex_json_schema_tester() -> dict[str, Any]:
     }
 
 
-def _codex_json_schema_reviewer() -> dict[str, Any]:
+def _json_schema_reviewer() -> dict[str, Any]:
     return {
         'type': 'object',
         'properties': {
@@ -943,7 +699,7 @@ def _codex_json_schema_reviewer() -> dict[str, Any]:
     }
 
 
-def _codex_json_schema_pm() -> dict[str, Any]:
+def _json_schema_pm() -> dict[str, Any]:
     return {
         'type': 'object',
         'properties': {
@@ -966,14 +722,6 @@ def _codex_json_schema_pm() -> dict[str, Any]:
         'required': ['action', 'summary'],
         'additionalProperties': False,
     }
-
-
-def _run_codex_json_task(prompt: str, schema: dict[str, Any], *, model: str, cwd: str) -> dict[str, Any] | None:
-    try:
-        return codex_bridge.run_turn_json(prompt, model=model, cwd=cwd, output_schema=schema, timeout=300)
-    except Exception as e:
-        logger.info(f'[agent_runner] Codex app-server error: {type(e).__name__}: {e}')
-        raise e
 
 
 # ── Pre-flight phantom task detection ────────────────────────────────────
@@ -1136,10 +884,16 @@ async def run_implementer(
             except Exception:
                 pass
 
-    if _task_uses_codex_app_server(task) and repo_path:
+    # ── Provider-aware structured output (Codex path) ──────────────────────
+    # When the resolved provider is 'codex', use its structured JSON workflow
+    # instead of the tool-calling loop. Codex handles file edits internally.
+    registry = get_registry()
+    provider = registry.resolve(task)
+    if provider.name == 'codex' and repo_path:
         max_codex_attempts = 3 if task.get('requires_code') else 1
+        schema = _json_schema_implementer()
         for attempt in range(1, max_codex_attempts + 1):
-            _progress(f'Using Codex app-server backend (attempt {attempt}/{max_codex_attempts})…')
+            _progress(f'Using Codex provider (attempt {attempt}/{max_codex_attempts})…')
             repo_file_hint = (
                 "\nEnsure your edits match the requested files."
                 if task.get('requires_code') else ''
@@ -1152,76 +906,59 @@ async def run_implementer(
                     "- You MUST include at least one changed path in artifacts.\n"
                     "- Do not return a no-op summary.\n"
                 )
-            prompt = (
-                f"SYSTEM PROMPT:\n{system_prompt}\n\n"
-                "You are operating inside the repository at the provided cwd. Make any needed file edits directly. "
-                "When finished, return ONLY JSON matching the required schema.\n\n"
-                f"TASK JSON:\n{json.dumps(task, indent=2)}\n\n"
-                f"REPO PATH: {repo_path}\n\n"
-                "If task.requires_code is true, you must make real code edits before finishing. "
-                "Set artifacts to the list of changed file paths relative to the repo root when possible."
-                + (
-                    "\nFor code tasks: artifacts must contain at least one edited file path."
-                    if task.get('requires_code') else ''
-                )
-                + repo_file_hint
-                + attempt_hint
-            )
+            messages_codex = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': (
+                    "You are operating inside the repository at the provided cwd. Make any needed file edits directly. "
+                    "When finished, return ONLY JSON matching the required schema.\n\n"
+                    f"TASK JSON:\n{json.dumps(task, indent=2)}\n\n"
+                    f"REPO PATH: {repo_path}\n\n"
+                    "If task.requires_code is true, you must make real code edits before finishing. "
+                    "Set artifacts to the list of changed file paths relative to the repo root when possible."
+                    + (
+                        "\nFor code tasks: artifacts must contain at least one edited file path."
+                        if task.get('requires_code') else ''
+                    )
+                    + repo_file_hint
+                    + attempt_hint
+                )},
+            ]
             try:
-                response = _run_codex_json_task(
-                    prompt,
-                    _codex_json_schema_implementer(),
-                    model=model,
-                    cwd=repo_path,
+                llm_resp = await provider.chat(
+                    client, messages_codex, model=model,
+                    json_schema=schema, agent_role='implementer',
+                    task_id=task.get('id', task.get('_id')), task=task,
                 )
+                response = json.loads(llm_resp.content) if isinstance(llm_resp.content, str) and llm_resp.content else llm_resp.raw
             except Exception as e:
                 err = str(e).strip().replace('\n', ' ')
                 if err:
-                    _thought(
-                        f"*[Codex]* attempt {attempt}/{max_codex_attempts} failed: {err[:500]}"
-                    )
+                    _thought(f"*[Codex]* attempt {attempt}/{max_codex_attempts} failed: {err[:500]}")
                 if attempt < max_codex_attempts:
                     _progress(f'Codex attempt {attempt}/{max_codex_attempts} failed — retrying.')
                     continue
                 return AgentResult(
                     action='implementer_failed',
-                    summary='Codex app-server failed after retries.',
+                    summary='Codex provider failed after retries.',
                     artifacts=[],
                     metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
                 )
             if response is None:
-                response = {
-                    'summary': 'Implementation attempt completed.',
-                    'commit_message': '',
-                    'artifacts': [],
-                }
-            if response is not None and not isinstance(response, dict):
-                response = {
-                    'summary': str(response).strip() or 'Implementation completed.',
-                    'commit_message': '',
-                    'artifacts': [],
-                }
+                response = {'summary': 'Implementation attempt completed.', 'commit_message': '', 'artifacts': []}
+            if not isinstance(response, dict):
+                response = {'summary': str(response).strip() or 'Implementation completed.', 'commit_message': '', 'artifacts': []}
             if response and isinstance(response, dict):
-                # For code tasks, require actual file edits before handing off.
                 if task.get('requires_code'):
                     resp_artifacts = [str(x) for x in (response.get('artifacts') or []) if str(x).strip()]
-                    import subprocess
                     status = subprocess.run(
                         ['git', '-C', repo_path, 'status', '--porcelain'],
-                        capture_output=True,
-                        text=True,
+                        capture_output=True, text=True,
                     )
                     has_changes = bool((status.stdout or '').strip())
                     if not has_changes or not resp_artifacts:
-                        _thought(
-                            f"*[Codex]* attempt {attempt}/{max_codex_attempts} produced "
-                            f"has_changes={has_changes}, artifacts={len(resp_artifacts)}"
-                        )
+                        _thought(f"*[Codex]* attempt {attempt}/{max_codex_attempts} produced has_changes={has_changes}, artifacts={len(resp_artifacts)}")
                         if attempt < max_codex_attempts:
-                            _progress(
-                                f'Codex returned insufficient edit evidence '
-                                f'(attempt {attempt}/{max_codex_attempts}) — retrying.'
-                            )
+                            _progress(f'Codex returned insufficient edit evidence (attempt {attempt}/{max_codex_attempts}) — retrying.')
                             continue
                 return AgentResult(
                     action='handoff_to_tester',
@@ -1229,14 +966,15 @@ async def run_implementer(
                     artifacts=[str(x) for x in (response.get('artifacts') or []) if str(x).strip()],
                     metadata={
                         'source': 'llm_agentic',
+                        'provider': provider.name,
                         'commit_sha': '',
                         'commit_message': str(response.get('commit_message') or '').strip(),
                     },
                 )
-        _progress('Codex app-server returned no usable file edits after retries.')
+        _progress('Codex provider returned no usable file edits after retries.')
         return AgentResult(
             action='implementer_failed',
-            summary='Codex app-server returned no usable file edits after retries.',
+            summary='Codex provider returned no usable file edits after retries.',
             artifacts=[],
             metadata={'source': 'llm_no_response', 'commit_sha': '', 'commit_message': ''},
         )
@@ -1325,8 +1063,15 @@ async def run_implementer(
             _progress('Nudge: require write_file before completion')
         dynamic_tools = _IMPLEMENTER_TOOLS.copy()
         dynamic_tools.append(_ELASTRO_QUERY_TOOL)
-            
-        raw = await _call_ollama_tools(messages, dynamic_tools, model, task=task, client=client)
+
+        # ── Provider-agnostic tool-calling ────────────────────────────────
+        llm_resp = await provider.chat_with_tools(
+            client, messages, dynamic_tools,
+            model=model, agent_role='implementer',
+            task_id=task.get('id', task.get('_id')),
+            task=task,
+        )
+        raw = llm_resp.raw if llm_resp else None
         if not raw:
             import random
             import os
@@ -1515,19 +1260,40 @@ async def run_implementer(
 
 
 async def run_tester(task: dict[str, Any], client: httpx.AsyncClient = None) -> AgentResult:
+    """Validate implementation quality via LLM-driven test analysis."""
     system_prompt = _load_system_prompt('tester')
-    response = await _call_ollama(
-        system_prompt,
-        {
+    registry = get_registry()
+    provider = registry.resolve(task)
+    model = task.get('preferred_model') or _current_llm_model()
+    schema = _json_schema_tester()
+
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': json.dumps({
             'instruction': (
                 'Return JSON: {"action":"pass|fail","summary":"...","bugs":[{"title":"...","objective":"...","severity":"high|normal"}]}'
             ),
             'task': task,
-        },
-        model=task.get('preferred_model') or _current_llm_model(),
+        }, indent=2)},
+    ]
+
+    llm_response = await provider.chat(
+        client,
+        messages,
+        model=model,
+        json_schema=schema,
+        agent_role='tester',
+        task_id=task.get('id', task.get('_id')),
         task=task,
-        client=client,
     )
+
+    response: Optional[dict[str, Any]] = None
+    if llm_response.content:
+        try:
+            response = json.loads(llm_response.content) if isinstance(llm_response.content, str) else llm_response.content
+        except json.JSONDecodeError:
+            logger.warning("run_tester: JSON parse failed — raw: %s", llm_response.content[:2000])
+
     if response and isinstance(response, dict):
         action = response.get('action', 'pass')
         if action == 'fail':
@@ -1536,23 +1302,44 @@ async def run_tester(task: dict[str, Any], client: httpx.AsyncClient = None) -> 
                 'objective': response.get('summary', 'Fix failing behavior found during validation.'),
                 'severity': 'high',
             }]
-            return AgentResult(action='fail', summary=response.get('summary', 'Testing failed.'), bugs=bugs, metadata={'source': 'llm'})
-        return AgentResult(action='pass', summary=response.get('summary', 'Testing passed.'), metadata={'source': 'llm'})
+            return AgentResult(action='fail', summary=response.get('summary', 'Testing failed.'), bugs=bugs, metadata={'source': 'llm', 'provider': provider.name})
+        return AgentResult(action='pass', summary=response.get('summary', 'Testing passed.'), metadata={'source': 'llm', 'provider': provider.name})
     return AgentResult(action='pass', summary='Testing passed by fallback policy.', metadata={'source': 'fallback'})
 
 
 async def run_reviewer(task: dict[str, Any], client: httpx.AsyncClient = None) -> AgentResult:
+    """Review implementation changes via LLM-driven code review."""
     system_prompt = _load_system_prompt('reviewer')
-    response = await _call_ollama(
-        system_prompt,
-        {
+    registry = get_registry()
+    provider = registry.resolve(task)
+    model = task.get('preferred_model') or _current_llm_model()
+    schema = _json_schema_reviewer()
+
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': json.dumps({
             'instruction': 'Return JSON: {"verdict":"approved|changes_requested","summary":"..."}',
             'task': task,
-        },
-        model=task.get('preferred_model') or _current_llm_model(),
+        }, indent=2)},
+    ]
+
+    llm_response = await provider.chat(
+        client,
+        messages,
+        model=model,
+        json_schema=schema,
+        agent_role='reviewer',
+        task_id=task.get('id', task.get('_id')),
         task=task,
-        client=client,
     )
+
+    response: Optional[dict[str, Any]] = None
+    if llm_response.content:
+        try:
+            response = json.loads(llm_response.content) if isinstance(llm_response.content, str) else llm_response.content
+        except json.JSONDecodeError:
+            logger.warning("run_reviewer: JSON parse failed — raw: %s", llm_response.content[:2000])
+
     if response and isinstance(response, dict):
         raw_verdict = response.get('verdict', 'approved')
         # Normalise: only 'approved' and 'changes_requested' are valid.
@@ -1565,7 +1352,7 @@ async def run_reviewer(task: dict[str, Any], client: httpx.AsyncClient = None) -
             action='review_complete',
             verdict=verdict,
             summary=response.get('summary', f'Review verdict: {verdict}.'),
-            metadata={'source': 'llm'},
+            metadata={'source': 'llm', 'provider': provider.name},
         )
     return AgentResult(
         action='review_complete',
@@ -1592,16 +1379,20 @@ def _get_cluster_topology() -> dict[str, Any]:
         return {'available_implementers': 1, 'target_models': ['unknown']}
 
 async def run_pm_dispatcher(task: Optional[dict[str, Any]] = None, client: httpx.AsyncClient = None) -> AgentResult:
-    logger.info("run_pm_dispatcher: started. getting system prompt.")
+    """Decompose or approve a task for execution.
+
+    Uses the ProviderRegistry to resolve the correct LLM backend based on
+    task configuration. JSON schema enforcement is applied uniformly
+    regardless of which provider handles the request.
+    """
+    logger.info("run_pm_dispatcher: started")
     system_prompt = _load_system_prompt('pm-dispatcher')
-    logger.info("run_pm_dispatcher: getting cluster topology.")
     topology = _get_cluster_topology()
-    logger.info(f"run_pm_dispatcher: got cluster topology {topology}. Checking codex app server.")
-    
+    logger.info("run_pm_dispatcher: cluster topology=%s", topology)
+
     # ── Complexity-aware instruction ──────────────────────────────────────
     # Prevent the PM from re-decomposing tasks that the planner already scoped.
     item_type = (task or {}).get('item_type', 'task')
-    
 
     instruction = (
         f"You are the Program Manager. Analyze the task and the following cluster execution topology:\n"
@@ -1645,40 +1436,50 @@ async def run_pm_dispatcher(task: Optional[dict[str, Any]] = None, client: httpx
                 "The Implementer models are Frontier API models — you may chunk work "
                 "into broader architecture scopes if decomposition is needed.\n"
             )
-    
-    if _task_uses_codex_app_server(task):
-        logger.info("run_pm_dispatcher: Using codex app server. calling _run_codex_json_task.")
-        prompt = (
-            f"SYSTEM PROMPT:\n{system_prompt}\n\n{instruction}\n\n"
-            'Return explicitly mapped JSON per the schema.\n'
-            f"TASK JSON:\n{json.dumps(task or {}, indent=2)}"
-        )
-        response = _run_codex_json_task(
-            prompt,
-            _codex_json_schema_pm(),
-            model=(task or {}).get('preferred_model') or _current_llm_model(),
-            cwd=str(BASE),
-        )
-        logger.info("run_pm_dispatcher: finished _run_codex_json_task.")
-    else:
-        logger.info("run_pm_dispatcher: calling _call_ollama.")
-        response = await _call_ollama(
-            system_prompt,
-            {
-                'instruction': instruction,
-                'task': task or {},
-            },
-            model=(task or {}).get('preferred_model') or _current_llm_model(),
-            task=task,
-            client=client,
-        )
-        logger.info("run_pm_dispatcher: finished _call_ollama.")
+
+    # ── Provider-agnostic LLM call ───────────────────────────────────────
+    registry = get_registry()
+    provider = registry.resolve(task)
+    model = (task or {}).get('preferred_model') or _current_llm_model()
+    schema = _json_schema_pm()
+
+    logger.info("run_pm_dispatcher: using provider=%s, model=%s", provider.name, model)
+
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': json.dumps({
+            'instruction': instruction,
+            'task': task or {},
+        }, indent=2)},
+    ]
+
+    llm_response = await provider.chat(
+        client,
+        messages,
+        model=model,
+        json_schema=schema,
+        agent_role='pm-dispatcher',
+        task_id=(task or {}).get('id', (task or {}).get('_id')),
+        task=task,
+    )
+
+    # ── Parse response ───────────────────────────────────────────────────
+    response: Optional[dict[str, Any]] = None
+    content = llm_response.content
+    if content:
+        try:
+            response = json.loads(content) if isinstance(content, str) else content
+        except json.JSONDecodeError:
+            logger.warning("run_pm_dispatcher: JSON parse failed — raw (first 2000 chars): %s", content[:2000])
+
+    logger.info("run_pm_dispatcher: completed via provider=%s", provider.name)
+
     if response and isinstance(response, dict):
         return AgentResult(
             action=response.get('action', 'compute_ready'),
             summary=response.get('summary', 'Computed readiness for queued tasks.'),
             subtasks=response.get('subtasks') or [],
-            metadata={'source': 'llm'},
+            metadata={'source': 'llm', 'provider': provider.name},
         )
     return AgentResult(
         action='compute_ready',
@@ -1686,3 +1487,25 @@ async def run_pm_dispatcher(task: Optional[dict[str, Any]] = None, client: httpx
         subtasks=[],
         metadata={'source': 'fallback'},
     )
+
+
+# ── Backward-compatible re-exports ───────────────────────────────────────
+# These symbols are imported by handler modules (handlers/pm.py, etc.) from
+# agent_runner, but they are actually defined in worker_handlers.py.
+# We re-export them here to preserve import compatibility during Phase 1.
+# Phase 2+ should update handler imports to source these directly.
+
+def _get_active_llm_model(default: str = 'llama3.2') -> str:
+    """Re-export: resolve active LLM model from workspace config or env."""
+    try:
+        from workspace_llm_env import get_active_llm_model
+        return get_active_llm_model(default)
+    except Exception:
+        return (os.environ.get('LLM_MODEL') or default).strip() or default
+
+
+async def _run_with_client(func, *args, **kwargs):
+    """Re-export: run an async agent function with a fresh httpx.AsyncClient."""
+    async with httpx.AsyncClient() as client:
+        kwargs['client'] = client
+        return await func(*args, **kwargs)
