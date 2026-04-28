@@ -4,24 +4,50 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-from utils.exceptions import SAFE_EXCEPTIONS
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
+from pydantic import BaseModel, Field, ValidationError
+
+from utils.exceptions import SAFE_EXCEPTIONS
 import llm_credentials_store as lcs  # type: ignore
 from llm_settings import load_effective_pairs, get_oauth_status, provider_catalog_for_workspace  # type: ignore
 from workspace_llm_env import normalize_gemini_model_id, resolve_cloud_agent_model  # type: ignore
 
-AGENT_ROLE_IDS = (
+AGENT_ROLE_IDS = frozenset({
     "intake",
     "pm",
     "implementer",
     "tester",
     "reviewer",
     "memory-updater",
-)
+})
+
+DEFAULT_MODEL = "llama3.2"
+DEFAULT_HOST = "localhost"
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_OPENAI = "openai"
+PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+PROVIDER_GEMINI = "gemini"
+
+
+class AgentRoleSpec(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    executionHost: Optional[str] = None
+    credentialId: Optional[str] = Field(default=lcs.SETTINGS_DEFAULT_CREDENTIAL_ID, alias="credential_id")
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+
+class AgentModelsDoc(BaseModel):
+    version: int = 1
+    roles: dict[str, Union[AgentRoleSpec, str]] = Field(default_factory=dict)
+
+
+class AgentModelsPayload(BaseModel):
+    roles: Optional[dict[str, Optional[Union[AgentRoleSpec, str, dict[str, Any]]]]] = None
 
 
 def agent_models_path(workspace_root: Path) -> Path:
@@ -38,15 +64,15 @@ def _catalog_entry(workspace_root: Path, provider_id: str) -> Optional[dict[str,
 def _provider_is_configured_env(workspace_root: Path, provider_id: str, pairs: dict[str, str]) -> bool:
     """Whether LLM_* env / OpenBao supports this provider (legacy / Settings default)."""
     pid = provider_id.strip().lower()
-    current = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
+    current = pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA).strip().lower()
     api_key = pairs.get("LLM_API_KEY", "").strip()
     base_url = pairs.get("LLM_BASE_URL", "").strip()
 
-    if pid == "ollama":
+    if pid == PROVIDER_OLLAMA:
         return True
 
-    if pid == "openai":
-        if current != "openai":
+    if pid == PROVIDER_OPENAI:
+        if current != PROVIDER_OPENAI:
             return False
         if api_key:
             return True
@@ -55,10 +81,10 @@ def _provider_is_configured_env(workspace_root: Path, provider_id: str, pairs: d
         except SAFE_EXCEPTIONS:
             return False
 
-    if pid == "openai_compatible":
-        return current == "openai_compatible" and bool(api_key) and bool(base_url)
+    if pid == PROVIDER_OPENAI_COMPATIBLE:
+        return current == PROVIDER_OPENAI_COMPATIBLE and bool(api_key) and bool(base_url)
 
-    if pid in ("anthropic", "gemini", "xai", "grok", "mistral", "cohere"):
+    if pid in ("anthropic", PROVIDER_GEMINI, "xai", "grok", "mistral", "cohere"):
         return current == pid and bool(api_key)
 
     return False
@@ -75,10 +101,10 @@ def provider_is_configured(
     cid = (credential_id or "").strip()
 
     if cid == lcs.OLLAMA_CREDENTIAL_ID:
-        return pid == "ollama"
+        return pid == PROVIDER_OLLAMA
 
     if cid == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
-        return pid == "openai" and _provider_is_configured_env(workspace_root, "openai", pairs)
+        return pid == PROVIDER_OPENAI and _provider_is_configured_env(workspace_root, PROVIDER_OPENAI, pairs)
 
     if cid and cid not in ("", lcs.SETTINGS_DEFAULT_CREDENTIAL_ID):
         cred = lcs.get_by_id(workspace_root, cid)
@@ -88,13 +114,13 @@ def provider_is_configured(
         if cprov != pid:
             return False
         key = str(cred.get("apiKey") or "").strip()
-        if pid == "openai_compatible":
+        if pid == PROVIDER_OPENAI_COMPATIBLE:
             return bool(key) and bool(str(cred.get("baseUrl") or "").strip())
-        if pid == "openai":
+        if pid == PROVIDER_OPENAI:
             if key:
                 return True
-            return _provider_is_configured_env(workspace_root, "openai", pairs)
-        if pid == "ollama":
+            return _provider_is_configured_env(workspace_root, PROVIDER_OPENAI, pairs)
+        if pid == PROVIDER_OLLAMA:
             return True
         return bool(key)
 
@@ -116,11 +142,11 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
     pairs = load_effective_pairs(workspace_root)
     out: list[dict[str, Any]] = []
 
-    current = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
+    current = pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA).strip().lower()
     entry = _catalog_entry(workspace_root, current)
     if entry:
         models = list(entry.get("models") or [])
-        if current == "openai_compatible":
+        if current == PROVIDER_OPENAI_COMPATIBLE:
             models = []
         settings_ok = _provider_is_configured_env(workspace_root, current, pairs)
         out.append(
@@ -131,7 +157,7 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "providerId": current,
                 "configured": settings_ok,
                 "models": models,
-                "allowCustomModelId": current in ("ollama", "openai_compatible", "xai", "grok"),
+                "allowCustomModelId": current in (PROVIDER_OLLAMA, PROVIDER_OPENAI_COMPATIBLE, "xai", "grok"),
                 "hint": None
                 if settings_ok
                 else "Set this provider and API key (or OAuth) under Settings → LLM.",
@@ -162,28 +188,28 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
             continue
         pid = lcs.normalize_provider_id(str(c.get("provider") or "").strip().lower())
         cat = _catalog_entry(workspace_root, pid)
-        if not cat and pid != "openai_compatible":
+        if not cat and pid != PROVIDER_OPENAI_COMPATIBLE:
             continue
         key = str(c.get("apiKey") or "").strip()
         base = str(c.get("baseUrl") or "").strip()
-        if pid == "openai_compatible" and not base:
+        if pid == PROVIDER_OPENAI_COMPATIBLE and not base:
             continue
         models = list(cat.get("models") or []) if cat else []
-        if pid == "openai_compatible":
+        if pid == PROVIDER_OPENAI_COMPATIBLE:
             models = []
         disp = cat.get("name", pid) if cat else pid
         lbl = str(c.get("label") or cid).strip() or cid
-        if pid == "openai":
+        if pid == PROVIDER_OPENAI:
             row_ok = bool(key) or oauth_ok
-        elif pid == "openai_compatible":
+        elif pid == PROVIDER_OPENAI_COMPATIBLE:
             row_ok = bool(key) and bool(base)
         else:
             row_ok = bool(key)
         hint = None
         if not row_ok:
-            if pid == "openai":
+            if pid == PROVIDER_OPENAI:
                 hint = "Paste an API key in Settings → LLM, or configure OpenAI OAuth."
-            elif pid == "openai_compatible":
+            elif pid == PROVIDER_OPENAI_COMPATIBLE:
                 hint = "Set base URL and API key under Settings → LLM for this profile."
             else:
                 hint = "Paste an API key for this label under Settings → LLM."
@@ -197,20 +223,20 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
                 "configured": row_ok,
                 "keySuffix": ks,
                 "models": models,
-                "allowCustomModelId": pid in ("ollama", "openai_compatible", "xai", "grok"),
+                "allowCustomModelId": pid in (PROVIDER_OLLAMA, PROVIDER_OPENAI_COMPATIBLE, "xai", "grok"),
                 "hint": hint,
             }
         )
 
     # Explicit OpenAI OAuth option when Codex/ChatGPT login is set up (even if Settings uses API key).
-    openai_entry = _catalog_entry(workspace_root, "openai")
+    openai_entry = _catalog_entry(workspace_root, PROVIDER_OPENAI)
     if openai_entry and oauth_ok:
         out.append(
             {
                 "credentialId": lcs.OPENAI_OAUTH_CREDENTIAL_ID,
                 "label": "OpenAI (OAuth — ChatGPT / Codex)",
                 "shortLabel": "OpenAI OAuth",
-                "providerId": "openai",
+                "providerId": PROVIDER_OPENAI,
                 "configured": True,
                 "models": list(openai_entry.get("models") or []),
                 "allowCustomModelId": False,
@@ -218,14 +244,14 @@ def available_credentials_for_agents(workspace_root: Path) -> list[dict[str, Any
             }
         )
 
-    ollama_entry = _catalog_entry(workspace_root, "ollama")
-    if ollama_entry and current != "ollama":
+    ollama_entry = _catalog_entry(workspace_root, PROVIDER_OLLAMA)
+    if ollama_entry and current != PROVIDER_OLLAMA:
         out.append(
             {
                 "credentialId": lcs.OLLAMA_CREDENTIAL_ID,
                 "label": ollama_entry.get("name", "Ollama (local)"),
                 "shortLabel": "Ollama",
-                "providerId": "ollama",
+                "providerId": PROVIDER_OLLAMA,
                 "configured": True,
                 "models": list(ollama_entry.get("models") or []),
                 "allowCustomModelId": True,
@@ -249,7 +275,7 @@ def _custom_model_ok(provider_id: str, model_id: str) -> bool:
         return False
     if not re.match(r"^[\w.\-:/]+$", mid):
         return False
-    return provider_id in ("ollama", "openai_compatible", "xai", "grok")
+    return provider_id in (PROVIDER_OLLAMA, PROVIDER_OPENAI_COMPATIBLE, "xai", "grok")
 
 
 def _role_model_allowed(groups: list[dict[str, Any]], cred_id: str, model: str) -> bool:
@@ -270,14 +296,14 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
     Provider groups the UI can offer. Primary provider (from Settings) + always Ollama for local overrides.
     """
     pairs = load_effective_pairs(workspace_root)
-    current = pairs.get("LLM_PROVIDER", "ollama").strip().lower()
+    current = pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA).strip().lower()
     out: list[dict[str, Any]] = []
 
     # Primary configured provider first
     entry = _catalog_entry(workspace_root, current)
     if entry and provider_is_configured(workspace_root, current, pairs):
         models = list(entry.get("models") or [])
-        if current == "openai_compatible":
+        if current == PROVIDER_OPENAI_COMPATIBLE:
             models = []  # free-text
         out.append(
             {
@@ -286,7 +312,7 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
                 "configured": True,
                 "isPrimary": True,
                 "models": models,
-                "allowCustomModelId": current == "openai_compatible",
+                "allowCustomModelId": current == PROVIDER_OPENAI_COMPATIBLE,
             }
         )
     elif entry:
@@ -297,17 +323,17 @@ def available_model_groups(workspace_root: Path) -> list[dict[str, Any]]:
                 "configured": False,
                 "isPrimary": True,
                 "models": list(entry.get("models") or []),
-                "allowCustomModelId": current == "openai_compatible",
+                "allowCustomModelId": current == PROVIDER_OPENAI_COMPATIBLE,
                 "hint": "Complete LLM authentication in Settings to use these models.",
             }
         )
 
     # Ollama — optional local routing per role
-    ollama_entry = _catalog_entry(workspace_root, "ollama")
+    ollama_entry = _catalog_entry(workspace_root, PROVIDER_OLLAMA)
     if ollama_entry:
         out.append(
             {
-                "providerId": "ollama",
+                "providerId": PROVIDER_OLLAMA,
                 "label": ollama_entry.get("name", "Ollama (local)"),
                 "configured": True,
                 "isPrimary": False,
@@ -336,31 +362,32 @@ def _allowed_model_ids(groups: list[dict[str, Any]]) -> set[tuple[str, str]]:
 
 def load_agent_models(workspace_root: Path) -> dict[str, Any]:
     path = agent_models_path(workspace_root)
+    default_doc = AgentModelsDoc().model_dump()
     if not path.is_file():
-        return {"version": 1, "roles": {}}
+        return default_doc
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return {"version": 1, "roles": {}}
-        data.setdefault("version", 1)
-        data.setdefault("roles", {})
-        if not isinstance(data["roles"], dict):
-            data["roles"] = {}
-        return data
-    except (OSError, json.JSONDecodeError):
-        return {"version": 1, "roles": {}}
+            return default_doc
+        return AgentModelsDoc(**data).model_dump()
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return default_doc
 
 
 def save_agent_models(workspace_root: Path, data: dict[str, Any]) -> None:
+    try:
+        model = AgentModelsDoc(**data)
+    except ValidationError:
+        return
     path = agent_models_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(model.model_dump(), indent=2) + "\n", encoding="utf-8")
 
 
 def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
     pairs = load_effective_pairs(workspace_root)
-    default_model = pairs.get("LLM_MODEL", "llama3.2").strip() or "llama3.2"
-    default_host = pairs.get("EXECUTION_HOST", "localhost").strip() or "localhost"
+    default_model = pairs.get("LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    default_host = pairs.get("EXECUTION_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     stored = load_agent_models(workspace_root)
     groups = available_model_groups(workspace_root)
     cred_groups = available_credentials_for_agents(workspace_root)
@@ -371,36 +398,45 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
         rdef = stored["roles"].get(role)
         if isinstance(rdef, str):
             rdef = {
-                "provider": pairs.get("LLM_PROVIDER", "ollama"),
+                "provider": pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA),
                 "model": rdef,
                 "executionHost": None,
                 "credentialId": lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
             }
         elif not isinstance(rdef, dict):
             rdef = {}
-        cred_id = str(rdef.get("credentialId") or rdef.get("credential_id") or "").strip()
+            
+        try:
+            spec = AgentRoleSpec(**rdef)
+        except ValidationError:
+            spec = AgentRoleSpec()
+            
+        cred_id = (spec.credentialId or "").strip()
         if not cred_id:
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
         if cred_id not in valid_cred_ids:
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            
         if cred_id == lcs.SETTINGS_DEFAULT_CREDENTIAL_ID:
-            prov = (rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
+            prov = (spec.provider or pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA)).strip().lower()
         elif cred_id == lcs.OLLAMA_CREDENTIAL_ID:
-            prov = "ollama"
+            prov = PROVIDER_OLLAMA
         elif cred_id == lcs.OPENAI_OAUTH_CREDENTIAL_ID:
-            prov = "openai"
+            prov = PROVIDER_OPENAI
         else:
             c = lcs.get_by_id(workspace_root, cred_id)
             prov = (
                 lcs.normalize_provider_id(
-                    str(c.get("provider") or rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
+                    str(c.get("provider") or spec.provider or pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA)).strip().lower()
                 )
                 if c
-                else (rdef.get("provider") or pairs.get("LLM_PROVIDER", "ollama")).strip().lower()
+                else (spec.provider or pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA)).strip().lower()
             )
-        model = (rdef.get("model") or default_model).strip() or default_model
+            
+        model = (spec.model or default_model).strip() or default_model
         model = resolve_cloud_agent_model(prov, model, default_model)
-        host = (rdef.get("executionHost") or default_host).strip() or default_host
+        host = (spec.executionHost or default_host).strip() or default_host
+        
         effective_roles[role] = {
             "credentialId": cred_id,
             "provider": prov,
@@ -411,7 +447,7 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
     return {
         "defaultLlmModel": default_model,
         "defaultExecutionHost": default_host,
-        "settingsProvider": pairs.get("LLM_PROVIDER", "ollama").strip().lower(),
+        "settingsProvider": pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA).strip().lower(),
         "roles": stored.get("roles", {}),
         "effective": effective_roles,
         "availableProviders": groups,
@@ -421,22 +457,25 @@ def get_agent_models_response(workspace_root: Path) -> dict[str, Any]:
 
 
 def validate_save_agent_models(
-    workspace_root: Path, payload: dict[str, Any]
+    workspace_root: Path, raw_payload: dict[str, Any]
 ) -> tuple[bool, str, dict[str, Any]]:
     groups = available_model_groups(workspace_root)
     cred_groups = available_credentials_for_agents(workspace_root)
     allowed_pairs = _allowed_model_ids(groups)
     allow_custom_providers = {g["providerId"] for g in groups if g.get("allowCustomModelId")}
 
-    raw_roles = payload.get("roles")
-    if raw_roles is not None and not isinstance(raw_roles, dict):
-        return False, "roles must be an object", {}
+    try:
+        payload = AgentModelsPayload(**raw_payload)
+    except ValidationError as e:
+        return False, f"Invalid payload structure: {e}", {}
+
+    raw_roles = payload.roles
     if raw_roles is None:
         raw_roles = {}
 
     pairs = load_effective_pairs(workspace_root)
-    default_model = pairs.get("LLM_MODEL", "llama3.2").strip() or "llama3.2"
-    default_host = pairs.get("EXECUTION_HOST", "localhost").strip() or "localhost"
+    default_model = pairs.get("LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    default_host = pairs.get("EXECUTION_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
 
     stored = load_agent_models(workspace_root)
     out_roles: dict[str, Any] = {}
@@ -449,38 +488,51 @@ def validate_save_agent_models(
         if spec is None:
             out_roles.pop(role, None)
             continue
+            
         if isinstance(spec, str):
-            spec = {
-                "provider": pairs.get("LLM_PROVIDER", "ollama"),
-                "model": spec.strip(),
-                "credentialId": lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
-            }
-        if not isinstance(spec, dict):
-            return False, f"Invalid spec for role {role}", {}
-        cred_id = str(spec.get("credentialId") or spec.get("credential_id") or "").strip()
+            role_spec = AgentRoleSpec(
+                provider=pairs.get("LLM_PROVIDER", PROVIDER_OLLAMA),
+                model=spec.strip(),
+                credentialId=lcs.SETTINGS_DEFAULT_CREDENTIAL_ID,
+            )
+        elif isinstance(spec, AgentRoleSpec):
+            role_spec = spec
+        else:
+            try:
+                role_spec = AgentRoleSpec(**spec)
+            except ValidationError as e:
+                return False, f"Invalid spec for role {role}: {e}", {}
+                
+        cred_id = (role_spec.credentialId or "").strip()
         if not cred_id:
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            
         cg = _credential_group_by_id(cred_groups, cred_id)
         if not cg:
             cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
             cg = _credential_group_by_id(cred_groups, cred_id)
         if not cg:
             return False, f"Unknown credential for role '{role}'", {}
+            
         if not cg.get("configured"):
             return (
                 False,
                 f"Credential '{cg.get('shortLabel') or cred_id}' is not ready — add its API key in Settings → LLM (role '{role}').",
                 {},
             )
+            
         prov = str(cg.get("providerId") or "").strip().lower()
-        model = (spec.get("model") or "").strip()
-        host = (spec.get("executionHost") or "").strip() or None
+        model = (role_spec.model or "").strip()
+        host = (role_spec.executionHost or "").strip() or None
+        
         if not model:
             model = default_model
-        if prov == "gemini":
+        if prov == PROVIDER_GEMINI:
             model = normalize_gemini_model_id(model)
+            
         if not provider_is_configured(workspace_root, prov, pairs, cred_id):
             return False, f"Provider '{prov}' is not configured for role '{role}'", {}
+            
         if _role_model_allowed(cred_groups, cred_id, model):
             pass
         elif prov in allow_custom_providers and _custom_model_ok(prov, model):
@@ -489,6 +541,7 @@ def validate_save_agent_models(
             pass
         else:
             return False, f"Model '{model}' is not allowed for credential '{cred_id}' on role '{role}'", {}
+            
         entry: dict[str, Any] = {
             "credentialId": cred_id,
             "provider": prov,
@@ -496,8 +549,11 @@ def validate_save_agent_models(
         }
         if host:
             entry["executionHost"] = host
-        elif spec.get("executionHost") == "":
+        elif isinstance(spec, dict) and spec.get("executionHost") == "":
             entry["executionHost"] = default_host
+        elif isinstance(spec, AgentRoleSpec) and spec.executionHost == "":
+            entry["executionHost"] = default_host
+            
         out_roles[role] = entry
 
     data = {"version": 1, "roles": out_roles}
