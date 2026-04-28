@@ -14,9 +14,7 @@ import urllib.parse
 import urllib.request
 from utils.es_auth import get_es_auth_headers
 
-import uuid
 import socket
-import asyncio
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +41,6 @@ from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
-from agent_runner import run_implementer, run_pm_dispatcher, run_reviewer, run_tester  # noqa: E402  # type: ignore
 
 async def _run_with_client(func, *args, **kwargs):
     async with httpx.AsyncClient() as client:
@@ -194,6 +191,18 @@ def check_kill_switch(es_id: str):
 
 def update_task_doc(es_id, doc):
     old_src = check_kill_switch(es_id) or {}
+    
+    old_status = old_src.get('status')
+    new_status = doc.get('status')
+    
+    if new_status and old_status and new_status != old_status:
+        from lifecycle.state_machine import TaskStateMachine, InvalidTransitionError
+        try:
+            TaskStateMachine.transition(es_id, old_status, new_status, repo=old_src.get('repo', ''))
+        except InvalidTransitionError as e:
+            _handlers_logger.error(f"FSM Blocked Invalid Transition for {es_id}: {e}")
+            raise e
+
     doc['updated_at'] = now_iso()
     doc['last_update'] = now_iso()
     
@@ -202,8 +211,6 @@ def update_task_doc(es_id, doc):
     
     es_request(f'/{TASK_INDEX}/_update/{es_id}', {'doc': doc}, method='POST')
     
-    new_status = doc.get('status')
-    old_status = old_src.get('status')
     if new_status and old_status and new_status != old_status:
         role = doc.get('assigned_agent_role') or old_src.get('assigned_agent_role') or ''
         worker = doc.get('active_worker') or old_src.get('active_worker') or ''
