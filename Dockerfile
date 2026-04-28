@@ -30,7 +30,7 @@ WORKDIR /app
 # does NOT shadow the installed packages. UV_PROJECT_ENVIRONMENT is set above
 # and matched by docker-compose so both build and runtime use the same venv.
 COPY pyproject.toml .
-RUN uv venv /opt/venv && uv pip install --python /opt/venv --index-url "https://pypi.org/simple/?bust=1" -e .
+RUN uv venv /opt/venv && uv pip install --python /opt/venv -e .
 
 COPY . /app
 
