@@ -28,6 +28,7 @@ AGENT_ROLE_IDS = (
     "tester",
     "reviewer",
     "memory-updater",
+    "auto-unblocker",
 )
 _AGENT_ROLE_ID_SET = frozenset(AGENT_ROLE_IDS)
 

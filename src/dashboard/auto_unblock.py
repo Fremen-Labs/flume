@@ -96,6 +96,11 @@ EVENT_STARTED = "auto_unblock.started"
 EVENT_SWEEP_CRASHED = "auto_unblock.sweep_crashed"
 EVENT_PARALLELISM_RESOLVED = "auto_unblock.parallelism_resolved"
 EVENT_PARALLELISM_FALLBACK = "auto_unblock.parallelism_fallback"
+EVENT_MESH_HEALTH_FETCHED = "auto_unblock.mesh_health_fetched"
+
+# Agent role — matches the entry in AGENT_ROLE_IDS so users can assign
+# a specific LLM provider/model to recovery plan generation via the UI.
+AGENT_ROLE_AUTO_UNBLOCKER = "auto-unblocker"
 
 # Rollup item types that unblock when children do — never auto-unblocked.
 _SKIP_ITEM_TYPES = frozenset({"epic", "feature", "story"})
@@ -121,6 +126,7 @@ _EXECUTION_THOUGHTS_TAIL_SIZE = 4
 _PARALLELISM_BACKOFF_DEFAULT = 1
 _PARALLELISM_HARD_CAP = 8
 _GATEWAY_HEALTH_TIMEOUT_SEC = 3
+_GATEWAY_NODES_TIMEOUT_SEC = 3
 
 # ES pagination — search_after page size and max pages to prevent
 # unbounded queries on very large blocked-task backlogs.
@@ -308,12 +314,15 @@ def _collect_context(src: dict, es_search: Callable[[str, dict], dict]) -> dict:
 
 _SYSTEM_PROMPT = (
     "You are a senior engineer triaging a blocked automation task. "
-    "Given the task JSON and recent signals, write a short, actionable "
-    "recovery plan the implementer agent can immediately follow. "
+    "Given the task JSON, recent signals, and the current node mesh health, "
+    "write a short, actionable recovery plan the implementer agent can "
+    "immediately follow. "
     "Keep it under 900 characters. "
     "Use 2–5 terse bullets. "
     "Be specific: point to the failing check, the file/function to inspect, "
     "and the next verification step (command to run, test to add, etc.). "
+    "If a node is offline or unhealthy and the failure correlates with that "
+    "node, note it — the gateway will route subsequent attempts to healthy nodes. "
     "Do NOT restate the whole task. Do NOT apologise. Do NOT say 'consult humans'."
 )
 
@@ -330,7 +339,12 @@ _CANNED_PLAN = (
 )
 
 
-def _build_user_prompt(src: dict, ctx: dict) -> str:
+def _build_user_prompt(
+    src: dict,
+    ctx: dict,
+    *,
+    mesh_health: Optional[list[dict]] = None,
+) -> str:
     slim_task = {
         "id": src.get("id"),
         "item_type": src.get("item_type"),
@@ -364,25 +378,46 @@ def _build_user_prompt(src: dict, ctx: dict) -> str:
             if k in ("verdict", "summary", "issues")
         },
     }
-    return (
-        "TASK:\n"
-        + json.dumps(slim_task, ensure_ascii=False)
-        + "\n\nSIGNALS:\n"
-        + json.dumps(slim_ctx, ensure_ascii=False)
-        + "\n\nRespond with ONLY the plan (no preamble)."
-    )
+    parts = [
+        "TASK:\n",
+        json.dumps(slim_task, ensure_ascii=False),
+        "\n\nSIGNALS:\n",
+        json.dumps(slim_ctx, ensure_ascii=False),
+    ]
+    # Inject node mesh health so the LLM can correlate failures to node state.
+    if mesh_health:
+        slim_nodes = [
+            {
+                "id": n.get("id"),
+                "model": n.get("model_tag"),
+                "status": (n.get("health") or {}).get("status"),
+                "latency_ms": (n.get("health") or {}).get("latency_ms"),
+                "load": (n.get("health") or {}).get("current_load"),
+            }
+            for n in mesh_health
+        ]
+        parts.append("\n\nNODE_MESH:\n")
+        parts.append(json.dumps(slim_nodes, ensure_ascii=False))
+    parts.append("\n\nRespond with ONLY the plan (no preamble).")
+    return "".join(parts)
 
 
-def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str, bool]:
+def _llm_recovery_plan(
+    src: dict,
+    ctx: dict,
+    timeout_seconds: int,
+    *,
+    mesh_health: Optional[list[dict]] = None,
+) -> tuple[str, bool]:
     """Returns (plan, llm_ok). On any LLM failure returns a canned plan + False."""
     try:
         from utils import llm_client  # lazy: imports settings
     except SAFE_EXCEPTIONS:
         return _CANNED_PLAN, False
 
-    prompt_user = _build_user_prompt(src, ctx)
+    prompt_user = _build_user_prompt(src, ctx, mesh_health=mesh_health)
     try:
-        reply = llm_client.chat(
+        reply, telemetry = llm_client.chat(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_user},
@@ -390,10 +425,22 @@ def _llm_recovery_plan(src: dict, ctx: dict, timeout_seconds: int) -> tuple[str,
             temperature=_LLM_TEMPERATURE,
             max_tokens=_LLM_MAX_TOKENS,
             timeout_seconds=timeout_seconds,
-            agent_role="auto_unblocker",
+            agent_role=AGENT_ROLE_AUTO_UNBLOCKER,
+            return_telemetry=True,
         )
     except SAFE_EXCEPTIONS as e:
         return _CANNED_PLAN + f"\n\n(LLM unavailable: {str(e)[:120]})", False
+
+    if telemetry:
+        logger.debug(
+            "Recovery plan generated via node",
+            extra={"structured_data": {
+                "event": "auto_unblock.llm_routed",
+                "task_id": src.get("id"),
+                "node_id": telemetry.get("node_id"),
+                "node_host": telemetry.get("node_host"),
+            }},
+        )
 
     plan = (reply or "").strip()
     if not plan:
@@ -613,10 +660,58 @@ def _fetch_blocked_candidates(
 # ─── Single-Task Processor ────────────────────────────────────────────────────
 
 
+def _fetch_mesh_health() -> Optional[list[dict]]:
+    """Query the Go gateway's ``/api/nodes`` for live node health.
+
+    Called once per sweep (not per task) to minimise gateway traffic.
+    The result is passed into ``_build_user_prompt`` so the LLM can
+    correlate failures with node status (e.g., an offline Ollama node
+    vs. a Claude rate-limit).
+
+    Returns ``None`` on any failure — the prompt will simply omit
+    the NODE_MESH section and the LLM generates a generic plan.
+    """
+    try:
+        from config import get_settings  # noqa: PLC0415
+        gateway_url = get_settings().GATEWAY_URL
+
+        req = urllib.request.Request(
+            f"{gateway_url}/api/nodes",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        ctx = ssl._create_unverified_context()  # noqa: S323  — internal mesh only
+        with urllib.request.urlopen(
+            req, timeout=_GATEWAY_NODES_TIMEOUT_SEC, context=ctx,
+        ) as resp:
+            data = json.loads(resp.read())
+
+        nodes = data.get("nodes") or []
+        logger.debug(
+            "Mesh health fetched for sweep context",
+            extra={"structured_data": {
+                "event": EVENT_MESH_HEALTH_FETCHED,
+                "node_count": len(nodes),
+                "healthy": sum(
+                    1 for n in nodes
+                    if (n.get("health") or {}).get("status") == "healthy"
+                ),
+            }},
+        )
+        return nodes
+    except SAFE_EXCEPTIONS:
+        logger.debug(
+            "Mesh health unavailable — proceeding without node context",
+            extra={"structured_data": {"event": EVENT_MESH_HEALTH_FETCHED, "node_count": 0}},
+        )
+        return None
+
+
 def _process_task_item(
     *,
     hit: dict,
     config: AutoUnblockConfig,
+    mesh_health: Optional[list[dict]],
     es_search: Callable[[str, dict], dict],
     es_post: Callable[[str, dict], Any],
     append_note: Callable[[str, str], bool],
@@ -663,7 +758,10 @@ def _process_task_item(
 
     try:
         ctx = _collect_context(src, es_search)
-        plan, llm_ok = _llm_recovery_plan(src, ctx, timeout_seconds=config.llm_timeout_sec)
+        plan, llm_ok = _llm_recovery_plan(
+            src, ctx, timeout_seconds=config.llm_timeout_sec,
+            mesh_health=mesh_health,
+        )
         _requeue_task(
             es_id=es_id,
             src=src,
@@ -711,7 +809,7 @@ def _sweep_once(
     config = AutoUnblockConfig.from_env()
     summary = SweepSummary()
 
-    # ── Phase 1: Paginated fetch ───────────────────────────────────────
+    # ── Phase 1: Paginated fetch + mesh health ──────────────────────────
     # Fetch more candidates than the batch limit to account for skips.
     # E.g., if batch=10 but 40% of candidates are in grace window,
     # we need ~17 candidates to fill 10 processable slots.
@@ -729,6 +827,9 @@ def _sweep_once(
         return summary
 
     summary.scanned = len(all_hits)
+
+    # Fetch mesh health once per sweep — shared across all task prompts.
+    mesh_health = _fetch_mesh_health()
 
     # ── Phase 2: Synchronous triage (no I/O) ───────────────────────────
     processable: list[dict] = []
@@ -759,6 +860,7 @@ def _sweep_once(
                 _process_task_item,
                 hit=h,
                 config=config,
+                mesh_health=mesh_health,
                 es_search=es_search,
                 es_post=es_post,
                 append_note=append_note,
