@@ -1,11 +1,11 @@
+"""Intake router — AI planning session lifecycle (create → refine → commit)."""
 from datetime import datetime, timezone
-import json
-import urllib.error
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
+from utils.exceptions import SAFE_EXCEPTIONS
 from core.sessions_store import load_session, save_session
 from api.models import IntakeSessionRequest, IntakeMessageRequest, IntakeCommitRequest
 
@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 @router.post('/api/intake/session')
-def api_intake_start_session(payload: IntakeSessionRequest):
+def api_intake_start_session(payload: IntakeSessionRequest) -> dict | JSONResponse:
     repo = payload.repo.strip()
     prompt = payload.prompt.strip()
     if not repo:
@@ -32,19 +32,23 @@ def api_intake_start_session(payload: IntakeSessionRequest):
     try:
         session = create_planning_session(repo, prompt)
         return _session_payload_for_client(session)
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.error(json.dumps({"event": "intake_session_create_failed", "error": str(e)[:400]}), exc_info=True)
+    except SAFE_EXCEPTIONS as e:
+        logger.error(
+            "Intake session creation failed",
+            extra={"structured_data": {"event": "intake_session_create_failed", "error": str(e)[:400]}},
+            exc_info=True,
+        )
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.get('/api/intake/session/{session_id}')
-def api_intake_get_session(session_id: str):
+def api_intake_get_session(session_id: str) -> dict | JSONResponse:
     session = load_session(session_id)
     if not session:
         return JSONResponse(status_code=404, content={'error': 'session not found'})
     return _session_payload_for_client(session)
 
 @router.post('/api/intake/session/{session_id}/message')
-def api_intake_message(session_id: str, payload: IntakeMessageRequest):
+def api_intake_message(session_id: str, payload: IntakeMessageRequest) -> dict | JSONResponse:
     text = payload.text.strip()
     if not text:
         return JSONResponse(status_code=400, content={'error': 'text is required'})
@@ -54,12 +58,16 @@ def api_intake_message(session_id: str, payload: IntakeMessageRequest):
         if not session:
             return JSONResponse(status_code=404, content={'error': 'session not found'})
         return _session_payload_for_client(session)
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.error(json.dumps({"event": "intake_session_refine_failed", "error": str(e)[:400]}), exc_info=True)
+    except SAFE_EXCEPTIONS as e:
+        logger.error(
+            "Intake session refinement failed",
+            extra={"structured_data": {"event": "intake_session_refine_failed", "error": str(e)[:400]}},
+            exc_info=True,
+        )
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.post('/api/intake/session/{session_id}/commit')
-def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
+def api_intake_commit(session_id: str, payload: IntakeCommitRequest) -> dict | JSONResponse:
     session = load_session(session_id)
     if not session:
         return JSONResponse(status_code=404, content={'error': 'session not found'})
@@ -85,6 +93,10 @@ def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
             'created': len(docs),
             'taskIds': [d.get('id') for d in docs if d.get('item_type') == 'task'],
         }
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.error(json.dumps({"event": "intake_plan_commit_failed", "error": str(e)[:400]}), exc_info=True)
+    except SAFE_EXCEPTIONS as e:
+        logger.error(
+            "Intake plan commit failed",
+            extra={"structured_data": {"event": "intake_plan_commit_failed", "error": str(e)[:400]}},
+            exc_info=True,
+        )
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
