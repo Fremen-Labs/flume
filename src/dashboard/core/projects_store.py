@@ -4,7 +4,7 @@ import urllib.error
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
-from core.elasticsearch import ES_URL, ctx, _get_auth_headers
+from core.elasticsearch import get_es_url, get_ssl_context, _get_auth_headers
 
 logger = get_logger(__name__)
 
@@ -33,9 +33,9 @@ def _es_projects_request(path: str, body=None, method: str = "GET") -> dict:
     data = json.dumps(body).encode() if body is not None else None
     if data and method == "GET":
         method = "POST"
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+    req = urllib.request.Request(f"{get_es_url()}{path}", data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, context=ctx) as resp:
+        with urllib.request.urlopen(req, context=get_ssl_context()) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:

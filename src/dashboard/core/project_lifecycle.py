@@ -14,11 +14,11 @@ from core.projects_store import _update_project_registry_field
 logger = get_logger(__name__)
 WORKSPACE_ROOT = resolve_safe_workspace()
 
-from core.elasticsearch import ES_URL, _get_auth_headers
+from core.elasticsearch import get_es_url, _get_auth_headers
 
 async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: str) -> tuple[bool, str]:
     try:
-        es_url = ES_URL
+        es_url = get_es_url()
         headers = {'Content-Type': 'application/json'}
         headers.update(_get_auth_headers())
 
@@ -76,7 +76,7 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             # Source these from the same ES_URL / ES_API_KEY that OpenBao hydrated
             # into os.environ at startup — matching the clone process secret path.
             elastro_env = os.environ.copy()
-            resolved_es_url = ES_URL or os.environ.get("ES_URL", "http://elasticsearch:9200")
+            resolved_es_url = get_es_url() or os.environ.get("ES_URL", "http://elasticsearch:9200")
             resolved_api_key = os.environ.get("ES_API_KEY", "")
             
             # Elastro native env vars (elastro/config/defaults.py reads ELASTIC_URL)

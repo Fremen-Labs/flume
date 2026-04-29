@@ -157,6 +157,7 @@ from core.elasticsearch import (
     es_post,
     es_bulk_update_proxy,
     _es_bulk_flusher_loop,
+    close_async_client,
 )
 
 
@@ -262,6 +263,8 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient(verify=_get_httpx_verify())
     yield
     await app.state.http_client.aclose()
+    # Close the persistent httpx.AsyncClient pool used by core/elasticsearch.py
+    await close_async_client()
     from core.process_manager import agents_stop
     agents_stop()
 
