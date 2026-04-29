@@ -8,8 +8,10 @@ Elasticsearch.  It provides:
   monkeypatching.
 - **Async-canonical API** — Business logic lives in the async (httpx) layer.
   Sync helpers exist only for background threads that cannot use asyncio.
+- **Persistent async client** — A module-scoped ``httpx.AsyncClient`` with
+  connection pooling eliminates per-request TLS handshake overhead.
 - **Bulk buffering** — High-throughput task-record updates are coalesced into
-  ``_bulk`` requests via a lock-protected buffer and a dedicated flusher thread.
+  ``_bulk`` requests via a ``BulkFlusher`` class with event-driven wakeup.
 """
 import asyncio
 import base64
@@ -30,6 +32,32 @@ from utils.exceptions import SAFE_EXCEPTIONS
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Named constants (Finding 10) ────────────────────────────────────────────
+#
+# Previously hard-coded throughout the module; now centralized for tuning.
+
+_MAX_RETRIES: int = 4
+"""Maximum number of retry attempts for retryable ES errors (429/503/504)."""
+
+_BACKOFF_BASE_S: float = 0.1
+"""Base multiplier for exponential backoff: delay = 2^attempt × base."""
+
+_REQUEST_TIMEOUT_S: float = 10.0
+"""Default timeout for individual ES HTTP requests (sync and async)."""
+
+_BULK_FLUSH_TIMEOUT_S: float = 15.0
+"""Timeout for the ``_bulk`` HTTP request during buffer flush."""
+
+_BULK_FLUSH_THRESHOLD: int = 50
+"""Flush the bulk buffer when it contains this many items."""
+
+_BULK_MAX_AGE_S: float = 0.25
+"""Maximum age (seconds) of the oldest buffered item before forced flush."""
+
+_TASK_RECORDS_INDEX: str = "agent-task-records"
+"""Canonical ES index name for task records."""
 
 
 # ── Lazy configuration ───────────────────────────────────────────────────────
@@ -166,6 +194,50 @@ def _build_json_headers() -> dict:
     return headers
 
 
+# ── Persistent httpx.AsyncClient (Finding 3) ────────────────────────────────
+#
+# Creating a new AsyncClient per request wastes a TLS handshake (~50-100ms)
+# and prevents HTTP/2 multiplexing and TCP keepalive.  A module-scoped
+# singleton is lazily created on first use and reused for all async operations.
+
+_httpx_client: Optional[httpx.AsyncClient] = None
+_httpx_client_lock = threading.Lock()
+
+
+def _get_async_client() -> httpx.AsyncClient:
+    """Return a persistent ``httpx.AsyncClient``, creating it lazily if needed.
+
+    Thread-safe via a lock.  The client is configured with connection pooling
+    limits suitable for a single-node dashboard.  If the client was closed
+    externally (e.g., during ASGI shutdown), a new one is created transparently.
+    """
+    global _httpx_client
+    with _httpx_client_lock:
+        if _httpx_client is None or _httpx_client.is_closed:
+            cfg = _get_es_config()
+            _httpx_client = httpx.AsyncClient(
+                verify=cfg.httpx_verify(),
+                timeout=httpx.Timeout(_REQUEST_TIMEOUT_S, connect=5.0),
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                ),
+            )
+    return _httpx_client
+
+
+async def close_async_client() -> None:
+    """Gracefully close the persistent httpx client.
+
+    Called during ASGI lifespan shutdown to release pooled connections.
+    """
+    global _httpx_client
+    with _httpx_client_lock:
+        if _httpx_client is not None and not _httpx_client.is_closed:
+            await _httpx_client.aclose()
+            _httpx_client = None
+
+
 # ── Async-canonical ES operations ────────────────────────────────────────────
 #
 # These are the *single source of truth* for each ES operation.  Sync wrappers
@@ -177,30 +249,30 @@ async def async_es_search(index: str, body: dict) -> dict:
     """Execute an ES ``_search`` request.  Returns ``{}`` on 404 (missing index)."""
     cfg = _get_es_config()
     headers = _build_json_headers()
-    async with httpx.AsyncClient(verify=cfg.httpx_verify()) as client:
-        resp = await client.post(
-            f"{cfg.url}/{index}/_search",
-            json=body,
-            headers=headers,
-        )
-        if resp.status_code == 404:
-            return {}
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_async_client()
+    resp = await client.post(
+        f"{cfg.url}/{index}/_search",
+        json=body,
+        headers=headers,
+    )
+    if resp.status_code == 404:
+        return {}
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def async_es_index(index: str, doc: dict) -> dict:
     """Index (create) a new document in *index*."""
     cfg = _get_es_config()
     headers = _build_json_headers()
-    async with httpx.AsyncClient(verify=cfg.httpx_verify()) as client:
-        resp = await client.post(
-            f"{cfg.url}/{index}/_doc",
-            json=doc,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_async_client()
+    resp = await client.post(
+        f"{cfg.url}/{index}/_doc",
+        json=doc,
+        headers=headers,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def async_es_upsert(index: str, doc_id: str, doc: dict) -> dict:
@@ -208,14 +280,14 @@ async def async_es_upsert(index: str, doc_id: str, doc: dict) -> dict:
     cfg = _get_es_config()
     headers = _build_json_headers()
     safe_id = urllib.parse.quote(str(doc_id), safe="")
-    async with httpx.AsyncClient(verify=cfg.httpx_verify()) as client:
-        resp = await client.put(
-            f"{cfg.url}/{index}/_doc/{safe_id}",
-            json=doc,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = _get_async_client()
+    resp = await client.put(
+        f"{cfg.url}/{index}/_doc/{safe_id}",
+        json=doc,
+        headers=headers,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def async_es_delete_doc(index: str, doc_id: str) -> bool:
@@ -223,73 +295,84 @@ async def async_es_delete_doc(index: str, doc_id: str) -> bool:
     cfg = _get_es_config()
     safe_id = urllib.parse.quote(str(doc_id), safe="")
     headers = _build_json_headers()
-    async with httpx.AsyncClient(verify=cfg.httpx_verify()) as client:
-        try:
-            resp = await client.delete(
-                f"{cfg.url}/{index}/_doc/{safe_id}",
-                headers=headers,
-            )
-            resp.raise_for_status()
+    client = _get_async_client()
+    try:
+        resp = await client.delete(
+            f"{cfg.url}/{index}/_doc/{safe_id}",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
             return True
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return True
-            raise
+        raise
 
 
 async def async_es_post(path: str, body: dict, method: str = "POST") -> dict:
     """Generic ES request with exponential-backoff retry on 429/503/504."""
     cfg = _get_es_config()
     headers = _build_json_headers()
-    async with httpx.AsyncClient(verify=cfg.httpx_verify()) as client:
-        for attempt in range(4):
-            try:
-                resp = await client.request(
-                    method=method,
-                    url=f"{cfg.url}/{path}",
-                    json=body,
-                    headers=headers,
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-                return resp.json()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 503, 504) and attempt < 3:
-                    await asyncio.sleep((2 ** attempt) * 0.1)
-                    continue
-                raise
-            except httpx.RequestError:
-                if attempt < 3:
-                    await asyncio.sleep((2 ** attempt) * 0.1)
-                    continue
-                raise
+    client = _get_async_client()
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = await client.request(
+                method=method,
+                url=f"{cfg.url}/{path}",
+                json=body,
+                headers=headers,
+                timeout=_REQUEST_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (429, 503, 504) and attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep((2 ** attempt) * _BACKOFF_BASE_S)
+                continue
+            raise
+        except httpx.RequestError:
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep((2 ** attempt) * _BACKOFF_BASE_S)
+                continue
+            raise
     return {}  # unreachable but satisfies type checkers
 
 
 async def async_find_task_doc_by_logical_id(
     logical_id: str,
 ) -> Tuple[Optional[str], Optional[dict]]:
-    """Locate a task document by trying multiple query strategies."""
+    """Locate a task document via a single ``bool.should`` query.
+
+    Combines all lookup strategies (IDs, term, term.keyword, match_phrase)
+    into one ES round-trip instead of up to 4 sequential requests (Finding 11).
+    """
     tid = (logical_id or "").strip()
     if not tid:
         return None, None
-    attempts = [
-        {"ids": {"values": [tid]}},
-        {"term": {"id": tid}},
-        {"term": {"id.keyword": tid}},
-        {"match_phrase": {"id": tid}},
-    ]
-    for query in attempts:
-        try:
-            res = await async_es_search(
-                "agent-task-records", {"size": 1, "query": query}
-            )
-            hits = res.get("hits", {}).get("hits", [])
-            if hits:
-                h = hits[0]
-                return h.get("_id"), h.get("_source", {})
-        except SAFE_EXCEPTIONS + (httpx.RequestError, httpx.HTTPStatusError):
-            continue
+    try:
+        res = await async_es_search(
+            _TASK_RECORDS_INDEX,
+            {
+                "size": 1,
+                "query": {
+                    "bool": {
+                        "should": [
+                            {"ids": {"values": [tid]}},
+                            {"term": {"id": tid}},
+                            {"term": {"id.keyword": tid}},
+                            {"match_phrase": {"id": tid}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                },
+            },
+        )
+        hits = res.get("hits", {}).get("hits", [])
+        if hits:
+            h = hits[0]
+            return h.get("_id"), h.get("_source", {})
+    except SAFE_EXCEPTIONS + (httpx.RequestError, httpx.HTTPStatusError):
+        pass
     return None, None
 
 
@@ -309,18 +392,18 @@ def es_post(path: str, body: dict, method: str = "POST") -> dict:
         headers=headers,
         method=method,
     )
-    for attempt in range(4):
+    for attempt in range(_MAX_RETRIES):
         try:
-            with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=10) as resp:
+            with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=_REQUEST_TIMEOUT_S) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 504) and attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
+            if e.code in (429, 503, 504) and attempt < _MAX_RETRIES - 1:
+                time.sleep((2 ** attempt) * _BACKOFF_BASE_S)
                 continue
             raise
         except SAFE_EXCEPTIONS:
-            if attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep((2 ** attempt) * _BACKOFF_BASE_S)
                 continue
             raise
     return {}  # unreachable but satisfies type checkers
@@ -337,7 +420,7 @@ def es_search(index: str, body: dict) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=10) as resp:
+        with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=_REQUEST_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -355,7 +438,7 @@ def es_index(index: str, doc: dict) -> dict:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=10) as resp:
+    with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=_REQUEST_TIMEOUT_S) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -370,12 +453,16 @@ def es_upsert(index: str, doc_id: str, doc: dict) -> dict:
         headers=headers,
         method="PUT",
     )
-    with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=10) as resp:
+    with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=_REQUEST_TIMEOUT_S) as resp:
         return json.loads(resp.read().decode())
 
 
 def es_delete_doc(index: str, doc_id: str) -> bool:
-    """Synchronous document delete.  Returns ``False`` on 404."""
+    """Synchronous document delete.  Returns ``True`` on 404 (idempotent).
+
+    Matches the async variant's semantics: a missing document is considered
+    a successful delete (Finding 7 — consistent 404 handling).
+    """
     cfg = _get_es_config()
     safe_id = urllib.parse.quote(str(doc_id), safe="")
     headers = _build_json_headers()
@@ -385,132 +472,198 @@ def es_delete_doc(index: str, doc_id: str) -> bool:
         method="DELETE",
     )
     try:
-        with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=10) as resp:
+        with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=_REQUEST_TIMEOUT_S) as resp:
             return 200 <= resp.status < 300
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return False
+            return True  # idempotent — document already gone
         raise
 
 
 def find_task_doc_by_logical_id(
     logical_id: str,
 ) -> Tuple[Optional[str], Optional[dict]]:
-    """Synchronous task document lookup using cascading query strategies."""
+    """Synchronous task document lookup via a single ``bool.should`` query.
+
+    Mirrors ``async_find_task_doc_by_logical_id`` — combines all lookup
+    strategies into one ES round-trip (Finding 11).
+    """
     tid = (logical_id or "").strip()
     if not tid:
         return None, None
-    attempts = [
-        {"ids": {"values": [tid]}},
-        {"term": {"id": tid}},
-        {"term": {"id.keyword": tid}},
-        {"match_phrase": {"id": tid}},
-    ]
-    for query in attempts:
-        try:
-            hits = (
-                es_search("agent-task-records", {"size": 1, "query": query})
-                .get("hits", {})
-                .get("hits", [])
+    try:
+        hits = (
+            es_search(
+                _TASK_RECORDS_INDEX,
+                {
+                    "size": 1,
+                    "query": {
+                        "bool": {
+                            "should": [
+                                {"ids": {"values": [tid]}},
+                                {"term": {"id": tid}},
+                                {"term": {"id.keyword": tid}},
+                                {"match_phrase": {"id": tid}},
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                },
             )
-            if hits:
-                h = hits[0]
-                return h.get("_id"), h.get("_source", {})
-        except SAFE_EXCEPTIONS:
-            continue
+            .get("hits", {})
+            .get("hits", [])
+        )
+        if hits:
+            h = hits[0]
+            return h.get("_id"), h.get("_source", {})
+    except SAFE_EXCEPTIONS:
+        pass
     return None, None
 
 
-# ── Bulk Buffering & Connection Resiliency ───────────────────────────────────
+# ── Bulk Buffering & Connection Resiliency (Findings 5, 12, 13) ─────────────
 
-_ES_BULK_BUFFER: list = []
-_ES_BULK_LOCK = threading.Lock()
-_ES_BULK_LAST_FLUSH = time.time()
+
+class BulkFlusher:
+    """Encapsulated bulk-update buffer with event-driven flushing.
+
+    Replaces the previous bare globals (``_ES_BULK_BUFFER``, ``_ES_BULK_LOCK``,
+    ``_ES_BULK_LAST_FLUSH``) with a self-contained class that:
+
+    - Uses ``threading.Event`` instead of a busy-wait spin loop (Finding 12).
+    - Tracks dropped payloads via a counter for observability (Finding 13).
+    - Makes flush thresholds configurable for unit testing (Finding 5).
+    """
+
+    def __init__(
+        self,
+        flush_threshold: int = _BULK_FLUSH_THRESHOLD,
+        max_age_s: float = _BULK_MAX_AGE_S,
+    ) -> None:
+        self._buffer: list[dict] = []
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._last_flush = time.time()
+        self._flush_threshold = flush_threshold
+        self._max_age_s = max_age_s
+        self._dropped_payloads: int = 0
+
+    @property
+    def dropped_payloads(self) -> int:
+        """Total number of payloads dropped due to flush failures."""
+        return self._dropped_payloads
+
+    def enqueue(self, index: str, doc_id: str, doc: dict) -> None:
+        """Thread-safe enqueue of a single update operation."""
+        with self._lock:
+            self._buffer.append({"index": index, "id": doc_id, "doc": doc})
+        # Wake the flusher thread immediately if threshold is reached.
+        self._event.set()
+
+    def run_forever(self) -> None:
+        """Background loop: block on event or timeout, then flush if needed.
+
+        Uses ``threading.Event.wait(timeout=max_age_s)`` so the thread sleeps
+        efficiently instead of polling every 50 ms (Finding 12).
+        """
+        while True:
+            # Block until data arrives (.set()) or max_age_s elapses.
+            self._event.wait(timeout=self._max_age_s)
+            self._event.clear()
+            with self._lock:
+                now = time.time()
+                if (
+                    len(self._buffer) >= self._flush_threshold
+                    or (
+                        len(self._buffer) > 0
+                        and (now - self._last_flush) >= self._max_age_s
+                    )
+                ):
+                    self._flush_unlocked()
+
+    def _flush_unlocked(self) -> None:
+        """Flush all buffered updates to ES.  Caller MUST hold ``self._lock``."""
+        if not self._buffer:
+            return
+        payloads = self._buffer
+        self._buffer = []
+        self._last_flush = time.time()
+
+        # Build NDJSON via list accumulator (O(n) vs O(n²) string concat)
+        lines: list[str] = []
+        for op in payloads:
+            lines.append(
+                json.dumps({"update": {"_index": op["index"], "_id": op["id"]}})
+            )
+            lines.append(json.dumps({"doc": op["doc"]}))
+        lines.append("")  # trailing newline required by _bulk API
+        ndjson = "\n".join(lines)
+
+        cfg = _get_es_config()
+        headers = {"Content-Type": "application/x-ndjson"}
+        headers.update(cfg.auth_headers())
+        req = urllib.request.Request(
+            f"{cfg.url}/_bulk",
+            data=ndjson.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        for attempt in range(_MAX_RETRIES):
+            try:
+                with urllib.request.urlopen(
+                    req, context=cfg.ssl_ctx, timeout=_BULK_FLUSH_TIMEOUT_S
+                ):
+                    pass
+                return  # success
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 503, 504) and attempt < _MAX_RETRIES - 1:
+                    time.sleep((2 ** attempt) * _BACKOFF_BASE_S)
+                    continue
+                self._dropped_payloads += len(payloads)
+                logger.warning(
+                    "ES Bulk HTTP Flush failed",
+                    extra={
+                        "structured_data": {
+                            "event": "es_bulk_http_flush_failed",
+                            "error": str(e),
+                            "attempt": attempt + 1,
+                            "payloads_dropped": len(payloads),
+                            "total_dropped": self._dropped_payloads,
+                        }
+                    },
+                )
+                return
+            except SAFE_EXCEPTIONS as e:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep((2 ** attempt) * _BACKOFF_BASE_S)
+                    continue
+                self._dropped_payloads += len(payloads)
+                logger.warning(
+                    "ES Bulk Connection failed",
+                    extra={
+                        "structured_data": {
+                            "event": "es_bulk_connection_failed",
+                            "error": str(e),
+                            "attempt": attempt + 1,
+                            "payloads_dropped": len(payloads),
+                            "total_dropped": self._dropped_payloads,
+                        }
+                    },
+                )
+                return
+
+
+# Module-level singleton — created once, started by server.py lifespan.
+_bulk_flusher = BulkFlusher()
 
 
 def _es_bulk_flusher_loop() -> None:
-    """Background thread: periodically flush the bulk update buffer to ES.
+    """Entry point for the background bulk-flusher thread.
 
-    Flushes when the buffer reaches 50 items **or** 250 ms have elapsed since
-    the last flush — whichever comes first.
+    Delegates to the ``BulkFlusher`` singleton.  Called by ``server.py``
+    via ``threading.Thread(target=_es_bulk_flusher_loop, daemon=True).start()``.
     """
-    global _ES_BULK_LAST_FLUSH
-    while True:
-        time.sleep(0.05)
-        with _ES_BULK_LOCK:
-            now = time.time()
-            if len(_ES_BULK_BUFFER) >= 50 or (
-                len(_ES_BULK_BUFFER) > 0
-                and (now - _ES_BULK_LAST_FLUSH) >= 0.25
-            ):
-                _flush_es_bulk_unlocked()
-
-
-def _flush_es_bulk_unlocked() -> None:
-    """Flush all buffered bulk updates to ES.  Caller MUST hold ``_ES_BULK_LOCK``."""
-    global _ES_BULK_BUFFER, _ES_BULK_LAST_FLUSH
-    if not _ES_BULK_BUFFER:
-        return
-    payloads = _ES_BULK_BUFFER
-    _ES_BULK_BUFFER = []
-    _ES_BULK_LAST_FLUSH = time.time()
-
-    # Build NDJSON via list accumulator (O(n) vs O(n²) string concat)
-    lines: list[str] = []
-    for op in payloads:
-        lines.append(
-            json.dumps({"update": {"_index": op["index"], "_id": op["id"]}})
-        )
-        lines.append(json.dumps({"doc": op["doc"]}))
-    lines.append("")  # trailing newline required by _bulk API
-    ndjson = "\n".join(lines)
-
-    cfg = _get_es_config()
-    headers = {"Content-Type": "application/x-ndjson"}
-    headers.update(cfg.auth_headers())
-    req = urllib.request.Request(
-        f"{cfg.url}/_bulk",
-        data=ndjson.encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, context=cfg.ssl_ctx, timeout=15):
-                pass
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 504) and attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            logger.warning(
-                "ES Bulk HTTP Flush failed",
-                extra={
-                    "structured_data": {
-                        "event": "es_bulk_http_flush_failed",
-                        "error": str(e),
-                        "attempt": attempt + 1,
-                        "payloads": len(payloads),
-                    }
-                },
-            )
-            break
-        except SAFE_EXCEPTIONS as e:
-            if attempt < 3:
-                time.sleep((2 ** attempt) * 0.1)
-                continue
-            logger.warning(
-                "ES Bulk Connection failed",
-                extra={
-                    "structured_data": {
-                        "event": "es_bulk_connection_failed",
-                        "error": str(e),
-                        "attempt": attempt + 1,
-                        "payloads": len(payloads),
-                    }
-                },
-            )
-            break
+    _bulk_flusher.run_forever()
 
 
 def es_bulk_update_proxy(path: str, body: dict, method: str = "POST") -> dict:
@@ -518,13 +671,10 @@ def es_bulk_update_proxy(path: str, body: dict, method: str = "POST") -> dict:
 
     Non-matching requests are forwarded to ``es_post`` synchronously.
     """
-    if method == "POST" and path.startswith("agent-task-records/_update/"):
+    if method == "POST" and path.startswith(f"{_TASK_RECORDS_INDEX}/_update/"):
         doc_id = path.split("/")[-1]
         doc = body.get("doc", {})
         if doc:
-            with _ES_BULK_LOCK:
-                _ES_BULK_BUFFER.append(
-                    {"index": "agent-task-records", "id": doc_id, "doc": doc}
-                )
+            _bulk_flusher.enqueue(_TASK_RECORDS_INDEX, doc_id, doc)
             return {"status": "buffered"}
     return es_post(path, body, method)
