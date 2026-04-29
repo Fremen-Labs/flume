@@ -1,11 +1,14 @@
+"""Repository router — branches, file trees, file content, and diffs."""
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import asyncio
 
 from utils.logger import get_logger
+from utils.exceptions import SAFE_EXCEPTIONS
 from utils.url_helpers import is_remote_url
 from utils.async_subprocess import run_cmd_async
+from utils.git_host_client import get_git_client, GitHostAuthError, GitHostNotFoundError, GitHostError
 
 from core.projects_store import load_projects_registry
 from core.tasks import resolve_default_branch
@@ -14,7 +17,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 @router.get("/api/repos/{project_id}/branches")
-async def api_repo_branches(project_id: str):
+async def api_repo_branches(project_id: str) -> dict | JSONResponse:
     """
     Return git branches for a project.
 
@@ -27,8 +30,6 @@ async def api_repo_branches(project_id: str):
     includes `cloneStatus` so the frontend can start the polling loop without
     an extra round-trip to /clone-status.
     """
-    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostError  # noqa
-
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get("id") == project_id), None)
     if not proj:
@@ -67,7 +68,7 @@ async def api_repo_branches(project_id: str):
             })
         except GitHostError as e:
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
-        except (ValueError, TypeError, OSError) as e:
+        except SAFE_EXCEPTIONS + (OSError,) as e:
             return JSONResponse(status_code=500, content={"error": str(e)[:300]})
 
     # ── Local repo path: original git subprocess (clone_status='local') ─────────
@@ -110,7 +111,7 @@ async def api_repo_branches(project_id: str):
             if name and name != "HEAD" and name not in seen:
                 seen.add(name)
                 branches.append(name)
-    except (ValueError, TypeError, OSError) as exc:
+    except SAFE_EXCEPTIONS + (OSError,) as exc:
         return JSONResponse(status_code=500, content={"error": f"git branch failed: {exc}"})
 
     default = await resolve_default_branch(
@@ -120,13 +121,11 @@ async def api_repo_branches(project_id: str):
 
 
 @router.get("/api/repos/{project_id}/tree")
-async def api_repo_tree(project_id: str, branch: str = ""):
+async def api_repo_tree(project_id: str, branch: str = "") -> dict | JSONResponse:
     """
     Return a flat list of all git-tracked files/dirs for a given branch.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
     """
-    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostError  # noqa
-
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get("id") == project_id), None)
     if not proj:
@@ -179,7 +178,7 @@ async def api_repo_tree(project_id: str, branch: str = ""):
         )
         if rc != 0:
             return JSONResponse(status_code=400, content={"error": f"Could not read tree for branch '{branch}': {err}"})
-    except (ValueError, TypeError, OSError) as exc:
+    except SAFE_EXCEPTIONS + (OSError,) as exc:
         return JSONResponse(status_code=500, content={"error": f"git ls-tree failed: {exc}"})
 
     entries = []
@@ -216,13 +215,11 @@ async def api_repo_tree(project_id: str, branch: str = ""):
 
 
 @router.get("/api/repos/{project_id}/file")
-async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
+async def api_repo_file(project_id: str, path: str = "", branch: str = "") -> dict | JSONResponse:
     """
     Return the content of a single file from the git tree.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
     """
-    from utils.git_host_client import get_git_client, GitHostAuthError, GitHostNotFoundError, GitHostError  # noqa
-
     if not path:
         return JSONResponse(status_code=400, content={"error": "path is required"})
 
@@ -267,6 +264,7 @@ async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     if not _local_path:
         return JSONResponse(status_code=400, content={"error": "No local repo path. This project has no local clone."})
     repo_path = Path(_local_path)
+
     if not (repo_path / ".git").exists():
         return JSONResponse(status_code=400, content={"error": "Not a git repository"})
 
@@ -285,7 +283,7 @@ async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
                 return JSONResponse(status_code=404, content={"error": f"File '{clean_path}' not found on branch '{branch}'"})
             return JSONResponse(status_code=500, content={"error": f"git show failed: {err}"})
         content_bytes = out.encode("utf-8")
-    except (ValueError, TypeError, OSError) as exc:
+    except SAFE_EXCEPTIONS + (OSError,) as exc:
         return JSONResponse(status_code=500, content={"error": f"git show failed: {exc}"})
 
     # Detect binary by sniffing for null bytes in the first 8KB
@@ -315,7 +313,7 @@ def _make_file_response(content_bytes: bytes, path: str) -> dict:
 
 
 @router.get("/api/repos/{project_id}/diff")
-async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
+async def api_repo_diff(project_id: str, base: str = "", head: str = "") -> dict | JSONResponse:
     """Return a unified diff between two branches for a project."""
     if not base or not head:
         return JSONResponse(status_code=400, content={"error": "base and head branch parameters are required"})
@@ -342,7 +340,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     # Best-effort fetch (non-blocking)
     try:
         await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
+    except SAFE_EXCEPTIONS + (OSError,) as _e:
         logger.debug("api_repo_diff: fetch failed (best-effort)", exc_info=True)
 
     files = []
@@ -363,7 +361,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
                 ins = sum(1 for c in change_part if c == "+")
                 dels = sum(1 for c in change_part if c == "-")
                 files.append({"path": path_part, "insertions": ins, "deletions": dels, "status": "modified"})
-    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
+    except SAFE_EXCEPTIONS + (OSError,) as _e:
         logger.debug("api_repo_diff: diff --stat failed (best-effort)", exc_info=True)
 
     diff_text = ""
@@ -380,7 +378,7 @@ async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
                 truncated = True
             else:
                 diff_text = raw_diff
-    except (ValueError, TypeError, OSError, asyncio.TimeoutError) as _e:
+    except SAFE_EXCEPTIONS + (OSError,) as _e:
         logger.debug("api_repo_diff: git diff failed (best-effort)", exc_info=True)
 
     identical = not diff_text.strip() and not files
