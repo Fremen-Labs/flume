@@ -237,13 +237,12 @@ def api_autonomy_sweep_now(sweep_name: str):
     try:
         if sweep_name == 'auto_unblock':
             import auto_unblock as _auto_unblock  # noqa: PLC0415
-            summary = _auto_unblock._sweep_once({
-                'es_search': es_search,
-                'es_post': es_post,
-                'append_note': _lazy_append_task_agent_log_note,
-                'logger': logger,
-            })
-            return {'ok': True, 'sweep': 'auto_unblock', 'summary': summary}
+            summary = _auto_unblock._sweep_once(
+                es_search=es_search,
+                es_post=es_post,
+                append_note=_lazy_append_task_agent_log_note,
+            )
+            return {'ok': True, 'sweep': 'auto_unblock', 'summary': summary.model_dump()}
 
         import autonomy_sweeps as _autonomy  # noqa: PLC0415
         result = _autonomy.run_sweep_now(
@@ -281,13 +280,12 @@ def api_auto_unblock_sweep_now():
     """Manually trigger one auto-unblock sweep and return its summary."""
     try:
         import auto_unblock as _auto_unblock  # noqa: PLC0415
-        summary = _auto_unblock._sweep_once({
-            'es_search': es_search,
-            'es_post': es_post,
-            'append_note': _lazy_append_task_agent_log_note,
-            'logger': logger,
-        })
-        return {'ok': True, 'summary': summary}
+        summary = _auto_unblock._sweep_once(
+            es_search=es_search,
+            es_post=es_post,
+            append_note=_lazy_append_task_agent_log_note,
+        )
+        return {'ok': True, 'summary': summary.model_dump()}
     except (ImportError, AttributeError, ValueError, KeyError) as e:
         logger.error(f'auto_unblock.manual_sweep_failed: {e}', exc_info=True)
         return JSONResponse(status_code=500, content={'error': str(e)[:300]})
