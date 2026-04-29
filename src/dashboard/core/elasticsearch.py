@@ -1,3 +1,4 @@
+"""Core REST adapter for Elasticsearch interactions (sync/async) and bulk buffering."""
 import json
 import ssl
 import threading
@@ -7,9 +8,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import httpx
+import asyncio
 from typing import Optional, Tuple
 
 from utils.logger import get_logger
+from utils.exceptions import SAFE_EXCEPTIONS
 
 logger = get_logger(__name__)
 
@@ -48,7 +51,7 @@ if ES_URL.startswith("https:"):
         ctx.verify_mode = ssl.CERT_NONE
     # else: default context verifies certs and hostnames
 
-def _get_httpx_verify():
+def _get_httpx_verify() -> bool | ssl.SSLContext:
     if ctx is not None:
         if not ES_VERIFY_TLS:
             return False
@@ -122,7 +125,7 @@ def find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[str], Optiona
             if hits:
                 h = hits[0]
                 return h.get('_id'), h.get('_source', {})
-        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+        except SAFE_EXCEPTIONS:
             continue
     return None, None
 
@@ -136,7 +139,6 @@ async def async_find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[s
         {'term': {'id.keyword': tid}},
         {'match_phrase': {'id': tid}},
     ]
-    import httpx
     for query in attempts:
         try:
             res = await async_es_search('agent-task-records', {'size': 1, 'query': query})
@@ -144,7 +146,7 @@ async def async_find_task_doc_by_logical_id(logical_id: str) -> Tuple[Optional[s
             if hits:
                 h = hits[0]
                 return h.get('_id'), h.get('_source', {})
-        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError):
+        except SAFE_EXCEPTIONS + (httpx.RequestError, httpx.HTTPStatusError):
             continue
     return None, None
 
@@ -244,13 +246,19 @@ def _flush_es_bulk_unlocked():
             if e.code in (429, 503, 504) and attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
-            logger.warning(f"[ES BULK] HTTP Flush failed: {e}")
+            logger.warning(
+                "ES Bulk HTTP Flush failed",
+                extra={"structured_data": {"event": "es_bulk_http_flush_failed", "error": str(e)}}
+            )
             break
-        except (urllib.error.URLError, TimeoutError) as e:
+        except SAFE_EXCEPTIONS as e:
             if attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
-            logger.warning(f"[ES BULK] Connection failed: {e}")
+            logger.warning(
+                "ES Bulk Connection failed",
+                extra={"structured_data": {"event": "es_bulk_connection_failed", "error": str(e)}}
+            )
             break
 
 def es_bulk_update_proxy(path: str, body: dict, method: str = 'POST') -> dict:
@@ -281,13 +289,11 @@ def es_post(path: str, body: dict, method: str = 'POST') -> dict:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
             raise
-        except (urllib.error.URLError, TimeoutError):
+        except SAFE_EXCEPTIONS:
             if attempt < 3:
                 time.sleep((2 ** attempt) * 0.1)
                 continue
             raise
-
-import asyncio  # noqa: E402
 
 async def async_es_post(path: str, body: dict, method: str = 'POST') -> dict:
     headers = {'Content-Type': 'application/json'}
