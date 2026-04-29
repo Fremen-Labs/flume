@@ -55,33 +55,28 @@ hydrate_secrets_from_openbao()
 from utils.logger import get_logger as _get_startup_logger
 from utils.exceptions import SAFE_EXCEPTIONS
 
-_startup_logger = _get_startup_logger('es_bootstrap')
-try:
-    import urllib.request as _ur
-    import urllib.error as _ue
-    from config import get_settings
-    _s = get_settings()
-    _es_check_url = _s.ES_URL or ('http://elasticsearch:9200' if _s.FLUME_NATIVE_MODE != '1' else 'http://localhost:9200')
-    _check_req = _ur.Request(f"{_es_check_url}/agent-task-records", method='HEAD')
-    # Add auth + TLS for hardened ES
-    from core.elasticsearch import _get_auth_headers as _boot_auth, ctx as _boot_ctx
-    for _k, _v in _boot_auth().items():
-        _check_req.add_header(_k, _v)
-    with _ur.urlopen(_check_req, timeout=3, context=_boot_ctx) as _r:
-        if _r.status == 200:
-            _startup_logger.info("ES index verification passed — agent-task-records exists")
-except _ue.HTTPError as _e:
-    if _e.code == 404:
-        _startup_logger.warning("ES index 'agent-task-records' not found — was `flume start` used to boot?")
-except SAFE_EXCEPTIONS as _e:
-    _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
-
-
 # ES configuration imported from core.elasticsearch (single source of truth)
 from core.elasticsearch import ES_API_KEY, ES_URL, _get_auth_headers, ctx as _es_ctx
 
 
-def _seed_llm_config_from_env() -> None:
+async def _async_verify_es_index():
+    _startup_logger = _get_startup_logger('es_bootstrap')
+    try:
+        from config import get_settings
+        _s = get_settings()
+        _es_check_url = _s.ES_URL or ('http://elasticsearch:9200' if _s.FLUME_NATIVE_MODE != '1' else 'http://localhost:9200')
+        from core.elasticsearch import _get_auth_headers as _boot_auth, _get_httpx_verify
+        async with httpx.AsyncClient(verify=_get_httpx_verify()) as client:
+            resp = await client.head(f"{_es_check_url}/agent-task-records", headers=_boot_auth(), timeout=3.0)
+            if resp.status_code == 200:
+                _startup_logger.info("ES index verification passed — agent-task-records exists")
+            elif resp.status_code == 404:
+                _startup_logger.warning("ES index 'agent-task-records' not found — was `flume start` used to boot?")
+    except SAFE_EXCEPTIONS as _e:
+        _startup_logger.warning(f"ES index verification skipped — cannot reach Elasticsearch: {_e}")
+
+
+async def _async_seed_llm_config_from_env() -> None:
     """
     Fallback boot-time seed for flume-llm-config/singleton.
 
@@ -93,8 +88,6 @@ def _seed_llm_config_from_env() -> None:
     env vars using doc_as_upsert — so it ONLY fills in missing fields and NEVER
     overwrites a value the user already saved via the Settings UI.
     """
-    import urllib.request
-    import urllib.error
     from config import get_settings
     _s = get_settings()
     model = _s.LLM_MODEL.strip()
@@ -102,7 +95,7 @@ def _seed_llm_config_from_env() -> None:
     base_url = _s.LLM_BASE_URL.strip()
 
     if not model and not provider:
-        logger.debug('_seed_llm_config_from_env: no LLM_MODEL or LLM_PROVIDER in env — skipping')
+        logger.debug('_async_seed_llm_config_from_env: no LLM_MODEL or LLM_PROVIDER in env — skipping')
         return
 
     # Build upsert payload only from non-empty env values
@@ -114,44 +107,29 @@ def _seed_llm_config_from_env() -> None:
     if base_url:
         doc['LLM_BASE_URL'] = base_url
 
-    # Use the update API with detect_noop=true so ES ignores no-op writes.
-    # doc_as_upsert creates the doc if absent; otherwise only merges missing fields
-    # because we explicitly do NOT overwrite here — we only supply missing values.
     try:
-        es_url_local = ES_URL
-        url = f'{es_url_local}/flume-llm-config/_update/singleton'
-        headers: dict = {'Content-Type': 'application/json'}
-        headers.update(_get_auth_headers())
-
-        # Fetch first to check if values already set — never clobber user changes
-        get_req = urllib.request.Request(
-            f'{es_url_local}/flume-llm-config/_doc/singleton',
-            headers=headers, method='GET',
-        )
+        from core.elasticsearch import async_es_search, async_es_post
         try:
-            with urllib.request.urlopen(get_req, timeout=5, context=_es_ctx) as r:
-                import json as _json
-                existing_src = _json.loads(r.read()).get('_source', {})
-                # Remove fields already present in ES so we don't overwrite them
+            # Fetch first to check if values already set — never clobber user changes
+            res = await async_es_search('flume-llm-config', {'query': {'term': {'_id': 'singleton'}}})
+            hits = res.get('hits', {}).get('hits', [])
+            if hits:
+                existing_src = hits[0].get('_source', {})
                 for k in list(doc.keys()):
                     if existing_src.get(k):
                         doc.pop(k, None)
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                logger.warning(f'_seed_llm_config_from_env: GET failed ({e}) — proceeding with full upsert')
         except SAFE_EXCEPTIONS as e:
-            logger.warning(f'_seed_llm_config_from_env: GET error ({e}) — proceeding with full upsert')
+            logger.warning(f'_async_seed_llm_config_from_env: GET error ({e}) — proceeding with full upsert')
 
         if not doc:
-            logger.info('_seed_llm_config_from_env: all LLM fields already present in ES — nothing to seed')
+            logger.info('_async_seed_llm_config_from_env: all LLM fields already present in ES — nothing to seed')
             return
 
-        body = json.dumps({'doc': doc, 'doc_as_upsert': True}).encode()
-        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=5, context=_es_ctx) as r:
-            logger.info(f'_seed_llm_config_from_env: seeded {list(doc.keys())} → flume-llm-config (model={model})')
+        body = {'doc': doc, 'doc_as_upsert': True}
+        await async_es_post('flume-llm-config/_update/singleton', body)
+        logger.info(f'_async_seed_llm_config_from_env: seeded {list(doc.keys())} → flume-llm-config (model={model})')
     except SAFE_EXCEPTIONS as e:
-        logger.warning(f'_seed_llm_config_from_env: non-fatal failure — {e}')
+        logger.warning(f'_async_seed_llm_config_from_env: non-fatal failure — {e}')
 
 from config import get_settings
 _s = get_settings()
@@ -269,6 +247,66 @@ def _merge_recent_task_hits_with_blocked(recent_hits: list, blocked_hits: list) 
     return [by_id[k] for k in order]
 
 
+async def _async_fetch_savings():
+    try:
+        from core.elasticsearch import async_es_search
+        agg_res = await async_es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {
+                'total_elastro_savings': {'sum': {'field': 'savings'}},
+                'total_baseline_tokens': {'sum': {'field': 'baseline_tokens'}},
+                'total_baseline_full_context': {'sum': {'field': 'baseline_full_context_tokens'}},
+                'total_actual_tokens': {'sum': {'field': 'actual_tokens_sent'}},
+                'total_input_tokens': {'sum': {'field': 'input_tokens'}},
+                'total_output_tokens': {'sum': {'field': 'output_tokens'}},
+                'by_worker': {
+                    'terms': {'field': 'worker_name', 'size': 100},
+                    'aggs': {
+                        'input': {'sum': {'field': 'input_tokens'}},
+                        'output': {'sum': {'field': 'output_tokens'}},
+                        'role': {'terms': {'field': 'worker_role'}}
+                    }
+                }
+            }
+        })
+        aggs = agg_res.get('aggregations', {})
+        cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', '0.002'))
+        cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
+        t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
+        t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
+        
+        historical_burn = []
+        for b in aggs.get('by_worker', {}).get('buckets', []):
+            historical_burn.append({
+                'worker_name': b['key'],
+                'input_tokens': int(b.get('input', {}).get('value', 0)),
+                'output_tokens': int(b.get('output', {}).get('value', 0)),
+                'role': b.get('role', {}).get('buckets', [{'key': 'unknown'}])[0]['key'] if len(b.get('role', {}).get('buckets', [])) > 0 else 'unknown'
+            })
+
+        return {
+            'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
+            'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
+            'baseline_full_context_tokens': int(aggs.get('total_baseline_full_context', {}).get('value', 0)),
+            'actual_tokens_sent': int(aggs.get('total_actual_tokens', {}).get('value', 0)),
+            'total_input_tokens': t_in,
+            'total_output_tokens': t_out,
+            'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
+            'historical_burn': historical_burn,
+        }
+    except SAFE_EXCEPTIONS:
+        logger.debug("api_snapshot: token savings computation failed (best-effort)", exc_info=True)
+        return {
+            'savings': 0,
+            'baseline_tokens': 0,
+            'baseline_full_context_tokens': 0,
+            'actual_tokens_sent': 0,
+            'total_input_tokens': 0,
+            'total_output_tokens': 0,
+            'estimated_cost_usd': 0.0,
+            'historical_burn': [],
+        }
+
 async def load_snapshot():
     global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
     now = time.time()
@@ -278,113 +316,68 @@ async def load_snapshot():
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         pass
 
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        f_tasks = pool.submit(lambda: es_search('agent-task-records', {
-            'size': 300,
-            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {
-                'bool': {
-                    'must': [{'match_all': {}}],
-                    'must_not': [{'term': {'status': 'archived'}}],
-                }
-            },
-        }))
-        f_blocked_tasks = pool.submit(lambda: es_search('agent-task-records', {
-            'size': 500,
-            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {
-                'bool': {
-                    'must': [{'term': {'status': 'blocked'}}],
-                    'must_not': [{'term': {'status': 'archived'}}],
-                }
-            },
-        }))
-        f_reviews = pool.submit(lambda: es_search('agent-review-records', {
-            'size': 100,
-            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {'match_all': {}}
-        }))
-        f_failures = pool.submit(lambda: es_search('agent-failure-records', {
-            'size': 100,
-            'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {'match_all': {}}
-        }))
-        f_provenance = pool.submit(lambda: es_search('agent-provenance-records', {
-            'size': 100,
-            'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
-            'query': {'match_all': {}}
-        }))
-        def fetch_savings():
-            try:
-                agg_res = es_search('agent-token-telemetry', {
-                    'size': 0,
-                    'aggs': {
-                        'total_elastro_savings': {'sum': {'field': 'savings'}},
-                        'total_baseline_tokens': {'sum': {'field': 'baseline_tokens'}},
-                        'total_baseline_full_context': {'sum': {'field': 'baseline_full_context_tokens'}},
-                        'total_actual_tokens': {'sum': {'field': 'actual_tokens_sent'}},
-                        'total_input_tokens': {'sum': {'field': 'input_tokens'}},
-                        'total_output_tokens': {'sum': {'field': 'output_tokens'}},
-                        'by_worker': {
-                            'terms': {'field': 'worker_name', 'size': 100},
-                            'aggs': {
-                                'input': {'sum': {'field': 'input_tokens'}},
-                                'output': {'sum': {'field': 'output_tokens'}},
-                                'role': {'terms': {'field': 'worker_role'}}
-                            }
-                        }
-                    }
-                })
-                aggs = agg_res.get('aggregations', {})
-                cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', '0.002'))
-                cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
-                t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
-                t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
-                
-                historical_burn = []
-                for b in aggs.get('by_worker', {}).get('buckets', []):
-                    historical_burn.append({
-                        'worker_name': b['key'],
-                        'input_tokens': int(b.get('input', {}).get('value', 0)),
-                        'output_tokens': int(b.get('output', {}).get('value', 0)),
-                        'role': b.get('role', {}).get('buckets', [{'key': 'unknown'}])[0]['key'] if len(b.get('role', {}).get('buckets', [])) > 0 else 'unknown'
-                    })
+    import asyncio
+    from core.elasticsearch import async_es_search
 
-                return {
-                    'savings': int(aggs.get('total_elastro_savings', {}).get('value', 0)),
-                    'baseline_tokens': int(aggs.get('total_baseline_tokens', {}).get('value', 0)),
-                    'baseline_full_context_tokens': int(aggs.get('total_baseline_full_context', {}).get('value', 0)),
-                    'actual_tokens_sent': int(aggs.get('total_actual_tokens', {}).get('value', 0)),
-                    'total_input_tokens': t_in,
-                    'total_output_tokens': t_out,
-                    'estimated_cost_usd': round((t_in / 1000.0 * cost_in) + (t_out / 1000.0 * cost_out), 4),
-                    'historical_burn': historical_burn,
-                }
-            except SAFE_EXCEPTIONS:
-                logger.debug("api_snapshot: token savings computation failed (best-effort)", exc_info=True)
-                return {
-                    'savings': 0,
-                    'baseline_tokens': 0,
-                    'baseline_full_context_tokens': 0,
-                    'actual_tokens_sent': 0,
-                    'total_input_tokens': 0,
-                    'total_output_tokens': 0,
-                    'estimated_cost_usd': 0.0,
-                    'historical_burn': [],
-                }
-        f_savings = pool.submit(fetch_savings)
-        f_workers = pool.submit(load_workers)
-        f_projects = pool.submit(load_projects_registry)
+    f_tasks = async_es_search('agent-task-records', {
+        'size': 300,
+        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {
+            'bool': {
+                'must': [{'match_all': {}}],
+                'must_not': [{'term': {'status': 'archived'}}],
+            }
+        },
+    })
+    f_blocked_tasks = async_es_search('agent-task-records', {
+        'size': 500,
+        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {
+            'bool': {
+                'must': [{'term': {'status': 'blocked'}}],
+                'must_not': [{'term': {'status': 'archived'}}],
+            }
+        },
+    })
+    f_reviews = async_es_search('agent-review-records', {
+        'size': 100,
+        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'match_all': {}}
+    })
+    f_failures = async_es_search('agent-failure-records', {
+        'size': 100,
+        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'match_all': {}}
+    })
+    f_provenance = async_es_search('agent-provenance-records', {
+        'size': 100,
+        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'match_all': {}}
+    })
+    f_savings = _async_fetch_savings()
+    f_workers = asyncio.to_thread(load_workers)
+    f_projects = asyncio.to_thread(load_projects_registry)
 
-        tasks_recent = f_tasks.result().get('hits', {}).get('hits', [])
-        tasks_blocked_extra = f_blocked_tasks.result().get('hits', {}).get('hits', [])
-        tasks_res = _merge_recent_task_hits_with_blocked(tasks_recent, tasks_blocked_extra)
-        reviews_res = f_reviews.result().get('hits', {}).get('hits', [])
-        failures_res = f_failures.result().get('hits', {}).get('hits', [])
-        provenance_res = f_provenance.result().get('hits', {}).get('hits', [])
-        token_metrics = f_savings.result()
-        workers_res = f_workers.result()
-        projects_res = f_projects.result()
+    (
+        tasks_res_raw,
+        blocked_tasks_res_raw,
+        reviews_res_raw,
+        failures_res_raw,
+        provenance_res_raw,
+        token_metrics,
+        workers_res,
+        projects_res
+    ) = await asyncio.gather(
+        f_tasks, f_blocked_tasks, f_reviews, f_failures, f_provenance,
+        f_savings, f_workers, f_projects
+    )
+
+    tasks_recent = tasks_res_raw.get('hits', {}).get('hits', [])
+    tasks_blocked_extra = blocked_tasks_res_raw.get('hits', {}).get('hits', [])
+    tasks_res = _merge_recent_task_hits_with_blocked(tasks_recent, tasks_blocked_extra)
+    reviews_res = reviews_res_raw.get('hits', {}).get('hits', [])
+    failures_res = failures_res_raw.get('hits', {}).get('hits', [])
+    provenance_res = provenance_res_raw.get('hits', {}).get('hits', [])
 
     repos_res = await load_repos(registry=projects_res)
     from api.projects import _map_task_hit_for_api
@@ -684,13 +677,15 @@ async def lifespan(app: FastAPI):
         }))
         raise WorkspaceInitializationError(f"Failed to initialize workspace: {e}") from e
 
+    # Phase 1: Native async Elasticsearch bootstrap verification
+    await _async_verify_es_index()
 
     # AP-3 resolved: _migrate_legacy_projects_json() removed — migration is complete.
 
     # Fallback LLM config seed: if the CLI's SeedLLMConfig write failed (e.g. due to
     # macOS Docker Desktop port-forward lag), seed from the container's env vars.
     # Uses doc_as_upsert so we never overwrite a value the user saved via the Settings UI.
-    _seed_llm_config_from_env()
+    await _async_seed_llm_config_from_env()
 
     # Ignite the child process worker swarm dynamically natively post-workspace assembly
     maybe_auto_start_workers()
