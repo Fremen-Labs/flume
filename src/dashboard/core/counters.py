@@ -1,3 +1,4 @@
+"""Elasticsearch-backed ID sequence generation and high-water mark counters."""
 from datetime import datetime, timezone
 import json
 import re
@@ -67,12 +68,17 @@ def es_counter_set_hwm(prefix: str, value: int) -> None:
     try:
         _es_counter_request(f'/{COUNTERS_INDEX}/_update/{prefix}', body=body, method='POST')
     except SAFE_EXCEPTIONS as exc:
-        logger.warning(json.dumps({
-            'event': 'es_counter_set_hwm_failed',
-            'prefix': prefix,
-            'value': value,
-            'error': str(exc),
-        }))
+        logger.warning(
+            "Failed to set counter high-water mark",
+            extra={
+                "structured_data": {
+                    "event": "es_counter_set_hwm_failed",
+                    "prefix": prefix,
+                    "value": value,
+                    "error": str(exc),
+                }
+            }
+        )
 
 def get_next_id_sequence(prefix: str) -> int:
     """
