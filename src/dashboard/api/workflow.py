@@ -21,7 +21,7 @@ def _agents_status() -> dict:
     Delegates to server.agents_status() which inspects running PIDs.
     Imported lazily to avoid circular dependency with server.py.
     """
-    from server import agents_status  # noqa: PLC0415
+    from core.process_manager import agents_status  # noqa: PLC0415
     return agents_status()
 
 

@@ -58,7 +58,7 @@ def health():
 @router.get('/api/snapshot')
 async def api_snapshot():
     try:
-        from server import load_snapshot  # noqa: PLC0415
+        from core.system_status import load_snapshot  # noqa: PLC0415
         return await load_snapshot()
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as e:
         logger.error(f"Snapshot failed: {e}", exc_info=True)

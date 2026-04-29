@@ -97,7 +97,7 @@ class ElasticsearchClient:
 
 class AgentSupervisor:
     def terminate_all(self) -> dict:
-        from server import agents_stop  # noqa: PLC0415
+        from core.process_manager import agents_stop  # noqa: PLC0415
         return agents_stop()
 
 
