@@ -1,6 +1,9 @@
+"""Core AI planning orchestration and task tree generation."""
 import json
 import urllib.request
 import urllib.error
+import socket
+from typing import Optional, List
 from utils.exceptions import SAFE_EXCEPTIONS
 import uuid
 import threading
@@ -8,8 +11,8 @@ import time
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse
-from typing import Optional
 
+from api.models import AgentTaskRecord, PlanResponse, PlanTask
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from config import get_settings
@@ -17,16 +20,15 @@ from core.elasticsearch import es_upsert
 from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
 from core.counters import get_next_id_sequence, es_counter_set_hwm
 
-
-
 logger = get_logger(__name__)
 WORKSPACE_ROOT = resolve_safe_workspace()
+
 
 
 def _planner_debug_log(event: str, **fields):
     # AP-6: planner-debug.log removed — structured debug output goes to stdout now.
     # Filter to DEBUG level so these are silent in default INFO deployments.
-    logger.debug(json.dumps({'event': event, **fields}, ensure_ascii=False))
+    logger.debug("Planner debug event", extra={"structured_data": {'event': event, **fields}})
 
 
 def _planner_runtime_config() -> dict:
@@ -162,8 +164,6 @@ def _test_planner_connection(status: dict) -> dict:
         
         # Fallback to localhost if running outside Docker or during DNS race condition
         if 'gateway:' in gw_url:
-            import socket
-            from urllib.parse import urlparse
             try:
                 parsed = urlparse(gw_url)
                 if parsed.hostname:
@@ -247,7 +247,10 @@ def _test_planner_connection(status: dict) -> dict:
         else:
              status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {exc}'
         
-        logger.warning(f"Plan New Work modal connection test failed: {exc}")
+        logger.warning(
+            "Plan New Work modal connection test failed",
+            extra={"structured_data": {"event": "planner_connection_failed", "error": str(exc)}}
+        )
 
     status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
     return status
@@ -357,13 +360,14 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     model = cfg.get('model') or LLM_MODEL
     timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
     logger.info(
-        json.dumps({
+        "Initiating planner request",
+        extra={"structured_data": {
             'event': 'planner_request',
             'agent_role': 'intake',
             'model': model,
             'timeoutSeconds': timeout_seconds,
             'messageCount': len(messages or []),
-        }, ensure_ascii=False)
+        }}
     )
     if cfg.get('usingCodexAppServer'):
         import codex_app_server_client  # type: ignore
@@ -682,237 +686,183 @@ def _extract_target_file(title: str) -> str | None:
     return None
 
 
-def _coalesce_story_tasks(tasks: list[dict]) -> list[dict]:
+def _coalesce_story_tasks(tasks: list[PlanTask]) -> list[PlanTask]:
     """Auto-merge adjacent tasks that modify the same file into a single compound task."""
     if not tasks:
         return []
     coalesced = []
-    curr = dict(tasks[0])
+    # Make a copy using model_copy so we don't mutate original objects
+    curr = tasks[0].model_copy(deep=True)
     for task in tasks[1:]:
-        t_file = _extract_target_file(task.get('title', ''))
-        c_file = _extract_target_file(curr.get('title', ''))
+        t_file = _extract_target_file(task.title)
+        c_file = _extract_target_file(curr.title)
         if t_file and c_file and t_file == c_file:
-            curr['title'] = f"Compound Task: {curr.get('title', '')} (+ {task.get('title', '')})"
-            curr_obj = curr.get('objective', '') or ''
-            task_obj = task.get('objective', '') or ''
-            curr['objective'] = f"{curr_obj}\n\n- {task.get('title', '')}: {task_obj}".strip()
-            curr['_coalesced_count'] = curr.get('_coalesced_count', 1) + 1
+            curr.title = f"Compound Task: {curr.title} (+ {task.title})"
+            curr_obj = curr.objective or ''
+            task_obj = task.objective or ''
+            curr.objective = f"{curr_obj}\n\n- {task.title}: {task_obj}".strip()
+            curr._coalesced_count += 1
         else:
             coalesced.append(curr)
-            curr = dict(task)
+            curr = task.model_copy(deep=True)
     coalesced.append(curr)
     
     # Log any coalescing using the centralized logger
     for t in coalesced:
-        if t.get('_coalesced_count', 1) > 1:
+        if t._coalesced_count > 1:
             logger.info("Task Coalescing Engine: Merged %d tasks into a single compound task targeting %s", 
-                        t['_coalesced_count'], _extract_target_file(t.get('title', '')))
+                        t._coalesced_count, _extract_target_file(t.title))
     return coalesced
 
 
-def _count_plan_tasks(plan: dict) -> int:
+def _count_plan_tasks(plan: PlanResponse) -> int:
     """Count total leaf tasks across all epics/features/stories after coalescing."""
     total = 0
-    for epic in plan.get('epics') or []:
-        for feat in epic.get('features') or []:
-            for story in feat.get('stories') or []:
-                coalesced = _coalesce_story_tasks(story.get('tasks') or [])
+    for epic in plan.epics:
+        for feat in epic.features:
+            for story in feat.stories:
+                coalesced = _coalesce_story_tasks(story.tasks)
                 total += len(coalesced)
     return total
 
 
-def commit_plan(repo: str, plan: dict):
+def _build_task_record(
+    item_id: str,
+    title: str,
+    objective: str,
+    repo: str,
+    item_type: str,
+    owner: str,
+    status: str,
+    now_iso: str,
+    priority: str = 'medium',
+    parent_id: Optional[str] = None,
+    depends_on: Optional[List[str]] = None,
+    acceptance_criteria: Optional[List[str]] = None,
+    assigned_agent_role: Optional[str] = None,
+    preferred_model: Optional[str] = None,
+) -> dict:
+    """Factory to build an AgentTaskRecord and return its ES-ready dict."""
+    record = AgentTaskRecord(
+        id=item_id,
+        title=title,
+        objective=objective,
+        repo=repo,
+        item_type=item_type,
+        owner=owner,
+        status=status,
+        priority=priority,
+        parent_id=parent_id,
+        depends_on=depends_on or [],
+        acceptance_criteria=acceptance_criteria or [],
+        last_update=now_iso,
+        assigned_agent_role=assigned_agent_role,
+        preferred_model=preferred_model,
+    )
+    return record.model_dump()
+
+
+def commit_plan(repo: str, plan_dict: dict):
     """
     Translate a plan tree (epics/features/stories/tasks) into TASK_SCHEMA docs
     and index them into agent-task-records with initial statuses and owners.
-
-    IDs are always freshly allocated by querying existing records, so numbers
-    are never reused even after items are deleted.
-
-    FAST PATH: When the plan has ≤2 total tasks, skip the epic/feature/story
-    hierarchy entirely and create tasks directly as 'ready'. This eliminates
-    structural overhead for trivial changes (e.g., URL updates, typo fixes).
     """
+    plan = PlanResponse.model_validate(plan_dict)
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     docs = []
 
     # ── Adaptive LLM Routing ────────────────────────────────────────────────
-    complexity_score = plan.get('complexityScore', 5)
+    complexity_score = plan.complexityScore
     fast_model = get_settings().FLUME_FAST_MODEL or 'o3-mini'
     routing_model = fast_model if complexity_score <= 3 else None
     if routing_model:
-        logger.info(f"Adaptive Routing: complexity={complexity_score}, routing tasks to {routing_model}")
+        logger.info("Adaptive Routing", extra={"structured_data": {"complexity": complexity_score, "routing_model": routing_model}})
 
     # ── Fast path: ≤3 tasks → skip hierarchy, create tasks directly ────────
     total_tasks = _count_plan_tasks(plan)
     if 0 < total_tasks <= 3:
         task_seq = get_next_id_sequence('task')
         prev_task_id = None
-        for epic in plan.get('epics') or []:
-            for feat in epic.get('features') or []:
-                for story in feat.get('stories') or []:
-                    ac = story.get('acceptanceCriteria') or []
-                    for task in _coalesce_story_tasks(story.get('tasks') or []):
+        for epic in plan.epics:
+            for feat in epic.features:
+                for story in feat.stories:
+                    ac = story.acceptanceCriteria
+                    for task in _coalesce_story_tasks(story.tasks):
                         task_id = f'task-{task_seq}'
                         task_seq += 1
-                        task_doc = {
-                            'id': task_id,
-                            'title': task.get('title') or '',
-                            'objective': epic.get('description') or story.get('title') or '',
-                            'repo': repo,
-                            'worktree': None,
-                            'item_type': 'task',
-                            'owner': 'implementer',
-                            'assigned_agent_role': 'implementer',
-                            'status': 'ready' if prev_task_id is None else 'planned',
-                            'priority': 'normal',
-                            'parent_id': None,
-                            'depends_on': [prev_task_id] if prev_task_id else [],
-                            'acceptance_criteria': ac,
-                            'artifacts': [],
-                            'last_update': now,
-                            'needs_human': False,
-                            'risk': 'medium',
-                            'preferred_model': routing_model,
-                        }
-                        docs.append(task_doc)
+                        docs.append(_build_task_record(
+                            item_id=task_id,
+                            title=task.title,
+                            objective=epic.description or story.title,
+                            repo=repo,
+                            item_type='task',
+                            owner='implementer',
+                            status='ready' if prev_task_id is None else 'planned',
+                            priority='normal',
+                            parent_id=None,
+                            depends_on=[prev_task_id] if prev_task_id else None,
+                            acceptance_criteria=ac,
+                            assigned_agent_role='implementer',
+                            preferred_model=routing_model,
+                            now_iso=now
+                        ))
                         prev_task_id = task_id
         es_counter_set_hwm('task', task_seq - 1)
         task_ids = [d['id'] for d in docs]
         logger.info(
-            "commit_plan: FAST PATH — %d tasks created directly (no epic/feature/story hierarchy): %s",
-            len(docs), task_ids,
+            "commit_plan: FAST PATH applied",
+            extra={"structured_data": {"event": "commit_plan_fast_path", "task_count": len(docs), "task_ids": task_ids}}
         )
-        results = []
-        for d in docs:
-            results.append(es_upsert('agent-task-records', d['id'], d))
-        return docs, results
+        return docs, [es_upsert('agent-task-records', d['id'], d) for d in docs]
 
     # ── Standard path: full epic/feature/story/task hierarchy ───────────────
-    # Allocate monotonically-increasing sequence numbers for each item type.
-    # These are fetched once before the loop so we don't make N round-trips.
     epic_seq = get_next_id_sequence('epic')
     feat_seq = get_next_id_sequence('feat')
     story_seq = get_next_id_sequence('story')
     task_seq = get_next_id_sequence('task')
 
-    epics = plan.get('epics') or []
-    for epic in epics:
+    for epic in plan.epics:
         epic_id = f'epic-{epic_seq}'
         epic_seq += 1
-        epic_title = epic.get('title') or ''
-        epic_desc = epic.get('description') or ''
-        epic_doc = {
-            'id': epic_id,
-            'title': epic_title,
-            'objective': epic_desc,
-            'repo': repo,
-            'worktree': None,
-            'item_type': 'epic',
-            'owner': 'pm',
-            'status': 'planned',
-            'priority': 'high',
-            'parent_id': None,
-            'depends_on': [],
-            'acceptance_criteria': [],
-            'artifacts': [],
-            'last_update': now,
-            'needs_human': False,
-            'risk': 'medium',
-        }
-        docs.append(epic_doc)
+        epic_title = epic.title
+        docs.append(_build_task_record(
+            item_id=epic_id, title=epic_title, objective=epic.description or '', repo=repo,
+            item_type='epic', owner='pm', status='planned', priority='high', now_iso=now
+        ))
 
-        for feature in epic.get('features') or []:
+        for feature in epic.features:
             feat_id = f'feat-{feat_seq}'
             feat_seq += 1
-            feat_title = feature.get('title') or ''
-            feat_doc = {
-                'id': feat_id,
-                'title': feat_title,
-                'objective': f"Feature of {epic_title}",
-                'repo': repo,
-                'worktree': None,
-                'item_type': 'feature',
-                'owner': 'pm',
-                'status': 'planned',
-                'priority': 'medium',
-                'parent_id': epic_id,
-                # depends_on drives UI hierarchy; features become ready when epic is done
-                'depends_on': [epic_id],
-                'acceptance_criteria': [],
-                'artifacts': [],
-                'last_update': now,
-                'needs_human': False,
-                'risk': 'medium',
-            }
-            docs.append(feat_doc)
+            feat_title = feature.title
+            docs.append(_build_task_record(
+                item_id=feat_id, title=feat_title, objective=f"Feature of {epic_title}", repo=repo,
+                item_type='feature', owner='pm', status='planned', parent_id=epic_id, depends_on=[epic_id], now_iso=now
+            ))
 
-            for story in feature.get('stories') or []:
+            for story in feature.stories:
                 story_id = f'story-{story_seq}'
                 story_seq += 1
-                story_title = story.get('title') or ''
-                ac = story.get('acceptanceCriteria') or []
-                story_doc = {
-                    'id': story_id,
-                    'title': story_title,
-                    'objective': f"Story for {feat_title}",
-                    'repo': repo,
-                    'worktree': None,
-                    'item_type': 'story',
-                    'owner': 'pm',
-                    'status': 'planned',
-                    'priority': 'medium',
-                    'parent_id': feat_id,
-                    'depends_on': [feat_id],
-                    'acceptance_criteria': ac,
-                    'artifacts': [],
-                    'last_update': now,
-                    'needs_human': False,
-                    'risk': 'medium',
-                }
-                docs.append(story_doc)
+                story_title = story.title
+                ac = story.acceptanceCriteria
+                docs.append(_build_task_record(
+                    item_id=story_id, title=story_title, objective=f"Story for {feat_title}", repo=repo,
+                    item_type='story', owner='pm', status='planned', parent_id=feat_id, depends_on=[feat_id],
+                    acceptance_criteria=ac, now_iso=now
+                ))
 
-                # Tasks within a story run sequentially: each depends on the
-                # previous task so the implementer can't start task N+1 until
-                # task N is fully done. The first task is immediately 'ready'.
                 prev_task_id = None
-                for task in _coalesce_story_tasks(story.get('tasks') or []):
+                for task in _coalesce_story_tasks(story.tasks):
                     task_id = f'task-{task_seq}'
                     task_seq += 1
-                    task_title = task.get('title') or ''
-                    task_doc = {
-                        'id': task_id,
-                        'title': task_title,
-                        'objective': task.get('objective') or f"Task for {story_title}",
-                        'repo': repo,
-                        'worktree': None,
-                        'item_type': 'task',
-                        'owner': 'implementer',
-                        'assigned_agent_role': 'implementer',
-                        # First task in the story starts ready; subsequent ones
-                        # are planned and get promoted after the previous task is done.
-                        'status': 'ready' if prev_task_id is None else 'planned',
-                        'priority': 'normal',
-                        'parent_id': story_id,
-                        # depends_on: previous task for ordering (UI hierarchy uses parent_id)
-                        'depends_on': [prev_task_id] if prev_task_id else [],
-                        'acceptance_criteria': ac,
-                        'artifacts': [],
-                        'last_update': now,
-                        'needs_human': False,
-                        'risk': 'medium',
-                        'preferred_model': routing_model,
-                    }
-                    docs.append(task_doc)
+                    docs.append(_build_task_record(
+                        item_id=task_id, title=task.title, objective=task.objective or f"Task for {story_title}",
+                        repo=repo, item_type='task', owner='implementer', status='ready' if prev_task_id is None else 'planned',
+                        priority='normal', parent_id=story_id, depends_on=[prev_task_id] if prev_task_id else None,
+                        acceptance_criteria=ac, assigned_agent_role='implementer', preferred_model=routing_model, now_iso=now
+                    ))
                     prev_task_id = task_id
 
-    # Persist high-water marks atomically in ES so deleted records never cause id recycling.
-    # epic_seq/feat_seq/story_seq/task_seq have already been incremented once
-    # beyond the last allocated value, so subtract 1 to get the actual max used.
     for prefix, seq in (('epic', epic_seq), ('feat', feat_seq), ('story', story_seq), ('task', task_seq)):
         es_counter_set_hwm(prefix, seq - 1)
 
-    results = []
-    for d in docs:
-        results.append(es_upsert('agent-task-records', d['id'], d))
-    return docs, results
+    return docs, [es_upsert('agent-task-records', d['id'], d) for d in docs]

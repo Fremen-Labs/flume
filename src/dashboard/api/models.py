@@ -123,3 +123,61 @@ class SystemSettingsRequest(BaseModel):
 
 class TaskClaimRequest(BaseModel):
     worker_id: str
+
+
+# ── AI Planning Domain Models ──────────────────────────────────────────────────
+
+class PlanTask(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    objective: Optional[str] = None
+    _coalesced_count: int = 1
+
+class PlanStory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    acceptanceCriteria: List[str] = Field(default_factory=list)
+    tasks: List[PlanTask] = Field(default_factory=list)
+
+class PlanFeature(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    stories: List[PlanStory] = Field(default_factory=list)
+
+class PlanEpic(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    description: Optional[str] = None
+    features: List[PlanFeature] = Field(default_factory=list)
+
+class PlanResponse(BaseModel):
+    """Strongly typed input from the LLM planner."""
+    model_config = ConfigDict(extra="ignore")
+    complexityScore: int = 5
+    epics: List[PlanEpic] = Field(default_factory=list)
+
+class AgentTaskRecord(BaseModel):
+    """Pydantic schema for Elasticsearch task records to guarantee shape safety."""
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    objective: str
+    repo: str
+    worktree: Optional[str] = None
+    item_type: str
+    owner: str
+    assigned_agent_role: Optional[str] = None
+    status: str
+    priority: str
+    parent_id: Optional[str] = None
+    depends_on: List[str] = Field(default_factory=list)
+    acceptance_criteria: List[str] = Field(default_factory=list)
+    artifacts: List[str] = Field(default_factory=list)
+    last_update: str
+    needs_human: bool = False
+    risk: str = 'medium'
+    preferred_model: Optional[str] = None
