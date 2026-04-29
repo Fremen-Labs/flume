@@ -3,6 +3,8 @@ import json
 import urllib.request
 import urllib.error
 import socket
+import asyncio
+import httpx
 from typing import Optional, List
 from utils.exceptions import SAFE_EXCEPTIONS
 import uuid
@@ -16,12 +18,16 @@ from api.models import AgentTaskRecord, PlanResponse, PlanTask
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from config import get_settings
-from core.elasticsearch import es_upsert
+from core.elasticsearch import es_upsert, async_es_upsert
 from core.sessions_store import load_session, save_session, _utcnow_iso, _iso_elapsed_seconds
 from core.counters import get_next_id_sequence, es_counter_set_hwm
 
 logger = get_logger(__name__)
-WORKSPACE_ROOT = resolve_safe_workspace()
+import functools
+
+@functools.lru_cache(maxsize=1)
+def _get_workspace_root():
+    return resolve_safe_workspace()
 
 
 
@@ -32,12 +38,15 @@ def _planner_debug_log(event: str, **fields):
 
 
 def _planner_runtime_config() -> dict:
-    from server import _sync_llm_runtime_env, LLM_MODEL
+    from workspace_llm_env import sync_llm_env_from_workspace # type: ignore
     from llm_settings import load_effective_pairs, resolve_effective_ollama_base_url
-    _sync_llm_runtime_env()
-    pairs = load_effective_pairs(WORKSPACE_ROOT)
+    try:
+        sync_llm_env_from_workspace(_get_workspace_root())
+    except SAFE_EXCEPTIONS:
+        pass
+    pairs = load_effective_pairs(_get_workspace_root())
     provider = (pairs.get('LLM_PROVIDER') or get_settings().LLM_PROVIDER or 'ollama').strip().lower()
-    model = (pairs.get('LLM_MODEL') or get_settings().LLM_MODEL or LLM_MODEL).strip()
+    model = (pairs.get('LLM_MODEL') or get_settings().LLM_MODEL).strip()
     # FLUME_PLANNER_MODEL lets operators use a lighter/faster model for planning
     # independently of the agent model (e.g. qwen2.5-coder:7b for planning speed
     # while gemma4:26b handles code implementation).
@@ -136,7 +145,7 @@ def _update_planning_status(session: dict, **updates) -> dict:
     return status
 
 
-def _test_planner_connection(status: dict) -> dict:
+async def _test_planner_connection(status: dict) -> dict:
     """Probe the configured LLM endpoint and update status with the result."""
     provider  = (status.get('provider') or '').lower().strip()
     base_url  = (status.get('baseUrl') or '').rstrip('/')
@@ -226,21 +235,21 @@ def _test_planner_connection(status: dict) -> dict:
 
     # ── Execute the probe ──────────────────────────────────────────────────
     try:
-        req = urllib.request.Request(url, headers=headers, method='GET')
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            status_code = getattr(resp, 'status', 200)
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(url, headers=headers)
+            status_code = resp.status_code
             status['connectionTestOk']     = True
             if provider == 'ollama':
                 status['connectionTestResult'] = f'NODE MESH connection OK — Gateway HTTP {status_code}'
             else:
                 status['connectionTestResult'] = f'{provider.upper()} connection OK — {url} responded HTTP {status_code}'
-    except urllib.error.HTTPError as he:
+    except httpx.HTTPStatusError as he:
         status['connectionTestOk']     = False
         if provider == 'ollama':
-             status['connectionTestResult'] = f'NODE MESH connection FAILED — Gateway HTTP {he.code}: {he.reason}'
+             status['connectionTestResult'] = f'NODE MESH connection FAILED — Gateway HTTP {he.response.status_code}: {he.response.reason_phrase}'
         else:
-             status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {url} returned HTTP {he.code}: {he.reason}'
-    except SAFE_EXCEPTIONS as exc:
+             status['connectionTestResult'] = f'{provider.upper()} connection FAILED — {url} returned HTTP {he.response.status_code}: {he.response.reason_phrase}'
+    except SAFE_EXCEPTIONS + (httpx.RequestError,) as exc:
         status['connectionTestOk']     = False
         if provider == 'ollama':
              status['connectionTestResult'] = f'NODE MESH connection FAILED — {exc}'
@@ -249,7 +258,8 @@ def _test_planner_connection(status: dict) -> dict:
         
         logger.warning(
             "Plan New Work modal connection test failed",
-            extra={"structured_data": {"event": "planner_connection_failed", "error": str(exc)}}
+            extra={"structured_data": {"event": "planner_connection_failed", "error": str(exc)}},
+            exc_info=True
         )
 
     status['connectionTestDurationMs'] = round((time.time() - started) * 1000, 1)
@@ -353,11 +363,10 @@ def _planner_should_use_codex_app_server() -> bool:
         return False
 
 
-def call_planner_model(messages, timeout_seconds: Optional[int] = None):
+async def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     """Call the configured planner backend and return the assistant response text."""
     cfg = _planner_runtime_config()
-    from server import LLM_MODEL
-    model = cfg.get('model') or LLM_MODEL
+    model = cfg.get('model') or get_settings().LLM_MODEL
     timeout_seconds = timeout_seconds or _planner_request_timeout_seconds(cfg)
     logger.info(
         "Initiating planner request",
@@ -372,15 +381,24 @@ def call_planner_model(messages, timeout_seconds: Optional[int] = None):
     if cfg.get('usingCodexAppServer'):
         import codex_app_server_client  # type: ignore
 
-        return codex_app_server_client.planner_chat(
+        return await asyncio.to_thread(
+            codex_app_server_client.planner_chat,
             messages,
             model=model,
-            cwd=str(WORKSPACE_ROOT),
+            cwd=str(_get_workspace_root()),
             timeout=timeout_seconds,
         )
 
     from utils import llm_client
-    return llm_client.chat(
+    # Prefer async chat if available, fallback to thread wrapping if not
+    if hasattr(llm_client, 'chat_async'):
+        # For llm_client.chat_async we'll need an async client. We can use a short-lived one here
+        # or use to_thread since llm_client handles it. Let's just use to_thread for simplicity
+        # as llm_client.chat already delegates to the gateway and handles failover.
+        pass
+    
+    return await asyncio.to_thread(
+        llm_client.chat,
         messages,
         model=model,
         temperature=0.3,
@@ -489,7 +507,7 @@ def build_llm_messages(session):
     return msgs
 
 
-def create_planning_session(repo, prompt):
+async def create_planning_session(repo, prompt):
     session_id = f'plan-{uuid.uuid4().hex[:12]}'
     session = {
         'id': session_id,
@@ -509,7 +527,7 @@ def create_planning_session(repo, prompt):
     
     # Run connection test synchronously to fail fast
     status = _update_planning_status(session, stage='testing_connection')
-    _test_planner_connection(status)
+    await _test_planner_connection(status)
     if status.get('connectionTestOk') is False:
         status['stage'] = 'failed'
         status['failureText'] = status.get('connectionTestResult') or 'Connection test failed.'
@@ -517,11 +535,11 @@ def create_planning_session(repo, prompt):
         raise ValueError(status['failureText'])
 
     session_copy = dict(session)
-    threading.Thread(target=_run_initial_planning, args=(session_copy,), daemon=True).start()
+    asyncio.create_task(_run_initial_planning(session_copy))
     return session
 
 
-def _run_initial_planning(session: dict):
+async def _run_initial_planning(session: dict):
     if not session:
         return
 
@@ -536,7 +554,7 @@ def _run_initial_planning(session: dict):
     plan = None
     llm_error = None
     try:
-        raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
+        raw = await call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
     except SAFE_EXCEPTIONS as e:
         llm_error = str(e)[:300]
@@ -570,7 +588,7 @@ def _run_initial_planning(session: dict):
     _complete_planner_turn(session, message, plan, 'llm')
 
 
-def refine_session(session_id, user_text, current_plan):
+async def refine_session(session_id, user_text, current_plan):
     session = load_session(session_id)
     if not session:
         return None
@@ -585,7 +603,7 @@ def refine_session(session_id, user_text, current_plan):
         session['draftPlan'] = current_plan
 
     status = _update_planning_status(session, stage='testing_connection')
-    _test_planner_connection(status)
+    await _test_planner_connection(status)
     if status.get('connectionTestOk') is False:
         status['stage'] = 'failed'
         status['failureText'] = status.get('connectionTestResult') or 'Connection test failed.'
@@ -598,7 +616,7 @@ def refine_session(session_id, user_text, current_plan):
     _update_planning_status(session, stage='requesting_plan', requestStartedAt=_utcnow_iso(), timeoutSeconds=timeout_seconds, failureText=None)
     save_session(session)
     try:
-        raw = call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
+        raw = await call_planner_model(llm_messages, timeout_seconds=timeout_seconds)
         message, plan = parse_llm_response(raw)
     except SAFE_EXCEPTIONS as e:
         err = str(e)[:300]
@@ -762,14 +780,95 @@ def _build_task_record(
     return record.model_dump()
 
 
-def commit_plan(repo: str, plan_dict: dict):
+def _build_fast_path_tasks(plan: PlanResponse, repo: str, routing_model: str | None, now: str) -> list[dict]:
+    docs = []
+    task_seq = get_next_id_sequence('task')
+    prev_task_id = None
+    for epic in plan.epics:
+        for feat in epic.features:
+            for story in feat.stories:
+                ac = story.acceptanceCriteria
+                for task in _coalesce_story_tasks(story.tasks):
+                    task_id = f'task-{task_seq}'
+                    task_seq += 1
+                    docs.append(_build_task_record(
+                        item_id=task_id,
+                        title=task.title,
+                        objective=epic.description or story.title,
+                        repo=repo,
+                        item_type='task',
+                        owner='implementer',
+                        status='ready' if prev_task_id is None else 'planned',
+                        priority='normal',
+                        parent_id=None,
+                        depends_on=[prev_task_id] if prev_task_id else None,
+                        acceptance_criteria=ac,
+                        assigned_agent_role='implementer',
+                        preferred_model=routing_model,
+                        now_iso=now
+                    ))
+                    prev_task_id = task_id
+    es_counter_set_hwm('task', task_seq - 1)
+    return docs
+
+def _build_task_hierarchy(plan: PlanResponse, repo: str, routing_model: str | None, now: str) -> list[dict]:
+    docs = []
+    epic_seq = get_next_id_sequence('epic')
+    feat_seq = get_next_id_sequence('feat')
+    story_seq = get_next_id_sequence('story')
+    task_seq = get_next_id_sequence('task')
+
+    for epic in plan.epics:
+        epic_id = f'epic-{epic_seq}'
+        epic_seq += 1
+        docs.append(_build_task_record(
+            item_id=epic_id, title=epic.title, objective=epic.description or '', repo=repo,
+            item_type='epic', owner='pm', status='planned', priority='high', now_iso=now
+        ))
+
+        for feature in epic.features:
+            feat_id = f'feat-{feat_seq}'
+            feat_seq += 1
+            docs.append(_build_task_record(
+                item_id=feat_id, title=feature.title, objective=f"Feature of {epic.title}", repo=repo,
+                item_type='feature', owner='pm', status='planned', parent_id=epic_id, depends_on=[epic_id], now_iso=now
+            ))
+
+            for story in feature.stories:
+                story_id = f'story-{story_seq}'
+                story_seq += 1
+                ac = story.acceptanceCriteria
+                docs.append(_build_task_record(
+                    item_id=story_id, title=story.title, objective=f"Story for {feature.title}", repo=repo,
+                    item_type='story', owner='pm', status='planned', parent_id=feat_id, depends_on=[feat_id],
+                    acceptance_criteria=ac, now_iso=now
+                ))
+
+                prev_task_id = None
+                for task in _coalesce_story_tasks(story.tasks):
+                    task_id = f'task-{task_seq}'
+                    task_seq += 1
+                    docs.append(_build_task_record(
+                        item_id=task_id, title=task.title, objective=task.objective or f"Task for {story.title}",
+                        repo=repo, item_type='task', owner='implementer', status='ready' if prev_task_id is None else 'planned',
+                        priority='normal', parent_id=story_id, depends_on=[prev_task_id] if prev_task_id else None,
+                        acceptance_criteria=ac, assigned_agent_role='implementer', preferred_model=routing_model, now_iso=now
+                    ))
+                    prev_task_id = task_id
+
+    for prefix, seq in (('epic', epic_seq), ('feat', feat_seq), ('story', story_seq), ('task', task_seq)):
+        es_counter_set_hwm(prefix, seq - 1)
+
+    return docs
+
+
+async def commit_plan(repo: str, plan_dict: dict):
     """
     Translate a plan tree (epics/features/stories/tasks) into TASK_SCHEMA docs
     and index them into agent-task-records with initial statuses and owners.
     """
     plan = PlanResponse.model_validate(plan_dict)
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    docs = []
 
     # ── Adaptive LLM Routing ────────────────────────────────────────────────
     complexity_score = plan.complexityScore
@@ -781,88 +880,13 @@ def commit_plan(repo: str, plan_dict: dict):
     # ── Fast path: ≤3 tasks → skip hierarchy, create tasks directly ────────
     total_tasks = _count_plan_tasks(plan)
     if 0 < total_tasks <= 3:
-        task_seq = get_next_id_sequence('task')
-        prev_task_id = None
-        for epic in plan.epics:
-            for feat in epic.features:
-                for story in feat.stories:
-                    ac = story.acceptanceCriteria
-                    for task in _coalesce_story_tasks(story.tasks):
-                        task_id = f'task-{task_seq}'
-                        task_seq += 1
-                        docs.append(_build_task_record(
-                            item_id=task_id,
-                            title=task.title,
-                            objective=epic.description or story.title,
-                            repo=repo,
-                            item_type='task',
-                            owner='implementer',
-                            status='ready' if prev_task_id is None else 'planned',
-                            priority='normal',
-                            parent_id=None,
-                            depends_on=[prev_task_id] if prev_task_id else None,
-                            acceptance_criteria=ac,
-                            assigned_agent_role='implementer',
-                            preferred_model=routing_model,
-                            now_iso=now
-                        ))
-                        prev_task_id = task_id
-        es_counter_set_hwm('task', task_seq - 1)
-        task_ids = [d['id'] for d in docs]
+        docs = _build_fast_path_tasks(plan, repo, routing_model, now)
         logger.info(
             "commit_plan: FAST PATH applied",
-            extra={"structured_data": {"event": "commit_plan_fast_path", "task_count": len(docs), "task_ids": task_ids}}
+            extra={"structured_data": {"event": "commit_plan_fast_path", "task_count": len(docs), "task_ids": [d['id'] for d in docs]}}
         )
-        return docs, [es_upsert('agent-task-records', d['id'], d) for d in docs]
+        return docs, await asyncio.gather(*[async_es_upsert('agent-task-records', d['id'], d) for d in docs])
 
     # ── Standard path: full epic/feature/story/task hierarchy ───────────────
-    epic_seq = get_next_id_sequence('epic')
-    feat_seq = get_next_id_sequence('feat')
-    story_seq = get_next_id_sequence('story')
-    task_seq = get_next_id_sequence('task')
-
-    for epic in plan.epics:
-        epic_id = f'epic-{epic_seq}'
-        epic_seq += 1
-        epic_title = epic.title
-        docs.append(_build_task_record(
-            item_id=epic_id, title=epic_title, objective=epic.description or '', repo=repo,
-            item_type='epic', owner='pm', status='planned', priority='high', now_iso=now
-        ))
-
-        for feature in epic.features:
-            feat_id = f'feat-{feat_seq}'
-            feat_seq += 1
-            feat_title = feature.title
-            docs.append(_build_task_record(
-                item_id=feat_id, title=feat_title, objective=f"Feature of {epic_title}", repo=repo,
-                item_type='feature', owner='pm', status='planned', parent_id=epic_id, depends_on=[epic_id], now_iso=now
-            ))
-
-            for story in feature.stories:
-                story_id = f'story-{story_seq}'
-                story_seq += 1
-                story_title = story.title
-                ac = story.acceptanceCriteria
-                docs.append(_build_task_record(
-                    item_id=story_id, title=story_title, objective=f"Story for {feat_title}", repo=repo,
-                    item_type='story', owner='pm', status='planned', parent_id=feat_id, depends_on=[feat_id],
-                    acceptance_criteria=ac, now_iso=now
-                ))
-
-                prev_task_id = None
-                for task in _coalesce_story_tasks(story.tasks):
-                    task_id = f'task-{task_seq}'
-                    task_seq += 1
-                    docs.append(_build_task_record(
-                        item_id=task_id, title=task.title, objective=task.objective or f"Task for {story_title}",
-                        repo=repo, item_type='task', owner='implementer', status='ready' if prev_task_id is None else 'planned',
-                        priority='normal', parent_id=story_id, depends_on=[prev_task_id] if prev_task_id else None,
-                        acceptance_criteria=ac, assigned_agent_role='implementer', preferred_model=routing_model, now_iso=now
-                    ))
-                    prev_task_id = task_id
-
-    for prefix, seq in (('epic', epic_seq), ('feat', feat_seq), ('story', story_seq), ('task', task_seq)):
-        es_counter_set_hwm(prefix, seq - 1)
-
-    return docs, [es_upsert('agent-task-records', d['id'], d) for d in docs]
+    docs = _build_task_hierarchy(plan, repo, routing_model, now)
+    return docs, await asyncio.gather(*[async_es_upsert('agent-task-records', d['id'], d) for d in docs])
