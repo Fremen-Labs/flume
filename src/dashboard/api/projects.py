@@ -1,9 +1,8 @@
+"""Project lifecycle router — creation, listing, status, and deletion."""
 import os
-import json
 import uuid
 import tempfile
 import httpx
-import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -12,6 +11,7 @@ from api.models import ProjectCreateRequest
 from fastapi.responses import JSONResponse
 
 from utils.logger import get_logger
+from utils.exceptions import SAFE_EXCEPTIONS
 from utils.workspace import resolve_safe_workspace
 from core.elasticsearch import async_es_search
 from core.projects_store import load_projects_registry, _upsert_project, PROJECTS_INDEX, _es_projects_request
@@ -24,11 +24,8 @@ WORKSPACE_ROOT = resolve_safe_workspace()
 router = APIRouter()
 
 @router.post("/api/projects")
-async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks):
+async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks) -> dict | JSONResponse:
     from core.project_lifecycle import _clone_and_setup_project, _deterministic_ast_ingest
-    from utils.git_credentials import detect_repo_type, strip_credentials, _rewrite_url
-    import ado_tokens_store
-    import github_tokens_store
 
     name = (payload.name or "").strip()
     if not name:
@@ -52,107 +49,30 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
         clone_status = 'no_repo'
         resolved_path = None
 
-    clone_url = strip_credentials(repo_url) if is_remote_url(repo_url) else repo_url
+    clone_url = repo_url
     if is_remote_url(repo_url):
+        from utils.git_credentials import embed_credentials, detect_repo_type, strip_credentials
         repo_type = detect_repo_type(repo_url)
-        pat: str = ""
-        if repo_type == "ado":
-            try:
-                raw_pat = ado_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
-                if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
-                    pat = raw_pat
-                elif raw_pat:
-                    logger.warning(json.dumps({
-                        "event": "ado_pat_placeholder_detected",
-                        "project_id": new_id,
-                        "hint": "OpenBao KV lookup returned placeholder. Falling back to ADO_PERSONAL_ACCESS_TOKEN env var.",
-                    }))
-            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
-                logger.warning(json.dumps({
-                    "event": "ado_pat_fetch_error",
-                    "project_id": new_id,
-                    "error": str(_cred_err)[:200],
-                }))
-            _DELEGATED = "OPENBAO_DELEGATED"
-            if not pat:
-                try:
-                    from llm_settings import _openbao_get_all
-                    _bao_vals = _openbao_get_all(WORKSPACE_ROOT)
-                    _bao_ado = str(_bao_vals.get("ADO_TOKEN") or "").strip()
-                    if _bao_ado and _DELEGATED not in _bao_ado:
-                        pat = _bao_ado
-                        logger.info(json.dumps({
-                            "event": "ado_pat_from_openbao_direct",
-                            "project_id": new_id,
-                            "hint": "PAT sourced from OpenBao ADO_TOKEN key (flume start provisioning).",
-                        }))
-                except (KeyError, ValueError, ImportError):
-                    pass
-            if not pat:
-                _env_pat = (
-                    os.environ.get("ADO_PERSONAL_ACCESS_TOKEN", "").strip()
-                    or os.environ.get("ADO_TOKEN", "").strip()
-                )
-                if _env_pat and _DELEGATED not in _env_pat:
-                    pat = _env_pat
-                    logger.info(json.dumps({
-                        "event": "ado_pat_from_env",
-                        "project_id": new_id,
-                        "hint": "PAT sourced from ADO_PERSONAL_ACCESS_TOKEN env var (OpenBao fallback).",
-                    }))
-                elif _env_pat:
-                    logger.warning(json.dumps({
-                        "event": "ado_pat_sentinel_in_env",
-                        "project_id": new_id,
-                        "hint": "ADO_TOKEN env var contains OPENBAO_DELEGATED sentinel — OpenBao not yet seeded.",
-                    }))
-        elif repo_type == "github":
-            try:
-                raw_pat = github_tokens_store.get_active_token_plain(WORKSPACE_ROOT)
-                if raw_pat and "OPENBAO_DELEGATED" not in raw_pat:
-                    pat = raw_pat
-                elif raw_pat:
-                    logger.warning(json.dumps({
-                        "event": "gh_pat_placeholder_detected",
-                        "project_id": new_id,
-                        "hint": "OpenBao KV lookup returned placeholder. Falling back to GITHUB_TOKEN env var.",
-                    }))
-            except (ValueError, KeyError, httpx.RequestError) as _cred_err:
-                logger.warning(json.dumps({
-                    "event": "gh_pat_fetch_error",
-                    "project_id": new_id,
-                    "error": str(_cred_err)[:200],
-                }))
-            _DELEGATED = "OPENBAO_DELEGATED"
-            if not pat:
-                _env_pat = os.environ.get("GITHUB_TOKEN", "").strip()
-                if _env_pat and _DELEGATED not in _env_pat:
-                    pat = _env_pat
-                    logger.info(json.dumps({
-                        "event": "gh_pat_from_env",
-                        "project_id": new_id,
-                        "hint": "PAT sourced from GITHUB_TOKEN env var (OpenBao fallback).",
-                    }))
-                elif _env_pat:
-                    logger.warning(json.dumps({
-                        "event": "gh_pat_sentinel_in_env",
-                        "project_id": new_id,
-                        "hint": "GITHUB_TOKEN env var contains OPENBAO_DELEGATED sentinel — OpenBao not yet seeded.",
-                    }))
-        if pat:
-            clone_url = _rewrite_url(clone_url, pat)
-            logger.info(json.dumps({
-                "event": "project_clone_credentials_embedded",
-                "project_id": new_id,
-                "repo_type": repo_type,
-            }))
+        embedded_url = embed_credentials(repo_url, repo_type)
+        if embedded_url != repo_url:
+            clone_url = embedded_url
+            logger.info(
+                "Project clone credentials embedded",
+                extra={"structured_data": {"event": "project_clone_credentials_embedded", "project_id": new_id, "repo_type": repo_type}}
+            )
         else:
-            logger.warning(json.dumps({
-                "event": "project_clone_no_credentials",
-                "project_id": new_id,
-                "repo_type": repo_type,
-                "hint": "Add credentials via Settings → Repositories before cloning private repos.",
-            }))
+            clone_url = strip_credentials(repo_url)
+            logger.warning(
+                "Project clone no credentials",
+                extra={
+                    "structured_data": {
+                        "event": "project_clone_no_credentials",
+                        "project_id": new_id,
+                        "repo_type": repo_type,
+                        "hint": "Add credentials via Settings → Repositories before cloning private repos."
+                    }
+                }
+            )
 
     entry = {
         "id": new_id,
@@ -195,7 +115,7 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
     return {"success": True, "projectId": new_id, "project": entry, "message": "Project created."}
 
 @router.get("/api/projects/{project_id}/clone-status")
-def api_project_clone_status(project_id: str):
+def api_project_clone_status(project_id: str) -> dict | JSONResponse:
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get('id') == project_id), None)
     if not proj:
@@ -224,7 +144,7 @@ async def api_project_tasks(
         'exclude',
         description='exclude=active only (default); include=all statuses; only=archived items only',
     ),
-):
+) -> dict | JSONResponse:
     registry = load_projects_registry()
     if not any(p.get('id') == project_id for p in registry):
         return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
@@ -258,8 +178,11 @@ async def api_project_tasks(
             'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
             'query': query,
         })
-    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
-        logger.warning(json.dumps({'event': 'project_tasks_query_failed', 'project_id': project_id, 'error': str(e)[:300]}))
+    except SAFE_EXCEPTIONS as e:
+        logger.warning(
+            "Project tasks query failed",
+            extra={"structured_data": {"event": "project_tasks_query_failed", "project_id": project_id, "error": str(e)[:300]}}
+        )
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
     hits = res.get('hits', {}).get('hits', [])
     return {
@@ -275,7 +198,7 @@ async def _project_task_ids_for_repo(project_id: str) -> list[str]:
             '_source': ['id'],
             'query': {'term': {'repo': project_id}},
         })
-    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError):
+    except SAFE_EXCEPTIONS:
         return []
     out = []
     for h in res.get('hits', {}).get('hits', []) or []:
@@ -286,7 +209,7 @@ async def _project_task_ids_for_repo(project_id: str) -> list[str]:
 
 
 @router.post("/api/projects/{project_id}/delete")
-def api_delete_project(project_id: str):
+def api_delete_project(project_id: str) -> dict | JSONResponse:
     registry = load_projects_registry()
     project_found = any(p.get("id") == project_id for p in registry)
 
@@ -301,27 +224,31 @@ def api_delete_project(project_id: str):
             f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
             method="DELETE",
         )
-        logger.info(json.dumps({
-            "event": "project_deleted",
-            "project_id": project_id,
-        }))
-    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
-        logger.warning(json.dumps({
-            "event": "project_delete_es_error",
-            "project_id": project_id,
-            "error": str(exc)[:200],
-        }))
+        logger.info(
+            "Project deleted",
+            extra={"structured_data": {"event": "project_deleted", "project_id": project_id}}
+        )
+    except SAFE_EXCEPTIONS as exc:
+        logger.warning(
+            "Project deletion ES error",
+            extra={"structured_data": {"event": "project_delete_es_error", "project_id": project_id, "error": str(exc)[:200]}}
+        )
 
     project_doc = next((p for p in registry if p.get("id") == project_id), {})
     local_path = project_doc.get("path")
     clone_status = project_doc.get("clone_status", "")
     if local_path and clone_status == "local":
         dest_path = Path(local_path)
-        logger.info(json.dumps({
-            "event": "project_local_path_note",
-            "project_id": project_id,
-            "path": str(dest_path),
-            "note": "Local path not auto-deleted (user-managed). Remove manually if desired.",
-        }))
+        logger.info(
+            "Project local path note",
+            extra={
+                "structured_data": {
+                    "event": "project_local_path_note",
+                    "project_id": project_id,
+                    "path": str(dest_path),
+                    "note": "Local path not auto-deleted (user-managed). Remove manually if desired."
+                }
+            }
+        )
 
     return {"success": True, "projectId": project_id, "message": "Project removed."}
