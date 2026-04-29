@@ -2,12 +2,9 @@
 # ruff: noqa: E402
 """Flume Server — Central intelligence and frontend orchestration."""
 from pathlib import Path
-from typing import Optional
 import json
 import os
 import re
-import shlex
-import signal
 import sys
 import threading
 import time
@@ -17,14 +14,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-
-
-import subprocess
-import urllib.request
-import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
 
 # Flume Bootstrap Logic
 
@@ -52,14 +43,12 @@ hydrate_secrets_from_openbao()
 # ES index creation is centralized in the CLI `flume start` orchestrator.
 # The dashboard only verifies indices exist at startup — it does NOT create them.
 # This eliminates the boot-race where workers hit 404s before the dashboard finishes bootstrapping.
-from utils.logger import get_logger as _get_startup_logger
 from utils.exceptions import SAFE_EXCEPTIONS
-
-# ES configuration imported from core.elasticsearch (single source of truth)
-from core.elasticsearch import ES_API_KEY, ES_URL, _get_auth_headers, ctx as _es_ctx
 
 
 async def _async_verify_es_index():
+    """Non-blocking ES index verification during ASGI startup."""
+    from utils.logger import get_logger as _get_startup_logger
     _startup_logger = _get_startup_logger('es_bootstrap')
     try:
         from config import get_settings
@@ -273,6 +262,7 @@ async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient(verify=_get_httpx_verify())
     yield
     await app.state.http_client.aclose()
+    from core.process_manager import agents_stop
     agents_stop()
 
 app = FastAPI(title="Flume Enterprise API", lifespan=lifespan)

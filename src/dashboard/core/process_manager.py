@@ -1,3 +1,9 @@
+"""Process manager — Worker agent lifecycle orchestration.
+
+Decoupled from server.py (Phase 3) to enforce Single Responsibility.
+Contains all OS-level process management: starting, stopping, and
+restarting worker manager and handler processes via subprocess.Popen.
+"""
 import os
 import sys
 import shlex
@@ -23,6 +29,7 @@ def _find_worker_pids() -> dict:
 
 
 def agents_status() -> dict:
+    """Fetch live agent cluster status from Elasticsearch heartbeats."""
     try:
         # 1. Fetch Admin Control Status
         clust = es_search('agent-system-cluster', {'size': 1, 'query': {'term': {'_id': 'config'}}})
@@ -46,7 +53,7 @@ def agents_status() -> dict:
                     if (now - hb).total_seconds() <= 30:
                         active_nodes += 1
                 except SAFE_EXCEPTIONS:
-                    logger.debug("api_snapshot: heartbeat timestamp parse failed", exc_info=True)
+                    logger.debug("agents_status: heartbeat timestamp parse failed", exc_info=True)
 
         return {
             'running': active_nodes > 0 and status != 'paused',
@@ -62,6 +69,7 @@ def agents_status() -> dict:
 
 
 def _requeue_running_tasks():
+    """After stopping workers, reset tasks stuck in 'running' back to queued."""
     try:
         hits = es_search('agent-task-records', {
             'size': 200,
@@ -88,6 +96,7 @@ def _requeue_running_tasks():
                 }
             })
             requeued += 1
+        logger.info("_requeue_running_tasks: requeued %d tasks", requeued)
         return requeued
     except SAFE_EXCEPTIONS:
         logger.error("_requeue_running_tasks: ES update failed", exc_info=True)
@@ -95,6 +104,7 @@ def _requeue_running_tasks():
 
 
 def agents_stop() -> dict:
+    """Kill worker processes and re-queue any stuck running tasks."""
     pids = _find_worker_pids()
     killed = []
     for group in ('manager', 'handlers'):
@@ -105,10 +115,12 @@ def agents_stop() -> dict:
             except SAFE_EXCEPTIONS:
                 logger.warning("agents_stop: SIGTERM failed for pid (may already be dead)", exc_info=True)
     requeued = _requeue_running_tasks()
+    logger.info("agents_stop: killed=%s, requeued=%d", killed, requeued)
     return {'ok': True, 'killed_pids': killed, 'requeued_tasks': requeued}
 
 
 def agents_start() -> dict:
+    """Start manager and worker_handlers if not already running."""
     pids = _find_worker_pids()
     started = []
 
@@ -143,10 +155,13 @@ def agents_start() -> dict:
         )
         started.append({'role': 'handlers', 'pid': proc.pid})
 
+    if started:
+        logger.info("agents_start: launched %s", started)
     return {'ok': True, 'started': started, 'already_running': not started}
 
 
 def _resolve_flume_cli() -> Optional[Path]:
+    """Path to the `flume` driver script at repo or package root, or None."""
     w = WORKSPACE_ROOT.resolve()
     for base in (w, w.parent):
         candidate = base / 'flume'
@@ -156,6 +171,7 @@ def _resolve_flume_cli() -> Optional[Path]:
 
 
 def restart_flume_services() -> dict:
+    """Schedule `./flume restart --all` or fall back to worker-only restart."""
     flume_sh = _resolve_flume_cli()
     if flume_sh is not None:
         root = flume_sh.parent.resolve()
@@ -172,13 +188,14 @@ def restart_flume_services() -> dict:
                 start_new_session=True,
                 close_fds=True,
             )
+            logger.info("restart_flume_services: scheduled full restart via flume CLI")
             return {
                 'ok': True,
                 'mode': 'flume',
                 'message': 'Restart scheduled. You may lose connection briefly; refresh if the page stops responding.',
             }
         except SAFE_EXCEPTIONS:
-            logger.warning("api_agents_restart: flume CLI restart failed, falling back to workers_only", exc_info=True)
+            logger.warning("restart_flume_services: flume CLI restart failed, falling back to workers_only", exc_info=True)
     try:
         agents_stop()
         started = agents_start()
@@ -189,10 +206,12 @@ def restart_flume_services() -> dict:
             'workers': started,
         }
     except SAFE_EXCEPTIONS as e:
+        logger.error("restart_flume_services: fallback restart failed", extra={"structured_data": {"error": str(e)[:400]}})
         return {'ok': False, 'error': str(e)[:400]}
 
 
 def maybe_auto_start_workers():
+    """Auto-start workers on dashboard boot. Disable with FLUME_AUTO_START_WORKERS=0."""
     raw = os.environ.get('FLUME_AUTO_START_WORKERS', '1').strip().lower()
     if raw in ('0', 'false', 'no', 'off'):
         return
@@ -200,8 +219,8 @@ def maybe_auto_start_workers():
         result = agents_start()
         started = result.get('started') or []
         if started:
-            logger.info(f'Flume: auto-started workers: {started}')
+            logger.info('Flume: auto-started workers: %s', started)
         elif result.get('already_running'):
             logger.info('Flume: workers already running (skipped auto-start).')
     except SAFE_EXCEPTIONS as e:
-        logger.info(f'Flume: warning — could not auto-start workers: {e}')
+        logger.warning('Flume: could not auto-start workers: %s', e)

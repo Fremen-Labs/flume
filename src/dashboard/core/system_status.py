@@ -1,3 +1,9 @@
+"""System status and snapshot aggregation.
+
+Decoupled from server.py (Phase 3) to enforce Single Responsibility.
+Provides the load_snapshot() endpoint data, token metrics computation,
+and TTL-cached snapshot state.
+"""
 import os
 import time
 import asyncio
@@ -8,12 +14,35 @@ from core.projects_store import load_projects_registry
 from core.elasticsearch import async_es_search, ES_API_KEY
 from utils.logger import get_logger
 from utils.exceptions import SAFE_EXCEPTIONS
-from api.projects import _map_task_hit_for_api
 
 logger = get_logger(__name__)
 
-_SNAPSHOT_CACHE_DATA = None
-_SNAPSHOT_CACHE_TIME = 0.0
+
+class _SnapshotCache:
+    """Encapsulated TTL cache for the dashboard snapshot.
+
+    Replaces bare global mutation with a proper abstraction.
+    Thread-safe for single-worker uvicorn; for multi-worker scaling
+    this should be replaced with Redis or an external store.
+    """
+    __slots__ = ('_data', '_timestamp', '_ttl')
+
+    def __init__(self, ttl: float = 2.0):
+        self._data: dict | None = None
+        self._timestamp: float = 0.0
+        self._ttl = ttl
+
+    def get(self) -> dict | None:
+        if self._data and (time.time() - self._timestamp) < self._ttl:
+            return self._data
+        return None
+
+    def set(self, data: dict) -> None:
+        self._data = data
+        self._timestamp = time.time()
+
+
+_snapshot_cache = _SnapshotCache(ttl=2.0)
 
 async def load_repos(registry=None):
     """Return git_repo_info for locally-mounted projects only."""
@@ -111,10 +140,10 @@ async def _async_fetch_savings():
         }
 
 async def load_snapshot():
-    global _SNAPSHOT_CACHE_DATA, _SNAPSHOT_CACHE_TIME
-    now = time.time()
-    if _SNAPSHOT_CACHE_DATA and (now - _SNAPSHOT_CACHE_TIME) < 2.0:
-        return _SNAPSHOT_CACHE_DATA
+    """Aggregate all dashboard telemetry via concurrent async ES queries."""
+    cached = _snapshot_cache.get()
+    if cached is not None:
+        return cached
 
     if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
         pass
@@ -181,6 +210,9 @@ async def load_snapshot():
 
     repos_res = await load_repos(registry=projects_res)
 
+    # Lazy import to prevent core → api reverse dependency
+    from api.projects import _map_task_hit_for_api  # noqa: PLC0415
+
     result = {
         'workers': workers_res,
         'tasks': [_map_task_hit_for_api(h) for h in tasks_res],
@@ -192,7 +224,6 @@ async def load_snapshot():
         'elastro_savings': token_metrics['savings'],
         'token_metrics': token_metrics,
     }
-    
-    _SNAPSHOT_CACHE_DATA = result
-    _SNAPSHOT_CACHE_TIME = now
+
+    _snapshot_cache.set(result)
     return result
