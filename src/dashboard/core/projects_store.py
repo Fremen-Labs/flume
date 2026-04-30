@@ -53,7 +53,11 @@ def load_projects_registry() -> list:
         hits = res.get("hits", {}).get("hits", [])
         return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.warning(json.dumps({"event": "projects_load_error", "error": str(e)}))
+        logger.warning(
+            "Projects load error",
+            extra={"structured_data": {"event": "projects_load_error", "error": str(e)[:300]}},
+            exc_info=True,
+        )
         return []
 
 def save_projects_registry(registry: list):
@@ -72,7 +76,11 @@ def save_projects_registry(registry: list):
                 method="PUT",
             )
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-            logger.warning(json.dumps({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)}))
+            logger.warning(
+                "Projects save error",
+                extra={"structured_data": {"event": "projects_save_error", "id": entry.get("id"), "error": str(e)[:300]}},
+                exc_info=True,
+            )
 
 def _upsert_project(entry: dict):
     """Upsert a single project document to ES.
@@ -91,23 +99,26 @@ def _upsert_project(entry: dict):
 def _update_project_registry_field(project_id: str, **fields) -> None:
     """Atomic field-level update on a single project document in ES.
 
-    Uses ?refresh=wait_for so the clone_status change is visible to the
+    Uses the ES _update API with doc_as_upsert to surgically patch only the
+    changed fields — avoids the previous O(N) full-registry scan and rewrite.
+
+    ?refresh=wait_for ensures the clone_status change is visible to the
     /clone-status polling endpoint on the very next request — prevents the
     UI being stuck on 'cloning' when the clone has already failed or succeeded.
     """
-    registry = load_projects_registry()
-    for p in registry:
-        if p.get('id') == project_id:
-            p.update(fields)
-            # Write back only the updated document with immediate consistency.
-            p["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _es_projects_request(
-                f"/{PROJECTS_INDEX}/_doc/{project_id}?refresh=wait_for",
-                p,
-                method="PUT",
-            )
-            return
-    logger.warning(json.dumps({"event": "update_field_project_not_found", "project_id": project_id}))
+    fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        _es_projects_request(
+            f"/{PROJECTS_INDEX}/_update/{project_id}?refresh=wait_for",
+            {"doc": fields, "doc_as_upsert": True},
+            method="POST",
+        )
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
+        logger.warning(
+            "Project field update failed",
+            extra={"structured_data": {"event": "update_field_project_failed", "project_id": project_id, "error": str(e)[:300]}},
+            exc_info=True,
+        )
 
 def _delete_project_from_es(project_id: str):
     """Delete a project document from ES."""
@@ -117,4 +128,8 @@ def _delete_project_from_es(project_id: str):
             method="DELETE",
         )
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.warning(json.dumps({"event": "projects_delete_error", "id": project_id, "error": str(e)}))
+        logger.warning(
+            "Project delete error",
+            extra={"structured_data": {"event": "projects_delete_error", "id": project_id, "error": str(e)[:300]}},
+            exc_info=True,
+        )
