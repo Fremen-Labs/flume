@@ -53,7 +53,11 @@ def load_projects_registry() -> list:
         hits = res.get("hits", {}).get("hits", [])
         return [_ensure_gitflow_defaults(h["_source"]) for h in hits if h.get("_source")]
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.warning(json.dumps({"event": "projects_load_error", "error": str(e)}))
+        logger.warning(
+            "Projects load error",
+            extra={"structured_data": {"event": "projects_load_error", "error": str(e)[:300]}},
+            exc_info=True,
+        )
         return []
 
 def save_projects_registry(registry: list):
@@ -72,7 +76,11 @@ def save_projects_registry(registry: list):
                 method="PUT",
             )
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-            logger.warning(json.dumps({"event": "projects_save_error", "id": entry.get("id"), "error": str(e)}))
+            logger.warning(
+                "Projects save error",
+                extra={"structured_data": {"event": "projects_save_error", "id": entry.get("id"), "error": str(e)[:300]}},
+                exc_info=True,
+            )
 
 def _upsert_project(entry: dict):
     """Upsert a single project document to ES.
@@ -106,7 +114,11 @@ def _update_project_registry_field(project_id: str, **fields) -> None:
             method="POST",
         )
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.warning(json.dumps({"event": "update_field_project_failed", "project_id": project_id, "error": str(e)}))
+        logger.warning(
+            "Project field update failed",
+            extra={"structured_data": {"event": "update_field_project_failed", "project_id": project_id, "error": str(e)[:300]}},
+            exc_info=True,
+        )
 
 def _delete_project_from_es(project_id: str):
     """Delete a project document from ES."""
@@ -116,4 +128,8 @@ def _delete_project_from_es(project_id: str):
             method="DELETE",
         )
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as e:
-        logger.warning(json.dumps({"event": "projects_delete_error", "id": project_id, "error": str(e)}))
+        logger.warning(
+            "Project delete error",
+            extra={"structured_data": {"event": "projects_delete_error", "id": project_id, "error": str(e)[:300]}},
+            exc_info=True,
+        )

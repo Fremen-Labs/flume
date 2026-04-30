@@ -1,26 +1,31 @@
 import os
-import json
 import asyncio
 import subprocess
+import shutil
 import functools
 import httpx
 from pathlib import Path
+from urllib.parse import urlparse
 
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from core.projects_store import _update_project_registry_field
-from core.elasticsearch import get_es_url, _get_auth_headers, async_es_search
+from core.elasticsearch import get_es_url, async_es_search
 
 logger = get_logger(__name__)
 
 _ELASTRO_INDEX = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+_AST_INGEST_TIMEOUT_S = 120
+_GIT_CLONE_TIMEOUT_S = 300
+_ERR_TRUNCATE_LEN = 500
+_DEFAULT_ELASTRO_BIN = Path("/opt/venv/bin/elastro")
 
 
 @functools.lru_cache(maxsize=1)
 def _get_workspace_root():
     return resolve_safe_workspace()
 
-async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: str) -> tuple[bool, str]:
+async def _check_ast_exists_natively(repo_path: str) -> tuple[bool, str]:
     """Check whether AST graph records exist for a given repo path."""
     try:
         # Use term on .keyword for exact path matching — match would tokenize
@@ -39,6 +44,7 @@ async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: 
 
 
 async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: str, project_id: str, project_name: str) -> bool:
+    """Run Elastro AST graph ingestion for a repository, idempotently."""
     try:
         # Sanitize remote Git URLs into guaranteed physical volume paths via basename isolation
         local_path = repo_path
@@ -48,27 +54,31 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             basename = os.path.basename(parsed.path).replace('.git', '')
             local_path = str(_get_workspace_root() / basename)
 
-        exists, details = await _check_ast_exists_natively(http_client, local_path)
+        exists, _details = await _check_ast_exists_natively(local_path)
             
         if not exists:
-            logger.info(json.dumps({"event": "ast_ingest_start", "repo": local_path, "project": project_name}))
-            elastro_index = _ELASTRO_INDEX
+            logger.info(
+                "AST ingest starting",
+                extra={"structured_data": {"event": "ast_ingest_start", "repo": local_path, "project": project_name}},
+            )
             # Use the venv binary directly — avoids uv run re-installing elastro
             # on every call and works reliably inside the non-interactive container.
-            elastro_bin = Path("/opt/venv/bin/elastro")
+            elastro_bin = _DEFAULT_ELASTRO_BIN
             if not elastro_bin.exists():
-                import shutil
                 resolved = shutil.which("elastro")
                 if resolved:
                     elastro_bin = Path(resolved)
                 else:
-                    logger.warning(json.dumps({
-                        "event": "ast_ingest_skipped",
-                        "repo": local_path,
-                        "project": project_name,
-                        "reason": "elastro_not_installed",
-                        "hint": "elastro>=0.2.0 is now in pyproject.toml — rebuild the Docker image to enable AST ingestion.",
-                    }))
+                    logger.warning(
+                        "AST ingest skipped — elastro not found",
+                        extra={"structured_data": {
+                            "event": "ast_ingest_skipped",
+                            "repo": local_path,
+                            "project": project_name,
+                            "reason": "elastro_not_installed",
+                            "hint": "elastro>=0.2.0 is now in pyproject.toml — rebuild the Docker image to enable AST ingestion.",
+                        }},
+                    )
                     return False
             
             # Pass ES connection env vars so elastro targets the cluster
@@ -86,7 +96,6 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             elastro_env["ELASTIC_ELASTICSEARCH_HOSTS"] = resolved_es_url
             
             # Also set the decomposed host/port/protocol for full compatibility
-            from urllib.parse import urlparse
             _parsed = urlparse(resolved_es_url)
             elastro_env["ELASTIC_HOST"] = _parsed.hostname or "elasticsearch"
             elastro_env["ELASTIC_PORT"] = str(_parsed.port or 9200)
@@ -101,24 +110,33 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             elastro_env["ELASTIC_ELASTICSEARCH_VERIFY_CERTS"] = "false"
             elastro_env["ELASTIC_VERIFY_CERTS"] = "false"
                 
-            logger.info(json.dumps({"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)}))
+            logger.info(
+                "AST ingest environment configured",
+                extra={"structured_data": {"event": "ast_ingest_env", "elastic_url": resolved_es_url, "has_api_key": bool(resolved_api_key)}},
+            )
             
             proc = await asyncio.create_subprocess_exec(
-                str(elastro_bin), "rag", "ingest", local_path, "-i", elastro_index,
+                str(elastro_bin), "rag", "ingest", local_path, "-i", _ELASTRO_INDEX,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=elastro_env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_AST_INGEST_TIMEOUT_S)
             
             if proc.returncode != 0:
                 raise subprocess.CalledProcessError(proc.returncode, "elastro", stdout, stderr)
                 
-            logger.info(json.dumps({"event": "ast_ingest_success", "repo": local_path, "project": project_name}))
+            logger.info(
+                "AST ingest succeeded",
+                extra={"structured_data": {"event": "ast_ingest_success", "repo": local_path, "project": project_name}},
+            )
             return True
 
         else:
-            logger.info(json.dumps({"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"}))
+            logger.info(
+                "AST ingest skipped — already indexed",
+                extra={"structured_data": {"event": "ast_ingest_skipped", "repo": local_path, "project": project_name, "reason": "already_indexed"}},
+            )
             return True
 
     except subprocess.CalledProcessError as e:
@@ -157,12 +175,15 @@ async def _clone_and_setup_project(
     clone — all browse/diff/branch data is served via the GitHostClient REST
     API. The local path is only needed for the AST ingest run.
     """
-    logger.info(json.dumps({
-        "event": "project_clone_start",
-        "project_id": project_id,
-        "repo_url": repo_url,
-        "dest": str(dest_path),
-    }))
+    logger.info(
+        "Project clone starting",
+        extra={"structured_data": {
+            "event": "project_clone_start",
+            "project_id": project_id,
+            "repo_url": repo_url,
+            "dest": str(dest_path),
+        }},
+    )
 
     try:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,22 +215,27 @@ async def _clone_and_setup_project(
                 )
             )
             if is_complete:
-                logger.info(json.dumps({
-                    "event": "project_clone_skip",
-                    "project_id": project_id,
-                    "reason": "already_cloned_ast_ingest_only",
-                }))
+                logger.info(
+                    "Project already cloned — proceeding to AST ingest only",
+                    extra={"structured_data": {
+                        "event": "project_clone_skip",
+                        "project_id": project_id,
+                        "reason": "already_cloned_ast_ingest_only",
+                    }},
+                )
                 # Fall through to AST ingestion below
             else:
                 # Partial or broken state — wipe and start fresh.
-                import shutil as _shutil
-                logger.warning(json.dumps({
-                    "event": "project_clone_stale_dir_removed",
-                    "project_id": project_id,
-                    "dest": str(dest_path),
-                    "reason": "partial_or_broken_git_dir",
-                }))
-                _shutil.rmtree(dest_path, ignore_errors=True)
+                logger.warning(
+                    "Stale clone directory removed",
+                    extra={"structured_data": {
+                        "event": "project_clone_stale_dir_removed",
+                        "project_id": project_id,
+                        "dest": str(dest_path),
+                        "reason": "partial_or_broken_git_dir",
+                    }},
+                )
+                shutil.rmtree(dest_path, ignore_errors=True)
 
         if not dest_path.exists():
             proc = await asyncio.create_subprocess_exec(
@@ -218,20 +244,23 @@ async def _clone_and_setup_project(
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_GIT_CLONE_TIMEOUT_S)
             except asyncio.TimeoutError:
                 proc.kill()
-                raise RuntimeError('git clone timed out after 300 seconds')
+                raise RuntimeError(f'git clone timed out after {_GIT_CLONE_TIMEOUT_S} seconds')
 
             if proc.returncode != 0:
                 err_msg = stderr.decode('utf-8', errors='replace').strip()
                 raise RuntimeError(f'git clone exited {proc.returncode}: {err_msg[:400]}')
 
-            logger.info(json.dumps({
-                "event": "project_clone_success",
-                "project_id": project_id,
-                "dest": str(dest_path),
-            }))
+            logger.info(
+                "Project clone succeeded",
+                extra={"structured_data": {
+                    "event": "project_clone_success",
+                    "project_id": project_id,
+                    "dest": str(dest_path),
+                }},
+            )
 
         # ── AST ingestion (inline — local clone available at this point) ─────
         _update_project_registry_field(
@@ -245,14 +274,16 @@ async def _clone_and_setup_project(
         # ── AP-4B: Delete local clone after ingestion ─────────────────────────
         # The local clone is no longer needed — browse/diff/branch data is
         # served via the GitHostClient REST API henceforth.
-        import shutil as _shutil2
-        _shutil2.rmtree(dest_path, ignore_errors=True)
-        logger.info(json.dumps({
-            "event": "project_clone_deleted_post_ingest",
-            "project_id": project_id,
-            "dest": str(dest_path),
-            "reason": "AP-4B: ephemeral clone — local path not retained after AST ingest",
-        }))
+        shutil.rmtree(dest_path, ignore_errors=True)
+        logger.info(
+            "Ephemeral clone deleted post-ingest",
+            extra={"structured_data": {
+                "event": "project_clone_deleted_post_ingest",
+                "project_id": project_id,
+                "dest": str(dest_path),
+                "reason": "AP-4B: ephemeral clone — local path not retained after AST ingest",
+            }},
+        )
 
         _update_project_registry_field(
             project_id,
@@ -263,12 +294,16 @@ async def _clone_and_setup_project(
         )
 
     except (asyncio.TimeoutError, RuntimeError, OSError, ValueError) as exc:
-        err_str = str(exc)[:500]
-        logger.error(json.dumps({
-            "event": "project_clone_failure",
-            "project_id": project_id,
-            "error": err_str,
-        }))
+        err_str = str(exc)[:_ERR_TRUNCATE_LEN]
+        logger.error(
+            "Project clone failed",
+            extra={"structured_data": {
+                "event": "project_clone_failure",
+                "project_id": project_id,
+                "error": err_str,
+            }},
+            exc_info=True,
+        )
         _update_project_registry_field(
             project_id,
             clone_status='failed',
