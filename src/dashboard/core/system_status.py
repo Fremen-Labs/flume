@@ -10,12 +10,19 @@ import asyncio
 from pathlib import Path
 
 from core.tasks import load_workers, git_repo_info
-from core.projects_store import load_projects_registry
-from core.elasticsearch import async_es_search, ES_API_KEY
+from core.projects_store import async_load_projects_registry
+from core.elasticsearch import async_es_search
 from utils.logger import get_logger
 from utils.exceptions import SAFE_EXCEPTIONS
 
 logger = get_logger(__name__)
+
+# ── Module Constants ─────────────────────────────────────────────────────────
+_SNAPSHOT_TASK_SIZE = 300
+_SNAPSHOT_BLOCKED_SIZE = 500
+_SNAPSHOT_AUX_SIZE = 100
+_COST_PER_1K_INPUT = 0.002
+_COST_PER_1K_OUTPUT = 0.010
 
 
 class _SnapshotCache:
@@ -46,7 +53,7 @@ _snapshot_cache = _SnapshotCache(ttl=2.0)
 
 async def load_repos(registry=None):
     """Return git_repo_info for locally-mounted projects only."""
-    registry = registry if registry is not None else load_projects_registry()
+    registry = registry if registry is not None else await async_load_projects_registry()
     repos = []
     for p in registry:
         local_path = p.get('path') or ''
@@ -80,6 +87,13 @@ def _merge_recent_task_hits_with_blocked(recent_hits: list, blocked_hits: list) 
         by_id[k] = h
     return [by_id[k] for k in order]
 
+def _extract_worker_role(bucket: dict) -> str:
+    """Extract worker role from aggregation bucket."""
+    role_buckets = bucket.get('role', {}).get('buckets', [])
+    if role_buckets:
+        return role_buckets[0].get('key', 'unknown')
+    return 'unknown'
+
 async def _async_fetch_savings():
     try:
         agg_res = await async_es_search('agent-token-telemetry', {
@@ -92,7 +106,7 @@ async def _async_fetch_savings():
                 'total_input_tokens': {'sum': {'field': 'input_tokens'}},
                 'total_output_tokens': {'sum': {'field': 'output_tokens'}},
                 'by_worker': {
-                    'terms': {'field': 'worker_name', 'size': 100},
+                    'terms': {'field': 'worker_name', 'size': _SNAPSHOT_AUX_SIZE},
                     'aggs': {
                         'input': {'sum': {'field': 'input_tokens'}},
                         'output': {'sum': {'field': 'output_tokens'}},
@@ -102,8 +116,8 @@ async def _async_fetch_savings():
             }
         })
         aggs = agg_res.get('aggregations', {})
-        cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', '0.002'))
-        cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', '0.010'))
+        cost_in = float(os.environ.get('FLUME_COST_PER_1K_INPUT', str(_COST_PER_1K_INPUT)))
+        cost_out = float(os.environ.get('FLUME_COST_PER_1K_OUTPUT', str(_COST_PER_1K_OUTPUT)))
         t_in = int(aggs.get('total_input_tokens', {}).get('value', 0))
         t_out = int(aggs.get('total_output_tokens', {}).get('value', 0))
         
@@ -113,7 +127,7 @@ async def _async_fetch_savings():
                 'worker_name': b['key'],
                 'input_tokens': int(b.get('input', {}).get('value', 0)),
                 'output_tokens': int(b.get('output', {}).get('value', 0)),
-                'role': b.get('role', {}).get('buckets', [{'key': 'unknown'}])[0]['key'] if len(b.get('role', {}).get('buckets', [])) > 0 else 'unknown'
+                'role': _extract_worker_role(b)
             })
 
         return {
@@ -145,11 +159,8 @@ async def load_snapshot():
     if cached is not None:
         return cached
 
-    if not ES_API_KEY or ES_API_KEY == 'AUTO_GENERATED_BY_INSTALLER':
-        pass
-
     f_tasks = async_es_search('agent-task-records', {
-        'size': 300,
+        'size': _SNAPSHOT_TASK_SIZE,
         'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {
             'bool': {
@@ -159,7 +170,7 @@ async def load_snapshot():
         },
     })
     f_blocked_tasks = async_es_search('agent-task-records', {
-        'size': 500,
+        'size': _SNAPSHOT_BLOCKED_SIZE,
         'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {
             'bool': {
@@ -169,23 +180,23 @@ async def load_snapshot():
         },
     })
     f_reviews = async_es_search('agent-review-records', {
-        'size': 100,
+        'size': _SNAPSHOT_AUX_SIZE,
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     })
     f_failures = async_es_search('agent-failure-records', {
-        'size': 100,
+        'size': _SNAPSHOT_AUX_SIZE,
         'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     })
     f_provenance = async_es_search('agent-provenance-records', {
-        'size': 100,
+        'size': _SNAPSHOT_AUX_SIZE,
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'match_all': {}}
     })
     f_savings = _async_fetch_savings()
     f_workers = asyncio.to_thread(load_workers)
-    f_projects = asyncio.to_thread(load_projects_registry)
+    f_projects = async_load_projects_registry()
 
     (
         tasks_res_raw,
