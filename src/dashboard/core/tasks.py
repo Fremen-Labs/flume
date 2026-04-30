@@ -9,8 +9,8 @@ from typing import Optional
 from utils.async_subprocess import run_cmd_async
 from utils.exceptions import GitOperationError, SAFE_EXCEPTIONS
 from utils.logger import get_logger
-from core.elasticsearch import es_search, es_post, find_task_doc_by_logical_id
-from core.projects_store import load_projects_registry
+from core.elasticsearch import es_search, es_post, find_task_doc_by_logical_id, async_es_search, async_es_post
+from core.projects_store import load_projects_registry, async_load_projects_registry
 
 
 logger = get_logger(__name__)
@@ -46,15 +46,16 @@ async def delete_task_branches(ids: list, repo: str) -> list:
         query_must.append({'term': {'repo': repo}})
 
     try:
-        hits = es_search('agent-task-records', {
+        res = await async_es_search('agent-task-records', {
             'size': _ES_SEARCH_SIZE,
             '_source': ['id', 'repo', 'branch'],
             'query': {'bool': {'must': query_must}},
-        }).get('hits', {}).get('hits', [])
+        })
+        hits = res.get('hits', {}).get('hits', [])
     except SAFE_EXCEPTIONS:
         return []
 
-    registry = load_projects_registry()
+    registry = await async_load_projects_registry()
     deleted = []
 
     # If multiple tasks share the same branch (e.g., tasks under the same
@@ -90,7 +91,7 @@ async def delete_task_branches(ids: list, repo: str) -> list:
         # Shared-branch safety: if any other remaining task doc still uses
         # this branch, skip deletion.
         try:
-            remaining = es_search('agent-task-records', {
+            remaining_res = await async_es_search('agent-task-records', {
                 'size': 1,
                 '_source': ['id'],
                 'query': {
@@ -102,8 +103,8 @@ async def delete_task_branches(ids: list, repo: str) -> list:
                         'must_not': [{'terms': {'id': list(ids_set)}}],
                     }
                 },
-            }).get('hits', {}).get('hits', [])
-            if remaining:
+            })
+            if remaining_res.get('hits', {}).get('hits', []):
                 continue
         except SAFE_EXCEPTIONS:
             # Best-effort: if ES check fails, fall back to deleting.
@@ -134,13 +135,90 @@ async def delete_task_branches(ids: list, repo: str) -> list:
     return deleted
 
 
+async def _resolve_local_branches(repo_path: Path) -> list:
+    try:
+        rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "--format=%(refname:short)")
+        raw = out
+        return [b.strip() for b in raw.splitlines() if b.strip()]
+    except SAFE_EXCEPTIONS:
+        return []
+
+async def _resolve_current_branch(repo_path: Path) -> str:
+    try:
+        rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
+        return out.strip() if rc == 0 else ""
+    except (OSError, GitOperationError):
+        logger.warning(
+            "Current branch detection failed",
+            extra={"structured_data": {"event": "current_branch_detect_failed", "repo_path": str(repo_path)}},
+            exc_info=True,
+        )
+        return ""
+
+async def _filter_blocked_by_tasks(branches_to_consider: list, repo_id: str) -> set:
+    try:
+        hits = await async_es_search('agent-task-records', {
+            'size': _ES_SEARCH_SIZE,
+            '_source': ['id', 'repo', 'branch', 'status'],
+            'query': {
+                'bool': {
+                    'must': [
+                        {'terms': {'branch': branches_to_consider}},
+                        {'term': {'repo': repo_id}},
+                    ],
+                    'must_not': [{'term': {'status': 'archived'}}],
+                }
+            },
+        })
+        blocked_by_tasks = set()
+        for h in hits.get('hits', {}).get('hits', []):
+            src = h.get('_source') or {}
+            b = (src.get('branch') or '').strip()
+            if b:
+                blocked_by_tasks.add(b)
+        return blocked_by_tasks
+    except SAFE_EXCEPTIONS:
+        return set()
+
+async def _switch_away_from_current(repo_path: Path, current_branch: str, to_delete: list, local_branches: list) -> str:
+    checkout_branch = next((b for b in local_branches if b != current_branch and b not in to_delete), None)
+    if not checkout_branch:
+        checkout_branch = next((b for b in local_branches if b != current_branch), None)
+    if checkout_branch:
+        try:
+            await run_cmd_async("git", "-C", str(repo_path), "switch", checkout_branch, timeout=_GIT_PUSH_TIMEOUT_S)
+            return checkout_branch
+        except SAFE_EXCEPTIONS:
+            pass
+    return current_branch
+
+async def _execute_branch_deletions(repo_path: Path, to_delete: list, force: bool) -> tuple:
+    deleted = []
+    errors = []
+    for b in to_delete:
+        try:
+            del_flag = '-D' if force else '-d'
+            rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", del_flag, b, timeout=_GIT_CMD_TIMEOUT_S)
+            if rc == 0:
+                deleted.append(b)
+            else:
+                errors.append({'branch': b, 'error': err[:_ERR_TRUNCATE_LEN] or 'git branch failed'})
+        except SAFE_EXCEPTIONS:
+            errors.append({'branch': b, 'error': 'exception during git branch deletion'})
+
+        try:
+            await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=_GIT_PUSH_TIMEOUT_S)
+        except (OSError, GitOperationError):
+            logger.warning(
+                "Branch remote push delete failed",
+                extra={"structured_data": {"event": "branch_remote_push_delete_failed", "branch": b, "repo_path": str(repo_path)}},
+                exc_info=True,
+            )
+    return deleted, errors
+
 async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dict:
     """
     Delete local git branches for a given dashboard repo.
-
-    Safety defaults:
-    - Default branch and currently checked-out branch are protected unless `force=True`.
-    - If any non-archived tasks reference the branch, deletion is blocked unless `force=True`.
     """
     try:
         raw_branches = [str(b or '').strip() for b in (branches or [])]
@@ -148,18 +226,15 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         if not raw_branches:
             return {'ok': False, 'error': 'No branches provided', 'deleted': [], 'skipped': []}
 
-        # Allow typical git ref formats like "feature/x", "bugfix-1", "release/1.2.3".
-        # Keep this conservative to avoid command injection / ref weirdness.
-        invalid = [b for b in raw_branches if not re.match(r'^[A-Za-z0-9._/\-]+$', b)]
+        invalid = [b for b in raw_branches if not re.match(r'^[A-Za-z0-9._/\\-]+$', b)]
         if invalid:
             return {'ok': False, 'error': 'Invalid branch name(s)', 'invalid': invalid}
 
-        registry = load_projects_registry()
+        registry = await async_load_projects_registry()
         proj = next((p for p in registry if p['id'] == repo_id), None)
         if not proj:
             return {'ok': False, 'error': f'Project "{repo_id}" not found'}
 
-        # AP-12: Explicit local-only guard — no silent workspace fallback.
         local_path = proj.get('path') or ''
         if not local_path or proj.get('clone_status') not in ('local',):
             return {'ok': False, 'error': 'Branch deletion is only supported for locally-mounted repos. Remote repos use GitHostClient.'}
@@ -167,14 +242,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         if not (repo_path / '.git').exists():
             return {'ok': False, 'error': 'Repo is not a git repository'}
 
-        # Discover actual local branches so we can report "missing" branches.
-        try:
-            rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "--format=%(refname:short)")
-            raw = out
-            local_branches = [b.strip() for b in raw.splitlines() if b.strip()]
-        except SAFE_EXCEPTIONS:
-            local_branches = []
-
+        local_branches = await _resolve_local_branches(repo_path)
         local_set = set(local_branches)
         missing = [b for b in raw_branches if local_branches and b not in local_set]
         branches_to_consider = [b for b in raw_branches if (not local_branches) or b in local_set]
@@ -184,17 +252,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         default_branch = await resolve_default_branch(
             repo_path, override=proj.get('gitflow', {}).get('defaultBranch')
         )
-
-        current_branch = None
-        try:
-            rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
-            current_branch = out.strip() if rc == 0 else ""
-        except (OSError, GitOperationError):
-            logger.warning(
-                "Current branch detection failed",
-                extra={"structured_data": {"event": "current_branch_detect_failed", "repo_path": str(repo_path)}},
-                exc_info=True,
-            )
+        current_branch = await _resolve_current_branch(repo_path)
 
         protected = set()
         if not force:
@@ -203,32 +261,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             if current_branch:
                 protected.add(current_branch)
 
-        # If not forcing, block deleting branches that are referenced by active tasks.
-        blocked_by_tasks = set()
-        if not force:
-            try:
-                hits = es_search('agent-task-records', {
-                    'size': _ES_SEARCH_SIZE,
-                    '_source': ['id', 'repo', 'branch', 'status'],
-                    'query': {
-                        'bool': {
-                            'must': [
-                                {'terms': {'branch': branches_to_consider}},
-                                {'term': {'repo': repo_id}},
-                            ],
-                            'must_not': [{'term': {'status': 'archived'}}],
-                        }
-                    },
-                }).get('hits', {}).get('hits', [])
-
-                for h in hits:
-                    src = h.get('_source') or {}
-                    b = (src.get('branch') or '').strip()
-                    if b:
-                        blocked_by_tasks.add(b)
-            except SAFE_EXCEPTIONS:
-                # If ES isn't available, don't block deletion.
-                blocked_by_tasks = set()
+        blocked_by_tasks = set() if force else await _filter_blocked_by_tasks(branches_to_consider, repo_id)
 
         to_delete = []
         skipped = []
@@ -241,48 +274,10 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
                 continue
             to_delete.append(b)
 
-        # If we are deleting the currently checked-out branch, switch away first.
         if current_branch and current_branch in to_delete:
-            checkout_branch = None
-            for b in local_branches:
-                if b != current_branch and b not in to_delete:
-                    checkout_branch = b
-                    break
-            if not checkout_branch:
-                for b in local_branches:
-                    if b != current_branch:
-                        checkout_branch = b
-                        break
-            if checkout_branch:
-                try:
-                    await run_cmd_async("git", "-C", str(repo_path), "switch", checkout_branch, timeout=_GIT_PUSH_TIMEOUT_S)
-                    current_branch = checkout_branch
-                except SAFE_EXCEPTIONS:
-                    # Best-effort only; deletion may still succeed or fail.
-                    pass
+            current_branch = await _switch_away_from_current(repo_path, current_branch, to_delete, local_branches)
 
-        deleted = []
-        errors = []
-        for b in to_delete:
-            try:
-                del_flag = '-D' if force else '-d'
-                rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", del_flag, b, timeout=_GIT_CMD_TIMEOUT_S)
-                if rc == 0:
-                    deleted.append(b)
-                else:
-                    errors.append({'branch': b, 'error': err[:_ERR_TRUNCATE_LEN] or 'git branch failed'})
-            except SAFE_EXCEPTIONS:
-                errors.append({'branch': b, 'error': 'exception during git branch deletion'})
-
-            # Best-effort: delete remote tracking branch if it exists on origin.
-            try:
-                await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=_GIT_PUSH_TIMEOUT_S)
-            except (OSError, GitOperationError):
-                logger.warning(
-                    "Branch remote push delete failed",
-                    extra={"structured_data": {"event": "branch_remote_push_delete_failed", "branch": b, "repo_path": str(repo_path)}},
-                    exc_info=True,
-                )
+        deleted, errors = await _execute_branch_deletions(repo_path, to_delete, force)
 
         return {
             'ok': True,
@@ -697,17 +692,12 @@ async def resolve_default_branch(repo_path: Path, override: Optional[str] = None
         return 'main'
 
 
-def get_task_doc(task_id: str):
-    """Fetch a single task document from ES by logical id."""
-    return find_task_doc_by_logical_id(task_id)
-
-
 async def create_task_pr(task_id: str) -> dict:
     """
     Create a GitHub PR for a task that has been reviewer-approved.
     Returns a result dict with keys: ok, pr_url, pr_number, error, skipped.
     """
-    es_id, task = get_task_doc(task_id)
+    es_id, task = find_task_doc_by_logical_id(task_id)
     if not task:
         return {'ok': False, 'error': 'Task not found'}
 
@@ -800,7 +790,7 @@ async def _git_task_context(task_id: str):
     Returns (task, repo_path, branch, target_branch, error_dict).
     error_dict is non-None when something is missing.
     """
-    _, task = get_task_doc(task_id)
+    _, task = find_task_doc_by_logical_id(task_id)
     if not task:
         return None, None, None, None, {'error': 'Task not found', 'branch': None}
     branch = task.get('branch')
@@ -967,4 +957,262 @@ async def task_commits(task_id: str) -> dict:
         'commits': commits,
         'error': None,
     }
+
+
+
+# ── Async API ────────────────────────────────────────────────────────────────
+# Non-blocking counterparts for FastAPI callers.
+
+from core.elasticsearch import async_es_search, async_es_post, async_find_task_doc_by_logical_id
+import asyncio
+
+async def async_load_workers() -> list:
+    """Load worker status from ES and enrich with token telemetry (non-blocking)."""
+    workers = []
+    try:
+        res = await async_es_search('agent-system-workers', {'size': _ES_SEARCH_SIZE_SMALL, 'sort': [{'updated_at': {'order': 'desc'}}]})
+        hits = res.get('hits', {}).get('hits', [])
+        now = datetime.now(timezone.utc)
+        for h in hits:
+            doc = h.get('_source', {})
+            node_workers = doc.get('workers', [])
+            for w in node_workers:
+                w['status'] = w.get('status', 'idle')
+                hb_str = w.get('heartbeat_at')
+                if hb_str:
+                    try:
+                        hb = datetime.fromisoformat(hb_str.replace('Z', '+00:00'))
+                        diff_sec = (now - hb).total_seconds()
+                        if diff_sec > _WORKER_GC_THRESHOLD_S:
+                            continue
+                        if diff_sec > _WORKER_OFFLINE_THRESHOLD_S:
+                            w['status'] = 'offline/terminated'
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Worker heartbeat parse failed",
+                            extra={"structured_data": {"event": "worker_heartbeat_parse_failed", "worker_name": w.get('name'), "heartbeat_raw": hb_str}},
+                            exc_info=True,
+                        )
+                workers.append(w)
+    except SAFE_EXCEPTIONS as e:
+        logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)[:_ERR_TRUNCATE_LEN]}}, exc_info=True)
+        return []
+        
+    try:
+        agg_res = await async_es_search('agent-token-telemetry', {
+            'size': 0,
+            'aggs': {
+                'by_worker': {
+                    'terms': {'field': 'worker_name.keyword', 'size': _ES_SEARCH_SIZE},
+                    'aggs': {
+                        'total_input': {'sum': {'field': 'input_tokens'}},
+                        'total_output': {'sum': {'field': 'output_tokens'}}
+                    }
+                },
+                'total_elastro_savings': {
+                    'sum': {'field': 'savings'}
+                }
+            }
+        })
+        buckets = agg_res.get('aggregations', {}).get('by_worker', {}).get('buckets', [])
+        totals = {}
+        for b in buckets:
+            totals[b.get('key')] = {
+                'input': int(b.get('total_input', {}).get('value', 0)),
+                'output': int(b.get('total_output', {}).get('value', 0))
+            }
+        for w in workers:
+            w['input_tokens'] = totals.get(w['name'], {}).get('input', 0)
+            w['output_tokens'] = totals.get(w['name'], {}).get('output', 0)
+    except Exception as e:
+        logger.warning(
+            "Worker token aggregation failed",
+            extra={"structured_data": {"event": "worker_token_aggregation_failed", "detail": "best-effort telemetry enrichment skipped"}},
+            exc_info=True,
+        )
+        
+    return workers
+
+
+async def async_queue_for_repo(repo_id: str):
+    """Return the ready-task queue for a repo, sorted by priority then age (non-blocking)."""
+    res = await async_es_search('agent-task-records', {
+        'size': _ES_SEARCH_SIZE,
+        'query': {
+            'bool': {
+                'must': [
+                    {'term': {'repo': repo_id}},
+                    {'term': {'status': 'ready'}},
+                ],
+                'must_not': [{'term': {'status': 'archived'}}],
+            }
+        },
+        'sort': [{'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}],
+    })
+    hits = res.get('hits', {}).get('hits', [])
+    tasks = [{'_id': h.get('_id'), **h.get('_source', {})} for h in hits]
+    tasks.sort(key=lambda t: (priority_rank(t.get('priority')), t.get('updated_at') or t.get('last_update') or ''))
+    out = []
+    for idx, t in enumerate(tasks, start=1):
+        out.append({
+            '_id': t.get('_id'),
+            'id': t.get('id') or t.get('_id'),
+            'title': t.get('title'),
+            'status': t.get('status'),
+            'priority': t.get('priority'),
+            'owner': t.get('owner'),
+            'assigned_agent_role': t.get('assigned_agent_role') or t.get('owner'),
+            'queuePosition': idx,
+            'updated_at': t.get('updated_at') or t.get('last_update'),
+        })
+    return out
+
+
+async def async_transition_task(task_id: str, status: str, owner=None, needs_human=None):
+    """Atomically transition a task to a new status and emit a telemetry event (non-blocking)."""
+    es_id, _src = await async_find_task_doc_by_logical_id(task_id)
+    if not es_id:
+        return None
+    previous_status = (_src or {}).get('status', 'unknown')
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    doc = {
+        'status': status,
+        'updated_at': now,
+        'last_update': now,
+    }
+    if owner:
+        doc['owner'] = owner
+        doc['assigned_agent_role'] = owner
+    if needs_human is not None:
+        doc['needs_human'] = bool(needs_human)
+    if status == 'ready':
+        doc['implementer_consecutive_llm_failures'] = 0
+    await async_es_post(f'agent-task-records/_update/{es_id}', {'doc': doc})
+
+    try:
+        event = {
+            'task_id': task_id,
+            'previous_status': previous_status,
+            'new_status': status,
+            'owner': owner or '',
+            'timestamp': doc['updated_at'],
+            'project': (_src or {}).get('project', ''),
+        }
+        await async_es_post('flume-task-events/_doc', event)
+    except Exception:
+        logger.debug(
+            "Task event telemetry write failed",
+            extra={"structured_data": {"event": "task_event_telemetry_failed", "task_id": task_id}},
+            exc_info=True,
+        )
+
+    return {'_id': es_id, 'id': task_id, **doc}
+
+
+async def async_task_history(task_id: str):
+    """Build a full timeline of handoffs, reviews, failures, and provenance for a task using concurrent searches (O(N) latency instead of O(4N))."""
+    es_id, src = await async_find_task_doc_by_logical_id(task_id)
+    if not src:
+        return None
+    task = {'_id': es_id, **src}
+
+    events = []
+
+    def infer_model(src, _event_type):
+        if src.get('model_used'):
+            return src.get('model_used')
+        role = src.get('agent_role') or src.get('from_role') or task.get('owner') or task.get('assigned_agent_role')
+        role = (role or '').lower()
+        if role in ('implementer', 'tester', 'e2e-tester', 'reviewer', 'acceptance-reviewer',
+                    'pm', 'pm-dispatcher', 'intake', 'memory-updater'):
+            return _DEFAULT_LLM_MODEL
+        return task.get('preferred_model') or None
+
+    f_handoffs = async_es_search('agent-handoff-records', {
+        'size': _ES_SEARCH_SIZE_SMALL,
+        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'term': {'task_id': task_id}},
+    })
+    f_reviews = async_es_search('agent-review-records', {
+        'size': _ES_SEARCH_SIZE_SMALL,
+        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'term': {'task_id': task_id}},
+    })
+    f_failures = async_es_search('agent-failure-records', {
+        'size': _ES_SEARCH_SIZE_SMALL,
+        'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'term': {'task_id': task_id}},
+    })
+    f_provenance = async_es_search('agent-provenance-records', {
+        'size': _ES_SEARCH_SIZE_SMALL,
+        'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
+        'query': {'term': {'task_id': task_id}},
+    })
+
+    (
+        handoffs_res,
+        reviews_res,
+        failures_res,
+        provenance_res
+    ) = await asyncio.gather(f_handoffs, f_reviews, f_failures, f_provenance)
+
+    for h in handoffs_res.get('hits', {}).get('hits', []):
+        src = h.get('_source', {})
+        commit_note = ''
+        if src.get('commit_sha'):
+            commit_note = f"commit: {src['commit_sha'][:8]}"
+        if src.get('branch'):
+            commit_note = f"branch: {src['branch']}" + (f"  {commit_note}" if commit_note else '')
+        events.append({
+            'type': 'handoff',
+            'timestamp': src.get('created_at'),
+            'actor': src.get('from_role', 'unknown'),
+            'summary': f"Handed off to {src.get('to_role', 'unknown')} ({src.get('status', 'unknown')})",
+            'detail': commit_note,
+            'model': infer_model(src, 'handoff'),
+        })
+
+    for r in reviews_res.get('hits', {}).get('hits', []):
+        src = r.get('_source', {})
+        st = src.get('status')
+        appr = 'Approved' if src.get('approved') else 'Rejected'
+        if st == 'needs_human':
+            appr = 'Escalated to human'
+        events.append({
+            'type': 'review',
+            'timestamp': src.get('created_at'),
+            'actor': src.get('agent_role', 'reviewer'),
+            'summary': appr,
+            'detail': src.get('feedback', '')[:200] + ('...' if len(src.get('feedback', '')) > 200 else ''),
+            'model': infer_model(src, 'review'),
+        })
+
+    for f in failures_res.get('hits', {}).get('hits', []):
+        src = f.get('_source', {})
+        err = src.get('error', '')
+        if isinstance(err, str):
+            err = err[:_ERR_TRUNCATE_LEN] + ('...' if len(err) > _ERR_TRUNCATE_LEN else '')
+        events.append({
+            'type': 'failure',
+            'timestamp': src.get('updated_at'),
+            'actor': src.get('agent_role', 'system'),
+            'summary': f"{src.get('operation', 'operation')} failed",
+            'detail': str(err),
+            'model': infer_model(src, 'failure'),
+        })
+
+    for p in provenance_res.get('hits', {}).get('hits', []):
+        src = p.get('_source', {})
+        events.append({
+            'type': 'provenance',
+            'timestamp': src.get('created_at'),
+            'actor': src.get('agent_role', 'system'),
+            'summary': f"Files accessed ({len(src.get('files_read', []))} read, {len(src.get('files_written', []))} written)",
+            'detail': '',
+            'model': infer_model(src, 'provenance'),
+        })
+
+    events.sort(key=lambda x: x.get('timestamp') or '', reverse=True)
+    task['timeline'] = events
+    return task
 
