@@ -1,10 +1,16 @@
+"""
+Unit tests for worker-manager/manager.py — Concurrency and Sweep Engine.
+
+Tests the node concurrency cap calculation, block/resume sweep logic,
+and emergency brake ramp-down without requiring running infrastructure.
+"""
 from unittest.mock import patch
 import time
 
 # Add worker-manager to path directly since it has a hyphen in its name
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src' / 'worker-manager'))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'src' / 'worker-manager'))
 
 import manager
 

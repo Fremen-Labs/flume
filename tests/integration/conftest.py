@@ -14,29 +14,15 @@ import subprocess
 import pytest
 import httpx
 
-import json
-
-# ─── API Base URLs ───────────────────────────────────────────────────────────
-FLUME_API_BASE = os.environ.get("FLUME_API_BASE", "http://localhost:8765/api")
-FLUME_ES_URL = os.environ.get("FLUME_ES_URL", "https://localhost:9200")
-FLUME_GATEWAY_URL = os.environ.get("FLUME_GATEWAY_URL", "http://localhost:8090")
-FLUME_OPENBAO_URL = os.environ.get("FLUME_OPENBAO_URL", "http://localhost:8200")
-
-def get_elastic_password() -> str:
-    # Always use the fresh Go orchestrator snapshot via hidden testenv command.
-    # Ignoring os.environ prevents stale passwords in the developer shell
-    # from causing 401 Unauthorized errors after a stack rebuild.
-    try:
-        res = subprocess.run(["./flume", "_testenv"], capture_output=True, text=True, check=True)
-        stdout = res.stdout
-        start_idx = stdout.find('{')
-        if start_idx != -1:
-            env_cfg = json.loads(stdout[start_idx:])
-            return env_cfg.get("ElasticPassword", "")
-        return ""
-    except Exception as e:
-        print(f"Warning: Failed to fetch elastic password from orchestrator: {e}")
-        return ""
+# ── DRY imports from root conftest ───────────────────────────────────────────
+from tests.conftest import (
+    FLUME_API_BASE,
+    FLUME_ES_URL,
+    FLUME_GATEWAY_URL,
+    FLUME_OPENBAO_URL,
+    get_elastic_password,
+    make_es_client,
+)
 
 FLUME_ES_PASSWORD = get_elastic_password()
 
@@ -56,14 +42,9 @@ def es_client():
     and Basic Auth via the FLUME_ELASTIC_PASSWORD env var, matching the
     TLS-enabled docker-compose configuration.
     """
-    auth = ("elastic", FLUME_ES_PASSWORD) if FLUME_ES_PASSWORD else None
-    with httpx.Client(
-        base_url=FLUME_ES_URL,
-        timeout=10.0,
-        verify=False,
-        auth=auth,
-    ) as client:
-        yield client
+    client = make_es_client(password=FLUME_ES_PASSWORD)
+    yield client
+    client.close()
 
 
 @pytest.fixture(scope="session")

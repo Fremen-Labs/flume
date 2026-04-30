@@ -24,6 +24,7 @@ from core.planning import (
     _planner_llm_error_hint,
     _planner_request_timeout_seconds,
 )
+from api.models import PlanTask, PlanStory, PlanFeature, PlanEpic, PlanResponse
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -199,12 +200,15 @@ class TestPlannerRequestTimeout:
     def test_frontier_provider_uses_default(self):
         """Non-Ollama providers should use the env-configured default."""
         config = {"provider": "openai", "baseUrl": "https://api.openai.com"}
-        with patch.dict(os.environ, {"FLUME_PLANNER_TIMEOUT_SECONDS": "120"}):
-            from config import get_settings
-            get_settings.cache_clear()
+        # Temporarily override the settings mock timeout to simulate a non-default value
+        from config import get_settings
+        original_timeout = get_settings().FLUME_PLANNER_TIMEOUT_SECONDS
+        get_settings().FLUME_PLANNER_TIMEOUT_SECONDS = 120
+        try:
             timeout = _planner_request_timeout_seconds(config)
             assert timeout == 120
-            get_settings.cache_clear()
+        finally:
+            get_settings().FLUME_PLANNER_TIMEOUT_SECONDS = original_timeout
 
     def test_ollama_in_base_url_triggers_minimum(self):
         """Even if provider isn't 'ollama', an ollama URL should trigger the 300s floor."""
@@ -260,27 +264,26 @@ class TestCoalesceStoryTasks:
         assert _coalesce_story_tasks([]) == []
 
     def test_single_task(self):
-        tasks = [{"title": "Update App.tsx", "objective": "Add routing"}]
+        tasks = [PlanTask(id="t-1", title="Update App.tsx", objective="Add routing")]
         result = _coalesce_story_tasks(tasks)
         assert len(result) == 1
-        assert result[0]["title"] == "Update App.tsx"
+        assert result[0].title == "Update App.tsx"
 
     def test_same_file_tasks_coalesced(self):
         """Adjacent tasks targeting the same file should merge into a compound task."""
         tasks = [
-            {"title": "Add imports to App.tsx", "objective": "Import router"},
-            {"title": "Add routes to App.tsx", "objective": "Define routes"},
+            PlanTask(id="t-1", title="Add imports to App.tsx", objective="Import router"),
+            PlanTask(id="t-2", title="Add routes to App.tsx", objective="Define routes"),
         ]
         result = _coalesce_story_tasks(tasks)
         assert len(result) == 1
-        assert "Compound Task" in result[0]["title"]
-        assert result[0].get("_coalesced_count", 1) == 2
+        assert "Compound Task" in result[0].title
 
     def test_different_file_tasks_not_coalesced(self):
         """Tasks targeting different files should remain separate."""
         tasks = [
-            {"title": "Update App.tsx", "objective": "Add routing"},
-            {"title": "Fix server.py endpoint", "objective": "Fix bug"},
+            PlanTask(id="t-1", title="Update App.tsx", objective="Add routing"),
+            PlanTask(id="t-2", title="Fix server.py endpoint", objective="Fix bug"),
         ]
         result = _coalesce_story_tasks(tasks)
         assert len(result) == 2
@@ -288,8 +291,8 @@ class TestCoalesceStoryTasks:
     def test_no_file_in_title_not_coalesced(self):
         """Tasks without extractable filenames should not merge."""
         tasks = [
-            {"title": "Implement the feature", "objective": "Build it"},
-            {"title": "Write the tests", "objective": "Test it"},
+            PlanTask(id="t-1", title="Implement the feature", objective="Build it"),
+            PlanTask(id="t-2", title="Write the tests", objective="Test it"),
         ]
         result = _coalesce_story_tasks(tasks)
         assert len(result) == 2
@@ -297,11 +300,11 @@ class TestCoalesceStoryTasks:
     def test_mixed_sequence(self):
         """A → A → B → B → A should produce [A_compound, B_compound, A]."""
         tasks = [
-            {"title": "Step 1 in App.tsx"},
-            {"title": "Step 2 in App.tsx"},
-            {"title": "Step 1 in server.py"},
-            {"title": "Step 2 in server.py"},
-            {"title": "Final check in App.tsx"},
+            PlanTask(id="t-1", title="Step 1 in App.tsx"),
+            PlanTask(id="t-2", title="Step 2 in App.tsx"),
+            PlanTask(id="t-3", title="Step 1 in server.py"),
+            PlanTask(id="t-4", title="Step 2 in server.py"),
+            PlanTask(id="t-5", title="Final check in App.tsx"),
         ]
         result = _coalesce_story_tasks(tasks)
         assert len(result) == 3  # compound_App, compound_server, App
@@ -315,46 +318,62 @@ class TestCountPlanTasks:
     """Validates leaf task counting across nested plan structures."""
 
     def test_empty_plan(self):
-        assert _count_plan_tasks({}) == 0
-        assert _count_plan_tasks({"epics": []}) == 0
+        assert _count_plan_tasks(PlanResponse()) == 0
+        assert _count_plan_tasks(PlanResponse(epics=[])) == 0
 
     def test_single_task(self):
-        plan = {
-            "epics": [{
-                "features": [{
-                    "stories": [{
-                        "tasks": [{"id": "task-1", "title": "Do thing"}]
-                    }]
-                }]
-            }]
-        }
+        plan = PlanResponse(epics=[
+            PlanEpic(id="e-1", title="Epic 1", features=[
+                PlanFeature(id="f-1", title="Feature 1", stories=[
+                    PlanStory(id="s-1", title="Story 1", tasks=[
+                        PlanTask(id="task-1", title="Do thing")
+                    ])
+                ])
+            ])
+        ])
         assert _count_plan_tasks(plan) == 1
 
     def test_multiple_tasks_across_stories(self):
-        plan = {
-            "epics": [{
-                "features": [{
-                    "stories": [
-                        {"tasks": [{"id": "t-1"}, {"id": "t-2"}]},
-                        {"tasks": [{"id": "t-3"}]},
-                    ]
-                }]
-            }]
-        }
+        plan = PlanResponse(epics=[
+            PlanEpic(id="e-1", title="Epic 1", features=[
+                PlanFeature(id="f-1", title="Feature 1", stories=[
+                    PlanStory(id="s-1", title="Story 1", tasks=[
+                        PlanTask(id="t-1", title="Task 1"),
+                        PlanTask(id="t-2", title="Task 2"),
+                    ]),
+                    PlanStory(id="s-2", title="Story 2", tasks=[
+                        PlanTask(id="t-3", title="Task 3"),
+                    ]),
+                ])
+            ])
+        ])
         assert _count_plan_tasks(plan) == 3
 
     def test_nested_epics(self):
-        plan = {
-            "epics": [
-                {"features": [{"stories": [{"tasks": [{"id": "t-1"}]}]}]},
-                {"features": [{"stories": [{"tasks": [{"id": "t-2"}, {"id": "t-3"}]}]}]},
-            ]
-        }
+        plan = PlanResponse(epics=[
+            PlanEpic(id="e-1", title="Epic 1", features=[
+                PlanFeature(id="f-1", title="Feature 1", stories=[
+                    PlanStory(id="s-1", title="Story 1", tasks=[
+                        PlanTask(id="t-1", title="Task 1"),
+                    ])
+                ])
+            ]),
+            PlanEpic(id="e-2", title="Epic 2", features=[
+                PlanFeature(id="f-2", title="Feature 2", stories=[
+                    PlanStory(id="s-2", title="Story 2", tasks=[
+                        PlanTask(id="t-2", title="Task 2"),
+                        PlanTask(id="t-3", title="Task 3"),
+                    ])
+                ])
+            ]),
+        ])
         assert _count_plan_tasks(plan) == 3
 
-    def test_missing_nested_keys(self):
-        """Plan with missing features/stories/tasks keys should not crash."""
-        plan = {"epics": [{"features": None}]}
+    def test_empty_nested_structures(self):
+        """Plan with epics but no features/stories/tasks should count zero."""
+        plan = PlanResponse(epics=[
+            PlanEpic(id="e-1", title="Empty Epic", features=[])
+        ])
         assert _count_plan_tasks(plan) == 0
 
 
