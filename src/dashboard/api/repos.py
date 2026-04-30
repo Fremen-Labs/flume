@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 @router.get("/api/repos/{project_id}/branches")
-async def api_repo_branches(project_id: str) -> dict | JSONResponse:
+async def api_repo_branches(project_id: str):
     """
     Return git branches for a project.
 
@@ -121,7 +121,7 @@ async def api_repo_branches(project_id: str) -> dict | JSONResponse:
 
 
 @router.get("/api/repos/{project_id}/tree")
-async def api_repo_tree(project_id: str, branch: str = "") -> dict | JSONResponse:
+async def api_repo_tree(project_id: str, branch: str = ""):
     """
     Return a flat list of all git-tracked files/dirs for a given branch.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
@@ -215,7 +215,7 @@ async def api_repo_tree(project_id: str, branch: str = "") -> dict | JSONRespons
 
 
 @router.get("/api/repos/{project_id}/file")
-async def api_repo_file(project_id: str, path: str = "", branch: str = "") -> dict | JSONResponse:
+async def api_repo_file(project_id: str, path: str = "", branch: str = ""):
     """
     Return the content of a single file from the git tree.
     AP-4B: Uses GitHostClient REST API for remote repos (no local clone required).
@@ -313,7 +313,7 @@ def _make_file_response(content_bytes: bytes, path: str) -> dict:
 
 
 @router.get("/api/repos/{project_id}/diff")
-async def api_repo_diff(project_id: str, base: str = "", head: str = "") -> dict | JSONResponse:
+async def api_repo_diff(project_id: str, base: str = "", head: str = ""):
     """Return a unified diff between two branches for a project."""
     if not base or not head:
         return JSONResponse(status_code=400, content={"error": "base and head branch parameters are required"})

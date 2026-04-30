@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 @router.post('/api/intake/session')
-async def api_intake_start_session(payload: IntakeSessionRequest) -> dict | JSONResponse:
+async def api_intake_start_session(payload: IntakeSessionRequest):
     repo = payload.repo.strip()
     prompt = payload.prompt.strip()
     if not repo:
@@ -41,14 +41,14 @@ async def api_intake_start_session(payload: IntakeSessionRequest) -> dict | JSON
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.get('/api/intake/session/{session_id}')
-def api_intake_get_session(session_id: str) -> dict | JSONResponse:
+def api_intake_get_session(session_id: str):
     session = load_session(session_id)
     if not session:
         return JSONResponse(status_code=404, content={'error': 'session not found'})
     return _session_payload_for_client(session)
 
 @router.post('/api/intake/session/{session_id}/message')
-async def api_intake_message(session_id: str, payload: IntakeMessageRequest) -> dict | JSONResponse:
+async def api_intake_message(session_id: str, payload: IntakeMessageRequest):
     text = payload.text.strip()
     if not text:
         return JSONResponse(status_code=400, content={'error': 'text is required'})
@@ -67,7 +67,7 @@ async def api_intake_message(session_id: str, payload: IntakeMessageRequest) -> 
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
 
 @router.post('/api/intake/session/{session_id}/commit')
-async def api_intake_commit(session_id: str, payload: IntakeCommitRequest) -> dict | JSONResponse:
+async def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
     session = load_session(session_id)
     if not session:
         return JSONResponse(status_code=404, content={'error': 'session not found'})

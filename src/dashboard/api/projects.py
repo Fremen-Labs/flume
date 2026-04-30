@@ -28,7 +28,7 @@ def _get_workspace_root():
 router = APIRouter()
 
 @router.post("/api/projects")
-async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks) -> dict | JSONResponse:
+async def api_create_project(request: Request, payload: ProjectCreateRequest, background_tasks: BackgroundTasks):
     from core.project_lifecycle import _clone_and_setup_project, _deterministic_ast_ingest
 
     name = (payload.name or "").strip()
@@ -119,7 +119,7 @@ async def api_create_project(request: Request, payload: ProjectCreateRequest, ba
     return {"success": True, "projectId": new_id, "project": entry, "message": "Project created."}
 
 @router.get("/api/projects/{project_id}/clone-status")
-def api_project_clone_status(project_id: str) -> dict | JSONResponse:
+def api_project_clone_status(project_id: str):
     registry = load_projects_registry()
     proj = next((p for p in registry if p.get('id') == project_id), None)
     if not proj:
@@ -148,7 +148,7 @@ async def api_project_tasks(
         'exclude',
         description='exclude=active only (default); include=all statuses; only=archived items only',
     ),
-) -> dict | JSONResponse:
+):
     registry = load_projects_registry()
     if not any(p.get('id') == project_id for p in registry):
         return JSONResponse(status_code=404, content={'error': f"Project '{project_id}' not found"})
@@ -213,7 +213,7 @@ async def _project_task_ids_for_repo(project_id: str) -> list[str]:
 
 
 @router.post("/api/projects/{project_id}/delete")
-def api_delete_project(project_id: str) -> dict | JSONResponse:
+def api_delete_project(project_id: str):
     registry = load_projects_registry()
     project_found = any(p.get("id") == project_id for p in registry)
 

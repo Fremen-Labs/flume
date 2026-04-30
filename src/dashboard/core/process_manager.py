@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from utils.logger import get_logger
 from utils.exceptions import SAFE_EXCEPTIONS
 from core.elasticsearch import es_search, es_post
-from utils.workspace import WORKSPACE_ROOT
+from utils.workspace import resolve_safe_workspace
+
+WORKSPACE_ROOT = resolve_safe_workspace()
 
 logger = get_logger(__name__)
 
