@@ -644,6 +644,35 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 		LastSeen: time.Now(),
 	}
 
+	// AP-14: Immediate health probe on registration so UI updates instantly
+	hc := NewHealthChecker(s.nodeRegistry)
+	baseURL := fmt.Sprintf("http://%s", node.Host)
+	start := time.Now()
+	
+	// Set a short timeout for the initial registration probe (2s max)
+	probeCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	tagsResult, err := hc.probeTags(probeCtx, baseURL, &node)
+	if err == nil {
+		node.Health.Status = NodeStatusHealthy
+		node.Health.LatencyMs = time.Since(start).Milliseconds()
+		node.Health.LoadedModels = tagsResult.models
+		
+		if tagsResult.quantization != "" {
+			node.Capabilities.Quantization = tagsResult.quantization
+		}
+		
+		// Attempt load probe
+		load, _, _ := hc.probeLoad(probeCtx, baseURL, &node)
+		node.Health.CurrentLoad = load
+	} else {
+		log.Warn("node_api: immediate health probe failed on registration",
+			slog.String("node_id", node.ID),
+			slog.String("error", err.Error()),
+		)
+	}
+
 	if err := s.nodeRegistry.UpsertNodeToES(r.Context(), &node); err != nil {
 		log.Error("node_api: failed to persist node",
 			slog.String("node_id", node.ID),

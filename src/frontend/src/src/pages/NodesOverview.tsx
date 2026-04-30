@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Server, Plus, Trash2, RefreshCw, CheckCircle2, AlertTriangle,
   XCircle, Cpu, MemoryStick, Gauge, Clock, Zap, ChevronDown, ChevronUp, Wifi,
-  DollarSign, Globe,
+  DollarSign, Globe, Pencil,
 } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 import { RoutingModeSelector } from '@/components/RoutingModeSelector';
@@ -174,7 +174,7 @@ function LoadBar({ load }: { load: number }) {
   );
 }
 
-function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string) => void }) {
+function NodeCard({ node, onDelete, onEdit }: { node: OllamaNode; onDelete: (id: string) => void; onEdit: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
@@ -278,6 +278,13 @@ function NodeCard({ node, onDelete }: { node: OllamaNode; onDelete: (id: string)
           {testing ? 'Testing…' : 'Test'}
         </button>
         <button
+          onClick={() => onEdit(node.id)}
+          className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md text-muted-foreground hover:text-foreground border border-border/20 hover:bg-white/5 transition-colors"
+        >
+          <Pencil className="w-3 h-3" />
+          Edit
+        </button>
+        <button
           onClick={() => onDelete(node.id)}
           className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md text-red-400/70 hover:text-red-400 border border-red-400/10 hover:bg-red-400/5 transition-colors"
         >
@@ -338,8 +345,8 @@ const BLANK_FORM: AddNodeForm = {
   capabilities: { reasoning_score: 5, max_context: 32768, memory_gb: 16 },
 };
 
-function AddNodeModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState<AddNodeForm>(BLANK_FORM);
+function AddNodeModal({ onClose, onSaved, initialData }: { onClose: () => void; onSaved: () => void; initialData?: AddNodeForm }) {
+  const [form, setForm] = useState<AddNodeForm>(initialData ?? BLANK_FORM);
   const [error, setError] = useState('');
   const qc = useQueryClient();
 
@@ -367,7 +374,7 @@ function AddNodeModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         className="glass-card w-full max-w-md mx-4 p-6 space-y-5"
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-foreground">Register Node</h2>
+          <h2 className="text-base font-semibold text-foreground">{initialData ? 'Edit Node' : 'Register Node'}</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">✕</button>
         </div>
 
@@ -378,7 +385,7 @@ function AddNodeModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         )}
 
         <div className="space-y-3">
-          <Field id="node-id" label="Node ID" placeholder="mac-mini-1" value={form.id} onChange={setField('id')} hint="Lowercase letters, numbers, and hyphens only" />
+          <Field id="node-id" label="Node ID" placeholder="mac-mini-1" value={form.id} onChange={setField('id')} hint="Lowercase letters, numbers, and hyphens only" disabled={!!initialData} />
           <Field id="node-host" label="Host:Port" placeholder="192.168.1.50:11434" value={form.host} onChange={setField('host')} hint="Accessible hostname/IP with Ollama port" />
           <Field id="node-model" label="Primary Model Tag" placeholder="qwen2.5-coder:32b" value={form.model_tag} onChange={setField('model_tag')} />
           <div className="grid grid-cols-2 gap-3">
@@ -400,7 +407,7 @@ function AddNodeModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
             onClick={() => mutation.mutate(form)}
             className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
           >
-            {mutation.isPending ? 'Registering…' : 'Register Node'}
+            {mutation.isPending ? 'Saving…' : (initialData ? 'Save Changes' : 'Register Node')}
           </button>
         </div>
       </motion.div>
@@ -409,19 +416,19 @@ function AddNodeModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
 }
 
 function Field({
-  id, label, placeholder = '', value, onChange, type = 'text', hint,
+  id, label, placeholder = '', value, onChange, type = 'text', hint, disabled,
 }: {
   id: string; label: string; placeholder?: string; value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  type?: string; hint?: string;
+  type?: string; hint?: string; disabled?: boolean;
 }) {
   return (
     <div>
       <label htmlFor={id} className="block text-[11px] text-muted-foreground mb-1">{label}</label>
       <input
-        id={id} type={type} placeholder={placeholder} value={value} onChange={onChange}
+        id={id} type={type} placeholder={placeholder} value={value} onChange={onChange} disabled={disabled}
         autoComplete="off"
-        className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+        className="w-full bg-white/5 border border-border/30 rounded-lg px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-50"
       />
       {hint && <p className="text-[10px] text-muted-foreground/60 mt-0.5">{hint}</p>}
     </div>
@@ -434,6 +441,7 @@ function Field({
 
 export default function NodesOverview() {
   const [showAdd, setShowAdd] = useState(false);
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showAddFrontier, setShowAddFrontier] = useState(false);
   const qc = useQueryClient();
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
@@ -730,7 +738,7 @@ export default function NodesOverview() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {nodes.map(node => (
-              <NodeCard key={node.id} node={node} onDelete={() => {}} />
+              <NodeCard key={node.id} node={node} onDelete={() => {}} onEdit={() => {}} />
             ))}
           </div>
         </div>
@@ -789,18 +797,39 @@ export default function NodesOverview() {
                     deleteMut.mutate(id);
                   }
                 }}
+                onEdit={(id) => setEditingNodeId(id)}
               />
             ))}
           </AnimatePresence>
         </motion.div>
       )}
 
-      {/* Add node modal */}
+      {/* Add/Edit node modal */}
       <AnimatePresence>
-        {showAdd && (
+        {(showAdd || editingNodeId) && (
           <AddNodeModal
-            onClose={() => setShowAdd(false)}
-            onSaved={() => setShowAdd(false)}
+            initialData={
+              editingNodeId
+                ? (() => {
+                    const n = nodes.find(n => n.id === editingNodeId);
+                    if (!n) return undefined;
+                    return {
+                      id: n.id,
+                      host: n.host,
+                      model_tag: n.model_tag,
+                      capabilities: n.capabilities,
+                    };
+                  })()
+                : undefined
+            }
+            onClose={() => {
+              setShowAdd(false);
+              setEditingNodeId(null);
+            }}
+            onSaved={() => {
+              setShowAdd(false);
+              setEditingNodeId(null);
+            }}
           />
         )}
       </AnimatePresence>
