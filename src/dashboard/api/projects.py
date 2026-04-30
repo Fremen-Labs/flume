@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request, Query, BackgroundTasks
 from api.models import ProjectCreateRequest
 from fastapi.responses import JSONResponse
 
+import functools
 from utils.logger import get_logger
 from utils.exceptions import SAFE_EXCEPTIONS
 from utils.workspace import resolve_safe_workspace
@@ -19,7 +20,10 @@ from utils.url_helpers import is_remote_url
 
 
 logger = get_logger(__name__)
-WORKSPACE_ROOT = resolve_safe_workspace()
+
+@functools.lru_cache(maxsize=1)
+def _get_workspace_root():
+    return resolve_safe_workspace()
 
 router = APIRouter()
 

@@ -2,37 +2,39 @@ import os
 import json
 import asyncio
 import subprocess
-import traceback
+import functools
 import httpx
-# ruff: noqa: E402
 from pathlib import Path
 
 from utils.logger import get_logger
 from utils.workspace import resolve_safe_workspace
 from core.projects_store import _update_project_registry_field
+from core.elasticsearch import get_es_url, _get_auth_headers, async_es_search
 
 logger = get_logger(__name__)
-WORKSPACE_ROOT = resolve_safe_workspace()
 
-from core.elasticsearch import get_es_url, _get_auth_headers
+_ELASTRO_INDEX = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+
+
+@functools.lru_cache(maxsize=1)
+def _get_workspace_root():
+    return resolve_safe_workspace()
 
 async def _check_ast_exists_natively(http_client: httpx.AsyncClient, repo_path: str) -> tuple[bool, str]:
+    """Check whether AST graph records exist for a given repo path."""
     try:
-        es_url = get_es_url()
-        headers = {'Content-Type': 'application/json'}
-        headers.update(_get_auth_headers())
-
-        elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
-        query = {"query": {"match": {"file_path": repo_path}}, "size": 1}
-        
-        response = await http_client.post(f"{es_url}/{elastro_index}/_search", json=query, headers=headers, timeout=5.0)
-        response.raise_for_status()
-        
-        data = response.json()
+        # Use term on .keyword for exact path matching — match would tokenize
+        # the path and produce false positives on shared prefixes.
+        query = {"query": {"term": {"file_path.keyword": repo_path}}, "size": 1}
+        data = await async_es_search(_ELASTRO_INDEX, query)
         exists = data.get('hits', {}).get('total', {}).get('value', 0) > 0
         return exists, ("Found mapping records" if exists else "No logical paths matched")
-    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError) as e:
-        logger.error(json.dumps({"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)}))
+    except Exception as e:
+        logger.error(
+            "AST existence check failed",
+            extra={"structured_data": {"event": "ast_existence_check_failure", "repo": repo_path, "error": str(e)[:300]}},
+            exc_info=True,
+        )
         return False, str(e)
 
 
@@ -44,13 +46,13 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             import urllib.parse
             parsed = urllib.parse.urlparse(repo_path)
             basename = os.path.basename(parsed.path).replace('.git', '')
-            local_path = str(WORKSPACE_ROOT / basename)
+            local_path = str(_get_workspace_root() / basename)
 
         exists, details = await _check_ast_exists_natively(http_client, local_path)
             
         if not exists:
             logger.info(json.dumps({"event": "ast_ingest_start", "repo": local_path, "project": project_name}))
-            elastro_index = os.environ.get("FLUME_ELASTRO_INDEX", "flume-elastro-graph")
+            elastro_index = _ELASTRO_INDEX
             # Use the venv binary directly — avoids uv run re-installing elastro
             # on every call and works reliably inside the non-interactive container.
             elastro_bin = Path("/opt/venv/bin/elastro")
@@ -120,16 +122,24 @@ async def _deterministic_ast_ingest(http_client: httpx.AsyncClient, repo_path: s
             return True
 
     except subprocess.CalledProcessError as e:
-        logger.error(json.dumps({
-            "event": "ast_ingest_failure", 
-            "repo": repo_path, 
-            "error": "subprocess_error",
-            "stderr": e.stderr.decode('utf-8', errors='replace') if e.stderr else "",
-            "stdout": e.stdout.decode('utf-8', errors='replace') if e.stdout else ""
-        }))
+        logger.error(
+            "AST ingest subprocess failed",
+            extra={"structured_data": {
+                "event": "ast_ingest_failure",
+                "repo": repo_path,
+                "error": "subprocess_error",
+                "stderr": e.stderr.decode('utf-8', errors='replace')[:500] if e.stderr else "",
+                "stdout": e.stdout.decode('utf-8', errors='replace')[:500] if e.stdout else "",
+            }},
+            exc_info=True,
+        )
         return False
     except (asyncio.TimeoutError, ValueError, OSError, RuntimeError) as e:
-        logger.error(json.dumps({"event": "ast_ingest_failure", "repo": repo_path, "error": str(e), "traceback": traceback.format_exc()}))
+        logger.error(
+            "AST ingest failed",
+            extra={"structured_data": {"event": "ast_ingest_failure", "repo": repo_path, "error": str(e)[:300]}},
+            exc_info=True,
+        )
         return False
 
 async def _clone_and_setup_project(
