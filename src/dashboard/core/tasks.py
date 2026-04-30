@@ -15,6 +15,22 @@ from core.projects_store import load_projects_registry
 
 logger = get_logger(__name__)
 
+# ── Module Constants ─────────────────────────────────────────────────────────
+_ES_SEARCH_SIZE = 500
+_ES_SEARCH_SIZE_SMALL = 100
+_GIT_CMD_TIMEOUT_S = 15
+_GIT_PUSH_TIMEOUT_S = 20
+_GIT_FETCH_TIMEOUT_S = 10
+_GH_PR_TIMEOUT_S = 60
+_MAX_DIFF_LINES = 2000
+_MAX_COMMIT_COUNT = 50
+_WORKER_GC_THRESHOLD_S = 120
+_WORKER_OFFLINE_THRESHOLD_S = 30
+_ERR_TRUNCATE_LEN = 300
+_DEFAULT_LLM_MODEL = os.environ.get('LLM_MODEL', 'llama3.2')
+_PRIORITY_RANKS = {'urgent': 0, 'high': 1, 'medium': 2, 'normal': 3, 'low': 4}
+_DEFAULT_PRIORITY_RANK = 99
+
 
 async def delete_task_branches(ids: list, repo: str) -> list:
     """
@@ -31,7 +47,7 @@ async def delete_task_branches(ids: list, repo: str) -> list:
 
     try:
         hits = es_search('agent-task-records', {
-            'size': 500,
+            'size': _ES_SEARCH_SIZE,
             '_source': ['id', 'repo', 'branch'],
             'query': {'bool': {'must': query_must}},
         }).get('hits', {}).get('hits', [])
@@ -62,7 +78,10 @@ async def delete_task_branches(ids: list, repo: str) -> list:
         local_path = proj.get('path') or ''
         if not local_path or proj.get('clone_status') not in ('local',):
             if not local_path:
-                logger.debug(json.dumps({'event': 'ap12_skip_non_local_branch_delete', 'repo_id': repo_id, 'clone_status': proj.get('clone_status')}))
+                logger.debug(
+                    "AP-12: skipping branch delete for non-local repo",
+                    extra={"structured_data": {"event": "ap12_skip_non_local_branch_delete", "repo_id": repo_id, "clone_status": proj.get('clone_status')}},
+                )
             continue
         repo_path = Path(local_path)
         if not (repo_path / '.git').exists():
@@ -86,23 +105,31 @@ async def delete_task_branches(ids: list, repo: str) -> list:
             }).get('hits', {}).get('hits', [])
             if remaining:
                 continue
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, Exception) as _es_err:
+        except SAFE_EXCEPTIONS:
             # Best-effort: if ES check fails, fall back to deleting.
             logger.debug("delete_task_branches: ES active-task check failed, proceeding with delete", exc_info=True)
 
         # Delete local branch (force, since it may not be merged)
         try:
-            rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-D", branch, timeout=15)
+            rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", "-D", branch, timeout=_GIT_CMD_TIMEOUT_S)
             if rc == 0:
                 deleted.append(branch)
-        except (OSError, GitOperationError) as _e:
-            logger.warning({"event": "branch_local_delete_failed", "branch": branch, "repo_path": str(repo_path)}, exc_info=True)
+        except (OSError, GitOperationError):
+            logger.warning(
+                "Branch local delete failed",
+                extra={"structured_data": {"event": "branch_local_delete_failed", "branch": branch, "repo_path": str(repo_path)}},
+                exc_info=True,
+            )
 
         # Best-effort: delete remote tracking branch if it exists on origin
         try:
-            await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", branch, timeout=20)
-        except (OSError, GitOperationError) as _e:
-            logger.warning({"event": "branch_remote_delete_failed", "branch": branch, "repo_path": str(repo_path)}, exc_info=True)
+            await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", branch, timeout=_GIT_PUSH_TIMEOUT_S)
+        except (OSError, GitOperationError):
+            logger.warning(
+                "Branch remote delete failed",
+                extra={"structured_data": {"event": "branch_remote_delete_failed", "branch": branch, "repo_path": str(repo_path)}},
+                exc_info=True,
+            )
 
     return deleted
 
@@ -162,8 +189,12 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         try:
             rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD")
             current_branch = out.strip() if rc == 0 else ""
-        except (OSError, GitOperationError) as _e:
-            logger.warning({"event": "current_branch_detect_failed", "repo_path": str(repo_path)}, exc_info=True)
+        except (OSError, GitOperationError):
+            logger.warning(
+                "Current branch detection failed",
+                extra={"structured_data": {"event": "current_branch_detect_failed", "repo_path": str(repo_path)}},
+                exc_info=True,
+            )
 
         protected = set()
         if not force:
@@ -177,7 +208,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         if not force:
             try:
                 hits = es_search('agent-task-records', {
-                    'size': 500,
+                    'size': _ES_SEARCH_SIZE,
                     '_source': ['id', 'repo', 'branch', 'status'],
                     'query': {
                         'bool': {
@@ -224,7 +255,7 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
                         break
             if checkout_branch:
                 try:
-                    await run_cmd_async("git", "-C", str(repo_path), "switch", checkout_branch, timeout=20)
+                    await run_cmd_async("git", "-C", str(repo_path), "switch", checkout_branch, timeout=_GIT_PUSH_TIMEOUT_S)
                     current_branch = checkout_branch
                 except SAFE_EXCEPTIONS:
                     # Best-effort only; deletion may still succeed or fail.
@@ -235,19 +266,23 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
         for b in to_delete:
             try:
                 del_flag = '-D' if force else '-d'
-                rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", del_flag, b, timeout=15)
+                rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "branch", del_flag, b, timeout=_GIT_CMD_TIMEOUT_S)
                 if rc == 0:
                     deleted.append(b)
                 else:
-                    errors.append({'branch': b, 'error': err[:200] or 'git branch failed'})
+                    errors.append({'branch': b, 'error': err[:_ERR_TRUNCATE_LEN] or 'git branch failed'})
             except SAFE_EXCEPTIONS:
                 errors.append({'branch': b, 'error': 'exception during git branch deletion'})
 
             # Best-effort: delete remote tracking branch if it exists on origin.
             try:
-                await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=20)
-            except (OSError, GitOperationError) as _e:
-                logger.warning({"event": "branch_remote_push_delete_failed", "branch": b, "repo_path": str(repo_path)}, exc_info=True)
+                await run_cmd_async("git", "-C", str(repo_path), "push", "origin", "--delete", b, timeout=_GIT_PUSH_TIMEOUT_S)
+            except (OSError, GitOperationError):
+                logger.warning(
+                    "Branch remote push delete failed",
+                    extra={"structured_data": {"event": "branch_remote_push_delete_failed", "branch": b, "repo_path": str(repo_path)}},
+                    exc_info=True,
+                )
 
         return {
             'ok': True,
@@ -259,13 +294,14 @@ async def delete_repo_branches(repo_id: str, branches: list, force: bool) -> dic
             'errors': errors,
         }
     except SAFE_EXCEPTIONS as e:
-        return {'ok': False, 'error': str(e)[:200], 'deleted': [], 'skipped': []}
+        return {'ok': False, 'error': str(e)[:_ERR_TRUNCATE_LEN], 'deleted': [], 'skipped': []}
 
 
 def load_workers() -> list:
+    """Load worker status from ES and enrich with token telemetry."""
     workers = []
     try:
-        res = es_search('agent-system-workers', {'size': 100, 'sort': [{'updated_at': {'order': 'desc'}}]})
+        res = es_search('agent-system-workers', {'size': _ES_SEARCH_SIZE_SMALL, 'sort': [{'updated_at': {'order': 'desc'}}]})
         hits = res.get('hits', {}).get('hits', [])
         now = datetime.now(timezone.utc)
         for h in hits:
@@ -278,15 +314,19 @@ def load_workers() -> list:
                     try:
                         hb = datetime.fromisoformat(hb_str.replace('Z', '+00:00'))
                         diff_sec = (now - hb).total_seconds()
-                        if diff_sec > 120:
+                        if diff_sec > _WORKER_GC_THRESHOLD_S:
                             continue  # Garbage collect from UI view
-                        if diff_sec > 30:
+                        if diff_sec > _WORKER_OFFLINE_THRESHOLD_S:
                             w['status'] = 'offline/terminated'
-                    except (ValueError, TypeError) as _e:
-                        logger.warning({"event": "worker_heartbeat_parse_failed", "worker_name": w.get('name'), "heartbeat_raw": hb_str}, exc_info=True)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Worker heartbeat parse failed",
+                            extra={"structured_data": {"event": "worker_heartbeat_parse_failed", "worker_name": w.get('name'), "heartbeat_raw": hb_str}},
+                            exc_info=True,
+                        )
                 workers.append(w)
     except SAFE_EXCEPTIONS as e:
-        logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)}})
+        logger.error("Error loading workers from ES", extra={"structured_data": {"error": str(e)[:_ERR_TRUNCATE_LEN]}}, exc_info=True)
         return []
         
     try:
@@ -294,7 +334,7 @@ def load_workers() -> list:
             'size': 0,
             'aggs': {
                 'by_worker': {
-                    'terms': {'field': 'worker_name.keyword', 'size': 500},
+                    'terms': {'field': 'worker_name.keyword', 'size': _ES_SEARCH_SIZE},
                     'aggs': {
                         'total_input': {'sum': {'field': 'input_tokens'}},
                         'total_output': {'sum': {'field': 'output_tokens'}}
@@ -315,20 +355,25 @@ def load_workers() -> list:
         for w in workers:
             w['input_tokens'] = totals.get(w['name'], {}).get('input', 0)
             w['output_tokens'] = totals.get(w['name'], {}).get('output', 0)
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as _e:
-        logger.warning({"event": "worker_token_aggregation_failed", "detail": "best-effort telemetry enrichment skipped"}, exc_info=True)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError):
+        logger.warning(
+            "Worker token aggregation failed",
+            extra={"structured_data": {"event": "worker_token_aggregation_failed", "detail": "best-effort telemetry enrichment skipped"}},
+            exc_info=True,
+        )
         
     return workers
 
 
 def priority_rank(priority: str) -> int:
-    ranks = {'urgent': 0, 'high': 1, 'medium': 2, 'normal': 3, 'low': 4}
-    return ranks.get((priority or '').lower(), 99)
+    """Return numeric sort rank for a task priority label."""
+    return _PRIORITY_RANKS.get((priority or '').lower(), _DEFAULT_PRIORITY_RANK)
 
 
 def queue_for_repo(repo_id: str):
+    """Return the ready-task queue for a repo, sorted by priority then age."""
     hits = es_search('agent-task-records', {
-        'size': 500,
+        'size': _ES_SEARCH_SIZE,
         'query': {
             'bool': {
                 'must': [
@@ -359,14 +404,16 @@ def queue_for_repo(repo_id: str):
 
 
 def transition_task(task_id: str, status: str, owner=None, needs_human=None):
+    """Atomically transition a task to a new status and emit a telemetry event."""
     es_id, _src = find_task_doc_by_logical_id(task_id)
     if not es_id:
         return None
     previous_status = (_src or {}).get('status', 'unknown')
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     doc = {
         'status': status,
-        'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-        'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'updated_at': now,
+        'last_update': now,
     }
     if owner:
         doc['owner'] = owner
@@ -389,12 +436,17 @@ def transition_task(task_id: str, status: str, owner=None, needs_human=None):
         }
         es_post('flume-task-events/_doc', event)
     except SAFE_EXCEPTIONS:
-        pass  # Non-critical — do not block transitions on telemetry failures.
+        logger.debug(
+            "Task event telemetry write failed",
+            extra={"structured_data": {"event": "task_event_telemetry_failed", "task_id": task_id}},
+            exc_info=True,
+        )
 
     return {'_id': es_id, 'id': task_id, **doc}
 
 
 def task_history(task_id: str):
+    """Build a full timeline of handoffs, reviews, failures, and provenance for a task."""
     es_id, src = find_task_doc_by_logical_id(task_id)
     if not src:
         return None
@@ -402,21 +454,18 @@ def task_history(task_id: str):
 
     events = []
 
-    def infer_model(src, event_type):
+    def infer_model(src, _event_type):
         if src.get('model_used'):
             return src.get('model_used')
         role = src.get('agent_role') or src.get('from_role') or task.get('owner') or task.get('assigned_agent_role')
         role = (role or '').lower()
-        if role in ('implementer', 'tester', 'e2e-tester'):
-            return os.environ.get('LLM_MODEL', 'llama3.2')
-        if role in ('reviewer', 'acceptance-reviewer'):
-            return os.environ.get('LLM_MODEL', 'llama3.2')
-        if role in ('pm', 'pm-dispatcher', 'intake', 'memory-updater'):
-            return os.environ.get('LLM_MODEL', 'llama3.2')
+        if role in ('implementer', 'tester', 'e2e-tester', 'reviewer', 'acceptance-reviewer',
+                    'pm', 'pm-dispatcher', 'intake', 'memory-updater'):
+            return _DEFAULT_LLM_MODEL
         return task.get('preferred_model') or None
 
     handoffs = es_search('agent-handoff-records', {
-        'size': 100,
+        'size': _ES_SEARCH_SIZE_SMALL,
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'term': {'task_id': task_id}},
     }).get('hits', {}).get('hits', [])
@@ -439,7 +488,7 @@ def task_history(task_id: str):
         })
 
     reviews = es_search('agent-review-records', {
-        'size': 100,
+        'size': _ES_SEARCH_SIZE_SMALL,
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'term': {'task_id': task_id}},
     }).get('hits', {}).get('hits', [])
@@ -457,7 +506,7 @@ def task_history(task_id: str):
         })
 
     failures = es_search('agent-failure-records', {
-        'size': 100,
+        'size': _ES_SEARCH_SIZE_SMALL,
         'sort': [{'updated_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'term': {'task_id': task_id}},
     }).get('hits', {}).get('hits', [])
@@ -475,7 +524,7 @@ def task_history(task_id: str):
         })
 
     provenance = es_search('agent-provenance-records', {
-        'size': 100,
+        'size': _ES_SEARCH_SIZE_SMALL,
         'sort': [{'created_at': {'order': 'desc', 'unmapped_type': 'date'}}],
         'query': {'term': {'task_id': task_id}},
     }).get('hits', {}).get('hits', [])
@@ -711,7 +760,7 @@ async def create_task_pr(task_id: str) -> dict:
         return {'ok': False, 'error': '`gh` CLI not found — install GitHub CLI to enable PR creation'}
 
     try:
-        rc, out, err = await run_cmd_async("gh", "pr", "create", "--base", target_branch, "--head", branch, "--title", title, "--body", body, cwd=str(repo_path), timeout=60)
+        rc, out, err = await run_cmd_async("gh", "pr", "create", "--base", target_branch, "--head", branch, "--title", title, "--body", body, cwd=str(repo_path), timeout=_GH_PR_TIMEOUT_S)
     except SAFE_EXCEPTIONS as e:
         return {'ok': False, 'error': f'gh pr create failed: {e}'}
 
@@ -719,7 +768,7 @@ async def create_task_pr(task_id: str) -> dict:
         return {'ok': False, 'error': f'gh pr create timed out or failed: {err}'}
 
     if rc != 0:
-        return {'ok': False, 'error': (err.strip() or out.strip())[:500]}
+        return {'ok': False, 'error': (err.strip() or out.strip())[:_ERR_TRUNCATE_LEN]}
 
     pr_url = out.strip()
     # Extract PR number from URL e.g. https://github.com/org/repo/pull/42
@@ -730,14 +779,15 @@ async def create_task_pr(task_id: str) -> dict:
 
     # Persist PR metadata to task doc
     if es_id:
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         es_post(f'agent-task-records/_update/{es_id}', {
             'doc': {
                 'pr_url': pr_url,
                 'pr_number': pr_number,
                 'pr_status': 'open',
                 'target_branch': target_branch,
-                'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-                'last_update': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                'updated_at': now,
+                'last_update': now,
             }
         })
 
@@ -780,20 +830,23 @@ async def task_diff(task_id: str) -> dict:
     if err:
         return {**err, 'files': [], 'diff': '', 'truncated': False, 'target_branch': None}
 
-    MAX_DIFF_LINES = 2000
     ref = f'origin/{target_branch}...{branch}'
 
     # Try fetch to ensure remote refs are current (best-effort, silent on failure)
     try:
-        await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except (OSError, GitOperationError) as _e:
-        logger.warning({"event": "git_fetch_best_effort_failed", "repo_path": str(repo_path)}, exc_info=True)
+        await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=_GIT_FETCH_TIMEOUT_S)
+    except (OSError, GitOperationError):
+        logger.warning(
+            "Git fetch best-effort failed",
+            extra={"structured_data": {"event": "git_fetch_best_effort_failed", "repo_path": str(repo_path)}},
+            exc_info=True,
+        )
 
     # --stat output to get per-file summary
     files = []
     try:
         rc, stat_raw, stat_err = await run_cmd_async(
-            "git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref, timeout=15
+            "git", "-C", str(repo_path), "diff", "--stat", "--stat-width=1000", ref, timeout=_GIT_CMD_TIMEOUT_S
         )
         if rc != 0:
             raise GitOperationError("diff --stat", stderr=stat_err, returncode=rc)
@@ -823,13 +876,13 @@ async def task_diff(task_id: str) -> dict:
     diff_text = ''
     truncated = False
     try:
-        rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "diff", ref, timeout=20)
+        rc, out, err = await run_cmd_async("git", "-C", str(repo_path), "diff", ref, timeout=_GIT_PUSH_TIMEOUT_S)
         if rc != 0:
             raise GitOperationError("diff", stderr=err, returncode=rc)
         raw = out
         lines = raw.splitlines(keepends=True)
-        if len(lines) > MAX_DIFF_LINES:
-            diff_text = ''.join(lines[:MAX_DIFF_LINES])
+        if len(lines) > _MAX_DIFF_LINES:
+            diff_text = ''.join(lines[:_MAX_DIFF_LINES])
             truncated = True
         else:
             diff_text = raw
@@ -841,14 +894,18 @@ async def task_diff(task_id: str) -> dict:
         try:
             ref_local = f'{target_branch}..{branch}'
             rc, raw, _err = await run_cmd_async(
-                "git", "-C", str(repo_path), "diff", ref_local, timeout=20
+                "git", "-C", str(repo_path), "diff", ref_local, timeout=_GIT_PUSH_TIMEOUT_S
             )
             if rc == 0 and raw:
                 lines = raw.splitlines(keepends=True)
-                diff_text = ''.join(lines[:MAX_DIFF_LINES])
-                truncated = len(lines) > MAX_DIFF_LINES
-        except (OSError, GitOperationError) as _e:
-            logger.warning({"event": "diff_local_fallback_failed", "branch": branch, "target_branch": target_branch, "repo_path": str(repo_path)}, exc_info=True)
+                diff_text = ''.join(lines[:_MAX_DIFF_LINES])
+                truncated = len(lines) > _MAX_DIFF_LINES
+        except (OSError, GitOperationError):
+            logger.warning(
+                "Diff local fallback failed",
+                extra={"structured_data": {"event": "diff_local_fallback_failed", "branch": branch, "target_branch": target_branch, "repo_path": str(repo_path)}},
+                exc_info=True,
+            )
 
     return {
         'branch': branch,
@@ -868,9 +925,13 @@ async def task_commits(task_id: str) -> dict:
 
     # Best-effort fetch
     try:
-        await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=10)
-    except (OSError, GitOperationError) as _e:
-        logger.warning({"event": "commits_fetch_best_effort_failed", "repo_path": str(repo_path)}, exc_info=True)
+        await run_cmd_async("git", "-C", str(repo_path), "fetch", "origin", "--quiet", timeout=_GIT_FETCH_TIMEOUT_S)
+    except (OSError, GitOperationError):
+        logger.warning(
+            "Commits fetch best-effort failed",
+            extra={"structured_data": {"event": "commits_fetch_best_effort_failed", "repo_path": str(repo_path)}},
+            exc_info=True,
+        )
 
     commits = []
     # Try origin/target first, fall back to local target
@@ -880,7 +941,7 @@ async def task_commits(task_id: str) -> dict:
                 "git", "-C", str(repo_path), "log",
                 f"{ref_target}..{branch}",
                 "--pretty=format:%H|%an|%ai|%s",
-                "--max-count=50", timeout=15
+                f"--max-count={_MAX_COMMIT_COUNT}", timeout=_GIT_CMD_TIMEOUT_S
             )
             if rc != 0:
                 continue
