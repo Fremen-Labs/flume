@@ -13,8 +13,9 @@ from core.planning import (
     create_planning_session,
     refine_session,
     commit_plan,
-    _count_plan_tasks
+    _count_plan_tasks,
 )
+from api.models import PlanResponse
 
 from utils.session_helpers import _session_payload_for_client
 
@@ -89,7 +90,7 @@ async def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
         save_session(session)
         return {
             'ok': True,
-            'count': _count_plan_tasks(plan),
+            'count': _count_plan_tasks(PlanResponse.model_validate(plan)),
             'created': len(docs),
             'taskIds': [d.get('id') for d in docs if d.get('item_type') == 'task'],
         }
