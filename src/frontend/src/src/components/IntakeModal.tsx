@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
+import { safeFetchJson } from '@/utils/safeFetch';
 
 // ─── Plan types ───────────────────────────────────────────────────────────────
 
@@ -325,12 +326,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   const { data: pollData, error: pollError } = useQuery({
     queryKey: ['intake-session', sessionId],
     enabled: !!(open && sessionId && phase === 'planning'),
-    queryFn: async () => {
-      const res = await fetch(`/api/intake/session/${sessionId}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to load planning status');
-      return data;
-    },
+    queryFn: () => safeFetchJson(`/api/intake/session/${sessionId}`),
     refetchInterval: 5000,
   });
 
@@ -359,13 +355,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     setPhase('planning');
     setError('');
     try {
-      const res = await fetch('/api/intake/session', {
+      const data = await safeFetchJson<Record<string, any>>('/api/intake/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo: projectId, prompt: prompt.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to start session');
       setSessionId(data.sessionId);
       setMessages(data.messages ?? []);
       setPlan(data.plan ?? { epics: [] });
@@ -393,13 +387,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
 
     setError('');
     try {
-      const res = await fetch(`/api/intake/session/${sessionId}/message`, {
+      const data = await safeFetchJson<Record<string, any>>(`/api/intake/session/${sessionId}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, plan }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to send message');
       setMessages(data.messages ?? []);
       if (data.plan?.epics?.length) setPlan(data.plan);
       if (data.planSource === 'placeholder' || data.planSource === 'llm') {
@@ -418,13 +410,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
     setPhase('committing');
     setError('');
     try {
-      const res = await fetch(`/api/intake/session/${sessionId}/commit`, {
+      const data = await safeFetchJson<Record<string, any>>(`/api/intake/session/${sessionId}/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to commit plan');
       setCommitCount(data.count ?? 0);
       setCommitted(true);
       setPhase('committed');
@@ -519,7 +509,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                   <textarea
                     value={prompt}
                     onChange={e => setPrompt(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) startSession(); }}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startSession(); } }}
                     placeholder="e.g. Add a user authentication system with email/password login, password reset, and session management…"
                     rows={5}
                     className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary/40 resize-none transition-colors"
@@ -589,7 +579,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                       <><Bot className="w-4 h-4" /> Start Planning</>
                     )}
                   </button>
-                  <p className="text-[10px] text-muted-foreground/40 text-center">Ctrl+Enter to submit</p>
+                  <p className="text-[10px] text-muted-foreground/40 text-center">Enter to submit · Shift+Enter for newline</p>
                 </div>
               </div>
             )}

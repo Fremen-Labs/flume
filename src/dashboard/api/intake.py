@@ -100,3 +100,13 @@ async def api_intake_commit(session_id: str, payload: IntakeCommitRequest):
             exc_info=True,
         )
         return JSONResponse(status_code=500, content={'error': str(e)[:400]})
+    except Exception as e:
+        # Defense-in-depth: Pydantic ValidationError and other unexpected
+        # exceptions must still return valid JSON so the frontend can parse
+        # the response — never a raw HTML 500 page.
+        logger.error(
+            "Intake plan commit unexpected error",
+            extra={"structured_data": {"event": "intake_plan_commit_unexpected", "error": str(e)[:400]}},
+            exc_info=True,
+        )
+        return JSONResponse(status_code=500, content={'error': f'Plan commit failed: {str(e)[:400]}'})

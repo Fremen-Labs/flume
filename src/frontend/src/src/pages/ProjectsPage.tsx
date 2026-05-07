@@ -102,6 +102,7 @@ export default function ProjectsPage() {
     return {
       total: ptasks.length,
       running: ptasks.filter(t => t.status === 'running').length,
+      inReview: ptasks.filter(t => t.status === 'review').length,
       planned: ptasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox').length,
       done: ptasks.filter(t => t.status === 'done').length,
       blocked: ptasks.filter(t => t.status === 'blocked').length,
@@ -334,9 +335,10 @@ export default function ProjectsPage() {
                     )}
 
                     {/* Stats grid */}
-                    <div className="grid grid-cols-4 gap-1.5 mb-4">
+                    <div className="grid grid-cols-5 gap-1.5 mb-4">
                       {[
                         { label: 'Running', value: stats.running, color: 'text-primary' },
+                        { label: 'Review', value: stats.inReview, color: 'text-violet-400' },
                         { label: 'Planned', value: stats.planned, color: 'text-muted-foreground' },
                         { label: 'Done', value: stats.done, color: 'text-emerald-400' },
                         { label: 'Blocked', value: stats.blocked, color: 'text-destructive' },

@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { safeFetchJson } from '@/utils/safeFetch';
 
 export interface AgentStatus {
   running: boolean;
@@ -11,7 +12,7 @@ export interface AgentStatus {
 export function useAgentStatus() {
   return useQuery<AgentStatus>({
     queryKey: ['agent-status'],
-    queryFn: () => fetch('/api/workflow/agents/status').then(r => r.json()),
+    queryFn: () => safeFetchJson<AgentStatus>('/api/workflow/agents/status'),
     refetchInterval: 5_000,
     staleTime: 3_000,
   });
@@ -26,15 +27,16 @@ export function useAgentControls() {
 
   const start = useMutation({
     mutationFn: () =>
-      fetch('/api/workflow/agents/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json()),
+      safeFetchJson('/api/workflow/agents/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     onSuccess: invalidate,
   });
 
   const stop = useMutation({
     mutationFn: () =>
-      fetch('/api/workflow/agents/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json()),
+      safeFetchJson('/api/workflow/agents/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     onSuccess: invalidate,
   });
 
   return { start, stop };
 }
+

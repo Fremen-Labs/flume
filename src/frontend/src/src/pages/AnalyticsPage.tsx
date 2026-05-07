@@ -19,6 +19,7 @@ export default function AnalyticsPage() {
 
   const done = tasks.filter(t => t.status === 'done').length;
   const running = tasks.filter(t => t.status === 'running').length;
+  const inReview = tasks.filter(t => t.status === 'review').length;
   const planned = tasks.filter(t => t.status === 'planned' || t.status === 'ready').length;
   const blocked = tasks.filter(t => t.status === 'blocked').length;
   const totalFailuresAndBlocked = failures.length + blocked;
@@ -46,6 +47,7 @@ export default function AnalyticsPage() {
   const statusDist = [
     { name: 'Done', value: done, color: COLORS[0] },
     { name: 'Running', value: running, color: COLORS[3] },
+    { name: 'In Review', value: inReview, color: 'hsl(265,70%,60%)' },
     { name: 'Planned', value: planned, color: 'hsl(215,20%,65%)' },
     { name: 'Blocked', value: blocked, color: COLORS[2] },
   ].filter(d => d.value > 0);
