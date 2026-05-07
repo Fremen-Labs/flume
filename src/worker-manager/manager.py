@@ -835,12 +835,14 @@ def try_atomic_claim(
 
     try:
         start_ms = int(time.time() * 1000)
+        log(f"DEBUG: Executing try_atomic_claim for {worker_name} ({role}) with body: {json.dumps(body)}")
         res = es_request(
             f'/{TASK_INDEX}/_update_by_query?conflicts=proceed&refresh=true',
             body,
             method='POST',
         )
         roundtrip_ms = int(time.time() * 1000) - start_ms
+        log(f"DEBUG: try_atomic_claim result for {worker_name}: {json.dumps(res)}")
 
         updated = res.get('updated', 0)
         if updated != 1:

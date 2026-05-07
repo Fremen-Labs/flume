@@ -2312,11 +2312,34 @@ def main():
                 node_doc = es_request(f'/agent-system-workers/_doc/{NODE_ID}', method='GET')
                 state = node_doc.get('_source', {}) if (node_doc and '_source' in node_doc) else {'workers': []}
             except Exception as es_err:
-                # Catch 404s or connection refused securely without crashing the daemon loop
-                log(f"ES worker telemetry fetch failed: {es_err}")
                 state = {'workers': []}
                 
-            claimed_workers = {w.get('name') for w in state.get('workers', []) if w.get('status') == 'claimed'}
+            active_swarm_workers = set()
+            try:
+                nodes_res = es_request(
+                    '/agent-system-workers/_search',
+                    {'size': 100, 'query': {'match_all': {}}},
+                    method='POST'
+                )
+                from datetime import datetime, timezone
+                now_utc = datetime.now(timezone.utc)
+                for h in nodes_res.get('hits', {}).get('hits', []):
+                    node_src = h.get('_source', {})
+                    updated_at_str = node_src.get('updated_at')
+                    if not updated_at_str:
+                        continue
+                    try:
+                        hb = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
+                        if (now_utc - hb).total_seconds() > 60:
+                            continue
+                    except Exception:
+                        pass
+                    
+                    for w in node_src.get('workers', []):
+                        if w.get('status') == 'claimed':
+                            active_swarm_workers.add(w.get('name'))
+            except Exception as es_err:
+                log(f"ES swarm telemetry fetch failed: {es_err}")
 
             # Release orphaned tasks: active_worker set but no matching claimed worker
             if not target_worker:
@@ -2329,7 +2352,7 @@ def main():
                     for h in res.get('hits', {}).get('hits', []):
                         src = h.get('_source', {})
                         aw = src.get('active_worker')
-                        if aw and aw not in claimed_workers:
+                        if aw and aw not in active_swarm_workers:
                             # Route to the status the owning role will claim
                             # from. pm -> planned, tester/reviewer -> review,
                             # else -> ready. Without this check, reviewer-owned

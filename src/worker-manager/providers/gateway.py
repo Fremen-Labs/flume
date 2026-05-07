@@ -148,11 +148,13 @@ class GatewayProvider:
         Returns:
             Unified ``LLMResponse`` with tool_calls, usage, and telemetry.
         """
+        kw = _resolve_task_credentials(task)
+
         payload: dict[str, Any] = {
             "messages": messages,
             "tools": tools,
             "model": model or "",
-            "provider": "",
+            "provider": kw.get("provider_override", ""),
             "temperature": temperature,
             "max_tokens": max_tokens,
             "think": True,

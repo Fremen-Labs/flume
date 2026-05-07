@@ -14,6 +14,7 @@ from agent_runner import (
     _get_active_llm_model,
     _run_with_client
 )
+from worker_handlers import _implementer_clear_claim_fields
 
 def handle_implementer_worker(task, es_id):
     if task.get('release_promotion_task'):

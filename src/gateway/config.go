@@ -240,7 +240,15 @@ func (c *Config) GetBaseURL(provider string) string {
 	defer c.mu.RUnlock()
 
 	if c.DefaultBaseURL != "" && (provider == c.DefaultProvider || provider == ProviderOllama) {
-		return c.DefaultBaseURL
+		// Safety check: if the DefaultBaseURL points to a local network interface, 
+		// but the provider is a managed cloud provider, ignore the base URL
+		// to prevent routing Grok/OpenAI requests to local Ollama.
+		isLocalURL := strings.Contains(c.DefaultBaseURL, "localhost") || strings.Contains(c.DefaultBaseURL, "127.0.0.1") || strings.Contains(c.DefaultBaseURL, "host.docker.internal")
+		isManagedCloud := provider == ProviderOpenAI || provider == ProviderAnthropic || provider == ProviderGemini || provider == ProviderXAI || provider == ProviderGrok
+		
+		if !(isLocalURL && isManagedCloud) {
+			return c.DefaultBaseURL
+		}
 	}
 	if url, ok := ProviderBaseURLs[provider]; ok {
 		return url
