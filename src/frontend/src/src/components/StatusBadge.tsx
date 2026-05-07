@@ -17,7 +17,7 @@ const statusConfig: Record<string, { color: string; label: string; dotClass: str
   planned: { color: 'text-muted-foreground', label: 'Planned', dotClass: 'bg-muted-foreground' },
   ready: { color: 'text-primary', label: 'Ready', dotClass: 'bg-primary' },
   running: { color: 'text-primary', label: 'Running', dotClass: 'bg-primary' },
-  review: { color: 'text-amber-400', label: 'In Review', dotClass: 'bg-amber-400' },
+  review: { color: 'text-violet-400', label: 'In Review', dotClass: 'bg-violet-400' },
   // Agent / worker statuses
   idle: { color: 'text-muted-foreground', label: 'Idle', dotClass: 'bg-muted-foreground' },
   active: { color: 'text-success', label: 'Active', dotClass: 'bg-success' },
@@ -51,7 +51,7 @@ export function StatusBadge({ status, pulse }: { status: string; pulse?: boolean
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${config.color}`}>
       <span className="relative flex h-2 w-2">
-        {pulse && (status === 'active' || status === 'in_progress') && (
+        {pulse && (status === 'active' || status === 'in_progress' || status === 'running' || status === 'review' || status === 'claimed') && (
           <motion.span
             className={`absolute inset-0 rounded-full ${config.dotClass} opacity-20`}
             animate={{ scale: [1, 1.35, 1], opacity: [0.2, 0, 0.2] }}
