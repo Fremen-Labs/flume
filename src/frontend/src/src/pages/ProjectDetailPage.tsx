@@ -556,6 +556,7 @@ export default function ProjectDetailPage() {
 
   // Stats
   const running = projectTasks.filter(t => t.status === 'running').length;
+  const inReview = projectTasks.filter(t => t.status === 'review').length;
   const planned = projectTasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox').length;
   const done = projectTasks.filter(t => t.status === 'done').length;
   const blocked = projectTasks.filter(t => t.status === 'blocked').length;
@@ -886,9 +887,10 @@ export default function ProjectDetailPage() {
       </Dialog>
 
       {/* ── Stats ── */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
         {[
           { label: 'Running', value: running, cls: 'text-primary', pulse: running > 0 },
+          { label: 'In Review', value: inReview, cls: inReview > 0 ? 'text-violet-400' : 'text-muted-foreground/40', pulse: inReview > 0 },
           { label: 'Planned', value: planned, cls: 'text-sky-400' },
           { label: 'Done', value: done, cls: 'text-emerald-400' },
           { label: 'Blocked', value: blocked, cls: blocked > 0 ? 'text-destructive' : 'text-muted-foreground/40' },

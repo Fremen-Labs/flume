@@ -659,6 +659,7 @@ def placeholder_plan(repo: str, prompt: str):
     task_id = 'task-1'
     return {
         'repo': repo,
+        'complexityScore': 1,
         'epics': [
             {
                 'id': epic_id,
@@ -680,6 +681,7 @@ def placeholder_plan(repo: str, prompt: str):
                                     {
                                         'id': task_id,
                                         'title': '[Placeholder] Add a concrete task',
+                                        'objective': prompt,
                                     }
                                 ],
                             }

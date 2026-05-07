@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import {
-  Bot, ListTodo, CheckCircle2, AlertTriangle,
+  Bot, ListTodo, CheckCircle2, AlertTriangle, Eye,
   TrendingUp, ArrowRight, Zap, Clock, Activity,
 } from 'lucide-react';
 import { useSnapshot } from '@/hooks/useSnapshot';
@@ -52,6 +52,7 @@ export default function Dashboard() {
 
   const activeWorkers = workers.filter(w => w.status === 'claimed' || w.status === 'active');
   const runningTasks = tasks.filter(t => t.status === 'running');
+  const inReviewTasks = tasks.filter(t => t.status === 'review');
   const doneTasks = tasks.filter(t => t.status === 'done');
   const blockedTasks = tasks.filter(t => t.status === 'blocked');
   const plannedTasks = tasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox');
@@ -65,6 +66,7 @@ export default function Dashboard() {
   const pipelineStages = [
     { label: 'Planned', count: plannedTasks.length, color: 'bg-muted-foreground', desc: 'Queued for agentic blueprint extraction natively.' },
     { label: 'Running', count: runningTasks.length, color: 'bg-primary', desc: 'Synchronous execution across parallel orchestrator nodes.' },
+    { label: 'In Review', count: inReviewTasks.length, color: 'bg-violet-500', desc: 'Tasks awaiting tester or reviewer evaluation before completion.' },
     { label: 'Done', count: doneTasks.length, color: 'bg-success', desc: 'Verified and merged safely bypassing evaluation structures.' },
     { label: 'Blocked', count: blockedTasks.length, color: 'bg-destructive', desc: 'Execution exceptions requiring structural AST interventions.' },
   ];
@@ -117,9 +119,10 @@ export default function Dashboard() {
       </motion.div>
 
       {/* Metric Cards */}
-      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="grid grid-cols-2 md:grid-cols-4 gap-4 relative z-10">
+      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="grid grid-cols-2 md:grid-cols-5 gap-4 relative z-10">
         {[
           { title: 'Tasks Running', value: runningTasks.length, icon: Zap, color: 'text-primary', description: "Real-time AI compute clusters generating code currently synced to parallel Git worktrees." },
+          { title: 'In Review', value: inReviewTasks.length, icon: Eye, color: 'text-violet-400', description: "Tasks awaiting automated tester validation or reviewer evaluation before final approval." },
           { title: 'Tasks in Queue', value: plannedTasks.length, icon: ListTodo, color: 'text-muted-foreground', description: "Tickets staged by the orchestrator awaiting native daemon resource allocation bounds." },
           { title: 'Tasks Completed', value: doneTasks.length, icon: CheckCircle2, color: 'text-success', description: "System verified pipelines pushed natively successfully bypassing the PR Critic thresholds." },
           { title: 'Blocked Issues', value: blockedTasks.length, icon: AlertTriangle, color: 'text-destructive', description: blockedTasks.length > 0 ? (
