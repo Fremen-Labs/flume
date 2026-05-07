@@ -14,7 +14,11 @@ from agent_runner import (
     _get_active_llm_model,
     _run_with_client
 )
-from worker_handlers import _implementer_clear_claim_fields
+# Python's `import *` excludes names starting with `_` (PEP 8 convention).
+from worker_handlers import (
+    _implementer_clear_claim_fields,
+    _bug_recursion_depth,
+)
 
 def handle_tester_worker(task, es_id):
     # Gate: refuse to test a task that has no real commit — nothing to validate

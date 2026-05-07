@@ -14,7 +14,16 @@ from agent_runner import (
     _get_active_llm_model,
     _run_with_client
 )
-from worker_handlers import _implementer_clear_claim_fields
+# Python's `import *` excludes names starting with `_` (PEP 8 convention).
+# Every underscore-prefixed function used in this module must be imported
+# explicitly or it will NameError at runtime.
+from worker_handlers import (
+    _implementer_clear_claim_fields,
+    _branch_has_new_commits,
+    _handle_release_promotion_task,
+    _get_project_source,
+    _implementer_handle_llm_failure,
+)
 
 def handle_implementer_worker(task, es_id):
     if task.get('release_promotion_task'):
