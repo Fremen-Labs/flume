@@ -75,8 +75,22 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
-def _fetch_node_concurrency_caps() -> dict:
-    """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints."""
+# Phase 2.2: TTL cache for node concurrency caps.
+# Node registry doesn't change between cycles — cache for 60s.
+_NODE_CAPS_CACHE: dict = {'ts': 0.0, 'data': None}
+_NODE_CAPS_TTL_SECONDS = 60
+
+
+def _fetch_node_concurrency_caps(force: bool = False) -> dict:
+    """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints.
+
+    Phase 2.2: Results are cached for 60s since node registry changes are rare.
+    Pass force=True to bypass the cache (e.g. after a config change).
+    """
+    now = time.time()
+    if not force and _NODE_CAPS_CACHE['data'] is not None and (now - _NODE_CAPS_CACHE['ts']) < _NODE_CAPS_TTL_SECONDS:
+        return _NODE_CAPS_CACHE['data']
+
     node_caps = {}
     try:
         res = es_request('/flume-node-registry/_search', {'size': 100}, method='GET')
@@ -98,11 +112,16 @@ def _fetch_node_concurrency_caps() -> dict:
 
     except Exception as e:
         _manager_logger.error(f"Failed calculating adaptive per-node concurrency: {e}")
+        # On error, return stale cache if available rather than empty dict
+        if _NODE_CAPS_CACHE['data'] is not None:
+            return _NODE_CAPS_CACHE['data']
         
     # Default fallback for unknown locals
     if 'localhost' not in node_caps:
         node_caps['localhost'] = 4
-        
+
+    _NODE_CAPS_CACHE['ts'] = now
+    _NODE_CAPS_CACHE['data'] = node_caps
     return node_caps
 
 def log(msg, **kwargs):
@@ -294,7 +313,22 @@ def get_dynamic_worker_limit() -> int:
         return 2
 
 
-def build_workers():
+# Phase 2.2: TTL cache for worker list.
+# Worker definitions (role defs + dynamic limit) don't change between cycles
+# unless the operator edits ES config. Cache for 60s.
+_WORKERS_CACHE: dict = {'ts': 0.0, 'data': None}
+_WORKERS_CACHE_TTL_SECONDS = 60
+
+
+def build_workers(force: bool = False):
+    """Build the full worker list from role definitions and dynamic limits.
+
+    Phase 2.2: Results are cached for 60s. Pass force=True after config changes.
+    """
+    now = time.time()
+    if not force and _WORKERS_CACHE['data'] is not None and (now - _WORKERS_CACHE['ts']) < _WORKERS_CACHE_TTL_SECONDS:
+        return _WORKERS_CACHE['data']
+
     workers = []
     limit = get_dynamic_worker_limit()
     raw = os.environ.get('WORKERS_PER_ROLE')
@@ -317,6 +351,9 @@ def build_workers():
                     'llm_credential_id': role_def.get('llm_credential_id') or '',
                 }
             )
+
+    _WORKERS_CACHE['ts'] = now
+    _WORKERS_CACHE['data'] = workers
     return workers
 
 
@@ -1441,6 +1478,18 @@ def _count_available_by_status() -> dict:
     return counts
 
 
+# Phase 2.1: Sweep interval tracking.
+# Requeue sweeps have 300-600s thresholds — running them every 2s wastes ~2 ES
+# calls per cycle (28/min). promote_planned has a tighter interval since it
+# directly controls pipeline throughput.
+_SWEEP_LAST_RUN: dict = {'stuck_impl': 0, 'stuck_review': 0, 'promote': 0}
+_SWEEP_INTERVALS: dict = {
+    'stuck_impl': 30,    # requeue_stuck_implementer_tasks: threshold is 600s
+    'stuck_review': 30,  # requeue_stuck_review_tasks: threshold is 300s
+    'promote': 5,        # promote_planned_tasks: tighter for throughput
+}
+
+
 def cycle():
     """Main orchestration heartbeat tick"""
     # 1. Check Global Cluster Paused state
@@ -1453,25 +1502,39 @@ def cycle():
         pass
 
     sync_llm_env_from_workspace(_WS)
-    try:
-        rq = requeue_stuck_implementer_tasks()
-        if rq:
-            log(f"stuck-implementer sweep: requeued {rq} task(s)")
-    except Exception as e:
-        log(f"stuck-implementer sweep error: {e}")
-    try:
-        rq_rev = requeue_stuck_review_tasks()
-        if rq_rev:
-            log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
-    except Exception as e:
-        log(f"stuck-review sweep error: {e}")
-        
-    try:
-        promoted = promote_planned_tasks()
-        if promoted:
-            log(f"dependency sweep: promoted {promoted} task(s) to ready")
-    except Exception as e:
-        log(f"dependency sweep error: {e}")
+
+    # Phase 2.1: Sweep throttling.
+    # Stuck-task requeue scans all running/review tasks but only matters every
+    # 30s (thresholds are 300-600s). promote_planned runs every 5s since it
+    # directly affects pipeline throughput. Skipping when not due saves ~2 ES
+    # calls per cycle for requeue and ~3-10 for promote.
+    now_ts = time.time()
+    if now_ts - _SWEEP_LAST_RUN.get('stuck_impl', 0) >= _SWEEP_INTERVALS['stuck_impl']:
+        _SWEEP_LAST_RUN['stuck_impl'] = now_ts
+        try:
+            rq = requeue_stuck_implementer_tasks()
+            if rq:
+                log(f"stuck-implementer sweep: requeued {rq} task(s)")
+        except Exception as e:
+            log(f"stuck-implementer sweep error: {e}")
+
+    if now_ts - _SWEEP_LAST_RUN.get('stuck_review', 0) >= _SWEEP_INTERVALS['stuck_review']:
+        _SWEEP_LAST_RUN['stuck_review'] = now_ts
+        try:
+            rq_rev = requeue_stuck_review_tasks()
+            if rq_rev:
+                log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
+        except Exception as e:
+            log(f"stuck-review sweep error: {e}")
+
+    if now_ts - _SWEEP_LAST_RUN.get('promote', 0) >= _SWEEP_INTERVALS['promote']:
+        _SWEEP_LAST_RUN['promote'] = now_ts
+        try:
+            promoted = promote_planned_tasks()
+            if promoted:
+                log(f"dependency sweep: promoted {promoted} task(s) to ready")
+        except Exception as e:
+            log(f"dependency sweep error: {e}")
 
     # Phase 1.1: Pre-flight availability counts.
     # One _msearch roundtrip tells us how many tasks exist per status.
