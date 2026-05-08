@@ -2323,6 +2323,21 @@ def execute_worker_task(worker: dict) -> dict:
             'success': False,
             'error': f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
         }
+    finally:
+        # Per-task ephemeral temp cleanup
+        task_id = worker.get('current_task_id', 'unknown')
+        if task_id and task_id != 'unknown':
+            import tempfile
+            import shutil
+            from pathlib import Path
+            tmp_path = Path(tempfile.gettempdir())
+            for d in tmp_path.glob(f"flume-{task_id}-*"):
+                if d.is_dir():
+                    try:
+                        shutil.rmtree(d)
+                        log(f"pool-worker [{worker.get('name')}]: cleaned up ephemeral dir {d.name}")
+                    except Exception as e:
+                        log(f"pool-worker [{worker.get('name')}]: failed to remove {d.name}: {e}")
 
 
 def main():

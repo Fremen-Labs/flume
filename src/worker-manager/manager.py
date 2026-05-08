@@ -49,6 +49,7 @@ POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
 
 # Phase 5: Worker Pool — replaces subprocess.Popen per-task spawning.
 import multiprocessing
+import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
 
 _POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
@@ -56,7 +57,7 @@ _WORKER_POOL: Optional[ProcessPoolExecutor] = None
 
 # Track in-flight futures to avoid double-dispatching a worker
 # and to harvest results/errors.
-_active_futures: dict = {}  # worker_name -> Future
+_active_futures: dict[str, concurrent.futures.Future] = {}  # worker_name -> Future
 
 
 def _get_worker_pool() -> ProcessPoolExecutor:
@@ -68,6 +69,8 @@ def _get_worker_pool() -> ProcessPoolExecutor:
     """
     global _WORKER_POOL
     if _WORKER_POOL is None:
+        if multiprocessing.current_process().name != 'MainProcess':
+            raise RuntimeError("Worker pool can only be created by the MainProcess")
         try:
             multiprocessing.set_start_method('forkserver', force=True)
         except (ValueError, RuntimeError):
@@ -1589,20 +1592,17 @@ def sync_worker_processes(state):
     from worker_handlers import execute_worker_task
 
     # 1. Harvest completed futures
-    completed = []
-    for name, fut in _active_futures.items():
-        if fut.done():
-            completed.append(name)
-            try:
-                result = fut.result(timeout=0)
-                if result and result.get('error'):
-                    log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
-                elif result:
-                    log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
-            except Exception as e:
-                log(f"pool-worker [{name}] future error: {e}")
+    completed = [name for name, fut in list(_active_futures.items()) if fut.done()]
     for name in completed:
-        del _active_futures[name]
+        try:
+            fut = _active_futures.pop(name)
+            result = fut.result(timeout=0)
+            if result and result.get('error'):
+                log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+            elif result:
+                log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+        except Exception as e:
+            log(f"pool-worker [{name}] future error: {e}")
 
     # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
@@ -1616,7 +1616,117 @@ def sync_worker_processes(state):
         _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
         log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
 
+_shutdown_requested = False
+
+def _shutdown_pool_signal(signum=None, frame=None):
+    global _shutdown_requested
+    if not _shutdown_requested:
+        _shutdown_requested = True
+        log("manager: graceful shutdown requested via signal (waiting for cycle to end)...")
+
+def _release_orphaned_tasks():
+    """Fetch tasks currently assigned to this node and reset them to ready via FSM."""
+    try:
+        body = {
+            "size": 100,
+            "_source": ["status", "active_worker"],
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"status": "running"}},
+                        {"wildcard": {"active_worker": f"*-{NODE_ID}-*"}}
+                    ]
+                }
+            }
+        }
+        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
+        hits = res.get('hits', {}).get('hits', [])
+        
+        if not hits:
+            return
+            
+        from utils.lifecycle.state_machine import TaskStateMachine
+        
+        for h in hits:
+            task_id = h['_id']
+            src = h.get('_source', {})
+            current_status = src.get('status', 'running')
+            
+            try:
+                TaskStateMachine.validate_transition(current_status, 'ready')
+            except Exception as e:
+                log(f"pool-shutdown: invalid transition for {task_id}: {e}")
+                continue
+                
+            update_body = {
+                'doc': {
+                    'status': 'ready',
+                    'active_worker': None,
+                    'queue_state': 'interrupted',
+                    'updated_at': now_iso(),
+                    'agent_log': [{'note': 'Worker node shutting down; task interrupted and re-queued.', 'ts': now_iso()}]
+                }
+            }
+            try:
+                es_request(f'/{TASK_INDEX}/_update/{task_id}?refresh=true', update_body, method='POST')
+                log(f"pool-shutdown: requeued task {task_id}")
+            except Exception as e:
+                log(f"pool-shutdown: failed to update task {task_id}: {e}")
+    except Exception as e:
+        log(f"pool-shutdown: failed to release orphaned tasks: {e}")
+
+def _cleanup_ephemeral_temp_dirs():
+    """Broad manager-level cleanup for any stray flume-* temp dirs (belt & suspenders)."""
+    import tempfile
+    import shutil
+    from pathlib import Path
+    tmp_path = Path(tempfile.gettempdir())
+    cleaned = 0
+    for d in tmp_path.glob("flume-*"):
+        if d.is_dir():
+            try:
+                shutil.rmtree(d)
+                cleaned += 1
+            except Exception:
+                pass
+    if cleaned > 0:
+        log(f"pool-shutdown: wiped {cleaned} stray ephemeral clone directories")
+
+def _perform_graceful_shutdown():
+    """Heavy cleanup executed synchronously by the main thread after the loop breaks."""
+    log("manager: executing graceful pool shutdown...")
+    start_time = time.time()
+    
+    if _WORKER_POOL is not None:
+        for name, fut in list(_active_futures.items()):
+            if not fut.done():
+                fut.cancel()  # best effort
+        try:
+            _WORKER_POOL.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            _WORKER_POOL.shutdown(wait=True)  # fallback for older python versions
+        except Exception as e:
+            log(f"pool-shutdown: pool shutdown error: {e}")
+            
+    try:
+        _release_orphaned_tasks()
+    except Exception as e:
+        log(f"pool-shutdown: task release error: {e}")
+        
+    try:
+        _cleanup_ephemeral_temp_dirs()
+    except Exception as e:
+        log(f"pool-shutdown: temp dir cleanup error: {e}")
+    
+    elapsed = time.time() - start_time
+    log(f"manager: shutdown complete. Took {elapsed:.2f}s. Exiting.")
+
+
 def main():
+    import signal
+    signal.signal(signal.SIGTERM, _shutdown_pool_signal)
+    signal.signal(signal.SIGINT, _shutdown_pool_signal)
+
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
@@ -1639,12 +1749,21 @@ def main():
 
     ping_local_llm()
     log('worker manager starting')
-    while True:
+    
+    while not _shutdown_requested:
         try:
             cycle()
         except Exception as e:
             log(f'cycle error: {e}')
-        time.sleep(POLL_SECONDS)
+        
+        # Sleep in small increments to respond to signals faster
+        SIGNAL_CHECK_INTERVAL = 0.1
+        for _ in range(int(POLL_SECONDS / SIGNAL_CHECK_INTERVAL)):
+            if _shutdown_requested:
+                break
+            time.sleep(SIGNAL_CHECK_INTERVAL)
+
+    _perform_graceful_shutdown()
 
 
 if __name__ == '__main__':
