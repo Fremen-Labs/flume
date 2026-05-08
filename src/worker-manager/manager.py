@@ -51,23 +51,32 @@ POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
-# Use forkserver to avoid re-importing the entire module tree on each spawn.
-# forkserver creates a clean server process at pool init; subsequent workers
-# are forked from it (~10ms vs ~100ms for a fresh interpreter).
-try:
-    multiprocessing.set_start_method('forkserver', force=True)
-except ValueError:
-    multiprocessing.set_start_method('spawn', force=True)
-
 _POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
-_WORKER_POOL: ProcessPoolExecutor = ProcessPoolExecutor(
-    max_workers=_POOL_SIZE,
-    mp_context=multiprocessing.get_context('forkserver') if 'forkserver' in multiprocessing.get_all_start_methods() else multiprocessing.get_context('spawn'),
-)
+_WORKER_POOL: Optional[ProcessPoolExecutor] = None
 
 # Track in-flight futures to avoid double-dispatching a worker
 # and to harvest results/errors.
 _active_futures: dict = {}  # worker_name -> Future
+
+
+def _get_worker_pool() -> ProcessPoolExecutor:
+    """Lazy-init the process pool. Only the main manager process creates it.
+
+    This prevents a fork bomb: if child processes re-import manager.py,
+    they won't create nested pools because _get_worker_pool() is only
+    called from sync_worker_processes() inside cycle().
+    """
+    global _WORKER_POOL
+    if _WORKER_POOL is None:
+        try:
+            multiprocessing.set_start_method('forkserver', force=True)
+        except (ValueError, RuntimeError):
+            try:
+                multiprocessing.set_start_method('spawn', force=True)
+            except RuntimeError:
+                pass  # already set — safe to continue
+        _WORKER_POOL = ProcessPoolExecutor(max_workers=_POOL_SIZE)
+    return _WORKER_POOL
 
 ROLE_ORDER = [
     'intake',
@@ -1577,6 +1586,8 @@ def cycle():
 
 def sync_worker_processes(state):
     """Dispatch claimed workers to the process pool and harvest completed futures."""
+    from worker_handlers import execute_worker_task
+
     # 1. Harvest completed futures
     completed = []
     for name, fut in _active_futures.items():
@@ -1602,17 +1613,10 @@ def sync_worker_processes(state):
         if name in _active_futures:
             continue  # already running in pool
         
-        from worker_handlers import execute_worker_task
-        _active_futures[name] = _WORKER_POOL.submit(execute_worker_task, dict(w))
+        _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
         log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
 
 def main():
-    try:
-        multiprocessing.set_start_method('forkserver', force=True)
-    except ValueError:
-        # macOS/Windows fallback
-        multiprocessing.set_start_method('spawn', force=True)
-        
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
