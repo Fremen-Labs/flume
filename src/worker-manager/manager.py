@@ -49,6 +49,7 @@ POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
 
 # Phase 5: Worker Pool — replaces subprocess.Popen per-task spawning.
 import multiprocessing
+import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
 
 _POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
@@ -56,7 +57,7 @@ _WORKER_POOL: Optional[ProcessPoolExecutor] = None
 
 # Track in-flight futures to avoid double-dispatching a worker
 # and to harvest results/errors.
-_active_futures: dict = {}  # worker_name -> Future
+_active_futures: dict[str, concurrent.futures.Future] = {}  # worker_name -> Future
 
 
 def _get_worker_pool() -> ProcessPoolExecutor:
@@ -68,6 +69,8 @@ def _get_worker_pool() -> ProcessPoolExecutor:
     """
     global _WORKER_POOL
     if _WORKER_POOL is None:
+        if multiprocessing.current_process().name != 'MainProcess':
+            raise RuntimeError("Worker pool can only be created by the MainProcess")
         try:
             multiprocessing.set_start_method('forkserver', force=True)
         except (ValueError, RuntimeError):
@@ -1589,20 +1592,17 @@ def sync_worker_processes(state):
     from worker_handlers import execute_worker_task
 
     # 1. Harvest completed futures
-    completed = []
-    for name, fut in _active_futures.items():
-        if fut.done():
-            completed.append(name)
-            try:
-                result = fut.result(timeout=0)
-                if result and result.get('error'):
-                    log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
-                elif result:
-                    log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
-            except Exception as e:
-                log(f"pool-worker [{name}] future error: {e}")
+    completed = [name for name, fut in list(_active_futures.items()) if fut.done()]
     for name in completed:
-        del _active_futures[name]
+        try:
+            fut = _active_futures.pop(name)
+            result = fut.result(timeout=0)
+            if result and result.get('error'):
+                log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+            elif result:
+                log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+        except Exception as e:
+            log(f"pool-worker [{name}] future error: {e}")
 
     # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
@@ -1675,9 +1675,28 @@ def _release_orphaned_tasks():
     except Exception as e:
         log(f"pool-shutdown: failed to release orphaned tasks: {e}")
 
+def _cleanup_ephemeral_temp_dirs():
+    """Broad manager-level cleanup for any stray flume-* temp dirs (belt & suspenders)."""
+    import tempfile
+    import shutil
+    from pathlib import Path
+    tmp_path = Path(tempfile.gettempdir())
+    cleaned = 0
+    for d in tmp_path.glob("flume-*"):
+        if d.is_dir():
+            try:
+                shutil.rmtree(d)
+                cleaned += 1
+            except Exception:
+                pass
+    if cleaned > 0:
+        log(f"pool-shutdown: wiped {cleaned} stray ephemeral clone directories")
+
 def _perform_graceful_shutdown():
     """Heavy cleanup executed synchronously by the main thread after the loop breaks."""
     log("manager: executing graceful pool shutdown...")
+    start_time = time.time()
+    
     if _WORKER_POOL is not None:
         for name, fut in list(_active_futures.items()):
             if not fut.done():
@@ -1693,8 +1712,14 @@ def _perform_graceful_shutdown():
         _release_orphaned_tasks()
     except Exception as e:
         log(f"pool-shutdown: task release error: {e}")
+        
+    try:
+        _cleanup_ephemeral_temp_dirs()
+    except Exception as e:
+        log(f"pool-shutdown: temp dir cleanup error: {e}")
     
-    log("manager: shutdown complete. Exiting.")
+    elapsed = time.time() - start_time
+    log(f"manager: shutdown complete. Took {elapsed:.2f}s. Exiting.")
 
 
 def main():
@@ -1732,10 +1757,11 @@ def main():
             log(f'cycle error: {e}')
         
         # Sleep in small increments to respond to signals faster
-        for _ in range(int(POLL_SECONDS * 10)):
+        SIGNAL_CHECK_INTERVAL = 0.1
+        for _ in range(int(POLL_SECONDS / SIGNAL_CHECK_INTERVAL)):
             if _shutdown_requested:
                 break
-            time.sleep(0.1)
+            time.sleep(SIGNAL_CHECK_INTERVAL)
 
     _perform_graceful_shutdown()
 
