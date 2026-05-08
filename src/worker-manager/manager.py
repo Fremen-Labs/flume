@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 import json
 import os
-import ssl
+import random
+import re
 import sys
 import time
-# AST injected by Swarm Agent 3
+import httpx
 import socket
-import urllib.request
-import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +47,36 @@ ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
 
-active_worker_processes = {}
+# Phase 5: Worker Pool — replaces subprocess.Popen per-task spawning.
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+_POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
+_WORKER_POOL: Optional[ProcessPoolExecutor] = None
+
+# Track in-flight futures to avoid double-dispatching a worker
+# and to harvest results/errors.
+_active_futures: dict = {}  # worker_name -> Future
+
+
+def _get_worker_pool() -> ProcessPoolExecutor:
+    """Lazy-init the process pool. Only the main manager process creates it.
+
+    This prevents a fork bomb: if child processes re-import manager.py,
+    they won't create nested pools because _get_worker_pool() is only
+    called from sync_worker_processes() inside cycle().
+    """
+    global _WORKER_POOL
+    if _WORKER_POOL is None:
+        try:
+            multiprocessing.set_start_method('forkserver', force=True)
+        except (ValueError, RuntimeError):
+            try:
+                multiprocessing.set_start_method('spawn', force=True)
+            except RuntimeError:
+                pass  # already set — safe to continue
+        _WORKER_POOL = ProcessPoolExecutor(max_workers=_POOL_SIZE)
+    return _WORKER_POOL
 
 ROLE_ORDER = [
     'intake',
@@ -59,11 +87,15 @@ ROLE_ORDER = [
     'memory-updater',
 ]
 
-ctx = None
-if not ES_VERIFY_TLS:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+# Phase 4: Connection-pooled httpx.Client replaces per-call urllib.request.
+# HTTP keep-alive eliminates TLS handshake overhead (~15ms per connection).
+_ES_CLIENT: httpx.Client = httpx.Client(
+    base_url=ES_URL,
+    headers=get_es_auth_headers(),
+    verify=ES_VERIFY_TLS,
+    timeout=httpx.Timeout(30.0, connect=5.0),
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
 
 
 def now_iso():
@@ -75,8 +107,22 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
-def _fetch_node_concurrency_caps() -> dict:
-    """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints."""
+# Phase 2.2: TTL cache for node concurrency caps.
+# Node registry doesn't change between cycles — cache for 60s.
+_NODE_CAPS_CACHE: dict = {'ts': 0.0, 'data': None}
+_NODE_CAPS_TTL_SECONDS = 60
+
+
+def _fetch_node_concurrency_caps(force: bool = False) -> dict:
+    """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints.
+
+    Phase 2.2: Results are cached for 60s since node registry changes are rare.
+    Pass force=True to bypass the cache (e.g. after a config change).
+    """
+    now = time.time()
+    if not force and _NODE_CAPS_CACHE['data'] is not None and (now - _NODE_CAPS_CACHE['ts']) < _NODE_CAPS_TTL_SECONDS:
+        return _NODE_CAPS_CACHE['data']
+
     node_caps = {}
     try:
         res = es_request('/flume-node-registry/_search', {'size': 100}, method='GET')
@@ -98,11 +144,16 @@ def _fetch_node_concurrency_caps() -> dict:
 
     except Exception as e:
         _manager_logger.error(f"Failed calculating adaptive per-node concurrency: {e}")
+        # On error, return stale cache if available rather than empty dict
+        if _NODE_CAPS_CACHE['data'] is not None:
+            return _NODE_CAPS_CACHE['data']
         
     # Default fallback for unknown locals
     if 'localhost' not in node_caps:
         node_caps['localhost'] = 4
-        
+
+    _NODE_CAPS_CACHE['ts'] = now
+    _NODE_CAPS_CACHE['data'] = node_caps
     return node_caps
 
 def log(msg, **kwargs):
@@ -111,9 +162,45 @@ def log(msg, **kwargs):
     else:
         _manager_logger.info(str(msg))
 
+# ── Telemetry Buffer (Phase 1.3) ─────────────────────────────────────────
+# Instead of firing synchronous ES POSTs per event on the claim hot path,
+# buffer events in-memory and flush with a single _bulk call per cycle.
+_TELEMETRY_BUFFER: list = []
+
+
+def es_request_raw(path: str, raw_body: str, method: str = 'POST') -> dict:
+    """Send a raw string body to ES (e.g. for _bulk NDJSON)."""
+    resp = _ES_CLIENT.request(
+        method, path,
+        content=raw_body.encode(),
+        headers={'Content-Type': 'application/x-ndjson'},
+    )
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
+
+
+def _flush_telemetry():
+    """Flush all buffered telemetry/lifecycle events to ES in a single _bulk call."""
+    if not _TELEMETRY_BUFFER:
+        return
+    bulk_lines = []
+    for entry in _TELEMETRY_BUFFER:
+        idx = entry.pop('_index', 'flume-telemetry')
+        bulk_lines.append(json.dumps({'index': {'_index': idx}}))
+        bulk_lines.append(json.dumps(entry))
+    _TELEMETRY_BUFFER.clear()
+    if not bulk_lines:
+        return
+    try:
+        es_request_raw('/_bulk?refresh=false', '\n'.join(bulk_lines) + '\n')
+    except Exception as e:
+        _manager_logger.error(f"telemetry bulk flush failed: {e}")
+
+
 def log_task_state_transition(task_id: str, prev_status: str, new_status: str, role: str, worker_name: str, project: str = ""):
-    """Emit a flat state transition event for the lifecycle observer."""
-    event = {
+    """Buffer a state transition event for deferred bulk flush."""
+    _TELEMETRY_BUFFER.append({
+        '_index': 'flume-task-events',
         'task_id': task_id,
         'previous_status': prev_status,
         'new_status': new_status,
@@ -121,28 +208,23 @@ def log_task_state_transition(task_id: str, prev_status: str, new_status: str, r
         'worker_name': worker_name,
         'owner': role,
         'project': project,
-        'timestamp': now_iso()
-    }
-    try:
-        es_request('/flume-task-events/_doc', body=event, method='POST')
-        _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
-    except Exception as e:
-        _manager_logger.error(f"Lifecycle Event Failure: Could not emit transition for task {task_id}: {e}")
+        'timestamp': now_iso(),
+    })
+    _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
+
 
 def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
+    """Buffer a telemetry event for deferred bulk flush."""
     ts = now_iso()
-    doc = {
-        "@timestamp": ts,
-        "timestamp": ts,
-        "worker_name": worker_name,
-        "event_type": event_type,
-        "message": details,
-        "level": level
-    }
-    try:
-        es_request("/flume-telemetry/_doc", body=doc, method="POST")
-    except Exception as e:
-        log(f"telemetry logging failed: {e}")
+    _TELEMETRY_BUFFER.append({
+        '_index': 'flume-telemetry',
+        '@timestamp': ts,
+        'timestamp': ts,
+        'worker_name': worker_name,
+        'event_type': event_type,
+        'message': details,
+        'level': level,
+    })
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -171,19 +253,10 @@ def load_agent_role_defs():
     cfg = {}
     # 1. Try ES flume-config first (K8s-native, replica-safe)
     try:
-        es_url = ES_URL
-        headers = {'Content-Type': 'application/json'}
-        headers.update(get_es_auth_headers())
-        req = urllib.request.Request(
-            f'{es_url}/flume-config/_doc/{AGENT_MODELS_ES_ID}',
-            headers=headers, method='GET',
-        )
-        with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
-            raw = resp.read().decode()
-            doc = json.loads(raw) if raw else {}
-            src = doc.get('_source') or {}
-            if src.get('roles'):
-                cfg = src['roles']
+        res = es_request(f'/flume-config/_doc/{AGENT_MODELS_ES_ID}', method='GET')
+        src = (res or {}).get('_source') or {}
+        if src.get('roles'):
+            cfg = src['roles']
     except Exception:
         pass  # fall through to file-based fallback
     # 2. File-based fallback (dev / migration period)
@@ -223,13 +296,12 @@ def load_agent_role_defs():
 
 
 def fetch_routing_policy() -> dict:
-    import urllib.error
     try:
         res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
         if res and '_source' in res:
             return res['_source']
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
             _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     except Exception as e:
         _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
@@ -263,7 +335,22 @@ def get_dynamic_worker_limit() -> int:
         return 2
 
 
-def build_workers():
+# Phase 2.2: TTL cache for worker list.
+# Worker definitions (role defs + dynamic limit) don't change between cycles
+# unless the operator edits ES config. Cache for 60s.
+_WORKERS_CACHE: dict = {'ts': 0.0, 'data': None}
+_WORKERS_CACHE_TTL_SECONDS = 60
+
+
+def build_workers(force: bool = False):
+    """Build the full worker list from role definitions and dynamic limits.
+
+    Phase 2.2: Results are cached for 60s. Pass force=True after config changes.
+    """
+    now = time.time()
+    if not force and _WORKERS_CACHE['data'] is not None and (now - _WORKERS_CACHE['ts']) < _WORKERS_CACHE_TTL_SECONDS:
+        return _WORKERS_CACHE['data']
+
     workers = []
     limit = get_dynamic_worker_limit()
     raw = os.environ.get('WORKERS_PER_ROLE')
@@ -286,96 +373,26 @@ def build_workers():
                     'llm_credential_id': role_def.get('llm_credential_id') or '',
                 }
             )
+
+    _WORKERS_CACHE['ts'] = now
+    _WORKERS_CACHE['data'] = workers
     return workers
 
 
 def es_request(path: str, body: dict = None, method: str = 'POST') -> dict:
-    headers = dict(get_es_auth_headers())
-    headers['Content-Type'] = 'application/json'
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode()
+    """Send a JSON request to ES via the connection-pooled httpx.Client."""
+    if body is not None and method == 'GET':
         # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
-        if method == 'GET':
-            method = 'POST'
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        raw = resp.read().decode()
-        return json.loads(raw) if raw else {}
+        method = 'POST'
+    resp = _ES_CLIENT.request(method, path, json=body)
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
 
 
-
-def ready_items_for_role(role):
-    """Query-only: return candidate tasks for a role without claiming them."""
-    must = []
-    if role == 'implementer':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'implementer'}},
-                {'term': {'owner': 'implementer'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'tester':
-        must = [
-            {'term': {'status': 'review'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'tester'}},
-                {'term': {'owner': 'tester'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'reviewer':
-        must = [
-            {'term': {'status': 'review'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'reviewer'}},
-                {'term': {'owner': 'reviewer'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'pm':
-        must = [
-            {'term': {'status': 'planned'}},
-            {'bool': {
-                'should': [
-                    {'term': {'owner': 'pm'}},
-                    {'term': {'assigned_agent_role': 'pm'}},
-                ],
-                'minimum_should_match': 1,
-            }},
-        ]
-    elif role == 'intake':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'intake'}},
-                {'term': {'owner': 'intake'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'memory-updater':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'memory-updater'}},
-                {'term': {'owner': 'memory-updater'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    else:
-        log(f'unknown role in ready_items_for_role: {role}')
-        return []
-    body = {
-        'size': 20,
-        'query': {'bool': {'must': must}},
-        'seq_no_primary_term': True,
-        'sort': [
-            {'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}
-        ]
-    }
-    return es_request(f'/{TASK_INDEX}/_search', body, method='GET').get('hits', {}).get('hits', [])
 
 
 def _normalize_title(title: str) -> str:
     """Lowercase, strip whitespace and punctuation for dedup comparison."""
-    import re
     return re.sub(r'[^a-z0-9 ]', '', (title or '').lower()).strip()
 
 
@@ -384,36 +401,28 @@ def _is_duplicate_task(task_title: str, task_id: str) -> bool:
 
     Returns True if a duplicate exists, meaning this task should be skipped
     to prevent parallel agents from redundantly executing the same work.
+
+    Phase 1.2: Merged the previous double-query (size:0 count + size:50 fetch)
+    into a single query that fetches titles directly.
     """
     norm = _normalize_title(task_title)
     if not norm:
         return False
     try:
         body = {
-            'size': 0,
-            'query': {'bool': {'must': [
-                {'bool': {'should': [
-                    {'term': {'status': 'running'}},
-                    {'term': {'status': 'review'}},
-                    {'term': {'status': 'done'}},
-                ], 'minimum_should_match': 1}},
-            ], 'must_not': [
-                {'term': {'_id': task_id}},
-            ]}},
+            'size': 50,
+            '_source': ['title'],
+            'query': {'bool': {
+                'must': [{'terms': {'status': ['running', 'review', 'done']}}],
+                'must_not': [{'term': {'_id': task_id}}],
+            }},
         }
         res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-        # Execute search without binding unused hits variable
-        res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
-        # Full scan: fetch titles of active tasks and compare normalized
-        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
-            body['size'] = 50
-            body['_source'] = ['title']
-            res2 = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-            for h in res2.get('hits', {}).get('hits', []):
-                existing_title = _normalize_title(h.get('_source', {}).get('title', ''))
-                if existing_title == norm:
-                    log(f"dedup: skipping task '{task_title}' — duplicate of {h['_id']} already in progress")
-                    return True
+        for h in res.get('hits', {}).get('hits', []):
+            existing_title = _normalize_title(h.get('_source', {}).get('title', ''))
+            if existing_title == norm:
+                log(f"dedup: skipping task '{task_title}' — duplicate of {h['_id']} already in progress")
+                return True
         return False
     except Exception as e:
         log(f"dedup check error: {e}")
@@ -835,12 +844,16 @@ def try_atomic_claim(
 
     try:
         start_ms = int(time.time() * 1000)
+        if os.environ.get('FLUME_DEBUG_CLAIMS'):
+            log(f"DEBUG: Executing try_atomic_claim for {worker_name} ({role})")
         res = es_request(
             f'/{TASK_INDEX}/_update_by_query?conflicts=proceed&refresh=true',
             body,
             method='POST',
         )
         roundtrip_ms = int(time.time() * 1000) - start_ms
+        if os.environ.get('FLUME_DEBUG_CLAIMS'):
+            log(f"DEBUG: try_atomic_claim result for {worker_name}: updated={res.get('updated', 0)}")
 
         updated = res.get('updated', 0)
         if updated != 1:
@@ -904,48 +917,6 @@ def try_atomic_claim(
         log(f"atomic claim error for {worker_name}: {e}")
         return None
 
-
-def claim(
-    item_id,
-    role,
-    execution_host=None,
-    preferred_model=None,
-    worker_name=None,
-    preferred_llm_provider=None,
-    preferred_llm_credential_id=None,
-    seq_no=None,
-    primary_term=None,
-):
-    doc = {
-        'status': 'running' if role != 'pm' else 'planned',
-        'queue_state': 'active',
-        'assigned_agent_role': role,
-        'owner': role,
-        'updated_at': now_iso(),
-        'last_update': now_iso(),
-    }
-    if execution_host:
-        doc['execution_host'] = execution_host
-    if preferred_model:
-        doc['preferred_model'] = preferred_model
-    if preferred_llm_provider:
-        doc['preferred_llm_provider'] = preferred_llm_provider
-    if preferred_llm_credential_id:
-        doc['preferred_llm_credential_id'] = preferred_llm_credential_id
-    if worker_name:
-        doc['active_worker'] = worker_name
-    
-    endpoint = f'/{TASK_INDEX}/_update/{item_id}?refresh=true'
-    # Distributed Task Lease Coordinator: Prevent Thundering Herd via OCC Mutex Locks
-    if seq_no is not None and primary_term is not None:
-        endpoint += f'&if_seq_no={seq_no}&if_primary_term={primary_term}'
-        
-    try:
-        es_request(endpoint, {'doc': doc}, method='POST')
-        return True
-    except Exception as e:
-        log(f"Manager Mutex Lock Collision (409) prevented for task {item_id}: {e}")
-        return False
 
 
 def save_state(state):
@@ -1327,7 +1298,7 @@ def promote_planned_tasks() -> int:
     return n
 
 
-import random  # noqa: E402
+
 
 last_resume_timestamp = 0
 
@@ -1379,6 +1350,53 @@ def _execute_resume_sweep():
     except Exception as e:
         _manager_logger.error(f"Failed to execute resume sweep: {e}")
 
+# ── Pre-flight Availability Cache (Phase 1.1) ────────────────────────────
+# One count query per target status at the top of cycle() eliminates the
+# need for ~16 idle workers to each fire a full _update_by_query against ES
+# when there are zero tasks to claim.
+
+def _count_available_by_status() -> dict:
+    """Return {status: count} for claimable task statuses in a single msearch.
+
+    Uses ES _msearch to batch three count queries (ready, review, planned)
+    into one HTTP roundtrip. Workers check this before attempting atomic claims.
+    """
+    counts = {'ready': 0, 'review': 0, 'planned': 0}
+    try:
+        # Build _msearch body: header + query pairs for each status
+        lines = []
+        for status in ('ready', 'review', 'planned'):
+            lines.append(json.dumps({'index': TASK_INDEX}))
+            lines.append(json.dumps({
+                'size': 0,
+                'query': {'term': {'status': status}},
+                'track_total_hits': True,
+            }))
+        raw_body = '\n'.join(lines) + '\n'
+        res = es_request_raw(f'/_msearch', raw_body, method='POST')
+        responses = res.get('responses', [])
+        for status, resp in zip(('ready', 'review', 'planned'), responses):
+            total = resp.get('hits', {}).get('total', {})
+            counts[status] = total.get('value', 0) if isinstance(total, dict) else int(total or 0)
+    except Exception as e:
+        # On failure, assume tasks exist so we don't accidentally skip claims
+        _manager_logger.error(f"pre-flight count failed, assuming tasks available: {e}")
+        counts = {'ready': 999, 'review': 999, 'planned': 999}
+    return counts
+
+
+# Phase 2.1: Sweep interval tracking.
+# Requeue sweeps have 300-600s thresholds — running them every 2s wastes ~2 ES
+# calls per cycle (28/min). promote_planned has a tighter interval since it
+# directly controls pipeline throughput.
+_SWEEP_LAST_RUN: dict = {'stuck_impl': 0, 'stuck_review': 0, 'promote': 0}
+_SWEEP_INTERVALS: dict = {
+    'stuck_impl': 30,    # requeue_stuck_implementer_tasks: threshold is 600s
+    'stuck_review': 30,  # requeue_stuck_review_tasks: threshold is 300s
+    'promote': 5,        # promote_planned_tasks: tighter for throughput
+}
+
+
 def cycle():
     """Main orchestration heartbeat tick"""
     # 1. Check Global Cluster Paused state
@@ -1391,25 +1409,46 @@ def cycle():
         pass
 
     sync_llm_env_from_workspace(_WS)
-    try:
-        rq = requeue_stuck_implementer_tasks()
-        if rq:
-            log(f"stuck-implementer sweep: requeued {rq} task(s)")
-    except Exception as e:
-        log(f"stuck-implementer sweep error: {e}")
-    try:
-        rq_rev = requeue_stuck_review_tasks()
-        if rq_rev:
-            log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
-    except Exception as e:
-        log(f"stuck-review sweep error: {e}")
-        
-    try:
-        promoted = promote_planned_tasks()
-        if promoted:
-            log(f"dependency sweep: promoted {promoted} task(s) to ready")
-    except Exception as e:
-        log(f"dependency sweep error: {e}")
+
+    # Phase 2.1: Sweep throttling.
+    # Stuck-task requeue scans all running/review tasks but only matters every
+    # 30s (thresholds are 300-600s). promote_planned runs every 5s since it
+    # directly affects pipeline throughput. Skipping when not due saves ~2 ES
+    # calls per cycle for requeue and ~3-10 for promote.
+    now_ts = time.time()
+    if now_ts - _SWEEP_LAST_RUN.get('stuck_impl', 0) >= _SWEEP_INTERVALS['stuck_impl']:
+        _SWEEP_LAST_RUN['stuck_impl'] = now_ts
+        try:
+            rq = requeue_stuck_implementer_tasks()
+            if rq:
+                log(f"stuck-implementer sweep: requeued {rq} task(s)")
+        except Exception as e:
+            log(f"stuck-implementer sweep error: {e}")
+
+    if now_ts - _SWEEP_LAST_RUN.get('stuck_review', 0) >= _SWEEP_INTERVALS['stuck_review']:
+        _SWEEP_LAST_RUN['stuck_review'] = now_ts
+        try:
+            rq_rev = requeue_stuck_review_tasks()
+            if rq_rev:
+                log(f"stuck-review sweep: cleared {rq_rev} phantom lock(s)")
+        except Exception as e:
+            log(f"stuck-review sweep error: {e}")
+
+    if now_ts - _SWEEP_LAST_RUN.get('promote', 0) >= _SWEEP_INTERVALS['promote']:
+        _SWEEP_LAST_RUN['promote'] = now_ts
+        try:
+            promoted = promote_planned_tasks()
+            if promoted:
+                log(f"dependency sweep: promoted {promoted} task(s) to ready")
+        except Exception as e:
+            log(f"dependency sweep error: {e}")
+
+    # Phase 1.1: Pre-flight availability counts.
+    # One _msearch roundtrip tells us how many tasks exist per status.
+    # Workers for roles with zero available tasks skip try_atomic_claim entirely,
+    # eliminating ~16 wasted _update_by_query calls per cycle.
+    available_counts = _count_available_by_status()
+
     busy_workers = {}
     try:
         res = es_request(
@@ -1498,6 +1537,20 @@ def cycle():
             log(f"{worker['name']} throttled to protect local Node {active_host} (Node Cap={host_cap})", metric_id="flume_concurrency_throttled_total")
             continue
 
+        # Phase 1.1: Skip claim when no tasks exist for this role's target status.
+        # Maps role → target status that try_atomic_claim would search.
+        role_target = {
+            'pm': 'planned',
+            'tester': 'review',
+            'reviewer': 'review',
+        }.get(worker['role'], 'ready')
+        if available_counts.get(role_target, 0) <= 0:
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            continue
+
         claimed_task = try_atomic_claim(
             worker['role'],
             worker['name'],
@@ -1527,23 +1580,42 @@ def cycle():
         state['workers'].append(snapshot)
     
     save_state(state)
+    _flush_telemetry()
     if not is_paused:
         sync_worker_processes(state)
 
 def sync_worker_processes(state):
+    """Dispatch claimed workers to the process pool and harvest completed futures."""
+    from worker_handlers import execute_worker_task
+
+    # 1. Harvest completed futures
+    completed = []
+    for name, fut in _active_futures.items():
+        if fut.done():
+            completed.append(name)
+            try:
+                result = fut.result(timeout=0)
+                if result and result.get('error'):
+                    log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+                elif result:
+                    log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+            except Exception as e:
+                log(f"pool-worker [{name}] future error: {e}")
+    for name in completed:
+        del _active_futures[name]
+
+    # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
     for w in claimed:
         name = w.get('name')
         if not name:
             continue
-        proc = active_worker_processes.get(name)
-        if proc is None or proc.poll() is not None:
-            active_worker_processes[name] = subprocess.Popen(
-                [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-            )
-            log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
+        if name in _active_futures:
+            continue  # already running in pool
+        
+        _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
+        log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
+
 def main():
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
@@ -1561,9 +1633,7 @@ def main():
         if "docker" in url and sys.platform.startswith("linux"):
             log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="define LOCAL_LLM_HOST=172.17.0.1 in .env")
         try:
-            req = urllib.request.Request(f"{url}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=3):
-                pass
+            httpx.get(f"{url}/api/tags", timeout=3.0)
         except Exception as e:
             log("Local LLM boot ping failed", event="llm_ping_failure", url=url, error=str(e), advice="Workers may stall if unreachable")
 

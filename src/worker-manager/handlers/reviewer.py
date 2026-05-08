@@ -14,6 +14,12 @@ from agent_runner import (
     _get_active_llm_model,
     _run_with_client
 )
+# Python's `import *` excludes names starting with `_` (PEP 8 convention).
+from worker_handlers import (
+    _implementer_clear_claim_fields,
+    _should_defer_auto_pr_until_story_complete,
+    _backfill_story_pr_to_sibling_tasks,
+)
 
 def handle_reviewer_worker(task, es_id):
     # Terminal tasks should never run reviewer LLM again (avoids tight loops + wasted Ollama calls).
