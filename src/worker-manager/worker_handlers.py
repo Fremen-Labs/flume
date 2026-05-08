@@ -2286,6 +2286,45 @@ def run_worker(worker):
     return True
 
 
+def execute_worker_task(worker: dict) -> dict:
+    """Execute a single worker task in a pool process.
+    
+    Called by ProcessPoolExecutor from manager.py. This replaces the
+    subprocess polling loop — the manager has already claimed the task
+    and passes the full worker dict directly.
+    
+    Returns a result dict for the manager to log.
+    """
+    try:
+        # Re-apply runtime config in the forked process
+        apply_runtime_config(_WS)
+        sync_llm_env_from_workspace(resolve_safe_workspace())
+        
+        worker_name = worker.get('name', 'unknown')
+        task_id = worker.get('current_task_id', 'unknown')
+        os.environ['FLUME_WORKER_NAME'] = worker_name
+        os.environ['FLUME_WORKER_ROLE'] = worker.get('role', 'unknown')
+        
+        log(f"pool-worker: executing {worker_name} for task={task_id}")
+        success = run_worker(worker)
+        log(f"pool-worker: completed {worker_name} for task={task_id} success={success}")
+        
+        return {
+            'worker_name': worker_name,
+            'task_id': task_id,
+            'success': success,
+            'error': None,
+        }
+    except Exception as e:
+        import traceback
+        return {
+            'worker_name': worker.get('name', 'unknown'),
+            'task_id': worker.get('current_task_id', 'unknown'),
+            'success': False,
+            'error': f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+        }
+
+
 def main():
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao

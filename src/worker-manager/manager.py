@@ -7,7 +7,6 @@ import sys
 import time
 import httpx
 import socket
-import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +47,27 @@ ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
 TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
 POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
 
-active_worker_processes = {}
+# Phase 5: Worker Pool — replaces subprocess.Popen per-task spawning.
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+# Use forkserver to avoid re-importing the entire module tree on each spawn.
+# forkserver creates a clean server process at pool init; subsequent workers
+# are forked from it (~10ms vs ~100ms for a fresh interpreter).
+try:
+    multiprocessing.set_start_method('forkserver', force=True)
+except ValueError:
+    multiprocessing.set_start_method('spawn', force=True)
+
+_POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
+_WORKER_POOL: ProcessPoolExecutor = ProcessPoolExecutor(
+    max_workers=_POOL_SIZE,
+    mp_context=multiprocessing.get_context('forkserver') if 'forkserver' in multiprocessing.get_all_start_methods() else multiprocessing.get_context('spawn'),
+)
+
+# Track in-flight futures to avoid double-dispatching a worker
+# and to harvest results/errors.
+_active_futures: dict = {}  # worker_name -> Future
 
 ROLE_ORDER = [
     'intake',
@@ -1557,20 +1576,43 @@ def cycle():
         sync_worker_processes(state)
 
 def sync_worker_processes(state):
+    """Dispatch claimed workers to the process pool and harvest completed futures."""
+    # 1. Harvest completed futures
+    completed = []
+    for name, fut in _active_futures.items():
+        if fut.done():
+            completed.append(name)
+            try:
+                result = fut.result(timeout=0)
+                if result and result.get('error'):
+                    log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+                elif result:
+                    log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+            except Exception as e:
+                log(f"pool-worker [{name}] future error: {e}")
+    for name in completed:
+        del _active_futures[name]
+
+    # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
     for w in claimed:
         name = w.get('name')
         if not name:
             continue
-        proc = active_worker_processes.get(name)
-        if proc is None or proc.poll() is not None:
-            active_worker_processes[name] = subprocess.Popen(
-                [sys.executable, str(BASE / 'worker_handlers.py'), name],
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-            )
-            log(f"manager: spawned dynamic swarm subprocess for worker [{name}] natively")
+        if name in _active_futures:
+            continue  # already running in pool
+        
+        from worker_handlers import execute_worker_task
+        _active_futures[name] = _WORKER_POOL.submit(execute_worker_task, dict(w))
+        log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
+
 def main():
+    try:
+        multiprocessing.set_start_method('forkserver', force=True)
+    except ValueError:
+        # macOS/Windows fallback
+        multiprocessing.set_start_method('spawn', force=True)
+        
     apply_runtime_config(_WS)
     from flume_secrets import hydrate_secrets_from_openbao
     hydrate_secrets_from_openbao()
