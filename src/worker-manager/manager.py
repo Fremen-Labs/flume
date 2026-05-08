@@ -111,9 +111,45 @@ def log(msg, **kwargs):
     else:
         _manager_logger.info(str(msg))
 
+# ── Telemetry Buffer (Phase 1.3) ─────────────────────────────────────────
+# Instead of firing synchronous ES POSTs per event on the claim hot path,
+# buffer events in-memory and flush with a single _bulk call per cycle.
+_TELEMETRY_BUFFER: list = []
+
+
+def es_request_raw(path: str, raw_body: str, method: str = 'POST') -> dict:
+    """Send a raw string body to ES (e.g. for _bulk NDJSON)."""
+    headers = dict(get_es_auth_headers())
+    headers['Content-Type'] = 'application/x-ndjson'
+    data = raw_body.encode()
+    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, context=ctx) as resp:
+        raw = resp.read().decode()
+        return json.loads(raw) if raw else {}
+
+
+def _flush_telemetry():
+    """Flush all buffered telemetry/lifecycle events to ES in a single _bulk call."""
+    if not _TELEMETRY_BUFFER:
+        return
+    bulk_lines = []
+    for entry in _TELEMETRY_BUFFER:
+        idx = entry.pop('_index', 'flume-telemetry')
+        bulk_lines.append(json.dumps({'index': {'_index': idx}}))
+        bulk_lines.append(json.dumps(entry))
+    _TELEMETRY_BUFFER.clear()
+    if not bulk_lines:
+        return
+    try:
+        es_request_raw('/_bulk?refresh=false', '\n'.join(bulk_lines) + '\n')
+    except Exception as e:
+        _manager_logger.error(f"telemetry bulk flush failed: {e}")
+
+
 def log_task_state_transition(task_id: str, prev_status: str, new_status: str, role: str, worker_name: str, project: str = ""):
-    """Emit a flat state transition event for the lifecycle observer."""
-    event = {
+    """Buffer a state transition event for deferred bulk flush."""
+    _TELEMETRY_BUFFER.append({
+        '_index': 'flume-task-events',
         'task_id': task_id,
         'previous_status': prev_status,
         'new_status': new_status,
@@ -121,28 +157,23 @@ def log_task_state_transition(task_id: str, prev_status: str, new_status: str, r
         'worker_name': worker_name,
         'owner': role,
         'project': project,
-        'timestamp': now_iso()
-    }
-    try:
-        es_request('/flume-task-events/_doc', body=event, method='POST')
-        _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
-    except Exception as e:
-        _manager_logger.error(f"Lifecycle Event Failure: Could not emit transition for task {task_id}: {e}")
+        'timestamp': now_iso(),
+    })
+    _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
+
 
 def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
+    """Buffer a telemetry event for deferred bulk flush."""
     ts = now_iso()
-    doc = {
-        "@timestamp": ts,
-        "timestamp": ts,
-        "worker_name": worker_name,
-        "event_type": event_type,
-        "message": details,
-        "level": level
-    }
-    try:
-        es_request("/flume-telemetry/_doc", body=doc, method="POST")
-    except Exception as e:
-        log(f"telemetry logging failed: {e}")
+    _TELEMETRY_BUFFER.append({
+        '_index': 'flume-telemetry',
+        '@timestamp': ts,
+        'timestamp': ts,
+        'worker_name': worker_name,
+        'event_type': event_type,
+        'message': details,
+        'level': level,
+    })
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -384,36 +415,28 @@ def _is_duplicate_task(task_title: str, task_id: str) -> bool:
 
     Returns True if a duplicate exists, meaning this task should be skipped
     to prevent parallel agents from redundantly executing the same work.
+
+    Phase 1.2: Merged the previous double-query (size:0 count + size:50 fetch)
+    into a single query that fetches titles directly.
     """
     norm = _normalize_title(task_title)
     if not norm:
         return False
     try:
         body = {
-            'size': 0,
-            'query': {'bool': {'must': [
-                {'bool': {'should': [
-                    {'term': {'status': 'running'}},
-                    {'term': {'status': 'review'}},
-                    {'term': {'status': 'done'}},
-                ], 'minimum_should_match': 1}},
-            ], 'must_not': [
-                {'term': {'_id': task_id}},
-            ]}},
+            'size': 50,
+            '_source': ['title'],
+            'query': {'bool': {
+                'must': [{'terms': {'status': ['running', 'review', 'done']}}],
+                'must_not': [{'term': {'_id': task_id}}],
+            }},
         }
         res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-        # Execute search without binding unused hits variable
-        res.get('hits', {}).get('hits', []) if res.get('hits', {}).get('total', {}).get('value', 0) > 0 else []
-        # Full scan: fetch titles of active tasks and compare normalized
-        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
-            body['size'] = 50
-            body['_source'] = ['title']
-            res2 = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-            for h in res2.get('hits', {}).get('hits', []):
-                existing_title = _normalize_title(h.get('_source', {}).get('title', ''))
-                if existing_title == norm:
-                    log(f"dedup: skipping task '{task_title}' — duplicate of {h['_id']} already in progress")
-                    return True
+        for h in res.get('hits', {}).get('hits', []):
+            existing_title = _normalize_title(h.get('_source', {}).get('title', ''))
+            if existing_title == norm:
+                log(f"dedup: skipping task '{task_title}' — duplicate of {h['_id']} already in progress")
+                return True
         return False
     except Exception as e:
         log(f"dedup check error: {e}")
@@ -835,14 +858,16 @@ def try_atomic_claim(
 
     try:
         start_ms = int(time.time() * 1000)
-        log(f"DEBUG: Executing try_atomic_claim for {worker_name} ({role}) with body: {json.dumps(body)}")
+        if os.environ.get('FLUME_DEBUG_CLAIMS'):
+            log(f"DEBUG: Executing try_atomic_claim for {worker_name} ({role})")
         res = es_request(
             f'/{TASK_INDEX}/_update_by_query?conflicts=proceed&refresh=true',
             body,
             method='POST',
         )
         roundtrip_ms = int(time.time() * 1000) - start_ms
-        log(f"DEBUG: try_atomic_claim result for {worker_name}: {json.dumps(res)}")
+        if os.environ.get('FLUME_DEBUG_CLAIMS'):
+            log(f"DEBUG: try_atomic_claim result for {worker_name}: updated={res.get('updated', 0)}")
 
         updated = res.get('updated', 0)
         if updated != 1:
@@ -1381,6 +1406,41 @@ def _execute_resume_sweep():
     except Exception as e:
         _manager_logger.error(f"Failed to execute resume sweep: {e}")
 
+# ── Pre-flight Availability Cache (Phase 1.1) ────────────────────────────
+# One count query per target status at the top of cycle() eliminates the
+# need for ~16 idle workers to each fire a full _update_by_query against ES
+# when there are zero tasks to claim.
+
+def _count_available_by_status() -> dict:
+    """Return {status: count} for claimable task statuses in a single msearch.
+
+    Uses ES _msearch to batch three count queries (ready, review, planned)
+    into one HTTP roundtrip. Workers check this before attempting atomic claims.
+    """
+    counts = {'ready': 0, 'review': 0, 'planned': 0}
+    try:
+        # Build _msearch body: header + query pairs for each status
+        lines = []
+        for status in ('ready', 'review', 'planned'):
+            lines.append(json.dumps({'index': TASK_INDEX}))
+            lines.append(json.dumps({
+                'size': 0,
+                'query': {'term': {'status': status}},
+                'track_total_hits': True,
+            }))
+        raw_body = '\n'.join(lines) + '\n'
+        res = es_request_raw(f'/_msearch', raw_body, method='POST')
+        responses = res.get('responses', [])
+        for status, resp in zip(('ready', 'review', 'planned'), responses):
+            total = resp.get('hits', {}).get('total', {})
+            counts[status] = total.get('value', 0) if isinstance(total, dict) else int(total or 0)
+    except Exception as e:
+        # On failure, assume tasks exist so we don't accidentally skip claims
+        _manager_logger.error(f"pre-flight count failed, assuming tasks available: {e}")
+        counts = {'ready': 999, 'review': 999, 'planned': 999}
+    return counts
+
+
 def cycle():
     """Main orchestration heartbeat tick"""
     # 1. Check Global Cluster Paused state
@@ -1412,6 +1472,13 @@ def cycle():
             log(f"dependency sweep: promoted {promoted} task(s) to ready")
     except Exception as e:
         log(f"dependency sweep error: {e}")
+
+    # Phase 1.1: Pre-flight availability counts.
+    # One _msearch roundtrip tells us how many tasks exist per status.
+    # Workers for roles with zero available tasks skip try_atomic_claim entirely,
+    # eliminating ~16 wasted _update_by_query calls per cycle.
+    available_counts = _count_available_by_status()
+
     busy_workers = {}
     try:
         res = es_request(
@@ -1500,6 +1567,20 @@ def cycle():
             log(f"{worker['name']} throttled to protect local Node {active_host} (Node Cap={host_cap})", metric_id="flume_concurrency_throttled_total")
             continue
 
+        # Phase 1.1: Skip claim when no tasks exist for this role's target status.
+        # Maps role → target status that try_atomic_claim would search.
+        role_target = {
+            'pm': 'planned',
+            'tester': 'review',
+            'reviewer': 'review',
+        }.get(worker['role'], 'ready')
+        if available_counts.get(role_target, 0) <= 0:
+            wcid = (worker.get('llm_credential_id') or '').strip() or lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
+            snapshot['preferred_llm_credential_id'] = wcid
+            snapshot['llm_credential_label'] = lcs.resolve_credential_label(_WS, wcid)
+            state['workers'].append(snapshot)
+            continue
+
         claimed_task = try_atomic_claim(
             worker['role'],
             worker['name'],
@@ -1529,6 +1610,7 @@ def cycle():
         state['workers'].append(snapshot)
     
     save_state(state)
+    _flush_telemetry()
     if not is_paused:
         sync_worker_processes(state)
 
