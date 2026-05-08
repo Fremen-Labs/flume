@@ -3,12 +3,10 @@ import json
 import os
 import random
 import re
-import ssl
 import sys
 import time
-# AST injected by Swarm Agent 3
+import httpx
 import socket
-import urllib.request
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -61,11 +59,15 @@ ROLE_ORDER = [
     'memory-updater',
 ]
 
-ctx = None
-if not ES_VERIFY_TLS:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+# Phase 4: Connection-pooled httpx.Client replaces per-call urllib.request.
+# HTTP keep-alive eliminates TLS handshake overhead (~15ms per connection).
+_ES_CLIENT: httpx.Client = httpx.Client(
+    base_url=ES_URL,
+    headers=get_es_auth_headers(),
+    verify=ES_VERIFY_TLS,
+    timeout=httpx.Timeout(30.0, connect=5.0),
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
 
 
 def now_iso():
@@ -140,13 +142,13 @@ _TELEMETRY_BUFFER: list = []
 
 def es_request_raw(path: str, raw_body: str, method: str = 'POST') -> dict:
     """Send a raw string body to ES (e.g. for _bulk NDJSON)."""
-    headers = dict(get_es_auth_headers())
-    headers['Content-Type'] = 'application/x-ndjson'
-    data = raw_body.encode()
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        raw = resp.read().decode()
-        return json.loads(raw) if raw else {}
+    resp = _ES_CLIENT.request(
+        method, path,
+        content=raw_body.encode(),
+        headers={'Content-Type': 'application/x-ndjson'},
+    )
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
 
 
 def _flush_telemetry():
@@ -223,19 +225,10 @@ def load_agent_role_defs():
     cfg = {}
     # 1. Try ES flume-config first (K8s-native, replica-safe)
     try:
-        es_url = ES_URL
-        headers = {'Content-Type': 'application/json'}
-        headers.update(get_es_auth_headers())
-        req = urllib.request.Request(
-            f'{es_url}/flume-config/_doc/{AGENT_MODELS_ES_ID}',
-            headers=headers, method='GET',
-        )
-        with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
-            raw = resp.read().decode()
-            doc = json.loads(raw) if raw else {}
-            src = doc.get('_source') or {}
-            if src.get('roles'):
-                cfg = src['roles']
+        res = es_request(f'/flume-config/_doc/{AGENT_MODELS_ES_ID}', method='GET')
+        src = (res or {}).get('_source') or {}
+        if src.get('roles'):
+            cfg = src['roles']
     except Exception:
         pass  # fall through to file-based fallback
     # 2. File-based fallback (dev / migration period)
@@ -275,13 +268,12 @@ def load_agent_role_defs():
 
 
 def fetch_routing_policy() -> dict:
-    import urllib.error
     try:
         res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
         if res and '_source' in res:
             return res['_source']
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
             _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
     except Exception as e:
         _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
@@ -360,18 +352,13 @@ def build_workers(force: bool = False):
 
 
 def es_request(path: str, body: dict = None, method: str = 'POST') -> dict:
-    headers = dict(get_es_auth_headers())
-    headers['Content-Type'] = 'application/json'
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode()
+    """Send a JSON request to ES via the connection-pooled httpx.Client."""
+    if body is not None and method == 'GET':
         # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
-        if method == 'GET':
-            method = 'POST'
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        raw = resp.read().decode()
-        return json.loads(raw) if raw else {}
+        method = 'POST'
+    resp = _ES_CLIENT.request(method, path, json=body)
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
 
 
 
@@ -1600,9 +1587,7 @@ def main():
         if "docker" in url and sys.platform.startswith("linux"):
             log("host.docker.internal natively detected on Linux!", event="linux_network_warning", url=url, advice="define LOCAL_LLM_HOST=172.17.0.1 in .env")
         try:
-            req = urllib.request.Request(f"{url}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=3):
-                pass
+            httpx.get(f"{url}/api/tags", timeout=3.0)
         except Exception as e:
             log("Local LLM boot ping failed", event="llm_ping_failure", url=url, error=str(e), advice="Workers may stall if unreachable")
 
