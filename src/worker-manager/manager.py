@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
 import os
+import random
+import re
 import ssl
 import sys
 import time
@@ -373,77 +375,9 @@ def es_request(path: str, body: dict = None, method: str = 'POST') -> dict:
 
 
 
-def ready_items_for_role(role):
-    """Query-only: return candidate tasks for a role without claiming them."""
-    must = []
-    if role == 'implementer':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'implementer'}},
-                {'term': {'owner': 'implementer'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'tester':
-        must = [
-            {'term': {'status': 'review'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'tester'}},
-                {'term': {'owner': 'tester'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'reviewer':
-        must = [
-            {'term': {'status': 'review'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'reviewer'}},
-                {'term': {'owner': 'reviewer'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'pm':
-        must = [
-            {'term': {'status': 'planned'}},
-            {'bool': {
-                'should': [
-                    {'term': {'owner': 'pm'}},
-                    {'term': {'assigned_agent_role': 'pm'}},
-                ],
-                'minimum_should_match': 1,
-            }},
-        ]
-    elif role == 'intake':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'intake'}},
-                {'term': {'owner': 'intake'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    elif role == 'memory-updater':
-        must = [
-            {'term': {'status': 'ready'}},
-            {'bool': {'should': [
-                {'term': {'assigned_agent_role': 'memory-updater'}},
-                {'term': {'owner': 'memory-updater'}},
-            ], 'minimum_should_match': 1}},
-        ]
-    else:
-        log(f'unknown role in ready_items_for_role: {role}')
-        return []
-    body = {
-        'size': 20,
-        'query': {'bool': {'must': must}},
-        'seq_no_primary_term': True,
-        'sort': [
-            {'updated_at': {'order': 'asc', 'unmapped_type': 'date'}}
-        ]
-    }
-    return es_request(f'/{TASK_INDEX}/_search', body, method='GET').get('hits', {}).get('hits', [])
-
 
 def _normalize_title(title: str) -> str:
     """Lowercase, strip whitespace and punctuation for dedup comparison."""
-    import re
     return re.sub(r'[^a-z0-9 ]', '', (title or '').lower()).strip()
 
 
@@ -969,48 +903,6 @@ def try_atomic_claim(
         return None
 
 
-def claim(
-    item_id,
-    role,
-    execution_host=None,
-    preferred_model=None,
-    worker_name=None,
-    preferred_llm_provider=None,
-    preferred_llm_credential_id=None,
-    seq_no=None,
-    primary_term=None,
-):
-    doc = {
-        'status': 'running' if role != 'pm' else 'planned',
-        'queue_state': 'active',
-        'assigned_agent_role': role,
-        'owner': role,
-        'updated_at': now_iso(),
-        'last_update': now_iso(),
-    }
-    if execution_host:
-        doc['execution_host'] = execution_host
-    if preferred_model:
-        doc['preferred_model'] = preferred_model
-    if preferred_llm_provider:
-        doc['preferred_llm_provider'] = preferred_llm_provider
-    if preferred_llm_credential_id:
-        doc['preferred_llm_credential_id'] = preferred_llm_credential_id
-    if worker_name:
-        doc['active_worker'] = worker_name
-    
-    endpoint = f'/{TASK_INDEX}/_update/{item_id}?refresh=true'
-    # Distributed Task Lease Coordinator: Prevent Thundering Herd via OCC Mutex Locks
-    if seq_no is not None and primary_term is not None:
-        endpoint += f'&if_seq_no={seq_no}&if_primary_term={primary_term}'
-        
-    try:
-        es_request(endpoint, {'doc': doc}, method='POST')
-        return True
-    except Exception as e:
-        log(f"Manager Mutex Lock Collision (409) prevented for task {item_id}: {e}")
-        return False
-
 
 def save_state(state):
     try:
@@ -1391,7 +1283,7 @@ def promote_planned_tasks() -> int:
     return n
 
 
-import random  # noqa: E402
+
 
 last_resume_timestamp = 0
 
