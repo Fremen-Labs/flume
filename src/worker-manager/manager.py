@@ -112,6 +112,17 @@ def log(msg, **kwargs):
 # and log_telemetry_event extracted to es/telemetry.py.
 
 
+# ── Prometheus Instrumentation (Phase 10) ────────────────────────────────────
+try:
+    from observability.metrics import (
+        CYCLE_DURATION, TASKS_CLAIMED, TASKS_DISPATCHED, TASKS_COMPLETED,
+        CLAIM_LATENCY, POOL_WORKERS_ACTIVE, POOL_WORKERS_TOTAL,
+    )
+    _METRICS_ENABLED = True
+except ImportError:
+    _METRICS_ENABLED = False
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
@@ -119,6 +130,19 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status":"ok","service":"flume-worker"}')
+        elif self.path == '/metrics':
+            try:
+                from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+                output = generate_latest()
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(output)
+            except ImportError:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"prometheus_client not installed"}')
         else:
             self.send_response(404)
             self.end_headers()
@@ -589,6 +613,8 @@ def try_atomic_claim(
     """
     Kubernetes-grade atomic task claim using a single _update_by_query roundtrip.
 
+    Phase 10: Instrumented with CLAIM_LATENCY histogram and TASKS_CLAIMED counter.
+
     Instead of fetch→CAS (which causes O(N²) 409 collisions under a swarm), this
     executes a Painless script that atomically transitions exactly one ``ready``
     task to ``running`` in a single ES operation — equivalent to:
@@ -602,6 +628,25 @@ def try_atomic_claim(
     Returns the claimed task _source dict on success, or None if no task was available
     or the script raced with another worker (both of which are safe no-ops).
     """
+    _claim_start = time.monotonic()
+    try:
+        return _try_atomic_claim_inner(
+            role, worker_name, execution_host,
+            preferred_model, preferred_llm_provider, preferred_llm_credential_id,
+        )
+    finally:
+        if _METRICS_ENABLED:
+            CLAIM_LATENCY.labels(role=role).observe(time.monotonic() - _claim_start)
+
+
+def _try_atomic_claim_inner(
+    role: str,
+    worker_name: str,
+    execution_host: Optional[str] = None,
+    preferred_model: Optional[str] = None,
+    preferred_llm_provider: Optional[str] = None,
+    preferred_llm_credential_id: Optional[str] = None,
+) -> Optional[dict]:
     # Tester & reviewer pick up tasks in 'review' status (set by implementer handoff);
     # PM picks up 'planned'; all other roles pick up 'ready'.
     if role == 'pm':
@@ -787,6 +832,11 @@ def try_atomic_claim(
             if claimed_title and _is_duplicate_task(claimed_title, claimed_doc_id):
                 _dedup_skip_task(claimed_doc_id, f'Duplicate of existing active task with title: {claimed_title}')
                 return None
+
+            # Phase 10: Increment claim counter on successful claim
+            if _METRICS_ENABLED:
+                TASKS_CLAIMED.labels(role=role, node_id=NODE_ID).inc()
+
             return claimed
         return None
     except Exception as e:
@@ -1276,6 +1326,7 @@ _SWEEP_INTERVALS: dict = {
 
 def cycle():
     """Main orchestration heartbeat tick"""
+    _cycle_start = time.monotonic()
     # 1. Check Global Cluster Paused state
     is_paused = False
     try:
@@ -1461,9 +1512,18 @@ def cycle():
     if not is_paused:
         sync_worker_processes(state)
 
+    # Phase 10: Observe total cycle duration
+    if _METRICS_ENABLED:
+        CYCLE_DURATION.labels(node_id=NODE_ID).observe(time.monotonic() - _cycle_start)
+
 def sync_worker_processes(state):
     """Dispatch claimed workers to the process pool and harvest completed futures."""
     from worker_handlers import execute_worker_task
+
+    # Phase 10: Update pool gauge
+    if _METRICS_ENABLED:
+        POOL_WORKERS_ACTIVE.labels(node_id=NODE_ID).set(len(_active_futures))
+        POOL_WORKERS_TOTAL.labels(node_id=NODE_ID).set(_POOL_SIZE)
 
     # 1. Harvest completed futures
     completed = [name for name, fut in list(_active_futures.items()) if fut.done()]
@@ -1473,10 +1533,17 @@ def sync_worker_processes(state):
             result = fut.result(timeout=0)
             if result and result.get('error'):
                 log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+                if _METRICS_ENABLED:
+                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success='false', node_id=NODE_ID).inc()
             elif result:
                 log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+                if _METRICS_ENABLED:
+                    _success = 'true' if result.get('success') else 'false'
+                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success=_success, node_id=NODE_ID).inc()
         except Exception as e:
             log(f"pool-worker [{name}] future error: {e}")
+            if _METRICS_ENABLED:
+                TASKS_COMPLETED.labels(role='unknown', success='false', node_id=NODE_ID).inc()
 
     # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
@@ -1489,7 +1556,9 @@ def sync_worker_processes(state):
         
         _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
         log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
-
+        if _METRICS_ENABLED:
+            _dispatch_role = w.get('role', 'unknown')
+            TASKS_DISPATCHED.labels(role=_dispatch_role, node_id=NODE_ID).inc()
 # Phase 7: Pool lifecycle, shutdown signal, orphan task requeue, and temp
 # cleanup extracted to pool.py. Imported at top of file.
 
