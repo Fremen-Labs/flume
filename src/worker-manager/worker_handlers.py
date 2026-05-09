@@ -4,76 +4,43 @@ import json
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from utils.es_auth import get_es_auth_headers
-
-import socket
-import httpx
-from datetime import datetime, timezone
 from pathlib import Path
 
-NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
+import httpx
+
+# ── Centralized Configuration ────────────────────────────────────────────────
+# Phase 7: All constants are now in config.py (single source of truth).
+from config import (
+    NODE_ID, WORKSPACE_ROOT as _WS, WORKER_MANAGER_BASE as BASE,
+    ES_URL, ES_VERIFY_TLS,
+    TASK_INDEX, HANDOFF_INDEX, FAILURE_INDEX, REVIEW_INDEX, PROVENANCE_INDEX,
+    POLL_SECONDS, BACKOFF_BASE_DELAY, BACKOFF_MAX_DELAY, BACKOFF_JITTER_FACTOR,
+    now_iso,
+)
+from utils.workspace import resolve_safe_workspace  # noqa: E402
+
+# ── Unified ES Client ───────────────────────────────────────────────────────
+# Phase 7: Replaces the inline urllib.request-based es_request() that created
+# a new TCP connection per call. Now uses the connection-pooled httpx.Client.
+from es.client import es_request
 
 # AP-10: Import ES-native model reader
 try:
-    import sys as _sys
-    _wm_src = str(__import__('pathlib').Path(__file__).resolve().parent.parent)
-    if _wm_src not in _sys.path:
-        _sys.path.insert(0, _wm_src)
     from workspace_llm_env import get_active_llm_model as _get_active_llm_model
 except Exception:
     def _get_active_llm_model(default: str = 'llama3.2') -> str:  # type: ignore[misc]
         return (os.environ.get('LLM_MODEL') or default).strip() or default
 
-
-_WS = Path(__file__).resolve().parent.parent
-if str(_WS) not in sys.path:
-    sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
 from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 
 apply_runtime_config(_WS)
 
-
-async def _run_with_client(func, *args, **kwargs):
-    async with httpx.AsyncClient() as client:
-        kwargs['client'] = client
-        return await func(*args, **kwargs)
-
-BASE = _WS / 'worker-manager'
-from utils.workspace import resolve_safe_workspace  # noqa: E402
-
-ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-ES_API_KEY = os.environ.get('ES_API_KEY', '')
-ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
-TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
-HANDOFF_INDEX = os.environ.get('ES_INDEX_HANDOFFS', 'agent-handoff-records')
-FAILURE_INDEX = os.environ.get('ES_INDEX_FAILURES', 'agent-failure-records')
-REVIEW_INDEX = os.environ.get('ES_INDEX_REVIEWS', 'agent-review-records')
-PROVENANCE_INDEX = os.environ.get('ES_INDEX_PROVENANCE', 'agent-provenance-records')
-POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '15'))
-BACKOFF_BASE_DELAY = float(os.environ.get('FLUME_BACKOFF_BASE_DELAY', '2.0'))
-BACKOFF_MAX_DELAY = float(os.environ.get('FLUME_BACKOFF_MAX_DELAY', '30.0'))
-BACKOFF_JITTER_FACTOR = float(os.environ.get('FLUME_BACKOFF_JITTER_FACTOR', '0.2'))
 # AP-3 cleanup: PROJECTS_REGISTRY (projects.json) removed — gitflow config read from ES flume-projects index.
-
-ctx = None
-if not ES_VERIFY_TLS:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
 
 # AP-6: file_path logger arg removed — get_logger writes to stdout only.
 from utils.logger import get_logger  # noqa: E402
@@ -86,19 +53,6 @@ def log(msg, **kwargs):
     else:
         _handlers_logger.info(str(msg))
 
-
-def es_request(path, body=None, method='GET'):
-    headers = dict(get_es_auth_headers())
-    data = None
-    if body is not None:
-        headers['Content-Type'] = 'application/json'
-        data = json.dumps(body).encode()
-        if method == 'GET':
-            method = 'POST'
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=ctx) as resp:
-        raw = resp.read().decode()
-        return json.loads(raw) if raw else {}
 
 
 def fetch_task_doc(task_id):
@@ -253,24 +207,15 @@ def append_execution_thought(es_id: str, thought: str) -> None:
 
 
 def _es_projects_request_worker(path: str, body=None, method: str = "GET") -> dict:
-    """Lightweight ES request helper scoped to flume-projects index (no httpx dep)."""
-    headers = {"Content-Type": "application/json"}
-    headers.update(get_es_auth_headers())
-    data = json.dumps(body).encode() if body is not None else None
-    if data and method == "GET":
-        method = "POST"
-    _ctx = None
-    if not ES_VERIFY_TLS:
-        _ctx = ssl.create_default_context()
-        _ctx.check_hostname = False
-        _ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(f"{ES_URL}{path}", data=data, headers=headers, method=method)
+    """ES request helper scoped to flume-projects index.
+
+    Phase 7: Now delegates to the shared es_request() from es/client.py.
+    Preserves the 404-swallowing behavior (returns {} on 404).
+    """
     try:
-        with urllib.request.urlopen(req, context=_ctx) as resp:
-            raw = resp.read().decode()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
+        return es_request(path, body=body, method=method)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
             return {}
         raise
 

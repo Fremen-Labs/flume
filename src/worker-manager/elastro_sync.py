@@ -1,26 +1,26 @@
+"""AST synchronization for Flume codebase graph.
+
+Phase 7: Migrated from urllib.request to shared es/client.py.
+"""
 import ast
 import os
-import urllib.request
-import json
 from pathlib import Path
 
 from utils.logger import get_logger
+from es.client import es_request
 
 logger = get_logger("elastro_sync")
 
+
 def sync_ast():
     """Robust fallback traversing AST scopes natively exporting boundaries to ES"""
-    es_url = os.environ.get("ES_URL", "http://elasticsearch:9200")
     for filepath in Path("/app/src").rglob("*.py"):
         try:
             tree = ast.parse(filepath.read_text())
             classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
-            headers = {"Content-Type": "application/json"}
-            payload = json.dumps({"file": str(filepath.name), "classes": classes})
-            url = f"{es_url}/flume-elastro-graph/_doc"
-            req = urllib.request.Request(url, data=payload.encode(), headers=headers, method="POST")
+            payload = {"file": str(filepath.name), "classes": classes}
             try:
-                urllib.request.urlopen(req, timeout=2)
+                es_request('/flume-elastro-graph/_doc', body=payload, method='POST')
             except Exception as e:
                 logger.warning(
                     "Failed to write AST entry to ES",

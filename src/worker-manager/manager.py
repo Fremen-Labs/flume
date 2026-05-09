@@ -6,27 +6,27 @@ import re
 import sys
 import time
 import httpx
-import socket
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-NODE_ID = os.environ.get('HOSTNAME') or socket.gethostname() or "null-node"
+# ── Centralized Configuration ────────────────────────────────────────────────
+# Phase 7: All constants and env vars are now in config.py (single source of truth).
+from config import (
+    NODE_ID, WORKSPACE_ROOT as _WS, WORKER_MANAGER_BASE as BASE,
+    ES_URL, ES_API_KEY, ES_VERIFY_TLS, TASK_INDEX, POLL_SECONDS,
+    POOL_SIZE as _POOL_SIZE, AGENT_MODELS_FILE, AGENT_MODELS_ES_ID,
+    ROLE_ORDER, now_iso,
+)
 
-_WS = Path(__file__).resolve().parent.parent
-if str(_WS) not in sys.path:
-    sys.path.insert(0, str(_WS))
 from flume_secrets import apply_runtime_config  # noqa: E402
 from workspace_llm_env import resolve_cloud_agent_model, sync_llm_env_from_workspace  # noqa: E402
 import llm_credentials_store as lcs  # noqa: E402
-from utils.es_auth import get_es_auth_headers  # noqa: E402
-
-apply_runtime_config(_WS)
-
-BASE = _WS / 'worker-manager'
 from utils.workspace import resolve_safe_workspace  # noqa: E402
+
+# Hydrate dashboard LLM settings into env if available
 try:
     from dashboard.llm_settings import load_effective_pairs
     for _k, _v in load_effective_pairs(resolve_safe_workspace()).items():
@@ -35,74 +35,17 @@ try:
 except ImportError:
     pass
 
-# AP-8: AGENT_MODELS_FILE (local disk) replaced by ES flume-config document.
-# Kept as an optional file-based fallback during rollout so existing
-# agent_models.json files are still honoured until explicitly migrated.
-AGENT_MODELS_FILE = resolve_safe_workspace() / 'worker-manager' / 'agent_models.json'
-AGENT_MODELS_ES_ID = 'agent-models'  # document ID in flume-config index
-
-ES_URL = os.environ.get('ES_URL', 'http://elasticsearch:9200').rstrip('/')
-ES_API_KEY = os.environ.get('ES_API_KEY', '')
-ES_VERIFY_TLS = os.environ.get('ES_VERIFY_TLS', 'false').lower() == 'true'
-TASK_INDEX = os.environ.get('ES_INDEX_TASKS', 'agent-task-records')
-POLL_SECONDS = int(os.environ.get('WORKER_MANAGER_POLL_SECONDS', '2'))
-
-# Phase 5: Worker Pool — replaces subprocess.Popen per-task spawning.
-import multiprocessing
-import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
-
-_POOL_SIZE = int(os.environ.get('FLUME_WORKER_POOL_SIZE', '24'))
-_WORKER_POOL: Optional[ProcessPoolExecutor] = None
-
-# Track in-flight futures to avoid double-dispatching a worker
-# and to harvest results/errors.
-_active_futures: dict[str, concurrent.futures.Future] = {}  # worker_name -> Future
-
-
-def _get_worker_pool() -> ProcessPoolExecutor:
-    """Lazy-init the process pool. Only the main manager process creates it.
-
-    This prevents a fork bomb: if child processes re-import manager.py,
-    they won't create nested pools because _get_worker_pool() is only
-    called from sync_worker_processes() inside cycle().
-    """
-    global _WORKER_POOL
-    if _WORKER_POOL is None:
-        if multiprocessing.current_process().name != 'MainProcess':
-            raise RuntimeError("Worker pool can only be created by the MainProcess")
-        try:
-            multiprocessing.set_start_method('forkserver', force=True)
-        except (ValueError, RuntimeError):
-            try:
-                multiprocessing.set_start_method('spawn', force=True)
-            except RuntimeError:
-                pass  # already set — safe to continue
-        _WORKER_POOL = ProcessPoolExecutor(max_workers=_POOL_SIZE)
-    return _WORKER_POOL
-
-ROLE_ORDER = [
-    'intake',
-    'pm',
-    'implementer',
-    'tester',
-    'reviewer',
-    'memory-updater',
-]
-
-# Phase 4: Connection-pooled httpx.Client replaces per-call urllib.request.
-# HTTP keep-alive eliminates TLS handshake overhead (~15ms per connection).
-_ES_CLIENT: httpx.Client = httpx.Client(
-    base_url=ES_URL,
-    headers=get_es_auth_headers(),
-    verify=ES_VERIFY_TLS,
-    timeout=httpx.Timeout(30.0, connect=5.0),
-    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+# ── Extracted Modules ────────────────────────────────────────────────────────
+# Phase 7: ES client, telemetry, and pool lifecycle extracted from this file.
+from es.client import es_request, es_request_raw, get_es_client
+from es.telemetry import log_task_state_transition, log_telemetry_event, flush_telemetry as _flush_telemetry
+from pool import (
+    get_worker_pool as _get_worker_pool,
+    active_futures as _active_futures,
+    shutdown_requested as _shutdown_requested_flag,
+    shutdown_pool_signal as _shutdown_pool_signal,
+    perform_graceful_shutdown as _perform_graceful_shutdown,
 )
-
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
 
 
 # AP-6: file_path logger arg removed — get_logger writes to stdout only.
@@ -165,69 +108,20 @@ def log(msg, **kwargs):
     else:
         _manager_logger.info(str(msg))
 
-# ── Telemetry Buffer (Phase 1.3) ─────────────────────────────────────────
-# Instead of firing synchronous ES POSTs per event on the claim hot path,
-# buffer events in-memory and flush with a single _bulk call per cycle.
-_TELEMETRY_BUFFER: list = []
+# Phase 7: Telemetry buffer, es_request_raw, log_task_state_transition,
+# and log_telemetry_event extracted to es/telemetry.py.
 
 
-def es_request_raw(path: str, raw_body: str, method: str = 'POST') -> dict:
-    """Send a raw string body to ES (e.g. for _bulk NDJSON)."""
-    resp = _ES_CLIENT.request(
-        method, path,
-        content=raw_body.encode(),
-        headers={'Content-Type': 'application/x-ndjson'},
+# ── Prometheus Instrumentation (Phase 10) ────────────────────────────────────
+try:
+    from observability.metrics import (
+        CYCLE_DURATION, TASKS_CLAIMED, TASKS_DISPATCHED, TASKS_COMPLETED,
+        CLAIM_LATENCY, POOL_WORKERS_ACTIVE, POOL_WORKERS_TOTAL,
     )
-    resp.raise_for_status()
-    return resp.json() if resp.content else {}
+    _METRICS_ENABLED = True
+except ImportError:
+    _METRICS_ENABLED = False
 
-
-def _flush_telemetry():
-    """Flush all buffered telemetry/lifecycle events to ES in a single _bulk call."""
-    if not _TELEMETRY_BUFFER:
-        return
-    bulk_lines = []
-    for entry in _TELEMETRY_BUFFER:
-        idx = entry.pop('_index', 'flume-telemetry')
-        bulk_lines.append(json.dumps({'index': {'_index': idx}}))
-        bulk_lines.append(json.dumps(entry))
-    _TELEMETRY_BUFFER.clear()
-    if not bulk_lines:
-        return
-    try:
-        es_request_raw('/_bulk?refresh=false', '\n'.join(bulk_lines) + '\n')
-    except Exception as e:
-        _manager_logger.error(f"telemetry bulk flush failed: {e}")
-
-
-def log_task_state_transition(task_id: str, prev_status: str, new_status: str, role: str, worker_name: str, project: str = ""):
-    """Buffer a state transition event for deferred bulk flush."""
-    _TELEMETRY_BUFFER.append({
-        '_index': 'flume-task-events',
-        'task_id': task_id,
-        'previous_status': prev_status,
-        'new_status': new_status,
-        'role': role,
-        'worker_name': worker_name,
-        'owner': role,
-        'project': project,
-        'timestamp': now_iso(),
-    })
-    _manager_logger.debug(f"Lifecycle Event: Task {task_id} transitioned from {prev_status} to {new_status}")
-
-
-def log_telemetry_event(worker_name: str, event_type: str, details: str, level: str = "INFO"):
-    """Buffer a telemetry event for deferred bulk flush."""
-    ts = now_iso()
-    _TELEMETRY_BUFFER.append({
-        '_index': 'flume-telemetry',
-        '@timestamp': ts,
-        'timestamp': ts,
-        'worker_name': worker_name,
-        'event_type': event_type,
-        'message': details,
-        'level': level,
-    })
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -236,6 +130,19 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status":"ok","service":"flume-worker"}')
+        elif self.path == '/metrics':
+            try:
+                from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+                output = generate_latest()
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(output)
+            except ImportError:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"prometheus_client not installed"}')
         else:
             self.send_response(404)
             self.end_headers()
@@ -381,16 +288,7 @@ def build_workers(force: bool = False):
     _WORKERS_CACHE['data'] = workers
     return workers
 
-
-def es_request(path: str, body: dict = None, method: str = 'POST') -> dict:
-    """Send a JSON request to ES via the connection-pooled httpx.Client."""
-    if body is not None and method == 'GET':
-        # ES expects POST for JSON search bodies; GET+body is unreliable behind proxies.
-        method = 'POST'
-    resp = _ES_CLIENT.request(method, path, json=body)
-    resp.raise_for_status()
-    return resp.json() if resp.content else {}
-
+# Phase 7: es_request() extracted to es/client.py.
 
 
 
@@ -715,6 +613,8 @@ def try_atomic_claim(
     """
     Kubernetes-grade atomic task claim using a single _update_by_query roundtrip.
 
+    Phase 10: Instrumented with CLAIM_LATENCY histogram and TASKS_CLAIMED counter.
+
     Instead of fetch→CAS (which causes O(N²) 409 collisions under a swarm), this
     executes a Painless script that atomically transitions exactly one ``ready``
     task to ``running`` in a single ES operation — equivalent to:
@@ -728,6 +628,25 @@ def try_atomic_claim(
     Returns the claimed task _source dict on success, or None if no task was available
     or the script raced with another worker (both of which are safe no-ops).
     """
+    _claim_start = time.monotonic()
+    try:
+        return _try_atomic_claim_inner(
+            role, worker_name, execution_host,
+            preferred_model, preferred_llm_provider, preferred_llm_credential_id,
+        )
+    finally:
+        if _METRICS_ENABLED:
+            CLAIM_LATENCY.labels(role=role).observe(time.monotonic() - _claim_start)
+
+
+def _try_atomic_claim_inner(
+    role: str,
+    worker_name: str,
+    execution_host: Optional[str] = None,
+    preferred_model: Optional[str] = None,
+    preferred_llm_provider: Optional[str] = None,
+    preferred_llm_credential_id: Optional[str] = None,
+) -> Optional[dict]:
     # Tester & reviewer pick up tasks in 'review' status (set by implementer handoff);
     # PM picks up 'planned'; all other roles pick up 'ready'.
     if role == 'pm':
@@ -913,6 +832,11 @@ def try_atomic_claim(
             if claimed_title and _is_duplicate_task(claimed_title, claimed_doc_id):
                 _dedup_skip_task(claimed_doc_id, f'Duplicate of existing active task with title: {claimed_title}')
                 return None
+
+            # Phase 10: Increment claim counter on successful claim
+            if _METRICS_ENABLED:
+                TASKS_CLAIMED.labels(role=role, node_id=NODE_ID).inc()
+
             return claimed
         return None
     except Exception as e:
@@ -1402,6 +1326,7 @@ _SWEEP_INTERVALS: dict = {
 
 def cycle():
     """Main orchestration heartbeat tick"""
+    _cycle_start = time.monotonic()
     # 1. Check Global Cluster Paused state
     is_paused = False
     try:
@@ -1587,9 +1512,18 @@ def cycle():
     if not is_paused:
         sync_worker_processes(state)
 
+    # Phase 10: Observe total cycle duration
+    if _METRICS_ENABLED:
+        CYCLE_DURATION.labels(node_id=NODE_ID).observe(time.monotonic() - _cycle_start)
+
 def sync_worker_processes(state):
     """Dispatch claimed workers to the process pool and harvest completed futures."""
     from worker_handlers import execute_worker_task
+
+    # Phase 10: Update pool gauge
+    if _METRICS_ENABLED:
+        POOL_WORKERS_ACTIVE.labels(node_id=NODE_ID).set(len(_active_futures))
+        POOL_WORKERS_TOTAL.labels(node_id=NODE_ID).set(_POOL_SIZE)
 
     # 1. Harvest completed futures
     completed = [name for name, fut in list(_active_futures.items()) if fut.done()]
@@ -1599,10 +1533,17 @@ def sync_worker_processes(state):
             result = fut.result(timeout=0)
             if result and result.get('error'):
                 log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
+                if _METRICS_ENABLED:
+                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success='false', node_id=NODE_ID).inc()
             elif result:
                 log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
+                if _METRICS_ENABLED:
+                    _success = 'true' if result.get('success') else 'false'
+                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success=_success, node_id=NODE_ID).inc()
         except Exception as e:
             log(f"pool-worker [{name}] future error: {e}")
+            if _METRICS_ENABLED:
+                TASKS_COMPLETED.labels(role='unknown', success='false', node_id=NODE_ID).inc()
 
     # 2. Submit new work for claimed workers not already in-flight
     claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
@@ -1615,115 +1556,16 @@ def sync_worker_processes(state):
         
         _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
         log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
-
-_shutdown_requested = False
-
-def _shutdown_pool_signal(signum=None, frame=None):
-    global _shutdown_requested
-    if not _shutdown_requested:
-        _shutdown_requested = True
-        log("manager: graceful shutdown requested via signal (waiting for cycle to end)...")
-
-def _release_orphaned_tasks():
-    """Fetch tasks currently assigned to this node and reset them to ready via FSM."""
-    try:
-        body = {
-            "size": 100,
-            "_source": ["status", "active_worker"],
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"status": "running"}},
-                        {"wildcard": {"active_worker": f"*-{NODE_ID}-*"}}
-                    ]
-                }
-            }
-        }
-        res = es_request(f'/{TASK_INDEX}/_search', body, method='GET')
-        hits = res.get('hits', {}).get('hits', [])
-        
-        if not hits:
-            return
-            
-        from utils.lifecycle.state_machine import TaskStateMachine
-        
-        for h in hits:
-            task_id = h['_id']
-            src = h.get('_source', {})
-            current_status = src.get('status', 'running')
-            
-            try:
-                TaskStateMachine.validate_transition(current_status, 'ready')
-            except Exception as e:
-                log(f"pool-shutdown: invalid transition for {task_id}: {e}")
-                continue
-                
-            update_body = {
-                'doc': {
-                    'status': 'ready',
-                    'active_worker': None,
-                    'queue_state': 'interrupted',
-                    'updated_at': now_iso(),
-                    'agent_log': [{'note': 'Worker node shutting down; task interrupted and re-queued.', 'ts': now_iso()}]
-                }
-            }
-            try:
-                es_request(f'/{TASK_INDEX}/_update/{task_id}?refresh=true', update_body, method='POST')
-                log(f"pool-shutdown: requeued task {task_id}")
-            except Exception as e:
-                log(f"pool-shutdown: failed to update task {task_id}: {e}")
-    except Exception as e:
-        log(f"pool-shutdown: failed to release orphaned tasks: {e}")
-
-def _cleanup_ephemeral_temp_dirs():
-    """Broad manager-level cleanup for any stray flume-* temp dirs (belt & suspenders)."""
-    import tempfile
-    import shutil
-    from pathlib import Path
-    tmp_path = Path(tempfile.gettempdir())
-    cleaned = 0
-    for d in tmp_path.glob("flume-*"):
-        if d.is_dir():
-            try:
-                shutil.rmtree(d)
-                cleaned += 1
-            except Exception:
-                pass
-    if cleaned > 0:
-        log(f"pool-shutdown: wiped {cleaned} stray ephemeral clone directories")
-
-def _perform_graceful_shutdown():
-    """Heavy cleanup executed synchronously by the main thread after the loop breaks."""
-    log("manager: executing graceful pool shutdown...")
-    start_time = time.time()
-    
-    if _WORKER_POOL is not None:
-        for name, fut in list(_active_futures.items()):
-            if not fut.done():
-                fut.cancel()  # best effort
-        try:
-            _WORKER_POOL.shutdown(wait=True, cancel_futures=True)
-        except TypeError:
-            _WORKER_POOL.shutdown(wait=True)  # fallback for older python versions
-        except Exception as e:
-            log(f"pool-shutdown: pool shutdown error: {e}")
-            
-    try:
-        _release_orphaned_tasks()
-    except Exception as e:
-        log(f"pool-shutdown: task release error: {e}")
-        
-    try:
-        _cleanup_ephemeral_temp_dirs()
-    except Exception as e:
-        log(f"pool-shutdown: temp dir cleanup error: {e}")
-    
-    elapsed = time.time() - start_time
-    log(f"manager: shutdown complete. Took {elapsed:.2f}s. Exiting.")
+        if _METRICS_ENABLED:
+            _dispatch_role = w.get('role', 'unknown')
+            TASKS_DISPATCHED.labels(role=_dispatch_role, node_id=NODE_ID).inc()
+# Phase 7: Pool lifecycle, shutdown signal, orphan task requeue, and temp
+# cleanup extracted to pool.py. Imported at top of file.
 
 
 def main():
     import signal
+    import pool as _pool_module  # for mutable shutdown_requested flag
     signal.signal(signal.SIGTERM, _shutdown_pool_signal)
     signal.signal(signal.SIGINT, _shutdown_pool_signal)
 
@@ -1750,7 +1592,7 @@ def main():
     ping_local_llm()
     log('worker manager starting')
     
-    while not _shutdown_requested:
+    while not _pool_module.shutdown_requested:
         try:
             cycle()
         except Exception as e:
@@ -1759,7 +1601,7 @@ def main():
         # Sleep in small increments to respond to signals faster
         SIGNAL_CHECK_INTERVAL = 0.1
         for _ in range(int(POLL_SECONDS / SIGNAL_CHECK_INTERVAL)):
-            if _shutdown_requested:
+            if _pool_module.shutdown_requested:
                 break
             time.sleep(SIGNAL_CHECK_INTERVAL)
 
