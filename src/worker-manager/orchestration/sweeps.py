@@ -11,20 +11,23 @@ Functions:
     promote_planned_tasks           — Dependency-aware promotion
     execute_block_sweep             — Push stalled tasks to blocked
     execute_resume_sweep            — Auto-resume blocked tasks
-    count_available_by_status       — Pre-flight msearch counts
-    _task_stale_seconds             — Timestamp staleness helper
-    _count_active_per_repo          — Aggregation: tasks per repo
-    _count_active_per_story         — Aggregation: tasks per story
+    count_available_by_status       — Pre-flight msearch counts (delegated to es/queries.py)
+    _task_stale_seconds             — Staleness helper (delegated to es/queries.py)
+    _count_active_per_repo          — Aggregation: tasks per repo (delegated to es/queries.py)
+    _count_active_per_story         — Aggregation: tasks per story (delegated to es/queries.py)
 """
-import json
 import os
 import random
 import time
-from datetime import datetime, timezone
-from typing import Optional
 
 from config import TASK_INDEX, now_iso
-from es.client import es_request, es_request_raw
+from es.client import es_request
+from es.queries import (
+    task_stale_seconds as _task_stale_seconds,
+    count_active_per_repo as _count_active_per_repo,
+    count_active_per_story as _count_active_per_story,
+    count_available_by_status,
+)
 from utils.logger import get_logger
 
 logger = get_logger('orchestration.sweeps')
@@ -49,117 +52,11 @@ SWEEP_INTERVALS: dict = {
 }
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _task_stale_seconds(src: dict) -> Optional[float]:
-    """Seconds since updated_at or last_update, or None if not parseable."""
-    for k in ('updated_at', 'last_update'):
-        t = src.get(k)
-        if not t:
-            continue
-        s = str(t).replace('Z', '+00:00')
-        try:
-            parsed = datetime.fromisoformat(s)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return (datetime.now(timezone.utc) - parsed).total_seconds()
-        except Exception:
-            continue
-    return None
-
-
-def _count_active_per_repo() -> dict:
-    """Return {repo_id: count} of leaf tasks with an in-flight branch.
-
-    Includes ``blocked`` tasks that still have a branch/commit_sha: a task
-    blocked on a merge conflict (awaiting pr_reconcile rebase) still owns an
-    unmerged branch, and promoting another ready task on top of it is what
-    produces the multi-branch conflict cascade.
-    """
-    try:
-        res = es_request(
-            f'/{TASK_INDEX}/_search',
-            {
-                'size': 0,
-                'query': {'bool': {
-                    'should': [
-                        {'terms': {'status': ['ready', 'running', 'review']}},
-                        {'bool': {
-                            'must': [
-                                {'term': {'status': 'blocked'}},
-                                {'bool': {'should': [
-                                    {'exists': {'field': 'branch'}},
-                                    {'exists': {'field': 'commit_sha'}},
-                                ], 'minimum_should_match': 1}},
-                            ],
-                            'must_not': [{'term': {'pr_merged': True}}],
-                        }},
-                    ],
-                    'minimum_should_match': 1,
-                    'must_not': [
-                        {'terms': {'item_type': ['epic', 'feature', 'story']}},
-                        {'term': {'owner': 'pm'}},
-                        {'term': {'assigned_agent_role': 'pm'}},
-                    ],
-                }},
-                'aggs': {'by_repo': {'terms': {'field': 'repo', 'size': 500}}},
-            },
-            method='POST',
-        )
-    except Exception:
-        return {}
-    out = {}
-    for b in (res.get('aggregations', {}).get('by_repo', {}).get('buckets', []) or []):
-        key = b.get('key')
-        if key:
-            out[key] = int(b.get('doc_count', 0) or 0)
-    return out
-
-
-def _count_active_per_story() -> dict:
-    """Return {parent_id: count} of leaf tasks with an in-flight branch.
-
-    Mirrors ``_count_active_per_repo`` — includes blocked-with-branch so a
-    merge-conflict task still occupies its story's parallelism slot.
-    """
-    try:
-        res = es_request(
-            f'/{TASK_INDEX}/_search',
-            {
-                'size': 0,
-                'query': {'bool': {
-                    'should': [
-                        {'terms': {'status': ['ready', 'running', 'review']}},
-                        {'bool': {
-                            'must': [
-                                {'term': {'status': 'blocked'}},
-                                {'bool': {'should': [
-                                    {'exists': {'field': 'branch'}},
-                                    {'exists': {'field': 'commit_sha'}},
-                                ], 'minimum_should_match': 1}},
-                            ],
-                            'must_not': [{'term': {'pr_merged': True}}],
-                        }},
-                    ],
-                    'minimum_should_match': 1,
-                    'must_not': [
-                        {'terms': {'item_type': ['epic', 'feature', 'story']}},
-                        {'term': {'owner': 'pm'}},
-                        {'term': {'assigned_agent_role': 'pm'}},
-                    ],
-                }},
-                'aggs': {'by_parent': {'terms': {'field': 'parent_id.keyword', 'size': 1000, 'missing': ''}}},
-            },
-            method='POST',
-        )
-    except Exception:
-        return {}
-    out = {}
-    for b in (res.get('aggregations', {}).get('by_parent', {}).get('buckets', []) or []):
-        key = b.get('key')
-        if key:
-            out[key] = int(b.get('doc_count', 0) or 0)
-    return out
+# ── Query Helpers ────────────────────────────────────────────────────────────
+# Phase 7 Priority 9: _task_stale_seconds, _count_active_per_repo,
+# _count_active_per_story, and count_available_by_status are now canonical in
+# es/queries.py and imported above. The private names are preserved for
+# backward compatibility within this module.
 
 
 # ── Stuck Task Requeue ───────────────────────────────────────────────────────
@@ -465,32 +362,7 @@ def execute_resume_sweep():
         logger.error(f"Failed to execute resume sweep: {e}")
 
 
-# ── Pre-flight Availability Cache (Phase 1.1) ────────────────────────────────
-
-def count_available_by_status() -> dict:
-    """Return {status: count} for claimable task statuses in a single msearch.
-
-    Uses ES _msearch to batch three count queries (ready, review, planned)
-    into one HTTP roundtrip. Workers check this before attempting atomic claims.
-    """
-    counts = {'ready': 0, 'review': 0, 'planned': 0}
-    try:
-        lines = []
-        for status in ('ready', 'review', 'planned'):
-            lines.append(json.dumps({'index': TASK_INDEX}))
-            lines.append(json.dumps({
-                'size': 0,
-                'query': {'term': {'status': status}},
-                'track_total_hits': True,
-            }))
-        raw_body = '\n'.join(lines) + '\n'
-        res = es_request_raw('/_msearch', raw_body, method='POST')
-        responses = res.get('responses', [])
-        for status, resp in zip(('ready', 'review', 'planned'), responses):
-            total = resp.get('hits', {}).get('total', {})
-            counts[status] = total.get('value', 0) if isinstance(total, dict) else int(total or 0)
-    except Exception as e:
-        # On failure, assume tasks exist so we don't accidentally skip claims
-        logger.error(f"pre-flight count failed, assuming tasks available: {e}")
-        counts = {'ready': 999, 'review': 999, 'planned': 999}
-    return counts
+# ── Pre-flight Availability ──────────────────────────────────────────────────
+# Phase 7 Priority 9: count_available_by_status is now canonical in
+# es/queries.py and imported at the top of this module. The re-export
+# through orchestration/__init__.py continues to work identically.

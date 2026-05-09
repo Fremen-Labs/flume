@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-import json
 import os
 import sys
 import time
 import httpx
 import threading
-from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ── Centralized Configuration ────────────────────────────────────────────────
 # Phase 7: All constants and env vars are now in config.py (single source of truth).
 from config import (
-    NODE_ID, WORKSPACE_ROOT as _WS, WORKER_MANAGER_BASE as BASE,
+    NODE_ID, WORKSPACE_ROOT as _WS,
     ES_URL, ES_API_KEY, ES_VERIFY_TLS, TASK_INDEX, POLL_SECONDS,
-    POOL_SIZE as _POOL_SIZE, AGENT_MODELS_FILE, AGENT_MODELS_ES_ID,
-    ROLE_ORDER, now_iso,
+    POOL_SIZE as _POOL_SIZE, now_iso,
 )
 
 from flume_secrets import apply_runtime_config  # noqa: E402
-from workspace_llm_env import resolve_cloud_agent_model, sync_llm_env_from_workspace  # noqa: E402
+from workspace_llm_env import sync_llm_env_from_workspace  # noqa: E402
 import llm_credentials_store as lcs  # noqa: E402
 from utils.workspace import resolve_safe_workspace  # noqa: E402
 
@@ -32,19 +29,17 @@ except ImportError:
     pass
 
 # ── Extracted Modules ────────────────────────────────────────────────────────
-# Phase 7: ES client, telemetry, and pool lifecycle extracted from this file.
+# Phase 7: ES client, telemetry, pool lifecycle, orchestration extracted.
 from es.client import es_request
 from es.telemetry import log_telemetry_event, flush_telemetry as _flush_telemetry
 from pool import (
-    get_worker_pool as _get_worker_pool,
-    active_futures as _active_futures,
-    shutdown_requested as _shutdown_requested_flag,
     shutdown_pool_signal as _shutdown_pool_signal,
     perform_graceful_shutdown as _perform_graceful_shutdown,
 )
-
 from orchestration import (
     try_atomic_claim,
+    build_workers,
+    sync_worker_processes,
     requeue_stuck_implementer_tasks,
     requeue_stuck_review_tasks,
     promote_planned_tasks,
@@ -121,10 +116,7 @@ def log(msg, **kwargs):
 
 # ── Prometheus Instrumentation (Phase 10) ────────────────────────────────────
 try:
-    from observability.metrics import (
-        CYCLE_DURATION, TASKS_CLAIMED, TASKS_DISPATCHED, TASKS_COMPLETED,
-        CLAIM_LATENCY, POOL_WORKERS_ACTIVE, POOL_WORKERS_TOTAL,
-    )
+    from observability.metrics import CYCLE_DURATION
     _METRICS_ENABLED = True
 except ImportError:
     _METRICS_ENABLED = False
@@ -160,140 +152,6 @@ def start_health_server():
     server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-
-def load_agent_role_defs():
-    """Merge per-role overrides from the ES flume-config document (AP-8) or
-    the legacy agent_models.json file with LLM_* / EXECUTION_HOST env."""
-    default_model = (os.environ.get('LLM_MODEL') or 'llama3.2').strip() or 'llama3.2'
-    default_host = (os.environ.get('EXECUTION_HOST') or 'localhost').strip() or 'localhost'
-    default_prov = os.environ.get('LLM_PROVIDER', 'ollama').strip().lower()
-    cfg = {}
-    # 1. Try ES flume-config first (K8s-native, replica-safe)
-    try:
-        res = es_request(f'/flume-config/_doc/{AGENT_MODELS_ES_ID}', method='GET')
-        src = (res or {}).get('_source') or {}
-        if src.get('roles'):
-            cfg = src['roles']
-    except Exception:
-        pass  # fall through to file-based fallback
-    # 2. File-based fallback (dev / migration period)
-    if not cfg and AGENT_MODELS_FILE.is_file():
-        try:
-            data = json.loads(AGENT_MODELS_FILE.read_text(encoding='utf-8'))
-            cfg = (data.get('roles') or {}) if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            pass
-    defs = []
-    for role in ROLE_ORDER:
-        spec = cfg.get(role)
-        model = default_model
-        host = default_host
-        prov = default_prov
-        cred_id = ''
-        if isinstance(spec, str):
-            model = spec.strip() or model
-        elif isinstance(spec, dict):
-            model = (spec.get('model') or model).strip() or model
-            host = (spec.get('executionHost') or host).strip() or host
-            prov = (spec.get('provider') or prov).strip().lower() or prov
-            cred_id = str(spec.get('credentialId') or spec.get('credential_id') or '').strip()
-        if not cred_id:
-            cred_id = lcs.SETTINGS_DEFAULT_CREDENTIAL_ID
-        model = resolve_cloud_agent_model(prov, model, default_model)
-        defs.append(
-            {
-                'role': role,
-                'model': model,
-                'execution_host': host,
-                'llm_provider': prov,
-                'llm_credential_id': cred_id,
-            }
-        )
-    return defs
-
-
-def fetch_routing_policy() -> dict:
-    try:
-        res = es_request('/flume-routing-policy/_doc/singleton', method='GET')
-        if res and '_source' in res:
-            return res['_source']
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code != 404:
-            _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
-    except Exception as e:
-        _manager_logger.error(f"Failed to fetch routing policy for worker limit calculations: {e}")
-    return {}
-
-def get_dynamic_worker_limit() -> int:
-    """Return the dynamic number of workers per agent role based on routing policy and mesh size.
-
-    Frontier/Hybrid: Compute boundaries scaled cleanly by host multiprocessing cores.
-    Local: Mesh node caps combined algorithmically (max 2 as floor).
-    Override with WORKERS_PER_ROLE env var for explicitly forcing concurrency boundaries.
-    """
-    try:
-        policy = fetch_routing_policy()
-        mode = policy.get('mode', 'local').lower()
-        
-        if mode in ('frontier', 'hybrid'):
-            import multiprocessing
-            cores = multiprocessing.cpu_count()
-            limit = max(4, cores * 2)
-            _manager_logger.debug(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
-            return limit
-        else:
-            caps = _fetch_node_concurrency_caps()
-            total_mesh_capacity = sum(caps.values())
-            limit = max(2, total_mesh_capacity)
-            _manager_logger.debug(f"Dynamic worker scaling [local]: {len(caps)} mesh node(s) with {total_mesh_capacity} combined capacity, bound limit set to {limit} per role.")
-            return limit
-    except Exception as e:
-        _manager_logger.error(f"Failed dynamic scaling, defaulting to 2: {e}")
-        return 2
-
-
-# Phase 2.2: TTL cache for worker list.
-# Worker definitions (role defs + dynamic limit) don't change between cycles
-# unless the operator edits ES config. Cache for 60s.
-_WORKERS_CACHE: dict = {'ts': 0.0, 'data': None}
-_WORKERS_CACHE_TTL_SECONDS = 60
-
-
-def build_workers(force: bool = False):
-    """Build the full worker list from role definitions and dynamic limits.
-
-    Phase 2.2: Results are cached for 60s. Pass force=True after config changes.
-    """
-    now = time.time()
-    if not force and _WORKERS_CACHE['data'] is not None and (now - _WORKERS_CACHE['ts']) < _WORKERS_CACHE_TTL_SECONDS:
-        return _WORKERS_CACHE['data']
-
-    workers = []
-    limit = get_dynamic_worker_limit()
-    raw = os.environ.get('WORKERS_PER_ROLE')
-    if raw:
-        try:
-            limit = int(raw)
-        except ValueError:
-            limit = get_dynamic_worker_limit()
-
-    for role_def in load_agent_role_defs():
-        active_limit = 1 if role_def['role'] == 'pm' else limit
-        for idx in range(1, active_limit + 1):
-            workers.append(
-                {
-                    'name': f"{role_def['role']}-{NODE_ID}-worker-{idx}",
-                    'role': role_def['role'],
-                    'model': role_def['model'],
-                    'execution_host': role_def['execution_host'],
-                    'llm_provider': role_def['llm_provider'],
-                    'llm_credential_id': role_def.get('llm_credential_id') or '',
-                }
-            )
-
-    _WORKERS_CACHE['ts'] = now
-    _WORKERS_CACHE['data'] = workers
-    return workers
 
 
 def save_state(state):
@@ -378,7 +236,7 @@ def cycle():
     except Exception as e:
         log(f"error fetching busy workers: {e}")
 
-    workers = build_workers()
+    workers = build_workers(node_caps_fn=_fetch_node_concurrency_caps)
     
     cloud_providers = {'openai', 'anthropic', 'google', 'azure'}
     node_loads = {}
@@ -498,51 +356,10 @@ def cycle():
     if _METRICS_ENABLED:
         CYCLE_DURATION.labels(node_id=NODE_ID).observe(time.monotonic() - _cycle_start)
 
-def sync_worker_processes(state):
-    """Dispatch claimed workers to the process pool and harvest completed futures."""
-    from worker_handlers import execute_worker_task
-
-    # Phase 10: Update pool gauge
-    if _METRICS_ENABLED:
-        POOL_WORKERS_ACTIVE.labels(node_id=NODE_ID).set(len(_active_futures))
-        POOL_WORKERS_TOTAL.labels(node_id=NODE_ID).set(_POOL_SIZE)
-
-    # 1. Harvest completed futures
-    completed = [name for name, fut in list(_active_futures.items()) if fut.done()]
-    for name in completed:
-        try:
-            fut = _active_futures.pop(name)
-            result = fut.result(timeout=0)
-            if result and result.get('error'):
-                log(f"pool-worker [{name}] finished with error: {result['error'][:200]}")
-                if _METRICS_ENABLED:
-                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success='false', node_id=NODE_ID).inc()
-            elif result:
-                log(f"pool-worker [{name}] completed task={result.get('task_id')} success={result.get('success')}")
-                if _METRICS_ENABLED:
-                    _success = 'true' if result.get('success') else 'false'
-                    TASKS_COMPLETED.labels(role=result.get('role', 'unknown'), success=_success, node_id=NODE_ID).inc()
-        except Exception as e:
-            log(f"pool-worker [{name}] future error: {e}")
-            if _METRICS_ENABLED:
-                TASKS_COMPLETED.labels(role='unknown', success='false', node_id=NODE_ID).inc()
-
-    # 2. Submit new work for claimed workers not already in-flight
-    claimed = [w for w in state.get('workers', []) if w.get('status') == 'claimed']
-    for w in claimed:
-        name = w.get('name')
-        if not name:
-            continue
-        if name in _active_futures:
-            continue  # already running in pool
-        
-        _active_futures[name] = _get_worker_pool().submit(execute_worker_task, dict(w))
-        log(f"manager: dispatched [{name}] to worker pool (pool_size={_POOL_SIZE}, in_flight={len(_active_futures)})")
-        if _METRICS_ENABLED:
-            _dispatch_role = w.get('role', 'unknown')
-            TASKS_DISPATCHED.labels(role=_dispatch_role, node_id=NODE_ID).inc()
 # Phase 7: Pool lifecycle, shutdown signal, orphan task requeue, and temp
 # cleanup extracted to pool.py. Imported at top of file.
+# Phase 7: Worker dispatch and future harvesting extracted to
+# orchestration/dispatch.py. Imported at top of file.
 
 
 def main():
