@@ -9,9 +9,9 @@ Functions:
     requeue_stuck_implementer_tasks — Reset stale running tasks
     requeue_stuck_review_tasks      — Clear phantom review locks
     promote_planned_tasks           — Dependency-aware promotion
-    _execute_block_sweep            — Push stalled tasks to blocked
-    _execute_resume_sweep           — Auto-resume blocked tasks
-    _count_available_by_status      — Pre-flight msearch counts
+    execute_block_sweep             — Push stalled tasks to blocked
+    execute_resume_sweep            — Auto-resume blocked tasks
+    count_available_by_status       — Pre-flight msearch counts
     _task_stale_seconds             — Timestamp staleness helper
     _count_active_per_repo          — Aggregation: tasks per repo
     _count_active_per_story         — Aggregation: tasks per story

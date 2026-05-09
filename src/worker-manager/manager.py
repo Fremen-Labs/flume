@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 import json
 import os
-import random
-import re
 import sys
 import time
 import httpx
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ── Centralized Configuration ────────────────────────────────────────────────
@@ -37,8 +33,8 @@ except ImportError:
 
 # ── Extracted Modules ────────────────────────────────────────────────────────
 # Phase 7: ES client, telemetry, and pool lifecycle extracted from this file.
-from es.client import es_request, es_request_raw, get_es_client
-from es.telemetry import log_task_state_transition, log_telemetry_event, flush_telemetry as _flush_telemetry
+from es.client import es_request
+from es.telemetry import log_telemetry_event, flush_telemetry as _flush_telemetry
 from pool import (
     get_worker_pool as _get_worker_pool,
     active_futures as _active_futures,
@@ -298,10 +294,6 @@ def build_workers(force: bool = False):
     _WORKERS_CACHE['ts'] = now
     _WORKERS_CACHE['data'] = workers
     return workers
-
-# Phase 7: es_request() extracted to es/client.py.
-
-
 
 
 def save_state(state):
