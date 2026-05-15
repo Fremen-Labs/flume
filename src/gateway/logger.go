@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Fremen-Labs/logloom-go/logloom"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +185,10 @@ func InitLogger() *slog.Logger {
 			baseHandler = &ConsoleHandler{inner: baseHandler}
 		}
 
-		defaultLogger = slog.New(&secureHandler{inner: baseHandler})
+		// Handler chain: secureHandler → logloom → baseHandler
+		// LogLoom enriches with AST metadata; secureHandler scrubs secrets from
+		// all fields (including any LogLoom adds) before they reach the output.
+		defaultLogger = slog.New(&secureHandler{inner: logloom.NewHandler(baseHandler)})
 		slog.SetDefault(defaultLogger)
 	})
 	return defaultLogger

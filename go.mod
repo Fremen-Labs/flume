@@ -3,6 +3,7 @@ module github.com/Fremen-Labs/flume
 go 1.24.2
 
 require (
+	github.com/Fremen-Labs/logloom-go v0.0.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -40,3 +41,5 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
+
+replace github.com/Fremen-Labs/logloom-go => /Users/jonathandoughty/clients/fremenlabs/fremen/logloom/logloom/sdk/go
