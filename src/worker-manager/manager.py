@@ -46,6 +46,8 @@ from orchestration import (
     execute_block_sweep,
     execute_resume_sweep,
     count_available_by_status,
+    set_last_planned_count as _set_last_planned_count,
+    get_sweep_interval as _get_sweep_interval,
     SWEEP_LAST_RUN as _SWEEP_LAST_RUN,
     SWEEP_INTERVALS as _SWEEP_INTERVALS,
 )
@@ -202,7 +204,7 @@ def cycle():
         except Exception as e:
             log(f"stuck-review sweep error: {e}")
 
-    if now_ts - _SWEEP_LAST_RUN.get('promote', 0) >= _SWEEP_INTERVALS['promote']:
+    if now_ts - _SWEEP_LAST_RUN.get('promote', 0) >= _get_sweep_interval('promote'):
         _SWEEP_LAST_RUN['promote'] = now_ts
         try:
             promoted = promote_planned_tasks()
@@ -216,6 +218,8 @@ def cycle():
     # Workers for roles with zero available tasks skip try_atomic_claim entirely,
     # eliminating ~16 wasted _update_by_query calls per cycle.
     available_counts = count_available_by_status()
+    # Phase 2.3: Feed planned count to the adaptive promote interval.
+    _set_last_planned_count(available_counts.get('planned', 0))
 
     busy_workers = {}
     try:
@@ -389,6 +393,31 @@ def main():
             log("Local LLM boot ping failed", event="llm_ping_failure", url=url, error=str(e), advice="Workers may stall if unreachable")
 
     ping_local_llm()
+
+    # Phase 2.3: Purge stale worker state from previous container sessions.
+    # Ghost workers with a different NODE_ID persist in agent-system-workers
+    # and clutter the dashboard with idle phantoms (BUG-004).
+    def _purge_stale_worker_docs():
+        try:
+            body = {
+                'query': {
+                    'bool': {
+                        'must_not': [{'wildcard': {'_id': f'*{NODE_ID}*'}}],
+                    }
+                }
+            }
+            res = es_request(
+                '/agent-system-workers/_delete_by_query?conflicts=proceed',
+                body,
+                method='POST',
+            )
+            deleted = res.get('deleted', 0) if res else 0
+            if deleted:
+                log(f'startup: purged {deleted} stale worker doc(s) from previous sessions')
+        except Exception as e:
+            log(f'startup: stale worker purge skipped ({e})')
+
+    _purge_stale_worker_docs()
     log('worker manager starting')
     
     while not _pool_module.shutdown_requested:

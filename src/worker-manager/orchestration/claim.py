@@ -168,10 +168,11 @@ _WIP_CACHE: dict = {
     'saturated_stories': set(),
     'in_flight_branches': set(),  # branch names currently occupying a WIP slot
 }
-# Cache TTL is deliberately tight: the aggregation is cheap (single count-only
-# search) and caching too long lets concurrent workers race past the WIP cap
-# before the shared count reflects the new `running` task.
-_WIP_CACHE_TTL_SECONDS = 0.25
+# Phase 2.3: Raised from 0.25s to 2.0s to eliminate query amplification.
+# At 0.25s with 300+ workers, ~1300 aggregation queries fired per cycle.
+# At 2.0s, the cost is amortized to ~1 query per cycle while remaining
+# responsive within a single heartbeat window (POLL_SECONDS default: 2s).
+_WIP_CACHE_TTL_SECONDS = 2.0
 
 
 def _load_repo_wip_limits() -> dict:

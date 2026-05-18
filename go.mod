@@ -42,4 +42,4 @@ require (
 	golang.org/x/text v0.3.8 // indirect
 )
 
-replace github.com/Fremen-Labs/logloom-go => /Users/jonathandoughty/clients/fremenlabs/fremen/logloom/logloom/sdk/go
+replace github.com/Fremen-Labs/logloom-go => ./vendor-local/logloom-go

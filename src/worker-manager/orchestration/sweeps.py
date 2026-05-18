@@ -48,8 +48,31 @@ SWEEP_LAST_RUN: dict = {'stuck_impl': 0, 'stuck_review': 0, 'promote': 0}
 SWEEP_INTERVALS: dict = {
     'stuck_impl': 30,    # requeue_stuck_implementer_tasks: threshold is 600s
     'stuck_review': 30,  # requeue_stuck_review_tasks: threshold is 300s
-    'promote': 5,        # promote_planned_tasks: tighter for throughput
+    # Phase 2.3: Adaptive promote interval — fast (2s) when planned tasks exist
+    # for pipeline throughput, slow (30s) when pipeline is empty to eliminate
+    # ~6 wasted ES queries per 30s window.
+    'promote': 5,        # base interval; overridden by get_sweep_interval()
 }
+
+# Last known planned task count — updated by manager.py after count_available_by_status()
+_last_planned_count: int = 0
+
+
+def set_last_planned_count(count: int) -> None:
+    """Called by manager.py to feed the adaptive promote interval."""
+    global _last_planned_count
+    _last_planned_count = count
+
+
+def get_sweep_interval(key: str) -> float:
+    """Return the effective sweep interval for *key*.
+
+    Phase 2.3: The 'promote' key is adaptive — 2s when planned tasks exist,
+    30s when the pipeline is empty.
+    """
+    if key == 'promote':
+        return 2 if _last_planned_count > 0 else 30
+    return SWEEP_INTERVALS.get(key, 30)
 
 
 # ── Query Helpers ────────────────────────────────────────────────────────────
