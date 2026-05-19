@@ -1,5 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import type { Snapshot } from '@/types';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('hooks.useSnapshot');
 
 async function fetchSnapshot(): Promise<Snapshot> {
   const res = await fetch('/api/snapshot');
@@ -9,8 +12,9 @@ async function fetchSnapshot(): Promise<Snapshot> {
       const body = await res.json();
       if (body?.error) msg = body.error;
     } catch {
-      /* ignore */
+      /* ignore parse failure */
     }
+    log.error('fetchSnapshot', msg, { status: res.status });
     throw new Error(msg);
   }
   return res.json();

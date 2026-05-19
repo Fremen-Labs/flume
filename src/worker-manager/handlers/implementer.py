@@ -237,8 +237,10 @@ def handle_implementer_worker(task, es_id):
             return True
 
         # ── Path B: agent completed but wrote no code ──────────────────────────
-        # This is an analysis, exploration, or context task. Mark it done directly
-        # — no branch, no tester/reviewer needed.
+        # Phase 2.3: When FLUME_REQUIRE_REVIEW_ON_NO_DIFF is true (default),
+        # zero-diff completions route through the reviewer to validate the
+        # agent's conclusion. This prevents the In Review stage from being
+        # bypassed entirely (BUG-003).
         if agent_completed and not has_changes:
             if task_requires_code(task):
                 # This task *should* result in code edits, but the agent wrote nothing.
@@ -248,6 +250,43 @@ def handle_implementer_worker(task, es_id):
                 released = True
                 return True
 
+            require_review = os.environ.get(
+                'FLUME_REQUIRE_REVIEW_ON_NO_DIFF', '1'
+            ).strip().lower() not in ('0', 'false', 'no', 'off')
+
+            if require_review:
+                # Route zero-diff through reviewer for validation
+                write_doc(HANDOFF_INDEX, {
+                    'task_id': task_id,
+                    'from_role': 'implementer',
+                    'to_role': 'reviewer',
+                    'reason': result.summary,
+                    'objective': task.get('objective', ''),
+                    'inputs': result.artifacts,
+                    'constraints': 'zero-diff completion — reviewer must validate that no changes were needed',
+                    'status_hint': 'review',
+                    'model_used': implementer_model,
+                    'commit_sha': '',
+                    'branch': branch or task.get('branch', ''),
+                    'created_at': now_iso(),
+                })
+                update_task_doc(es_id, {
+                    'status': 'review',
+                    'owner': 'reviewer',
+                    'assigned_agent_role': 'reviewer',
+                    'context_summary': result.summary,
+                    'no_diff_completion': True,
+                    'implementer_consecutive_llm_failures': 0,
+                    **_implementer_clear_claim_fields(),
+                })
+                log(
+                    f"implementer completed non-code task={task_id} with zero diffs — "
+                    f"routed to reviewer for validation (FLUME_REQUIRE_REVIEW_ON_NO_DIFF=true)"
+                )
+                released = True
+                return True
+
+            # Review gate disabled — mark done directly (legacy behavior)
             update_task_doc(es_id, {
                 'status': 'done',
                 'owner': 'implementer',

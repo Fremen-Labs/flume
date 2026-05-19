@@ -11,7 +11,9 @@
  *   const data = await safeFetchJson<MyType>('/api/endpoint');
  */
 
-import { appLogger } from '@/utils/logger';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('utils.safeFetch');
 
 /**
  * Fetch a URL and safely parse the JSON body. If the response is not JSON
@@ -29,7 +31,7 @@ export async function safeFetchJson<T = unknown>(
   if (!contentType.includes('application/json')) {
     const snippet = await res.text().catch(() => '');
     const hint = snippet.slice(0, 120).replace(/\s+/g, ' ').trim();
-    appLogger.error(`Non-JSON response from ${url}`, {
+    log.error('safeFetchJson', `Non-JSON response from ${url}`, {
       status: res.status,
       contentType,
       hint,

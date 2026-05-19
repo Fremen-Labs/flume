@@ -1,4 +1,7 @@
 import { useState, useEffect } from 'react';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('hooks.useTelemetryStream');
 
 export interface TelemetryLog {
   id: string;
@@ -23,6 +26,7 @@ export function useTelemetryStream() {
 
     const connect = () => {
       ws = new WebSocket(wsUrl);
+      log.debug('connect', 'WebSocket connecting', { url: wsUrl });
 
       ws.onmessage = (event) => {
         try {
@@ -32,17 +36,17 @@ export function useTelemetryStream() {
               setLogs(prev => [newLog, ...prev].slice(0, 100));
           }
         } catch (e) {
-          console.error("Telemetry WebSocket parse error:", e);
+          log.error('onmessage', 'WebSocket parse error', { error: String(e) });
         }
       };
 
       ws.onclose = (ev) => {
-        console.warn(`[useTelemetryStream] WebSocket closed (code ${ev.code}), reconnecting in 3s`);
+        log.warn('onclose', `WebSocket closed (code ${ev.code}), reconnecting in 3s`);
         reconnectTimeout = setTimeout(connect, 3000);
       };
 
-      ws.onerror = (ev) => {
-        console.warn('[useTelemetryStream] WebSocket error', ev);
+      ws.onerror = () => {
+        log.warn('onerror', 'WebSocket error — closing connection');
         ws?.close();
       };
     };
@@ -59,3 +63,4 @@ export function useTelemetryStream() {
 
   return logs;
 }
+

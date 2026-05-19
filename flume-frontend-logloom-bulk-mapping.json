@@ -1,0 +1,63 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "logloom": {
+        "properties": {
+          "node_id": {
+            "type": "keyword",
+            "ignore_above": 64
+          },
+          "traversal": {
+            "type": "keyword"
+          },
+          "module": {
+            "type": "keyword"
+          },
+          "function": {
+            "type": "keyword"
+          },
+          "file": {
+            "type": "keyword"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "tags": {
+            "type": "keyword"
+          },
+          "level": {
+            "type": "keyword"
+          },
+          "message_template": {
+            "type": "keyword",
+            "fields": {
+              "text": {
+                "type": "text",
+                "analyzer": "standard"
+              }
+            }
+          },
+          "call_parents": {
+            "type": "keyword"
+          },
+          "call_children": {
+            "type": "keyword"
+          },
+          "graph_version": {
+            "type": "keyword"
+          },
+          "commit_sha": {
+            "type": "keyword"
+          },
+          "branch": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  }
+}

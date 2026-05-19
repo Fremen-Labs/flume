@@ -17,6 +17,9 @@ import type {
   AgentModelsRoleEffective,
 } from '@/types';
 
+import { createLogger } from '@/utils/logger';
+const log = createLogger('components.AgentConfigPanel');
+
 export const SETTINGS_DEFAULT_CREDENTIAL_ID = '__settings_default__';
 export const OLLAMA_CREDENTIAL_ID = '__ollama__';
 export const OPENAI_OAUTH_CREDENTIAL_ID = '__openai_oauth__';
@@ -53,7 +56,10 @@ export function normalizeRoleSpec(
 
 export async function fetchAgentModels(): Promise<AgentModelsResponse> {
   const res = await fetch('/api/settings/agent-models');
-  if (!res.ok) throw new Error(`agent-models: ${res.status}`);
+  if (!res.ok) {
+    log.error('fetchAgentModels', 'Failed to load agent model config', { status: res.status });
+    throw new Error(`agent-models: ${res.status}`);
+  }
   return res.json();
 }
 

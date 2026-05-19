@@ -25,6 +25,9 @@ import {
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
 import { cn } from '@/lib/utils';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('components.FileExplorerModal');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -579,6 +582,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
       if (!r.ok) return null;
       return (await r.json()) as CloneStatusResponse;
     } catch {
+      log.warn('fetchCloneStatus', 'Clone status fetch failed silently');
       return null;
     }
   };
@@ -613,7 +617,10 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
             const second = list.find(b => b !== (d2.default ?? ''));
             setCompareBranch(second ?? d2.default ?? '');
           })
-          .catch(() => setBranchesFetchError('Failed to load branches after clone'));
+          .catch(() => {
+            log.error('_startClonePolling', 'Failed to load branches after clone', { projectId });
+            setBranchesFetchError('Failed to load branches after clone');
+          });
       } else if (s.clone_status === 'failed') {
         stopClonePolling();
       }
@@ -685,6 +692,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
         setCompareBranch(second ?? data.default ?? '');
       })
       .catch((e: unknown) => {
+        log.error('fetchBranches', 'Branch loading failed', { projectId, error: e instanceof Error ? e.message : String(e) });
         setBranchesFetchError(e instanceof Error ? e.message : 'Failed to load branches');
       });
   }, [open, projectId, _startClonePolling]);
@@ -711,6 +719,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
         setTreeLoading(false);
       })
       .catch(err => {
+        log.error('loadTree', 'Repository tree load failed', { projectId, branch, error: String(err) });
         setTreeError(err.message ?? 'Failed to load repository');
         setTreeLoading(false);
       });
@@ -776,6 +785,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
           }
         }
       } catch (err: unknown) {
+        log.error('loadFile', 'File load failed', { projectId, path: node.path, error: err instanceof Error ? err.message : String(err) });
         setFileError(err instanceof Error ? err.message : 'Failed to load file');
       } finally {
         setFileLoading(false);
@@ -797,6 +807,7 @@ export function FileExplorerModal({ open, onOpenChange, projectName, projectId }
       if (data.error) throw new Error(data.error);
       setDiffResult(data);
     } catch (err: unknown) {
+      log.error('runCompare', 'Diff computation failed', { projectId, base: branch, head: compareBranch, error: err instanceof Error ? err.message : String(err) });
       setDiffError(err instanceof Error ? err.message : 'Failed to compute diff');
     } finally {
       setDiffLoading(false);

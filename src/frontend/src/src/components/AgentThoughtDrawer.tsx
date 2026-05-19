@@ -32,6 +32,9 @@ import {
   Clock,
   Activity,
 } from "lucide-react";
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('components.AgentThoughtDrawer');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -436,7 +439,10 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
     queryFn: async () => {
       if (!taskId) return { thoughts: [] };
       const res = await fetch(`/api/tasks/${taskId}/thoughts`);
-      if (!res.ok) throw new Error("Failed to fetch thoughts");
+      if (!res.ok) {
+        log.error('queryFn', 'Failed to fetch agent thoughts', { taskId, status: res.status });
+        throw new Error("Failed to fetch thoughts");
+      }
       return res.json();
     },
     enabled: !!taskId && isOpen,
@@ -453,6 +459,9 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
         index > 0
           ? new Date(entry.ts).getTime() - new Date(raw[index - 1].ts).getTime()
           : undefined;
+      if (category === 'unknown' && raw.length < 20) {
+        log.debug('parseThoughts', 'Uncategorized thought entry', { ts: entry.ts, preview: cleanText.slice(0, 80) });
+      }
       return { raw: entry, category, cleanText, toolAction, elapsedMs };
     });
   }, [data?.thoughts]);

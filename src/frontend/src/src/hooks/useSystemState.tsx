@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { safeFetchJson } from '@/utils/safeFetch';
-import { appLogger } from '@/utils/logger';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('hooks.useSystemState');
 
 export interface WorkerState {
   name: string;
@@ -28,7 +30,7 @@ export function useSystemState(pollInterval: number = 2000) {
         const json = await safeFetchJson<SystemState>('/api/system-state');
         setData(json);
       } catch (e) {
-        appLogger.error('Failed to fetch system state', e);
+        log.error('fetchState', 'Failed to fetch system state', { error: String(e) });
       }
     };
     

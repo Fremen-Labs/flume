@@ -18,6 +18,8 @@ from orchestration.sweeps import (
     execute_block_sweep,
     execute_resume_sweep,
     count_available_by_status,
+    set_last_planned_count,
+    get_sweep_interval,
     SWEEP_LAST_RUN,
     SWEEP_INTERVALS,
 )
@@ -35,6 +37,8 @@ __all__ = [
     'execute_block_sweep',
     'execute_resume_sweep',
     'count_available_by_status',
+    'set_last_planned_count',
+    'get_sweep_interval',
     'SWEEP_LAST_RUN',
     'SWEEP_INTERVALS',
 ]

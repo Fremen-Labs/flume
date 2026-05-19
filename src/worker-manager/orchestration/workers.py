@@ -128,8 +128,20 @@ def get_dynamic_worker_limit(node_caps_fn=None) -> int:
         if mode in ('frontier', 'hybrid'):
             import multiprocessing  # noqa: PLC0415
             cores = multiprocessing.cpu_count()
-            limit = max(4, cores * 2)
-            logger.debug(f"Dynamic worker scaling [{mode}]: detected {cores} cores, bound limit set to {limit} per role.")
+            cpu_limit = max(4, cores * 2)
+            # Phase 2.3: Mesh-aware ceiling — prevent CPU-based scaling from
+            # creating hundreds of idle workers that waste ES claim queries.
+            # Cap at 3× total mesh capacity to keep worker pools proportional.
+            if node_caps_fn:
+                mesh_caps = node_caps_fn()
+            else:
+                mesh_caps = {'localhost': 4}
+            mesh_total = sum(mesh_caps.values())
+            limit = min(cpu_limit, max(4, mesh_total * 3))
+            logger.debug(
+                f"Dynamic worker scaling [{mode}]: {cores} cores → cpu_limit={cpu_limit}, "
+                f"mesh_capacity={mesh_total}, capped limit={limit} per role."
+            )
             return limit
         else:
             if node_caps_fn:

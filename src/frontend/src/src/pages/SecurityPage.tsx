@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { Shield, Key, Lock, EyeOff, Activity, AlertCircle } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 
+import { createLogger } from '@/utils/logger';
+const logger = createLogger('pages.SecurityPage');
+
 interface SecurityData {
   vault_active: boolean;
   openbao_keys: Record<string, string>;
@@ -33,6 +36,7 @@ export default function SecurityPage() {
         setLoading(false);
       })
       .catch((err) => {
+        logger.error('fetchSecurityData', 'Security data fetch failed', { error: String(err) });
         setError(err.message);
         setLoading(false);
       });
