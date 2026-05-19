@@ -85,8 +85,12 @@ async function parseJsonBody<T>(res: Response): Promise<T> {
   try {
     return JSON.parse(text) as T;
   } catch {
+    log.warn('catch', 'Silent catch block executed');
     throw new Error(
       `Invalid JSON from server (HTTP ${res.status}): ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
+
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.SettingsPage');
     );
   }
 }
@@ -178,6 +182,7 @@ export default function SettingsPage() {
     try {
       return localStorage.getItem('fremen-user-perspective') ?? 'standard';
     } catch {
+      log.warn('catch', 'Silent catch block executed');
       return 'standard';
     }
   });
@@ -187,6 +192,7 @@ export default function SettingsPage() {
     try {
       localStorage.setItem('fremen-user-perspective', v);
     } catch {
+      log.warn('catch', 'Silent catch block executed');
       /* ignore */
     }
   };
@@ -370,6 +376,7 @@ export default function SettingsPage() {
       await queryClient.invalidateQueries({ queryKey: ['settings', 'llm'] });
       setTimeout(() => setCredMsg(null), 4000);
     } catch (e) {
+      log.error('catch', String(e));
       setCredMsg(e instanceof Error ? e.message : 'Credential action failed');
     } finally {
       setCredBusy(null);
@@ -413,6 +420,7 @@ export default function SettingsPage() {
       setTimeout(() => setRepoSaveSuccess(false), 3000);
       return true;
     } catch (e) {
+      log.error('catch', String(e));
       setRepoSaveError(e instanceof Error ? e.message : 'GitHub token action failed');
       return false;
     } finally {
@@ -436,6 +444,7 @@ export default function SettingsPage() {
       setTimeout(() => setRepoSaveSuccess(false), 3000);
       return true;
     } catch (e) {
+      log.error('catch', String(e));
       setRepoSaveError(e instanceof Error ? e.message : 'ADO credential action failed');
       return false;
     } finally {

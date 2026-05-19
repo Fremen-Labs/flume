@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Sparkles, KeyRound, DollarSign, Wallet, Plus, Loader2 } from 'lucide-react';
 import type { FrontierModelWeight, FrontierProviderCatalog, LlmCredentialSummary } from '@/types';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('components.AddFrontierModelModal');
 
 interface Props {
   catalog: FrontierProviderCatalog[];
@@ -80,7 +83,7 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
       });
       onClose();
     } catch (err) {
-      console.error(err);
+      log.error('handleAdd', 'Failed to add frontier model', { provider: providerId, model, error: String(err) });
       setIsSubmitting(false);
     }
   };

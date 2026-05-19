@@ -16,7 +16,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import type { ApiTask } from '@/types';
-import { appLogger } from '@/utils/logger';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('pages.QueuePage');
 
 const stages: { id: string; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
@@ -88,6 +90,7 @@ export default function QueuePage() {
       setUnblockQueueNote('');
       mutate();
     } catch (e) {
+      log.error('submitQueueUnblock', 'Task unblock failed', { taskId: unblockTarget.id, error: String(e) });
       toast({
         title: 'Unblock failed',
         description: e instanceof Error ? e.message : 'Unknown error',
@@ -120,7 +123,7 @@ export default function QueuePage() {
         toast({ title: "Operation Failed", description, variant: "destructive" });
       }
     } catch (e) {
-      appLogger.error('Swarms request failed:', e);
+      log.error('handleConfirmAction', 'Swarms request failed', { action: dialogAction, error: String(e) });
       toast({ title: "System Exception", description: "Exception occurred triggering Swarm operation bounds.", variant: "destructive" });
     } finally {
       setIsHalting(false);

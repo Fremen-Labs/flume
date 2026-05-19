@@ -58,6 +58,7 @@ export default function Dashboard() {
   const plannedTasks = tasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox');
 
   // Derive recent activity from tasks sorted by last_update
+
   const recentActivity = [...tasks]
     .filter(t => t.last_update || t.updated_at)
     .sort((a, b) => new Date(b.last_update ?? b.updated_at ?? 0).getTime() - new Date(a.last_update ?? a.updated_at ?? 0).getTime())

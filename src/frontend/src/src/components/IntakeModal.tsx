@@ -8,6 +8,9 @@ import {
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { safeFetchJson } from '@/utils/safeFetch';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('components.IntakeModal');
 
 // ─── Plan types ───────────────────────────────────────────────────────────────
 
@@ -360,6 +363,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo: projectId, prompt: prompt.trim() }),
       });
+      log.info('startSession', 'Planning session started', { sessionId: data.sessionId, projectId });
       setSessionId(data.sessionId);
       setMessages(data.messages ?? []);
       setPlan(data.plan ?? { epics: [] });
@@ -369,6 +373,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       );
       setPhase(data.status === 'ready' || data.status === 'failed' ? 'chat' : 'planning');
     } catch (e: unknown) {
+      log.error('startSession', 'Failed to start planning session', { projectId, error: String(e) });
       setError(e instanceof Error ? e.message : 'Failed to connect to planner');
       setPhase('prompt');
     }
@@ -399,6 +404,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       }
       setPlanningStatus(data.planningStatus ?? null);
     } catch (e: unknown) {
+      log.error('sendMessage', 'Chat message failed', { sessionId, error: String(e) });
       // Remove thinking msg and show error
       setMessages(prev => prev.filter(m => m !== thinkingMsg));
       setError(e instanceof Error ? e.message : 'Failed to get response');
@@ -418,9 +424,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setCommitCount(data.count ?? 0);
       setCommitted(true);
       setPhase('committed');
+      log.info('commitWork', 'Work committed to queue', { sessionId, taskCount: data.count ?? 0 });
       qc.invalidateQueries({ queryKey: ['snapshot'] });
       qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
     } catch (e: unknown) {
+      log.error('commitWork', 'Failed to commit work', { sessionId, error: String(e) });
       setError(e instanceof Error ? e.message : 'Failed to commit');
       setPhase('chat');
     }

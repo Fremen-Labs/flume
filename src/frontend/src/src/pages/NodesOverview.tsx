@@ -190,6 +190,7 @@ function NodeCard({ node, onDelete, onEdit }: { node: OllamaNode; onDelete: (id:
       const result = await testNode(node.id);
       setTestResult(result);
     } catch {
+      log.warn('catch', 'Silent catch block executed');
       setTestResult({ node_id: node.id, host: node.host, reachable: false, latency_ms: 0, models: [], current_load: 0, error: 'Connection test failed' });
     } finally {
       setTesting(false);
@@ -794,6 +795,9 @@ export default function NodesOverview() {
                 node={node}
                 onDelete={(id) => {
                   if (window.confirm(`Remove node "${id}" from the mesh?`)) {
+
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.NodesOverview');
                     deleteMut.mutate(id);
                   }
                 }}

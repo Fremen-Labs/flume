@@ -1,5 +1,8 @@
 import { Brain, Code, Eye, TestTube2, Briefcase, MessageSquare } from 'lucide-react';
 import type { FrontierModelWeight } from '@/types';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('components.RolePinningPanel');
 
 const AGENT_ROLES = [
   { id: 'planner',     label: 'Planner',      icon: Brain },
@@ -23,8 +26,10 @@ export function RolePinningPanel({ rolePinning, frontierMix, onChange }: Props) 
     const updated = { ...rolePinning };
     if (model === '' || model === 'auto') {
       delete updated[role];
+      log.info('handleChange', `Role unpinned: ${role} → auto routing`);
     } else {
       updated[role] = model;
+      log.info('handleChange', `Role pinned: ${role} → ${model}`);
     }
     onChange(updated);
   };

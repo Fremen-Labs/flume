@@ -269,6 +269,7 @@ function RepoBranchesManager({
       setSelected(new Set());
       setConfirmDelete(false);
     } catch (e) {
+      log.error('catch', String(e));
       setError(e instanceof Error ? e.message : 'Failed to load branches');
     } finally {
       setLoading(false);
@@ -336,6 +337,7 @@ function RepoBranchesManager({
       setConfirmDelete(false);
       await refreshBranches();
     } catch (e) {
+      log.error('catch', String(e));
       setError(e instanceof Error ? e.message : 'Failed to delete branches');
     } finally {
       setDeleting(false);
@@ -656,6 +658,7 @@ export default function ProjectDetailPage() {
       qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
       qc.invalidateQueries({ queryKey: ['project-activity', projectId] });
     } catch (e) {
+      log.error('catch', String(e));
       toast({
         title: 'Unblock failed',
         description: e instanceof Error ? e.message : 'Unknown error',
@@ -705,6 +708,7 @@ export default function ProjectDetailPage() {
         successCount += Array.isArray(ok) ? ok.length : 0;
         if (Array.isArray(data?.failed)) failures.push(...data.failed);
       } catch (e) {
+        log.error('catch', String(e));
         errorMessages.push(e instanceof Error ? e.message : 'Network error');
       }
     }
@@ -752,6 +756,7 @@ export default function ProjectDetailPage() {
       setConfirmDeleteProject(false);
       navigate('/projects');
     } catch (e) {
+      log.error('catch', String(e));
       setDeleteProjectError(e instanceof Error ? e.message : 'Failed to delete project');
     } finally {
       setDeletingProject(false);
@@ -859,6 +864,9 @@ export default function ProjectDetailPage() {
             <DialogTitle>Delete project?</DialogTitle>
             <DialogDescription>
               This will remove the project directory from the workspace and delete related records from Elasticsearch (best-effort).
+
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.ProjectDetailPage');
             </DialogDescription>
           </DialogHeader>
           {deleteProjectError && (

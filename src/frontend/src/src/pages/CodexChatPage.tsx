@@ -15,6 +15,9 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type { CodexAppServerProxyConfigResponse } from '@/types';
 
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.CodexChatPage');
+
 async function fetchProxyConfig(): Promise<CodexAppServerProxyConfigResponse> {
   const res = await fetch('/api/codex-app-server/proxy-config');
   if (!res.ok) throw new Error(`proxy-config failed: ${res.status}`);
@@ -42,7 +45,7 @@ export default function CodexChatPage() {
     refetchInterval: 30_000,
   });
 
-  const [log, setLog] = useState<LogLine[]>([]);
+  const [trafficLog, setTrafficLog] = useState<LogLine[]>([]);
   const [outgoing, setOutgoing] = useState('');
   const [wsState, setWsState] = useState<'idle' | 'connecting' | 'open' | 'closed'>('idle');
   const wsRef = useRef<WebSocket | null>(null);
@@ -52,13 +55,14 @@ export default function CodexChatPage() {
   >({});
 
   const appendLog = useCallback((dir: LogLine['dir'], text: string) => {
-    setLog((prev) => [...prev.slice(-400), { dir, text, t: Date.now() }]);
+    setTrafficLog((prev) => [...prev.slice(-400), { dir, text, t: Date.now() }]);
   }, []);
 
   const disconnect = useCallback(() => {
     wsRef.current?.close();
     wsRef.current = null;
     setWsState('closed');
+    log.info('disconnect', 'Codex WebSocket disconnected');
   }, []);
 
   const connect = useCallback(() => {
@@ -71,14 +75,17 @@ export default function CodexChatPage() {
     ws.onopen = () => {
       setWsState('open');
       appendLog('sys', 'WebSocket open (relayed to Codex app-server).');
+      log.info('connect', 'Codex WebSocket opened', { url: cfg.clientWsUrl });
     };
     ws.onclose = (ev) => {
       setWsState('closed');
       appendLog('sys', `WebSocket closed (code ${ev.code}).`);
+      log.warn('onclose', `Codex WebSocket closed`, { code: ev.code, reason: ev.reason });
       wsRef.current = null;
     };
     ws.onerror = () => {
       appendLog('sys', 'WebSocket error (see browser devtools / network).');
+      log.error('onerror', 'Codex WebSocket error', { url: cfg.clientWsUrl });
     };
     ws.onmessage = (ev) => {
       const raw = typeof ev.data === 'string' ? ev.data : '(binary frame)';
@@ -90,7 +97,7 @@ export default function CodexChatPage() {
           setPending((p) => ({ ...p, [key]: obj }));
         }
       } catch {
-        /* not JSON */
+        /* not JSON — expected for plain-text frames */
       }
     };
   }, [cfg?.clientWsUrl, cfg?.proxyRunning, appendLog, disconnect]);
@@ -100,7 +107,7 @@ export default function CodexChatPage() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [log]);
+  }, [trafficLog]);
 
   const sendJson = useCallback(
     (raw: string) => {
@@ -279,7 +286,7 @@ export default function CodexChatPage() {
       <div className="glass-panel p-4 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-foreground">Traffic log</h2>
-          <Button type="button" variant="ghost" size="sm" onClick={() => setLog([])}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setTrafficLog([])}>
             <Trash2 className="h-4 w-4 mr-1" />
             Clear
           </Button>
@@ -288,10 +295,10 @@ export default function CodexChatPage() {
           ref={scrollRef}
           className="h-[280px] w-full overflow-y-auto rounded-md border border-border/60 bg-muted/20 p-3 space-y-1 font-mono text-[11px] leading-relaxed"
         >
-          {log.length === 0 ? (
+          {trafficLog.length === 0 ? (
             <p className="text-muted-foreground">No messages yet.</p>
           ) : (
-            log.map((line, i) => (
+            trafficLog.map((line, i) => (
               <div
                 key={`${line.t}-${i}`}
                 className={

@@ -9,6 +9,9 @@ import { useEffect, useCallback, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchAgentModels, normalizeRoleSpec, RoleForm, SaveState, SETTINGS_DEFAULT_CREDENTIAL_ID } from '@/components/mission/AgentConfigPanel';
 
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.MissionControlPage');
+
 
 export default function MissionControlPage() {
 
@@ -85,6 +88,7 @@ export default function MissionControlPage() {
       await queryClient.invalidateQueries({ queryKey: ['settings', 'agent-models'] });
       setTimeout(() => setRoleSaveState((prev) => (prev[roleId] === 'success' ? { ...prev, [roleId]: 'idle' } : prev)), 4000);
     } catch (e) {
+      log.error('catch', String(e));
       setRoleSaveState((prev) => ({ ...prev, [roleId]: 'error' }));
       setRoleSaveMsg((prev) => ({ ...prev, [roleId]: e instanceof Error ? e.message : 'Save failed' }));
     }
@@ -106,9 +110,11 @@ export default function MissionControlPage() {
       if (res.ok) {
         toast.success("Grid Halted Successfully", { description: "All autonomous workers and background threads have been forcefully terminated." });
       } else {
+        log.warn('triggerKillSwitch', 'Orchestrator refused shutdown command', { status: res.status });
         toast.error("Kill Switch Failed", { description: "The Orchestrator refused the shutdown command." });
       }
     } catch(e) {
+      log.error('triggerKillSwitch', 'Grid halt API unreachable', { error: String(e) });
       toast.error("Grid Timeout", { description: "The API endpoint was unreachable natively." });
     }
     setHaltingState('idle');

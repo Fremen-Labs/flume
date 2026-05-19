@@ -157,6 +157,7 @@ export default function ProjectsPage() {
       setCreateName('');
       setCreateRepoUrl('');
     } catch (e: unknown) {
+      log.error('catch', String(e));
       setCreateError(e instanceof Error ? e.message : 'Failed to create project');
     } finally {
       setCreateLoading(false);
@@ -174,6 +175,7 @@ export default function ProjectsPage() {
       await fetch(`/api/projects/${encodeURIComponent(projectId)}/delete`, { method: 'POST' });
       qc.invalidateQueries({ queryKey: ['snapshot'] });
     } catch {
+      log.warn('catch', 'Silent catch block executed');
       qc.invalidateQueries({ queryKey: ['snapshot'] });
     }
   }
@@ -497,6 +499,9 @@ export default function ProjectsPage() {
               />
               <p className="text-[10px] text-muted-foreground/50">
                 Paste an HTTPS clone URL. Credentials are resolved from your stored tokens.
+
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.ProjectsPage');
               </p>
             </div>
 
