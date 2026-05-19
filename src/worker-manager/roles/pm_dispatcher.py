@@ -8,6 +8,7 @@ for provider-agnostic LLM dispatch.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 import httpx
@@ -22,6 +23,38 @@ from roles.common import (
 from utils.logger import get_logger
 
 logger = get_logger("roles.pm_dispatcher")
+
+
+# ── Phase 2.3: Enumerable Target Detection ──────────────────────────────────
+# Patterns that signal the user prompt contains multiple discrete entities
+# that should each become a subtask (e.g., "all commands", "each module").
+
+_ENUMERABLE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\ball\b.*\b(commands?|modules?|endpoints?|services?|files?|components?|pages?|routes?)\b", re.I),
+    re.compile(r"\beach\b.*\b(command|module|endpoint|service|file|component|page|route)\b", re.I),
+    re.compile(r"\bevery\b.*\b(command|module|endpoint|service|file|component|page|route)\b", re.I),
+    re.compile(r"\b(review|update|audit|document|test)\b.*\b(and|to)\b.*\b(ensure|update|verify)\b", re.I),
+]
+
+
+def _estimate_enumerable_targets(task: dict) -> int:
+    """Estimate the number of discrete entities referenced in the task description.
+
+    Phase 2.3: Detects enumerable scope in the task title/description so the PM
+    can be instructed to decompose rather than treating multi-entity requests as
+    a single monolithic task.
+
+    Returns 0 if no enumerable pattern is detected, otherwise a positive count.
+    """
+    title = (task.get("title") or "").strip()
+    desc = (task.get("description") or task.get("objective") or "").strip()
+    full_text = f"{title} {desc}"
+
+    for pattern in _ENUMERABLE_PATTERNS:
+        if pattern.search(full_text):
+            # Return a minimum hint — the LLM will determine the actual count
+            return max(2, len(re.findall(r",\s*", full_text)) + 1)
+    return 0
 
 
 def _get_cluster_topology() -> dict[str, Any]:
@@ -79,6 +112,24 @@ async def run_pm_dispatcher(
             "Do NOT return action='decompose'. Do NOT create subtasks.\n"
         )
     else:
+        # Phase 2.3: Detect enumerable targets and inject mandatory decomposition.
+        enumerable_count = _estimate_enumerable_targets(task or {})
+        if enumerable_count > 0:
+            instruction += (
+                "MANDATORY DECOMPOSITION — ENUMERABLE SCOPE DETECTED:\n"
+                f"The user's request references approximately {enumerable_count}+ discrete "
+                "entities (commands, modules, endpoints, etc.). You MUST decompose this "
+                "into individual subtasks — one per entity — so they can be executed in "
+                "parallel across the available implementer nodes.\n"
+                "Return action='decompose' with at least one subtask per entity.\n"
+                "Do NOT return action='compute_ready' for multi-entity requests.\n\n"
+            )
+            logger.info(
+                "run_pm_dispatcher: enumerable scope detected (%d targets), "
+                "forcing decomposition directive",
+                enumerable_count,
+            )
+
         instruction += (
             "COMPLEXITY-PROPORTIONAL DECOMPOSITION RULES:\n"
             "- If the task title describes a trivial change (URL update, typo fix, config change, "

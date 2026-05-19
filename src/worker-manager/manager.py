@@ -57,16 +57,27 @@ from utils.logger import get_logger  # noqa: E402
 _manager_logger = get_logger('worker-manager')
 
 
-# Phase 2.2: TTL cache for node concurrency caps.
-# Node registry doesn't change between cycles — cache for 60s.
+# Phase 2.3: Reduced from 60s to 15s so newly registered nodes receive work faster.
+# Combined with force_refresh_node_caps() webhook for immediate invalidation.
 _NODE_CAPS_CACHE: dict = {'ts': 0.0, 'data': None}
-_NODE_CAPS_TTL_SECONDS = 60
+_NODE_CAPS_TTL_SECONDS = 15
+
+
+def force_refresh_node_caps() -> None:
+    """Invalidate the node caps cache so the next cycle picks up new nodes.
+
+    Phase 2.3: Called by the dashboard's node registration proxy to eliminate
+    the 15s stale window when a new node joins the mesh.
+    """
+    _NODE_CAPS_CACHE['ts'] = 0.0
+    _NODE_CAPS_CACHE['data'] = None
+    _manager_logger.info('force_refresh_node_caps: cache invalidated by webhook')
 
 
 def _fetch_node_concurrency_caps(force: bool = False) -> dict:
     """Dynamically determine PER-NODE MAX_CONCURRENT_TASKS based on cluster constraints.
 
-    Phase 2.2: Results are cached for 60s since node registry changes are rare.
+    Phase 2.3: Results are cached for 15s since node registry changes are rare.
     Pass force=True to bypass the cache (e.g. after a config change).
     """
     now = time.time()
