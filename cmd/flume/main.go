@@ -33,6 +33,11 @@ func init() {
     rootCmd.AddCommand(commands.UpgradeCmd)
     rootCmd.AddCommand(commands.SkillsCmd)
     rootCmd.AddCommand(commands.TestEnvCmd)
+
+    // Phase 5: Standalone service subcommands for distributed deployments
+    rootCmd.AddCommand(commands.GatewayCmd)
+    rootCmd.AddCommand(commands.DashboardCmd)
+    rootCmd.AddCommand(commands.WorkerManagerCmd)
 }
 
 func main() {

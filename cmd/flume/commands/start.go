@@ -4,16 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/Fremen-Labs/flume/cmd/flume/agents"
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
+	"github.com/Fremen-Labs/flume/cmd/flume/services"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
+	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
@@ -240,40 +240,25 @@ var StartCmd = &cobra.Command{
 				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
 			}
 
+			// Phase 5: Start all application services in-process.
+			// Replaces Python subprocess (uv run src/dashboard/server.py)
+			// and Go worker goroutines with unified Supervisor.
+			services.SetEnvForServices(generatedEnv)
+			services.SetEnvForServices(portEnvOverrides)
+			os.Setenv("FLUME_NATIVE_MODE", "1")
+			os.Setenv("ES_URL", "https://localhost:"+esPort)
+			os.Setenv("OPENBAO_ADDR", "http://localhost:"+vaultPort)
+
+			logger := slog.Default()
+			cfg := config.Load(ctx, logger)
+			sup := services.NewSupervisor(cfg, logger)
+
+			// Start services — blocks until ctx cancelled or fatal error
 			go func() {
-				log.Info("Spawning FastAPI Dashboard daemon natively...")
-				dash := exec.CommandContext(ctx, "uv", "run", "src/dashboard/server.py")
-
-				dashEnv := append(os.Environ(), portEnvOverrides...)
-				dashEnv = append(dashEnv, "PYTHONPATH=src", "FLUME_NATIVE_MODE=1", "ES_URL=https://localhost:"+esPort, "OPENBAO_ADDR=http://localhost:"+vaultPort)
-				dashEnv = append(dashEnv, generatedEnv...)
-				dash.Env = dashEnv
-
-				dash.Stdout = os.Stdout
-				dash.Stderr = os.Stderr
-
-				if err := dash.Start(); err != nil {
-					log.Error("Failed to spawn Flume Dashboard natively", "err", err)
-					return
+				if err := sup.StartAll(ctx); err != nil {
+					log.Error("Service mesh error", "err", err)
 				}
-
-				homeDir, _ := os.UserHomeDir()
-				pidFile := filepath.Join(homeDir, ".flume", "flume-daemon.pid")
-				os.MkdirAll(filepath.Dir(pidFile), 0755)
-				os.WriteFile(pidFile, []byte(strconv.Itoa(dash.Process.Pid)), 0644)
-
-				dash.Wait()
 			}()
-
-			var wg sync.WaitGroup
-			for i := 1; i <= 3; i++ {
-				wg.Add(1)
-				go func(id int) {
-					defer wg.Done()
-					agents.DeployWorker(cmd.Context(), id, "init")
-				}(i)
-			}
-			wg.Wait()
 		} else {
 			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
 
@@ -337,21 +322,21 @@ var StartCmd = &cobra.Command{
 				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
 			}
 
-			swArgs := []string{"compose"}
-			if !envCfg.ExternalElastic {
-				swArgs = append(swArgs, "--profile", "managed_elastic")
-			}
-			swArgs = append(swArgs, "up", "-d", "--build", "--wait", "dashboard", "worker")
+			// Phase 5: Start application services in-process instead of
+			// building and launching Python Docker containers.
+			// Infrastructure (ES, OpenBao) still runs as containers above.
+			services.SetEnvForServices(fullEnv)
 
-			swC := exec.CommandContext(ctx, "docker", swArgs...)
-			swC.Env = fullEnv
-			swC.Stdout = os.Stdout
-			swC.Stderr = os.Stderr
-			if err := swC.Run(); err != nil {
-				log.Error("Container topology boot failed", "error", err)
-				return err
-			}
-			log.Info("Container Swarm bootstrapped successfully in detached mode.")
+			logger := slog.Default()
+			cfg := config.Load(ctx, logger)
+			sup := services.NewSupervisor(cfg, logger)
+
+			go func() {
+				if err := sup.StartAll(ctx); err != nil {
+					log.Error("Service mesh error", "err", err)
+				}
+			}()
+			log.Info("In-process service mesh started successfully.")
 		}
 
 		if err := orchestrator.AwaitOrchestration(); err != nil {
