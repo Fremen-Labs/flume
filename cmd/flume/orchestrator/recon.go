@@ -4,14 +4,17 @@ import (
 	"os/exec"
 )
 
+// SystemEcology captures the local OS binary dependency state.
+//
+// Phase 5: Python, uv, and pipx are no longer required. All application
+// services compile into a single Go binary. Only Docker (for ES + OpenBao
+// infrastructure containers) and Go (for building the binary) are needed.
 type SystemEcology struct {
 	HasDocker      bool
 	HasElastic     bool
 	HasOpenBao     bool
 	HasFlumeLegacy bool
 	HasElastro     bool
-	HasUV          bool
-	HasPython      bool
 	HasGo          bool
 }
 
@@ -24,8 +27,6 @@ func PerformReconnaissance() SystemEcology {
 		HasOpenBao:     checkBinary("openbao") || checkBinary("vault"),
 		HasFlumeLegacy: checkBinary("flume"),
 		HasElastro:     checkBinary("elastro"),
-		HasUV:          checkBinary("uv"),
-		HasPython:      checkBinary("python3") || checkBinary("python"),
 		HasGo:          checkBinary("go"),
 	}
 }
