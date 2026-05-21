@@ -330,6 +330,161 @@ func (bf *BulkFlusher) Stop() {
 	close(bf.stopCh)
 }
 
+// ─── Raw Search ─────────────────────────────────────────────────────────────
+
+// SearchRaw executes a raw search query and returns the full ES response.
+// Used when the caller needs access to _id, _score, aggregations, etc.
+func (c *Client) SearchRaw(ctx context.Context, index string, body interface{}) (map[string]interface{}, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("es: search raw marshal failed: %w", err)
+	}
+
+	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/_search", index), bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("es: search raw %s failed: %w", index, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("es: search raw %s returned HTTP %d: %s", index, resp.StatusCode, string(respBody))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("es: search raw decode failed: %w", err)
+	}
+	return result, nil
+}
+
+// ─── Post ───────────────────────────────────────────────────────────────────
+
+// Post sends a POST request to the specified ES path with a JSON body.
+// Used for _update, _doc, and other POST-based ES APIs.
+func (c *Client) Post(ctx context.Context, path string, body interface{}) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("es: post marshal failed: %w", err)
+	}
+
+	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("es: post %s failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("es: post %s returned HTTP %d: %s", path, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// ─── Generic HTTP Proxy Methods ─────────────────────────────────────────────
+// These methods allow the dashboard to proxy requests to arbitrary URLs
+// (e.g., the Go gateway, Vault, Exo topology).
+
+// HTTPGet performs a GET request to an arbitrary URL and returns decoded JSON.
+func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{}, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("http get: build failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http get %s failed: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("http get decode failed: %w", err)
+	}
+	return result, nil
+}
+
+// HTTPPost performs a POST request to an arbitrary URL with a JSON body.
+func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("http post: marshal failed: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("http post: build failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http post %s failed: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("http post decode failed: %w", err)
+	}
+	return result, nil
+}
+
+// HTTPPut performs a PUT request to an arbitrary URL with a JSON body.
+func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("http put: marshal failed: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("http put: build failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http put %s failed: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("http put decode failed: %w", err)
+	}
+	return result, nil
+}
+
+// HTTPDelete performs a DELETE request to an arbitrary URL.
+func (c *Client) HTTPDelete(ctx context.Context, url string) (map[string]interface{}, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("http delete: build failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http delete %s failed: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("http delete decode failed: %w", err)
+	}
+	return result, nil
+}
+
 // ─── Health ─────────────────────────────────────────────────────────────────
 
 // Ping checks if the ES cluster is reachable.

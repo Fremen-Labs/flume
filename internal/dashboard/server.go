@@ -1,0 +1,360 @@
+// Package dashboard implements the Flume Dashboard REST API server.
+//
+// This is the Go port of Python's src/dashboard/server.py (16 nodes) and
+// all 9 API sub-modules (81 nodes). Uses net/http + Go 1.22 ServeMux for
+// routing with zero external dependencies.
+//
+// Phase 2 of the Python → Go migration plan.
+// Python source: src/dashboard/server.py, src/dashboard/api/*.py
+package dashboard
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/pkg/types"
+)
+
+// Server is the Dashboard API HTTP server.
+// Derived from Python: server.py (FastAPI app instance + lifespan).
+type Server struct {
+	mux            *http.ServeMux
+	httpServer     *http.Server
+	es             *es.Client
+	logger         *slog.Logger
+	cfg            *Config
+	logLevel       *slog.LevelVar
+	startTime      time.Time
+	autonomyStatus map[string]interface{}
+	workerStatus   map[string]interface{}
+	mu             sync.RWMutex
+}
+
+// Config holds dashboard server configuration.
+// Derived from Python: config.py get_settings().
+type Config struct {
+	Host           string
+	Port           int
+	ESUrl          string
+	ESApiKey       string
+	CORSOrigins    []string
+	StaticRoot     string
+	NativeMode     bool
+	RateLimitPerMin int
+}
+
+// DefaultConfig returns production-safe defaults, overridden by env vars.
+// Derived from Python: config.py get_settings() Pydantic model.
+func DefaultConfig() *Config {
+	host := envOr("DASHBOARD_HOST", "0.0.0.0")
+	port := envInt("DASHBOARD_PORT", 8765)
+	esURL := envOr("ES_URL", "http://localhost:9200")
+	if envOr("FLUME_NATIVE_MODE", "0") != "1" && os.Getenv("ES_URL") == "" {
+		esURL = "http://elasticsearch:9200"
+	}
+	corsRaw := envOr("FLUME_CORS_ORIGINS", "")
+	var cors []string
+	if corsRaw != "" {
+		for _, o := range strings.Split(corsRaw, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				cors = append(cors, o)
+			}
+		}
+	} else {
+		cors = []string{"http://localhost:8080", "http://localhost:8765", "http://127.0.0.1:8080"}
+	}
+
+	return &Config{
+		Host:           host,
+		Port:           port,
+		ESUrl:          esURL,
+		ESApiKey:       envOr("ES_API_KEY", ""),
+		CORSOrigins:    cors,
+		StaticRoot:     "",
+		NativeMode:     envOr("FLUME_NATIVE_MODE", "0") == "1",
+		RateLimitPerMin: envInt("FLUME_RATE_LIMIT", 2000),
+	}
+}
+
+// New creates a new Dashboard server.
+func New(cfg *Config, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	esClient := es.New(cfg.ESUrl, cfg.ESApiKey, logger)
+	s := &Server{
+		mux:       http.NewServeMux(),
+		es:        esClient,
+		logger:    logger,
+		cfg:       cfg,
+		startTime: time.Now(),
+	}
+	s.registerRoutes()
+	return s
+}
+
+// ListenAndServe starts the HTTP server.
+func (s *Server) ListenAndServe() error {
+	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	s.httpServer = &http.Server{
+		Addr:         addr,
+		Handler:      s.withMiddleware(s.mux),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	s.logger.Info("Dashboard API starting",
+		slog.String("addr", addr),
+		slog.Bool("native_mode", s.cfg.NativeMode),
+	)
+	return s.httpServer.ListenAndServe()
+}
+
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.logger.Info("Dashboard API shutting down")
+	return s.httpServer.Shutdown(ctx)
+}
+
+// ─── Route Registration ─────────────────────────────────────────────────────
+
+// registerRoutes wires all API endpoints to their handlers.
+// Each route maps directly to a Python @router.get/post/put/delete decorator.
+func (s *Server) registerRoutes() {
+	// Health + System (api/system.py — 21 nodes)
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/snapshot", s.handleSnapshot)
+	s.mux.HandleFunc("GET /api/system-state", s.handleSystemState)
+	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
+	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /api/exo-status", s.handleExoStatus)
+	s.mux.HandleFunc("GET /api/autonomy/status", s.handleAutonomyStatus)
+	s.mux.HandleFunc("POST /api/autonomy/sweep/{sweep_name}", s.handleAutonomySweep)
+	s.mux.HandleFunc("GET /api/auto-unblock/status", s.handleAutoUnblockStatus)
+	s.mux.HandleFunc("POST /api/auto-unblock/sweep", s.handleAutoUnblockSweep)
+
+	// Tasks (api/tasks.py — 14 nodes)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/history", s.handleTaskHistory)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/diff", s.handleTaskDiff)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts", s.handleTaskThoughts)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/commits", s.handleTaskCommits)
+	s.mux.HandleFunc("POST /api/tasks/{task_id}/transition", s.handleTaskTransition)
+	s.mux.HandleFunc("POST /api/tasks/bulk-requeue", s.handleTasksBulkRequeue)
+	s.mux.HandleFunc("POST /api/tasks/bulk-update", s.handleTasksBulkUpdate)
+	s.mux.HandleFunc("POST /api/tasks/claim", s.handleTaskClaim)
+	s.mux.HandleFunc("POST /api/tasks/complete", s.handleTaskComplete)
+
+	// Security (api/security.py — 9 nodes)
+	s.mux.HandleFunc("GET /api/security", s.handleSecurity)
+	s.mux.HandleFunc("GET /api/vault/status", s.handleVaultStatus)
+	s.mux.HandleFunc("POST /api/tasks/stop-all", s.handleTasksStopAll)
+	s.mux.HandleFunc("POST /api/tasks/resume-all", s.handleTasksResumeAll)
+
+	// Projects (api/projects.py — 6 nodes)
+	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
+	s.mux.HandleFunc("GET /api/projects/{project_id}/clone-status", s.handleProjectCloneStatus)
+	s.mux.HandleFunc("GET /api/projects/{project_id}/tasks", s.handleProjectTasks)
+	s.mux.HandleFunc("POST /api/projects/{project_id}/delete", s.handleProjectDelete)
+
+	// Repos (api/repos.py — 3 nodes)
+	s.mux.HandleFunc("GET /api/repos/{project_id}/branches", s.handleRepoBranches)
+	s.mux.HandleFunc("GET /api/repos/{project_id}/tree", s.handleRepoTree)
+	s.mux.HandleFunc("GET /api/repos/{project_id}/file", s.handleRepoFile)
+	s.mux.HandleFunc("GET /api/repos/{project_id}/diff", s.handleRepoDiff)
+
+	// Nodes (api/nodes.py — 18 nodes)
+	s.mux.HandleFunc("GET /api/nodes", s.handleNodesList)
+	s.mux.HandleFunc("POST /api/nodes", s.handleNodesAdd)
+	s.mux.HandleFunc("DELETE /api/nodes/{node_id}", s.handleNodesDelete)
+	s.mux.HandleFunc("POST /api/nodes/{node_id}/test", s.handleNodesTest)
+	s.mux.HandleFunc("GET /api/routing-policy", s.handleRoutingPolicyGet)
+	s.mux.HandleFunc("PUT /api/routing-policy", s.handleRoutingPolicyPut)
+	s.mux.HandleFunc("GET /api/frontier-models", s.handleFrontierModels)
+	s.mux.HandleFunc("GET /api/nodes/utilization", s.handleNodesUtilization)
+
+	// Settings (api/settings.py — 3 nodes)
+	s.mux.HandleFunc("POST /api/settings/log-level", s.handleSettingsLogLevel)
+	s.mux.HandleFunc("POST /api/logs/client", s.handleClientLogs)
+	s.mux.HandleFunc("GET /api/settings/llm", s.handleSettingsLLMGet)
+	s.mux.HandleFunc("POST /api/settings/llm", s.handleSettingsLLMUpdate)
+	s.mux.HandleFunc("PUT /api/settings/llm/credentials", s.handleSettingsLLMCredentialsPut)
+	s.mux.HandleFunc("POST /api/settings/llm/credentials", s.handleSettingsLLMCredentialsPost)
+	s.mux.HandleFunc("POST /api/settings/llm/oauth/refresh", s.handleSettingsLLMOAuthRefresh)
+	s.mux.HandleFunc("GET /api/settings/repos", s.handleSettingsReposGet)
+	s.mux.HandleFunc("PUT /api/settings/repos", s.handleSettingsReposUpdate)
+	s.mux.HandleFunc("GET /api/settings/system", s.handleSettingsSystemGet)
+	s.mux.HandleFunc("PUT /api/settings/system", s.handleSettingsSystemUpdate)
+	s.mux.HandleFunc("GET /api/settings/agent-models", s.handleSettingsAgentModelsGet)
+	s.mux.HandleFunc("PUT /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
+	s.mux.HandleFunc("POST /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
+	s.mux.HandleFunc("POST /api/settings/restart-services", s.handleSettingsRestartServices)
+
+	// Intake (api/intake.py — 4 nodes)
+	s.mux.HandleFunc("POST /api/intake/session", s.handleIntakeStartSession)
+	s.mux.HandleFunc("GET /api/intake/session/{session_id}", s.handleIntakeGetSession)
+	s.mux.HandleFunc("POST /api/intake/session/{session_id}/message", s.handleIntakeMessage)
+	s.mux.HandleFunc("POST /api/intake/session/{session_id}/commit", s.handleIntakeCommit)
+
+	// Workflow (api/workflow.py — 3 nodes)
+	s.mux.HandleFunc("GET /api/workflow/workers", s.handleWorkflowWorkers)
+	s.mux.HandleFunc("GET /api/workflow/agents/status", s.handleWorkflowAgentsStatus)
+	s.mux.HandleFunc("POST /api/workflow/agents/start", s.handleWorkflowAgentsStart)
+	s.mux.HandleFunc("POST /api/workflow/agents/stop", s.handleWorkflowAgentsStop)
+}
+
+// ─── Middleware ──────────────────────────────────────────────────────────────
+
+// withMiddleware wraps the mux with CORS, logging, and request ID middleware.
+// Derived from Python: CORSMiddleware + LoggingMiddleware in server.py.
+func (s *Server) withMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// CORS headers
+		origin := r.Header.Get("Origin")
+		if s.isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Flume-System-Token")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		// Request ID
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		w.Header().Set("X-Request-ID", reqID)
+
+		// Wrap response writer to capture status
+		rw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rw, r)
+
+		// Structured request logging
+		duration := time.Since(start)
+		isNoisy := strings.Contains(r.URL.Path, "/health") || strings.Contains(r.URL.Path, "/tasks")
+		logFn := s.logger.Info
+		if isNoisy {
+			logFn = s.logger.Debug
+		}
+		logFn(fmt.Sprintf("%s %s - %d", r.Method, r.URL.Path, rw.status),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rw.status),
+			slog.Float64("duration_ms", float64(duration.Microseconds())/1000),
+			slog.String("request_id", reqID),
+		)
+	})
+}
+
+func (s *Server) isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, o := range s.cfg.CORSOrigins {
+		if o == origin || o == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// statusWriter wraps http.ResponseWriter to capture the response status.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	written bool
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	if !w.written {
+		w.status = status
+		w.written = true
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+// ─── Response Helpers ───────────────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		// Best-effort: headers are already sent
+		_ = err
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func decodeBody(r *http.Request, dst interface{}) error {
+	defer r.Body.Close()
+	return json.NewDecoder(r.Body).Decode(dst)
+}
+
+// ─── Env Helpers ────────────────────────────────────────────────────────────
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return fallback
+	}
+	return n
+}
+
+func timeNowUnixMilli() int64 {
+	return time.Now().UnixMilli()
+}
+
+// ─── Type aliases for request bodies ────────────────────────────────────────
+
+// TaskTransitionRequest is the request body for POST /api/tasks/{id}/transition.
+// Derived from Python: api/models.py TaskTransitionRequest(BaseModel).
+type TaskTransitionRequest struct {
+	Status              string `json:"status"`
+	Instruction         string `json:"instruction,omitempty"`
+	AutoRecoveryPrompt  *bool  `json:"auto_recovery_prompt,omitempty"`
+}
+
+// BulkRequeueRequest is the request body for POST /api/tasks/bulk-requeue.
+type BulkRequeueRequest struct {
+	TaskIDs []string `json:"task_ids"`
+}
+
+// BulkUpdateRequest is the request body for POST /api/tasks/bulk-update.
+type BulkUpdateRequest struct {
+	IDs    []string `json:"ids"`
+	Action string   `json:"action"`
+	Repo   string   `json:"repo,omitempty"`
+}
+
+// Compile-time check that types are referenced.
+var _ = types.TaskStatusReady
+var _ = utf8.RuneLen
