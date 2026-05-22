@@ -30,7 +30,7 @@ RUN go mod download
 COPY . .
 
 # Embed the pre-built SPA into the static assets directory
-COPY --from=frontend /build/dist/ ./src/frontend/dist/
+COPY --from=frontend /dist/ ./src/frontend/dist/
 
 # Build a fully static binary (no cgo, no external deps)
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -50,7 +50,7 @@ RUN apk add --no-cache git ca-certificates tzdata && \
 COPY --from=builder /flume /usr/local/bin/flume
 
 # Copy pre-built frontend dist for dashboard serving
-COPY --from=frontend /build/dist/ /app/frontend/dist/
+COPY --from=frontend /dist/ /app/frontend/dist/
 
 # LogLoom graph for runtime enrichment (optional — zero-overhead if missing)
 COPY --from=builder /src/logloom-graph.json /app/logloom-graph.json
