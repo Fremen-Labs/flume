@@ -79,19 +79,13 @@ Worker count options:
 		workerCount := orchestrator.ResolveWorkerCount(upgradeWorkersFlag)
 		fmt.Println(ui.CyberGradient(fmt.Sprintf("  Worker count: %s", orchestrator.WorkerCountDescription(upgradeWorkersFlag))))
 
-		// ── Phase 4: Rebuild images ───────────────────────────────────────────
-		fmt.Println(ui.WarningGold("  Rebuilding dashboard and worker images..."))
-		buildArgs := []string{"compose", "--profile", "managed_elastic", "build", "dashboard", "worker"}
-		buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
-		buildCmd.Stdout = os.Stdout
-		buildCmd.Stderr = os.Stderr
-		buildCmd.Env = os.Environ()
-		if err := buildCmd.Run(); err != nil {
-			return fmt.Errorf("image build failed: %w", err)
-		}
+		// ── Phase 4: Image rebuild skipped ──────────────────────────────────
+		// Phase 5+: all application services (gateway, dashboard, worker-manager)
+		// run in-process via the Go binary. No Docker images to rebuild.
+		fmt.Println(ui.SuccessBlue("  Application services run in-process — no Docker images to rebuild."))
 
 		// ── Phase 5: Rolling stop (ES + OpenBao stay running) ─────────────────
-		fmt.Print(ui.WarningGold("  Stopping dashboard and workers (ES + OpenBao unaffected)... "))
+		fmt.Print(ui.WarningGold("  Stopping workers (ES + OpenBao unaffected)... "))
 		stopServices := buildStopServiceNames(workerCount)
 		stopArgs := append([]string{"compose", "stop"}, stopServices...)
 		stopCmd := exec.CommandContext(ctx, "docker", stopArgs...)
@@ -162,8 +156,9 @@ Worker count options:
 }
 
 // buildStopServiceNames returns the service names to stop (excludes elasticsearch + openbao).
+// Phase 5+: dashboard runs in-process, not as a Docker container.
 func buildStopServiceNames(workerCount int) []string {
-	services := []string{"dashboard"}
+	var services []string
 	for i := 1; i <= workerCount; i++ {
 		services = append(services, fmt.Sprintf("worker-%d", i))
 	}

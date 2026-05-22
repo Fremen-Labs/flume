@@ -87,9 +87,10 @@ func autoWorkerCount() int {
 }
 
 // BuildWorkerServiceNames returns the docker compose service names for N workers.
-// e.g. N=3 → ["dashboard", "worker-1", "worker-2", "worker-3"]
+// Phase 5+: dashboard runs in-process (not Docker). Only worker containers are listed.
+// e.g. N=3 → ["worker-1", "worker-2", "worker-3"]
 func BuildWorkerServiceNames(workerCount int) []string {
-	services := []string{"dashboard"}
+	var services []string
 	for i := 1; i <= workerCount; i++ {
 		services = append(services, fmt.Sprintf("worker-%d", i))
 	}
