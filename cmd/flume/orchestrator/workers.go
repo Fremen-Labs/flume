@@ -86,15 +86,11 @@ func autoWorkerCount() int {
 	return count
 }
 
-// BuildWorkerServiceNames returns the docker compose service names for N workers.
-// Phase 5+: dashboard runs in-process (not Docker). Only worker containers are listed.
-// e.g. N=3 → ["worker-1", "worker-2", "worker-3"]
+// BuildWorkerServiceNames returns the docker compose service names to start.
+// Workers use deploy.replicas for scaling — no per-worker service names needed.
+// The workerCount is set via FLUME_WORKER_COUNT env var for compose interpolation.
 func BuildWorkerServiceNames(workerCount int) []string {
-	var services []string
-	for i := 1; i <= workerCount; i++ {
-		services = append(services, fmt.Sprintf("worker-%d", i))
-	}
-	return services
+	return []string{"dashboard", "gateway", "worker"}
 }
 
 // WorkerCountDescription returns a human-readable description of the count source.

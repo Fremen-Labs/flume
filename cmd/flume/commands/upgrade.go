@@ -156,13 +156,8 @@ Worker count options:
 }
 
 // buildStopServiceNames returns the service names to stop (excludes elasticsearch + openbao).
-// Phase 5+: dashboard runs in-process, not as a Docker container.
 func buildStopServiceNames(workerCount int) []string {
-	var services []string
-	for i := 1; i <= workerCount; i++ {
-		services = append(services, fmt.Sprintf("worker-%d", i))
-	}
-	return services
+	return []string{"dashboard", "gateway", "worker"}
 }
 
 // runUpgradeFallback falls through to a condensed interactive credential prompt
@@ -237,8 +232,10 @@ func runStartSequence(ctx context.Context, envCfg orchestrator.EnvConfig, worker
 	fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
 
 	workerCount := orchestrator.ResolveWorkerCount(workersFlag)
+	fullEnv = append(fullEnv, fmt.Sprintf("FLUME_WORKER_COUNT=%d", workerCount))
+
 	upServices := orchestrator.BuildWorkerServiceNames(workerCount)
-	upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait"}, upServices...)
+	upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--build", "--wait"}, upServices...)
 	upCmd := exec.CommandContext(ctx, "docker", upArgs...)
 	upCmd.Env = fullEnv
 	upCmd.Stdout = os.Stdout

@@ -31,10 +31,9 @@ This is a hard reset that requires explicit confirmation.`,
 		// Supply a placeholder so compose doesn't warn about an unset OPENBAO_TOKEN variable.
 		destroyEnv := append(os.Environ(), "OPENBAO_TOKEN=flume-dev-token")
 
-		// --- Standard destroy: stop ES + OpenBao containers ---
-		// Phase 5: Only infrastructure containers remain in docker-compose.
-		// Application services (gateway, dashboard, worker) run in-process.
-		fmt.Println(ui.CyberGradient("Removing infrastructure containers and volumes (elasticsearch, openbao)..."))
+		// --- Standard destroy: stop ALL Flume containers ---
+		// docker compose down removes all services defined in the compose file.
+		fmt.Println(ui.CyberGradient("Removing Flume containers and volumes (openbao, workers, dashboard, elasticsearch)..."))
 		downArgs := []string{"compose", "--profile", "managed_elastic", "down", "-v"}
 		c := exec.CommandContext(ctx, "docker", downArgs...)
 		c.Stdout = os.Stdout
@@ -54,10 +53,18 @@ This is a hard reset that requires explicit confirmation.`,
 				return
 			}
 
-			// Phase 5: No Python images to remove.
-			// The flume-dashboard and flume-worker images no longer exist.
-			// Only the Go binary and infrastructure images remain.
-			fmt.Println(ui.SuccessBlue("Phase 5: No application container images to purge (all services run in-process)."))
+			fmt.Println(ui.WarningGold("⚡ PURGE MODE: Removing all Flume Docker images..."))
+			// Remove the unified Go flume image (used by dashboard, gateway, worker services)
+			for _, img := range []string{"flume-dashboard", "flume-gateway", "flume-worker"} {
+				rmiCmd := exec.CommandContext(ctx, "docker", "rmi", img+":latest")
+				rmiCmd.Stderr = os.Stderr
+				if err := rmiCmd.Run(); err != nil {
+					fmt.Println(ui.WarningGold(fmt.Sprintf("  Image %s not found (skipped)", img)))
+				} else {
+					fmt.Println(ui.SuccessBlue("✔ Removed image: " + img))
+				}
+			}
+			fmt.Println(ui.SuccessBlue("✔ All Flume Docker images purged."))
 		}
 
 		// Always prune the full builder cache on every destroy (purge or not).

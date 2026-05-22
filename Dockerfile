@@ -1,11 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # flume — unified multi-stage build for the single Go binary.
 #
-# Phase 5: All application services (gateway, dashboard, worker-manager)
-# compile into one statically-linked binary. The dashboard Vue SPA is
-# pre-built and embedded as static assets.
-#
-# Produces a ~16MB binary on a distroless base with zero runtime deps.
+# Produces a ~20MB binary on golang:alpine with git for worker clone/push ops.
+# Dashboard, gateway, and worker-manager all compile into one binary.
+# Each Docker Compose service runs a different entrypoint command:
+#   dashboard → /flume start --native (serves Vue SPA + API)
+#   worker-N  → /flume worker          (claims and executes tasks)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build the Vue dashboard SPA ────────────────────────────────────
@@ -24,6 +24,7 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY vendor-local/ vendor-local/
 RUN go mod download
 
 COPY . .
@@ -33,21 +34,38 @@ COPY --from=frontend /build/dist/ ./src/frontend/dist/
 
 # Build a fully static binary (no cgo, no external deps)
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" \
     -o /flume \
     ./cmd/flume
 
-# ── Stage 3: Minimal production image ───────────────────────────────────────
-FROM gcr.io/distroless/static:nonroot
+# ── Stage 3: Minimal Alpine runtime ────────────────────────────────────────
+# Using Alpine instead of distroless because workers need:
+#   - git: clone/push operations on work repos
+#   - sh:  health check scripts in docker-compose
+FROM alpine:3.21
 
-COPY --from=builder /flume /flume
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --no-cache git ca-certificates tzdata && \
+    adduser -D -u 1000 flume
 
-# Git is needed for worker clone/push operations — use a multi-stage
-# copy from Alpine to keep the image minimal.
-COPY --from=builder /usr/bin/git /usr/bin/git
+COPY --from=builder /flume /usr/local/bin/flume
 
-EXPOSE 8090 8765 8080
+# Copy pre-built frontend dist for dashboard serving
+COPY --from=frontend /build/dist/ /app/frontend/dist/
 
-ENTRYPOINT ["/flume"]
-CMD ["start"]
+# LogLoom graph for runtime enrichment (optional — zero-overhead if missing)
+COPY --from=builder /src/logloom-graph.json /app/logloom-graph.json
+
+# Agent system prompts consumed by the worker manager's LLM subsystem
+COPY --from=builder /src/src/agents/ /app/agents/
+
+ENV LOGLOOM_GRAPH_PATH=/app/logloom-graph.json
+ENV FLUME_AGENTS_DIR=/app/agents
+ENV FLUME_STATIC_ROOT=/app/frontend/dist
+
+WORKDIR /app
+USER flume
+
+EXPOSE 8090 8765
+
+ENTRYPOINT ["flume"]
+CMD ["start", "--native"]

@@ -1,16 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Flume Infrastructure Services — docker-compose.yml
+# Flume Docker Compose — Infrastructure + Application Services
 #
-# Phase 5: Only infrastructure services (Elasticsearch, OpenBao) run as
-# Docker containers. All application services (gateway, dashboard,
-# worker-manager) now run in-process via the single `flume` Go binary.
+# Infrastructure: Elasticsearch, OpenBao (always containers)
+# Application:    Dashboard, Gateway (Go containers from unified Dockerfile)
+# Workers:        Spawned dynamically by the orchestrator (1..N)
+#
+# All application services share a single Docker image built from ./Dockerfile.
+# Each service uses a different CMD to run its specific subsystem.
 #
 # Usage:
-#   flume start         → orchestrates this compose file + in-process services
+#   flume start         → orchestrates this compose file
 #   flume destroy       → docker compose --profile managed_elastic down -v
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
   openbao:
     image: hashicorp/vault:1.15
     container_name: flume-openbao
@@ -33,6 +38,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: flume-elasticsearch
@@ -51,6 +57,105 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ── Application Services (Go binary, different entrypoints) ─────────────────
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flume-dashboard
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        required: false
+      openbao:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - ES_API_KEY=${ES_API_KEY:-}
+      - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-}
+      - FLUME_STATIC_ROOT=/app/frontend/dist
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
+      - GATEWAY_URL=http://gateway:8090
+    ports:
+      - "${DASHBOARD_PORT:-8765}:8765"
+    command: ["dashboard"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8765/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flume-gateway
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        required: false
+      openbao:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - ES_API_KEY=${ES_API_KEY:-}
+      - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
+    ports:
+      - "${GATEWAY_PORT:-8090}:8090"
+    command: ["gateway"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - ES_API_KEY=${ES_API_KEY:-}
+      - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
+      - OPENBAO_ADDR=http://openbao:8200
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
+      - GATEWAY_URL=http://gateway:8090
+      - DASHBOARD_URL=http://dashboard:8765
+    command: ["worker"]
+    deploy:
+      replicas: ${FLUME_WORKER_COUNT:-2}
 
 volumes:
   es_data:

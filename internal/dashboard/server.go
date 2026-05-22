@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +80,7 @@ func DefaultConfig() *Config {
 		ESUrl:          esURL,
 		ESApiKey:       envOr("ES_API_KEY", ""),
 		CORSOrigins:    cors,
-		StaticRoot:     "",
+		StaticRoot:     envOr("FLUME_STATIC_ROOT", ""),
 		NativeMode:     envOr("FLUME_NATIVE_MODE", "0") == "1",
 		RateLimitPerMin: envInt("FLUME_RATE_LIMIT", 2000),
 	}
@@ -209,6 +210,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/workflow/agents/status", s.handleWorkflowAgentsStatus)
 	s.mux.HandleFunc("POST /api/workflow/agents/start", s.handleWorkflowAgentsStart)
 	s.mux.HandleFunc("POST /api/workflow/agents/stop", s.handleWorkflowAgentsStop)
+
+	// ─── SPA Static File Serving ─────────────────────────────────────────
+	// In Docker mode, FLUME_STATIC_ROOT points to the pre-built Vue SPA.
+	// Serves static assets and falls back to index.html for client-side routing.
+	if s.cfg.StaticRoot != "" {
+		s.logger.Info("SPA static serving enabled", slog.String("root", s.cfg.StaticRoot))
+		s.mux.Handle("/", s.spaHandler(s.cfg.StaticRoot))
+	}
 }
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
@@ -328,6 +337,29 @@ func envInt(key string, fallback int) int {
 	}
 	return n
 }
+
+// ─── SPA Handler ────────────────────────────────────────────────────────────
+
+// spaHandler serves a Single-Page Application from the filesystem.
+// Static assets are served directly; all other paths receive index.html
+// so the client-side router (React Router) handles navigation.
+func (s *Server) spaHandler(root string) http.Handler {
+	fileServer := http.FileServer(http.Dir(root))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Attempt to serve the file directly (JS, CSS, images, fonts, etc.)
+		path := filepath.Join(root, filepath.Clean(r.URL.Path))
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		// For all other paths, serve index.html (SPA client-side routing)
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+	})
+}
+
 
 func timeNowUnixMilli() int64 {
 	return time.Now().UnixMilli()

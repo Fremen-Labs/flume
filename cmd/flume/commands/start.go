@@ -322,21 +322,32 @@ var StartCmd = &cobra.Command{
 				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
 			}
 
-			// Phase 5: Start application services in-process instead of
-			// building and launching Python Docker containers.
-			// Infrastructure (ES, OpenBao) still runs as containers above.
-			services.SetEnvForServices(fullEnv)
+			// Start application containers (dashboard, gateway, workers).
+			// Workers scale via FLUME_WORKER_COUNT env var → compose deploy.replicas.
+			workerCount := orchestrator.ResolveWorkerCount(WorkersFlag)
+			fullEnv = append(fullEnv,
+				fmt.Sprintf("FLUME_WORKER_COUNT=%d", workerCount),
+			)
 
-			logger := slog.Default()
-			cfg := config.Load(ctx, logger)
-			sup := services.NewSupervisor(cfg, logger)
+			appServices := orchestrator.BuildWorkerServiceNames(workerCount)
+			appArgs := []string{"compose"}
+			if !envCfg.ExternalElastic {
+				appArgs = append(appArgs, "--profile", "managed_elastic")
+			}
+			appArgs = append(appArgs, "up", "-d", "--build", "--wait")
+			appArgs = append(appArgs, appServices...)
 
-			go func() {
-				if err := sup.StartAll(ctx); err != nil {
-					log.Error("Service mesh error", "err", err)
-				}
-			}()
-			log.Info("In-process service mesh started successfully.")
+			appCmd := exec.CommandContext(ctx, "docker", appArgs...)
+			appCmd.Env = fullEnv
+			appCmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+			appCmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+
+			if err := appCmd.Run(); err != nil {
+				combinedOutput := outBuf.String() + "\n" + errBuf.String()
+				log.Error("Application container boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				return err
+			}
+			log.Info("Application containers started successfully.")
 		}
 
 		if err := orchestrator.AwaitOrchestration(); err != nil {
