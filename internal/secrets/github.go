@@ -205,9 +205,7 @@ func (s *GHTokenStore) handleDelete(ctx context.Context, doc *GHMetadataDoc, bod
 
 	// Clear OpenBao secret
 	if s.bao != nil {
-		_ = s.bao.KVPut(ctx, "flume/keys", map[string]interface{}{
-			fmt.Sprintf("FLUME_GH_%s", cid): "",
-		})
+		_ = s.bao.KVDelete(ctx, fmt.Sprintf("flume/github_tokens/%s", cid))
 	}
 
 	s.SaveDocument(ctx, doc)
@@ -271,8 +269,8 @@ func (s *GHTokenStore) handleUpsert(ctx context.Context, doc *GHMetadataDoc, bod
 		if doc.ActiveTokenID == "" && strings.TrimSpace(row.Token) != "" {
 			doc.ActiveTokenID = credID
 		}
-		if tokenIn != "" && tokenIn != "***" {
-			s.safeBaoPut(ctx, fmt.Sprintf("FLUME_GH_%s", credID), tokenIn)
+		if tokenIn != "" && tokenIn != "***" && s.bao != nil {
+			_ = s.bao.KVPut(ctx, fmt.Sprintf("flume/github_tokens/%s", credID), map[string]interface{}{"token": tokenIn})
 		}
 		s.SaveDocument(ctx, doc)
 		return true, ""
@@ -297,16 +295,11 @@ func (s *GHTokenStore) handleUpsert(ctx context.Context, doc *GHMetadataDoc, bod
 	if doc.ActiveTokenID == "" {
 		doc.ActiveTokenID = newID
 	}
-	s.safeBaoPut(ctx, fmt.Sprintf("FLUME_GH_%s", newID), tokenIn)
+	if s.bao != nil {
+		_ = s.bao.KVPut(ctx, fmt.Sprintf("flume/github_tokens/%s", newID), map[string]interface{}{"token": tokenIn})
+	}
 	s.SaveDocument(ctx, doc)
 	return true, ""
-}
-
-func (s *GHTokenStore) safeBaoPut(ctx context.Context, key, value string) {
-	if s.bao == nil {
-		return
-	}
-	_ = s.bao.KVPut(ctx, "flume/keys", map[string]interface{}{key: value})
 }
 
 func ghLabelTaken(tokens []GHCredential, label, excludeID string) bool {

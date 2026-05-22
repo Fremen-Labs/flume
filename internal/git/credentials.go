@@ -6,12 +6,16 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/Fremen-Labs/flume/internal/config"
+	"github.com/Fremen-Labs/flume/internal/secrets"
 )
 
 // ─── Provider Detection ─────────────────────────────────────────────────────
@@ -103,8 +107,39 @@ const delegatedSentinel = "OPENBAO_DELEGATED"
 // Priority: OpenBao KV → environment variable fallback.
 // Derived from Python: _resolve_token().
 func resolveToken(repoType string) string {
+	ctx := context.Background()
+	logger := slog.Default()
+
+	var cfg *config.Config
+	// Recover from panic if config.Get() hasn't been initialized (e.g. in tests)
+	defer func() {
+		_ = recover()
+	}()
+	cfg = config.Get()
+
+	var esStore *secrets.ESStore
+	var baoClient *secrets.OpenBaoClient
+	if cfg != nil {
+		if cfg.ESURL != "" {
+			os.Setenv("ES_URL", cfg.ESURL)
+		}
+		if cfg.ESAPIKey != "" {
+			os.Setenv("ES_API_KEY", cfg.ESAPIKey)
+		}
+		esStore = secrets.NewESStore(logger)
+		if cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
+			baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, logger)
+		}
+	}
+
 	if repoType == "ado" {
-		// TODO(Phase 4): OpenBao KV lookup via internal/secrets
+		if esStore != nil {
+			store := secrets.NewADOTokenStore(esStore, baoClient, logger)
+			token := store.GetActiveTokenPlain(ctx)
+			if token != "" {
+				return token
+			}
+		}
 		token := envOr("ADO_TOKEN", envOr("ADO_PERSONAL_ACCESS_TOKEN", ""))
 		if strings.Contains(token, delegatedSentinel) {
 			return ""
@@ -113,7 +148,13 @@ func resolveToken(repoType string) string {
 	}
 
 	if repoType == "github" {
-		// TODO(Phase 4): OpenBao KV lookup via internal/secrets
+		if esStore != nil {
+			store := secrets.NewGHTokenStore(esStore, baoClient, logger)
+			token := store.GetActiveTokenPlain(ctx)
+			if token != "" {
+				return token
+			}
+		}
 		token := envOr("GH_TOKEN", envOr("GITHUB_TOKEN", ""))
 		if strings.Contains(token, delegatedSentinel) {
 			return ""

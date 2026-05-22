@@ -192,7 +192,7 @@ function WorkerRadarCard({ worker, isActive, i, cfg, form, saveState, saveMsg, u
                         <Server className="w-3.5 h-3.5" /> <span className="capitalize">{worker.llm_provider}</span>
                       </span>
                       <span className="text-muted-foreground flex items-center gap-1.5 truncate max-w-[120px]">
-                        <Monitor className="w-3.5 h-3.5" /> {worker.execution_host.split('.')[0]}
+                        <Monitor className="w-3.5 h-3.5" /> {(worker.execution_host || '').split('.')[0]}
                       </span>
                     </div>
                     {cfg && form && (

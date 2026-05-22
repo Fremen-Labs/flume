@@ -418,7 +418,7 @@ func (c *Client) Post(ctx context.Context, path string, body interface{}) error 
 // (e.g., the Go gateway, Vault, Exo topology).
 
 // HTTPGet performs a GET request to an arbitrary URL and returns decoded JSON.
-func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{}, error) {
+func (c *Client) HTTPGet(ctx context.Context, url string) (interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http get: build failed: %w", err)
@@ -430,7 +430,7 @@ func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http get decode failed: %w", err)
 	}
@@ -438,7 +438,7 @@ func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{
 }
 
 // HTTPPost performs a POST request to an arbitrary URL with a JSON body.
-func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (interface{}, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -460,7 +460,7 @@ func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (ma
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http post decode failed: %w", err)
 	}
@@ -468,7 +468,7 @@ func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (ma
 }
 
 // HTTPPut performs a PUT request to an arbitrary URL with a JSON body.
-func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (interface{}, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -490,7 +490,7 @@ func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http put decode failed: %w", err)
 	}
@@ -498,7 +498,7 @@ func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map
 }
 
 // HTTPDelete performs a DELETE request to an arbitrary URL.
-func (c *Client) HTTPDelete(ctx context.Context, url string) (map[string]interface{}, error) {
+func (c *Client) HTTPDelete(ctx context.Context, url string) (interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http delete: build failed: %w", err)
@@ -510,7 +510,7 @@ func (c *Client) HTTPDelete(ctx context.Context, url string) (map[string]interfa
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http delete decode failed: %w", err)
 	}

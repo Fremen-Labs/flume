@@ -9,6 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/Fremen-Labs/flume/internal/config"
+	"github.com/Fremen-Labs/flume/internal/secrets"
 )
 
 const (
@@ -200,14 +203,30 @@ func (s *Server) handleSettingsLLMOAuthRefresh(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleSettingsReposGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	src, err := s.es.GetDoc(ctx, repoSettingsIndex, "singleton")
-	if err != nil || src == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{})
-		return
+	logger := s.logger
+	cfg := config.Get()
+	var baoClient *secrets.OpenBaoClient
+	if cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
+		baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, logger)
 	}
-	var config map[string]interface{}
-	_ = unmarshalRaw(src, &config)
-	writeJSON(w, http.StatusOK, config)
+	esStore := secrets.NewESStore(logger)
+	ghStore := secrets.NewGHTokenStore(esStore, baoClient, logger)
+	adoStore := secrets.NewADOTokenStore(esStore, baoClient, logger)
+
+	ghTokens := ghStore.ListPublicTokens(ctx)
+	activeGHID := ghStore.GetActiveTokenID(ctx)
+	adoTokens := adoStore.ListPublicTokens(ctx)
+	activeADOID := adoStore.GetActiveTokenID(ctx)
+
+	resp := map[string]interface{}{
+		"settings": map[string]interface{}{
+			"githubTokens":        ghTokens,
+			"activeGithubTokenId": activeGHID,
+			"adoCredentials":      adoTokens,
+			"activeAdoCredentialId": activeADOID,
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSettingsReposUpdate(w http.ResponseWriter, r *http.Request) {
@@ -217,14 +236,38 @@ func (s *Server) handleSettingsReposUpdate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	body["updated_at"] = nowISO()
-	if err := s.es.Post(ctx, repoSettingsIndex+"/_update/singleton", map[string]interface{}{
-		"doc": body, "doc_as_upsert": true,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update repo settings")
+
+	logger := s.logger
+	cfg := config.Get()
+	var baoClient *secrets.OpenBaoClient
+	if cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
+		baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, logger)
+	}
+	esStore := secrets.NewESStore(logger)
+
+	if ghActionPayload, ok := body["githubTokenAction"].(map[string]interface{}); ok {
+		ghStore := secrets.NewGHTokenStore(esStore, baoClient, logger)
+		ok, errStr := ghStore.ApplyAction(ctx, ghActionPayload)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errStr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+
+	if adoActionPayload, ok := body["adoTokenAction"].(map[string]interface{}); ok {
+		adoStore := secrets.NewADOTokenStore(esStore, baoClient, logger)
+		ok, errStr := adoStore.ApplyAction(ctx, adoActionPayload)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errStr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "no recognized token action found in payload")
 }
 
 // ─── GET/PUT /api/settings/system ───────────────────────────────────────────
@@ -263,26 +306,109 @@ func (s *Server) handleSettingsSystemUpdate(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleSettingsAgentModelsGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	src, err := s.es.GetDoc(ctx, agentModelsIndex, "singleton")
-	if err != nil || src == nil {
-		// Return a well-structured default so the frontend doesn't crash
-		// trying to iterate over a missing roleIds field.
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"roleIds":  []string{},
-			"effective": map[string]interface{}{},
-		})
-		return
-	}
-	var config map[string]interface{}
-	_ = unmarshalRaw(src, &config)
 
-	// Ensure roleIds is always present (defensive).
-	if _, ok := config["roleIds"]; !ok {
-		config["roleIds"] = []string{}
+	defaultRoleIds := []string{"pm", "implementer", "reviewer", "tester"}
+	defaultLlmModel := "llama3.2"
+	defaultExecutionHost := "localhost"
+	settingsProvider := "ollama"
+
+	availableProviders := []interface{}{
+		map[string]interface{}{
+			"providerId": "ollama",
+			"label":      "Ollama (local)",
+			"configured": true,
+			"isPrimary":  true,
+			"models": []interface{}{
+				map[string]interface{}{"id": "llama3.2", "name": "Llama 3.2"},
+				map[string]interface{}{"id": "llama3", "name": "Llama 3"},
+				map[string]interface{}{"id": "mistral", "name": "Mistral"},
+				map[string]interface{}{"id": "codegemma", "name": "CodeGemma"},
+			},
+			"allowCustomModelId": true,
+			"hint":               "Uses your local Ollama instance (LLM_BASE_URL / default :11434).",
+		},
 	}
-	if _, ok := config["effective"]; !ok {
-		config["effective"] = map[string]interface{}{}
+
+	availableCredentials := []interface{}{
+		map[string]interface{}{
+			"credentialId": "__ollama__",
+			"label":        "Ollama (Local Default)",
+			"shortLabel":   "Ollama",
+			"providerId":   "ollama",
+			"configured":   true,
+			"models": []interface{}{
+				map[string]interface{}{"id": "llama3.2", "name": "Llama 3.2"},
+				map[string]interface{}{"id": "llama3", "name": "Llama 3"},
+				map[string]interface{}{"id": "mistral", "name": "Mistral"},
+				map[string]interface{}{"id": "codegemma", "name": "CodeGemma"},
+			},
+			"allowCustomModelId": true,
+		},
+		map[string]interface{}{
+			"credentialId": "__settings_default__",
+			"label":        "Global Settings Default",
+			"shortLabel":   "Global Default",
+			"providerId":   "ollama",
+			"configured":   true,
+			"models": []interface{}{
+				map[string]interface{}{"id": "llama3.2", "name": "Llama 3.2"},
+			},
+			"allowCustomModelId": true,
+		},
 	}
-	writeJSON(w, http.StatusOK, config)
+
+	var rolesMap map[string]interface{}
+	if err == nil && src != nil {
+		var doc map[string]interface{}
+		if err := json.Unmarshal(src, &doc); err == nil {
+			if rMap, ok := doc["roles"].(map[string]interface{}); ok {
+				rolesMap = rMap
+			}
+		}
+	}
+	if rolesMap == nil {
+		rolesMap = map[string]interface{}{}
+	}
+
+	effectiveMap := map[string]interface{}{}
+	for _, role := range defaultRoleIds {
+		roleConf := map[string]interface{}{
+			"provider":      settingsProvider,
+			"model":         defaultLlmModel,
+			"executionHost": defaultExecutionHost,
+			"credentialId":  "__settings_default__",
+		}
+		if rawSpec, exists := rolesMap[role]; exists {
+			if strSpec, ok := rawSpec.(string); ok {
+				roleConf["model"] = strSpec
+			} else if mapSpec, ok := rawSpec.(map[string]interface{}); ok {
+				if p, exists := mapSpec["provider"].(string); exists && p != "" {
+					roleConf["provider"] = p
+				}
+				if m, exists := mapSpec["model"].(string); exists && m != "" {
+					roleConf["model"] = m
+				}
+				if h, exists := mapSpec["executionHost"].(string); exists && h != "" {
+					roleConf["executionHost"] = h
+				}
+				if c, exists := mapSpec["credentialId"].(string); exists && c != "" {
+					roleConf["credentialId"] = c
+				}
+			}
+		}
+		effectiveMap[role] = roleConf
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"defaultLlmModel":      defaultLlmModel,
+		"defaultExecutionHost": defaultExecutionHost,
+		"settingsProvider":     settingsProvider,
+		"roles":                rolesMap,
+		"effective":            effectiveMap,
+		"availableProviders":   availableProviders,
+		"availableCredentials": availableCredentials,
+		"roleIds":              defaultRoleIds,
+	})
 }
 
 func (s *Server) handleSettingsAgentModelsUpdate(w http.ResponseWriter, r *http.Request) {

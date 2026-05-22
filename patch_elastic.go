@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"net/http"
-	"os"
+	"time"
 )
 
 func getInsecureClient() *http.Client {
