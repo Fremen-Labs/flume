@@ -153,7 +153,7 @@ services:
       - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
       - GATEWAY_URL=http://gateway:8090
       - DASHBOARD_URL=http://dashboard:8765
-    command: ["worker"]
+    command: ["worker-manager"]
     deploy:
       replicas: ${FLUME_WORKER_COUNT:-2}
 
