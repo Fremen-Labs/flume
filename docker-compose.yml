@@ -72,7 +72,7 @@ services:
       openbao:
         condition: service_healthy
     environment:
-      - ES_URL=http://elasticsearch:9200
+      - ES_URL=https://elasticsearch:9200
       - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
       - OPENBAO_ADDR=http://openbao:8200
@@ -108,7 +108,7 @@ services:
       openbao:
         condition: service_healthy
     environment:
-      - ES_URL=http://elasticsearch:9200
+      - ES_URL=https://elasticsearch:9200
       - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
       - OPENBAO_ADDR=http://openbao:8200
@@ -139,7 +139,7 @@ services:
       gateway:
         condition: service_healthy
     environment:
-      - ES_URL=http://elasticsearch:9200
+      - ES_URL=https://elasticsearch:9200
       - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
       - OPENBAO_ADDR=http://openbao:8200

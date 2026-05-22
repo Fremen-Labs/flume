@@ -14,11 +14,13 @@ package es
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,20 +30,48 @@ import (
 type Client struct {
 	baseURL    string
 	apiKey     string
+	password   string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
 
 // New creates a new Elasticsearch client.
+// When the baseURL uses HTTPS, TLS certificate verification is disabled
+// to support ES 8.x's auto-generated self-signed certificates inside Docker.
 func New(baseURL, apiKey string, logger *slog.Logger) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.HasPrefix(baseURL, "https://") {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		logger.Info("ES client: TLS skip-verify enabled for self-signed certs")
+	}
+
+	// Check for password-based Basic Auth (ES 8.x default when no API key exists).
+	password := ""
+	if apiKey == "" {
+		password = envOrBlank("FLUME_ELASTIC_PASSWORD")
+		if password != "" {
+			logger.Info("ES client: using Basic Auth (elastic:***) — no API key provided")
+		}
+	}
+
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		apiKey:   apiKey,
+		password: password,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		logger: logger,
 	}
+}
+
+func envOrBlank(key string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return ""
+	}
+	return v
 }
 
 // do executes an HTTP request against Elasticsearch with auth headers.
@@ -54,6 +84,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+c.apiKey)
+	} else if c.password != "" {
+		req.SetBasicAuth("elastic", c.password)
 	}
 	return c.httpClient.Do(req)
 }

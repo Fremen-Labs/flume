@@ -15,6 +15,8 @@ import projBg2 from '@/assets/projects/proj-bg-2.jpg';
 import projBg3 from '@/assets/projects/proj-bg-3.jpg';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.ProjectsPage');
 
 const projectBgs = [projBg1, projBg2, projBg3];
 
@@ -499,9 +501,6 @@ export default function ProjectsPage() {
               />
               <p className="text-[10px] text-muted-foreground/50">
                 Paste an HTTPS clone URL. Credentials are resolved from your stored tokens.
-
-import { createLogger } from '@/utils/logger';
-const log = createLogger('pages.ProjectsPage');
               </p>
             </div>
 

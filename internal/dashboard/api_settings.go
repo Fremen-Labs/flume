@@ -264,11 +264,24 @@ func (s *Server) handleSettingsAgentModelsGet(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 	src, err := s.es.GetDoc(ctx, agentModelsIndex, "singleton")
 	if err != nil || src == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{})
+		// Return a well-structured default so the frontend doesn't crash
+		// trying to iterate over a missing roleIds field.
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"roleIds":  []string{},
+			"effective": map[string]interface{}{},
+		})
 		return
 	}
 	var config map[string]interface{}
 	_ = unmarshalRaw(src, &config)
+
+	// Ensure roleIds is always present (defensive).
+	if _, ok := config["roleIds"]; !ok {
+		config["roleIds"] = []string{}
+	}
+	if _, ok := config["effective"]; !ok {
+		config["effective"] = map[string]interface{}{}
+	}
 	writeJSON(w, http.StatusOK, config)
 }
 

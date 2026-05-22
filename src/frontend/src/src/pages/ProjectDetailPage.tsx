@@ -26,6 +26,8 @@ import {
 } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.ProjectDetailPage');
 
 function timeAgo(ts?: string) {
   if (!ts) return '';
@@ -864,9 +866,6 @@ export default function ProjectDetailPage() {
             <DialogTitle>Delete project?</DialogTitle>
             <DialogDescription>
               This will remove the project directory from the workspace and delete related records from Elasticsearch (best-effort).
-
-import { createLogger } from '@/utils/logger';
-const log = createLogger('pages.ProjectDetailPage');
             </DialogDescription>
           </DialogHeader>
           {deleteProjectError && (
