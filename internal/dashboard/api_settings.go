@@ -5,10 +5,16 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/secrets"
@@ -125,6 +131,7 @@ func (s *Server) handleSettingsLLMUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.triggerSettingsReload()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 }
 
@@ -186,16 +193,113 @@ func (s *Server) handleSettingsLLMCredentialsPost(w http.ResponseWriter, r *http
 		return
 	}
 
+	s.triggerSettingsReload()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 }
 
 // ─── POST /api/settings/llm/oauth/refresh ───────────────────────────────────
 
 func (s *Server) handleSettingsLLMOAuthRefresh(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement OpenAI OAuth token refresh (Phase 4 — secrets module).
+	ctx := r.Context()
+	logger := s.logger
+	cfg := config.Get()
+	var baoClient *secrets.OpenBaoClient
+	if cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
+		baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, logger)
+	}
+
+	oauthStore := secrets.NewOAuthStore(baoClient, logger)
+	state, _ := oauthStore.LoadState(ctx)
+	if state == nil || state.RefreshToken == "" {
+		writeError(w, http.StatusBadRequest, "no valid OAuth state or refresh token found")
+		return
+	}
+
+	clientID := state.ClientID
+	if clientID == "" {
+		clientID = os.Getenv("OPENAI_CLIENT_ID")
+	}
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "missing client_id in OAuth state or OPENAI_CLIENT_ID env var")
+		return
+	}
+
+	tokenURL := os.Getenv("OPENAI_OAUTH_TOKEN_URL")
+	if tokenURL == "" {
+		tokenURL = "https://auth.openai.com/oauth/token"
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", state.RefreshToken)
+	form.Set("client_id", clientID)
+	if scope := os.Getenv("OPENAI_OAUTH_SCOPE"); scope != "" {
+		form.Set("scope", scope)
+	}
+
+	reqBody := strings.NewReader(form.Encode())
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", tokenURL, reqBody)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create refresh request: %v", err))
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("OAuth refresh HTTP request failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyStr := string(bodyBytes)
+		if len(bodyStr) > 500 {
+			bodyStr = bodyStr[:500]
+		}
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("OAuth refresh returned status %d: %s", resp.StatusCode, bodyStr))
+		return
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to decode OAuth token response: %v", err))
+		return
+	}
+
+	if tokenResp.AccessToken == "" {
+		writeError(w, http.StatusBadRequest, "OAuth response did not contain access_token")
+		return
+	}
+
+	state.AccessToken = tokenResp.AccessToken
+	state.Access = tokenResp.AccessToken
+	if tokenResp.RefreshToken != "" {
+		state.RefreshToken = tokenResp.RefreshToken
+		state.Refresh = tokenResp.RefreshToken
+	}
+	if tokenResp.ExpiresIn > 0 {
+		state.ExpiresIn = tokenResp.ExpiresIn
+		state.Expires = time.Now().UnixMilli() + int64(tokenResp.ExpiresIn*1000)
+	}
+
+	savedTo, err := oauthStore.SaveState(ctx, state)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save refreshed OAuth state: %v", err))
+		return
+	}
+
+	s.logger.Info("OpenAI OAuth token refreshed successfully", slog.String("saved_to", savedTo))
+	s.triggerSettingsReload()
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": false,
-		"message": "OAuth refresh not yet implemented in Go dashboard",
+		"success":    true,
+		"expires_in": tokenResp.ExpiresIn,
 	})
 }
 
@@ -252,6 +356,7 @@ func (s *Server) handleSettingsReposUpdate(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, errStr)
 			return
 		}
+		s.triggerSettingsReload()
 		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 		return
 	}
@@ -263,6 +368,7 @@ func (s *Server) handleSettingsReposUpdate(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, errStr)
 			return
 		}
+		s.triggerSettingsReload()
 		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 		return
 	}
@@ -298,6 +404,7 @@ func (s *Server) handleSettingsSystemUpdate(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to update system settings")
 		return
 	}
+	s.triggerSettingsReload()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 }
 
@@ -425,6 +532,7 @@ func (s *Server) handleSettingsAgentModelsUpdate(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to update agent model settings")
 		return
 	}
+	s.triggerSettingsReload()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
 }
 
@@ -433,10 +541,22 @@ func (s *Server) handleSettingsAgentModelsUpdate(w http.ResponseWriter, r *http.
 func (s *Server) handleSettingsRestartServices(w http.ResponseWriter, r *http.Request) {
 	// TODO: Wire to process manager restart logic (Phase 3).
 	s.logger.Info("services restart requested")
+	s.triggerSettingsReload()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"message": "restart signal sent",
 	})
+}
+
+func (s *Server) triggerSettingsReload() {
+	s.logger.Info("triggering settings reload")
+	config.Reload(context.Background(), s.logger)
+	s.mu.RLock()
+	cb := s.onSettingsReload
+	s.mu.RUnlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 // ─── Unmarshal helper ───────────────────────────────────────────────────────

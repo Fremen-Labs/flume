@@ -15,8 +15,9 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "flume",
-	Short: "Autonomous Engineering Frontier - V3 Lipgloss Edge",
+	Use:     "flume",
+	Short:   "Autonomous Engineering Frontier - V3 Lipgloss Edge",
+	Version: "3.0.0",
 }
 
 func init() {

@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"bytes"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -16,8 +15,7 @@ func TestCLICompilation(t *testing.T) {
 	binaryPath := filepath.Join(tempDir, "flume")
 
 	// 2. Gate: Attempt compilation
-	// We run `go build` targeting the root main.go
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, "../../")
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, "../../cmd/flume")
 	var buildErr bytes.Buffer
 	buildCmd.Stderr = &buildErr
 

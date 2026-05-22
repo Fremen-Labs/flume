@@ -677,10 +677,10 @@ func (s *Server) handleAutonomySweep(w http.ResponseWriter, r *http.Request) {
 	sweepName := r.PathValue("sweep_name")
 
 	validSweeps := map[string]bool{
-		"parent-revival":     true,
-		"stuck-worker":      true,
-		"plan-progress":     true,
-		"orphan-gc":         true,
+		"parent-revival": true,
+		"stuck-worker":   true,
+		"plan-progress":  true,
+		"orphan-gc":      true,
 	}
 
 	if !validSweeps[sweepName] {
@@ -688,8 +688,22 @@ func (s *Server) handleAutonomySweep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Wire to actual sweep goroutine triggers
 	s.logger.Info("autonomy sweep triggered", slog.String("sweep", sweepName))
+
+	s.mu.RLock()
+	cb := s.onSweepTrigger
+	s.mu.RUnlock()
+
+	var err error
+	if cb != nil {
+		err = cb(sweepName)
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"sweep":      sweepName,
@@ -712,6 +726,21 @@ func (s *Server) handleAutoUnblockStatus(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAutoUnblockSweep(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("auto-unblock sweep triggered")
+
+	s.mu.RLock()
+	cb := s.onSweepTrigger
+	s.mu.RUnlock()
+
+	var err error
+	if cb != nil {
+		err = cb("auto-unblock")
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"message":    "sweep triggered",

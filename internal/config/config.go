@@ -257,6 +257,40 @@ func Get() *Config {
 	return globalConfig
 }
 
+// Reload re-reads configuration from Elasticsearch and environment and updates the global config in-place.
+func (c *Config) Reload(ctx context.Context, logger *slog.Logger) {
+	fresh := DefaultConfig()
+	fresh.OverlayFromES(ctx, logger)
+	fresh.OverlayFromEnv()
+
+	c.LLMProvider = fresh.LLMProvider
+	c.LLMModel = fresh.LLMModel
+	c.LLMBaseURL = fresh.LLMBaseURL
+	c.LLMAPIKey = fresh.LLMAPIKey
+	c.GitUserName = fresh.GitUserName
+	c.GitUserEmail = fresh.GitUserEmail
+	c.ESURL = fresh.ESURL
+	c.ESAPIKey = fresh.ESAPIKey
+	c.ESVerifyTLS = fresh.ESVerifyTLS
+	c.OpenBaoAddr = fresh.OpenBaoAddr
+	c.OpenBaoToken = fresh.OpenBaoToken
+	c.DashboardHost = fresh.DashboardHost
+	c.DashboardPort = fresh.DashboardPort
+	c.WorkerManagerPollSeconds = fresh.WorkerManagerPollSeconds
+	c.WorkersPerRole = fresh.WorkersPerRole
+	c.NativeMode = fresh.NativeMode
+
+	logger.Info("Configuration reloaded in-place from ES and Environment")
+}
+
+// Reload re-reads global config. Returns the reloaded global config.
+func Reload(ctx context.Context, logger *slog.Logger) *Config {
+	if globalConfig != nil {
+		globalConfig.Reload(ctx, logger)
+	}
+	return globalConfig
+}
+
 // RewriteLoopbackForDocker replaces 127.0.0.1/localhost with
 // host.docker.internal when running inside Docker.
 // Mirrors gateway.rewriteLoopbackForDocker and

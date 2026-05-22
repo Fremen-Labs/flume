@@ -30,6 +30,10 @@ type OAuthState struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresIn    int    `json:"expires_in,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	Access       string `json:"access,omitempty"`
+	Refresh      string `json:"refresh,omitempty"`
+	Expires      int64  `json:"expires,omitempty"`
 }
 
 // OAuthStore manages OpenAI OAuth state via env + OpenBao.
@@ -53,8 +57,16 @@ func (s *OAuthStore) LoadState(ctx context.Context) (*OAuthState, string) {
 	raw := strings.TrimSpace(os.Getenv(EnvOAuthStateJSON))
 	if raw != "" {
 		var state OAuthState
-		if err := json.Unmarshal([]byte(raw), &state); err == nil && state.AccessToken != "" {
-			return &state, SourceEnv
+		if err := json.Unmarshal([]byte(raw), &state); err == nil {
+			if state.AccessToken == "" && state.Access != "" {
+				state.AccessToken = state.Access
+			}
+			if state.RefreshToken == "" && state.Refresh != "" {
+				state.RefreshToken = state.Refresh
+			}
+			if state.AccessToken != "" {
+				return &state, SourceEnv
+			}
 		}
 		s.logger.Error("failed parsing OPENAI_OAUTH_STATE_JSON from env",
 			slog.String("error", "invalid JSON or missing access_token"))
@@ -68,8 +80,16 @@ func (s *OAuthStore) LoadState(ctx context.Context) (*OAuthState, string) {
 			baoRaw = strings.TrimSpace(baoRaw)
 			if baoRaw != "" {
 				var state OAuthState
-				if err := json.Unmarshal([]byte(baoRaw), &state); err == nil && state.AccessToken != "" {
-					return &state, SourceOpenBao
+				if err := json.Unmarshal([]byte(baoRaw), &state); err == nil {
+					if state.AccessToken == "" && state.Access != "" {
+						state.AccessToken = state.Access
+					}
+					if state.RefreshToken == "" && state.Refresh != "" {
+						state.RefreshToken = state.Refresh
+					}
+					if state.AccessToken != "" {
+						return &state, SourceOpenBao
+					}
 				}
 				s.logger.Warn("failed parsing OpenAI OAuth state from OpenBao",
 					slog.String("error", "invalid JSON or missing access_token"))

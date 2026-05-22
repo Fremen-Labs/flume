@@ -21,22 +21,40 @@ import (
 	"time"
 	"unicode/utf8"
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/pkg/types"
 )
 
 // Server is the Dashboard API HTTP server.
 // Derived from Python: server.py (FastAPI app instance + lifespan).
 type Server struct {
-	mux            *http.ServeMux
-	httpServer     *http.Server
-	es             *es.Client
-	logger         *slog.Logger
-	cfg            *Config
-	logLevel       *slog.LevelVar
-	startTime      time.Time
-	autonomyStatus map[string]interface{}
-	workerStatus   map[string]interface{}
-	mu             sync.RWMutex
+	mux              *http.ServeMux
+	httpServer       *http.Server
+	es               *es.Client
+	llmClient        *llm.Client
+	logger           *slog.Logger
+	cfg              *Config
+	logLevel         *slog.LevelVar
+	startTime        time.Time
+	autonomyStatus   map[string]interface{}
+	workerStatus     map[string]interface{}
+	onSweepTrigger   func(sweepName string) error
+	onSettingsReload func()
+	mu               sync.RWMutex
+}
+
+// RegisterSweepTrigger registers a callback for manual sweep triggering.
+func (s *Server) RegisterSweepTrigger(cb func(sweepName string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSweepTrigger = cb
+}
+
+// RegisterSettingsReload registers a callback for reloading settings and environment variables.
+func (s *Server) RegisterSettingsReload(cb func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSettingsReload = cb
 }
 
 // Config holds dashboard server configuration.
@@ -95,6 +113,7 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 	s := &Server{
 		mux:       http.NewServeMux(),
 		es:        esClient,
+		llmClient: llm.New(logger),
 		logger:    logger,
 		cfg:       cfg,
 		startTime: time.Now(),

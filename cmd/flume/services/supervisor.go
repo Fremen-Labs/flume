@@ -192,6 +192,29 @@ func (s *Supervisor) startDashboard(ctx context.Context) error {
 
 	srv := dashboard.New(cfg, s.logger.With(slog.String("component", "dashboard")))
 
+	srv.RegisterSettingsReload(func() {
+		s.mu.Lock()
+		mgr := s.workerMgr
+		s.mu.Unlock()
+		if mgr != nil {
+			s.logger.Info("Supervisor: waking worker manager due to settings reload")
+			mgr.Wake()
+		}
+	})
+
+	srv.RegisterSweepTrigger(func(sweepName string) error {
+		s.mu.Lock()
+		mgr := s.workerMgr
+		s.mu.Unlock()
+		if mgr != nil {
+			s.logger.Info("Supervisor: triggering manual sweep on worker manager", slog.String("sweep", sweepName))
+			sweepCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			return mgr.TriggerSweep(sweepCtx, sweepName)
+		}
+		return fmt.Errorf("worker manager not running or unavailable")
+	})
+
 	s.mu.Lock()
 	s.dashServer = srv
 	s.mu.Unlock()
