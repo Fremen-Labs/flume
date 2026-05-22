@@ -16,6 +16,8 @@ import type {
   RoutingMode, RoutingPolicy, FrontierModelWeight,
   FrontierModelsResponse, FrontierProviderCatalog,
 } from '@/types';
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.NodesOverview');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types (Node Mesh — preserved)
@@ -796,8 +798,6 @@ export default function NodesOverview() {
                 onDelete={(id) => {
                   if (window.confirm(`Remove node "${id}" from the mesh?`)) {
 
-import { createLogger } from '@/utils/logger';
-const log = createLogger('pages.NodesOverview');
                     deleteMut.mutate(id);
                   }
                 }}

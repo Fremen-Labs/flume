@@ -39,6 +39,8 @@ import type {
   GithubTokenActionPayload,
   AdoTokenActionPayload,
 } from '@/types';
+import { createLogger } from '@/utils/logger';
+const log = createLogger('pages.SettingsPage');
 
 interface SystemSettingsPayload {
   es_url: string;
@@ -88,9 +90,6 @@ async function parseJsonBody<T>(res: Response): Promise<T> {
     log.warn('catch', 'Silent catch block executed');
     throw new Error(
       `Invalid JSON from server (HTTP ${res.status}): ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`,
-
-import { createLogger } from '@/utils/logger';
-const log = createLogger('pages.SettingsPage');
     );
   }
 }
