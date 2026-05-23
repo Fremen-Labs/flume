@@ -156,6 +156,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/system-state", s.handleSystemState)
 	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
 	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /ws/telemetry", s.handleWebSocketTelemetry)
 	s.mux.HandleFunc("GET /api/exo-status", s.handleExoStatus)
 	s.mux.HandleFunc("GET /api/autonomy/status", s.handleAutonomyStatus)
 	s.mux.HandleFunc("POST /api/autonomy/sweep/{sweep_name}", s.handleAutonomySweep)
@@ -267,6 +268,12 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 			reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
 		w.Header().Set("X-Request-ID", reqID)
+
+		// Bypass statusWriter wrapping for WebSockets to allow http.Hijacker
+		if r.Header.Get("Upgrade") == "websocket" || strings.HasPrefix(r.URL.Path, "/ws") {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		// Wrap response writer to capture status
 		rw := &statusWriter{ResponseWriter: w, status: 200}

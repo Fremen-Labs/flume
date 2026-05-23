@@ -6,7 +6,10 @@
 package dashboard
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +18,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type LastCommit struct {
@@ -755,4 +760,337 @@ func orSliceIface(s []interface{}) []interface{} {
 		return []interface{}{}
 	}
 	return s
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+type GatewayNodesResponse struct {
+	Nodes []struct {
+		ID     string `json:"id"`
+		Health struct {
+			Status       string   `json:"status"`
+			LatencyMS    int      `json:"latency_ms"`
+			CurrentLoad  float64  `json:"current_load"`
+			LoadedModels []string `json:"loaded_models"`
+		} `json:"health"`
+	} `json:"nodes"`
+}
+
+type connState struct {
+	escalations int
+	throttled   int
+}
+
+type TelemetryEvent struct {
+	ID    string `json:"id"`
+	Time  string `json:"time"`
+	Level string `json:"level"`
+	Msg   string `json:"msg"`
+}
+
+
+
+func (s *Server) loadWorkers(ctx context.Context) ([]map[string]interface{}, error) {
+	var workers []map[string]interface{}
+	workersRes, err := s.es.SearchRaw(ctx, "agent-system-workers", map[string]interface{}{
+		"size": 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	hits, _ := workersRes["hits"].(map[string]interface{})
+	hitsArr, _ := hits["hits"].([]interface{})
+	for _, h := range hitsArr {
+		hit, _ := h.(map[string]interface{})
+		src, _ := hit["_source"].(map[string]interface{})
+		if src != nil {
+			if nodeWorkers, ok := src["workers"].([]interface{}); ok {
+				for _, nw := range nodeWorkers {
+					if wMap, ok := nw.(map[string]interface{}); ok {
+						workers = append(workers, wMap)
+					}
+				}
+			}
+		}
+	}
+	return workers, nil
+}
+
+func (s *Server) gatherTelemetryEvents(ctx context.Context, state *connState) []TelemetryEvent {
+	var events []TelemetryEvent
+	nowStr := time.Now().Format("15:04:05")
+
+	// --- 1. Gateway Prometheus metrics ---
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://localhost:8090"
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/metrics", nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var bodyBytes []byte
+				if buf, err := io.ReadAll(resp.Body); err == nil {
+					bodyBytes = buf
+				}
+
+				var goroutines int
+				var allocMB float64
+				var escalations int
+				var blocked int
+				var throttled int
+				var activeModels []string
+
+				for _, line := range strings.Split(string(bodyBytes), "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" || strings.HasPrefix(line, "#") {
+						continue
+					}
+					parts := strings.SplitN(line, " ", 2)
+					if len(parts) != 2 {
+						continue
+					}
+					k, v := parts[0], parts[1]
+					var fVal float64
+					fmt.Sscanf(v, "%f", &fVal)
+
+					if k == "go_goroutines" {
+						goroutines = int(fVal)
+					} else if k == "go_memstats_alloc_bytes" {
+						allocMB = fVal / 1048576.0
+					} else if k == "flume_escalation_total" {
+						escalations = int(fVal)
+					} else if k == "flume_tasks_blocked_total" {
+						blocked = int(fVal)
+					} else if k == "flume_concurrency_throttled_total" {
+						throttled = int(fVal)
+					} else if strings.HasPrefix(k, "flume_active_models{") && int(fVal) == 1 {
+						idx := strings.Index(k, `model="`)
+						if idx != -1 {
+							sub := k[idx+7:]
+							endIdx := strings.Index(sub, `"`)
+							if endIdx != -1 {
+								activeModels = append(activeModels, sub[:endIdx])
+							}
+						}
+					}
+				}
+
+				events = append(events, TelemetryEvent{
+					ID:    randomHex(16),
+					Time:  nowStr,
+					Level: "INFO",
+					Msg:   fmt.Sprintf("Gateway alive — %d goroutines, %.1fMB heap", goroutines, allocMB),
+				})
+
+				if len(activeModels) > 0 {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "INFO",
+						Msg:   fmt.Sprintf("Active models: %s", strings.Join(activeModels, ", ")),
+					})
+				}
+
+				prevEsc := state.escalations
+				if escalations > prevEsc {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Escalation events: %d (+%d)", escalations, escalations-prevEsc),
+					})
+				}
+				state.escalations = escalations
+
+				if blocked > 0 {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Blocked tasks in queue: %d", blocked),
+					})
+				}
+
+				if throttled > state.throttled {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Concurrency throttle events: %d", throttled),
+					})
+				}
+				state.throttled = throttled
+			}
+		} else {
+			s.logger.Warn("gateway metrics connection failed", slog.String("error", err.Error()))
+			events = append(events, TelemetryEvent{
+				ID:    randomHex(16),
+				Time:  nowStr,
+				Level: "WARN",
+				Msg:   "Gateway metrics unreachable",
+			})
+		}
+	}
+
+	// --- 2. Node mesh health from gateway ---
+	reqNodes, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/api/nodes", nil)
+	if err == nil {
+		respNodes, err := client.Do(reqNodes)
+		if err == nil {
+			defer respNodes.Body.Close()
+			if respNodes.StatusCode == 200 {
+				var nodesResp GatewayNodesResponse
+				if err := json.NewDecoder(respNodes.Body).Decode(&nodesResp); err == nil {
+					healthyCount := 0
+					for _, n := range nodesResp.Nodes {
+						if n.Health.Status == "healthy" {
+							healthyCount++
+						}
+					}
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "INFO",
+						Msg:   fmt.Sprintf("Node mesh: %d/%d healthy", healthyCount, len(nodesResp.Nodes)),
+					})
+					for _, n := range nodesResp.Nodes {
+						level := "INFO"
+						if n.Health.Status != "healthy" {
+							level = "WARN"
+						}
+						modelsStr := "none"
+						if len(n.Health.LoadedModels) > 0 {
+							modelsStr = strings.Join(n.Health.LoadedModels, ", ")
+						}
+						events = append(events, TelemetryEvent{
+							ID:    randomHex(16),
+							Time:  nowStr,
+							Level: level,
+							Msg:   fmt.Sprintf("  %s: %s | %dms | load %.2f | models [%s]", n.ID, n.Health.Status, n.Health.LatencyMS, n.Health.CurrentLoad, modelsStr),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// --- 3. Worker heartbeat summary ---
+	workers, err := s.loadWorkers(ctx)
+	if err == nil {
+		activeCount := 0
+		idleCount := 0
+		for _, w := range workers {
+			status, _ := w["status"].(string)
+			if status == "busy" || status == "running" || status == "claimed" || status == "active" {
+				activeCount++
+			} else if status == "idle" {
+				idleCount++
+			}
+		}
+		events = append(events, TelemetryEvent{
+			ID:    randomHex(16),
+			Time:  nowStr,
+			Level: "INFO",
+			Msg:   fmt.Sprintf("Workers: %d active, %d standby, %d total", activeCount, idleCount, len(workers)),
+		})
+		for _, w := range workers {
+			status, _ := w["status"].(string)
+			if status == "busy" || status == "running" || status == "claimed" || status == "active" {
+				taskTitle, _ := w["current_task_title"].(string)
+				if taskTitle == "" {
+					taskTitle, _ = w["current_task_id"].(string)
+				}
+				if taskTitle == "" {
+					taskTitle = "—"
+				}
+				name, _ := w["name"].(string)
+				model, _ := w["model"].(string)
+				events = append(events, TelemetryEvent{
+					ID:    randomHex(16),
+					Time:  nowStr,
+					Level: "INFO",
+					Msg:   fmt.Sprintf("  ▸ %s [%s] → %s", name, model, taskTitle),
+				})
+			}
+		}
+	}
+
+	return events
+}
+
+// handleWebSocketTelemetry upgrades connection and streams telemetry events.
+// Derived from Python: api/system.py websocket_telemetry().
+func (s *Server) handleWebSocketTelemetry(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Warn("websocket upgrade failed", slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	s.logger.Info("websocket client connected", slog.String("addr", r.RemoteAddr))
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	state := &connState{}
+	ctx := r.Context()
+
+	// Send initial event batch
+	events := s.gatherTelemetryEvents(ctx, state)
+	for _, ev := range events {
+		data, err := json.Marshal(map[string]interface{}{
+			"event": "telemetry",
+			"data":  ev,
+		})
+		if err != nil {
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-closed:
+			s.logger.Info("websocket client disconnected", slog.String("addr", r.RemoteAddr))
+			return
+		case <-ticker.C:
+			events := s.gatherTelemetryEvents(ctx, state)
+			for _, ev := range events {
+				data, err := json.Marshal(map[string]interface{}{
+					"event": "telemetry",
+					"data":  ev,
+				})
+				if err != nil {
+					continue
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					return
+				}
+			}
+		}
+	}
 }

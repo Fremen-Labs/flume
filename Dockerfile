@@ -47,16 +47,19 @@ FROM alpine:3.21
 RUN apk add --no-cache git ca-certificates tzdata && \
     adduser -D -u 1000 flume
 
+# Create /app directory and set ownership
+RUN mkdir -p /app && chown -R flume:flume /app
+
 COPY --from=builder /flume /usr/local/bin/flume
 
 # Copy pre-built frontend dist for dashboard serving
-COPY --from=frontend /dist/ /app/frontend/dist/
+COPY --from=frontend --chown=flume:flume /dist/ /app/frontend/dist/
 
 # LogLoom graph for runtime enrichment (optional — zero-overhead if missing)
-COPY --from=builder /src/logloom-graph.json /app/logloom-graph.json
+COPY --from=builder --chown=flume:flume /src/logloom-graph.json /app/logloom-graph.json
 
 # Agent system prompts consumed by the worker manager's LLM subsystem
-COPY --from=builder /src/src/agents/ /app/agents/
+COPY --from=builder --chown=flume:flume /src/src/agents/ /app/agents/
 
 ENV LOGLOOM_GRAPH_PATH=/app/logloom-graph.json
 ENV FLUME_AGENTS_DIR=/app/agents
