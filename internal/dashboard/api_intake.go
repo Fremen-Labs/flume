@@ -1,19 +1,20 @@
-// api_intake.go — Intake session management: create, get, message, commit.
-//
-// Direct port of Python: src/dashboard/api/intake.py (4 AST nodes).
-// The intake system is an LLM-powered conversational interface for
-// breaking down user requests into structured tasks.
 package dashboard
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/llm"
+	"github.com/Fremen-Labs/flume/internal/secrets"
 )
 
 const (
@@ -72,50 +73,453 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
   the project has distinct test suites requiring separate execution.
 - A single-file edit should NEVER produce more than 3 tasks total.`
 
+// Plan Response structures
+type PlanTask struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Objective string `json:"objective,omitempty"`
+}
+
+type PlanStory struct {
+	ID                 string     `json:"id"`
+	Title              string     `json:"title"`
+	AcceptanceCriteria []string   `json:"acceptanceCriteria"`
+	Tasks              []PlanTask `json:"tasks"`
+}
+
+type PlanFeature struct {
+	ID      string      `json:"id"`
+	Title   string      `json:"title"`
+	Stories []PlanStory `json:"stories"`
+}
+
+type PlanEpic struct {
+	ID          string        `json:"id"`
+	Title       string        `json:"title"`
+	Description string        `json:"description,omitempty"`
+	Features    []PlanFeature `json:"features"`
+}
+
+type PlanResponse struct {
+	ComplexityScore int        `json:"complexityScore"`
+	Epics           []PlanEpic `json:"epics"`
+}
+
+type PlanningStatus struct {
+	Stage                    string   `json:"stage"` // queued, testing_connection, requesting_plan, ready, failed
+	Provider                 string   `json:"provider"`
+	Model                    string   `json:"model"`
+	BaseURL                  string   `json:"baseUrl"`
+	Host                     string   `json:"host"`
+	ConnectionTestStartedAt  *string  `json:"connectionTestStartedAt,omitempty"`
+	ConnectionTestDurationMs float64  `json:"connectionTestDurationMs"`
+	ConnectionTestOk         *bool    `json:"connectionTestOk,omitempty"`
+	ConnectionTestResult     *string  `json:"connectionTestResult,omitempty"`
+	RequestStartedAt         *string  `json:"requestStartedAt,omitempty"`
+	RequestElapsedSeconds    float64  `json:"requestElapsedSeconds"`
+	TimeoutSeconds           int      `json:"timeoutSeconds"`
+	FailureText              *string  `json:"failureText,omitempty"`
+	LastUpdatedAt            string   `json:"lastUpdatedAt"`
+}
+
+type SessionMessage struct {
+	From      string      `json:"from"` // user, agent
+	Text      string      `json:"text"`
+	Plan      interface{} `json:"plan,omitempty"`
+	AgentRole string      `json:"agent_role,omitempty"`
+	Timestamp string      `json:"timestamp"`
+}
+
+type SessionDoc struct {
+	ID              string           `json:"id"`
+	Repo            string           `json:"repo"`
+	Status          string           `json:"status"` // active, committed
+	AgentRole       string           `json:"agent_role"` // "intake"
+	Messages        []SessionMessage `json:"messages"`
+	DraftPlan       interface{}      `json:"draftPlan,omitempty"`
+	DraftPlanSource string           `json:"draftPlanSource"` // "llm", "placeholder"
+	PlanningStatus  PlanningStatus   `json:"planningStatus"`
+	CreatedAt       string           `json:"created_at"`
+	UpdatedAt       string           `json:"updated_at"`
+	CommittedAt     string           `json:"committed_at,omitempty"`
+	CommittedDocs   []string         `json:"committedDocs,omitempty"`
+}
+
+type AgentTaskRecord struct {
+	ID                    string   `json:"id"`
+	Title                 string   `json:"title"`
+	Objective             string   `json:"objective"`
+	Repo                  string   `json:"repo"`
+	Worktree              string   `json:"worktree,omitempty"`
+	ItemType              string   `json:"item_type"` // epic, feature, story, task
+	Owner                 string   `json:"owner"`      // pm, implementer
+	AssignedAgentRole     string   `json:"assigned_agent_role,omitempty"`
+	Status                string   `json:"status"` // planned, ready
+	Priority              string   `json:"priority"` // normal, high, medium
+	ParentID              string   `json:"parent_id,omitempty"`
+	DependsOn             []string `json:"depends_on"`
+	AcceptanceCriteria    []string `json:"acceptance_criteria"`
+	Artifacts             []string `json:"artifacts"`
+	LastUpdate            string   `json:"last_update"`
+	CreatedAt             string   `json:"created_at"`
+	UpdatedAt             string   `json:"updated_at"`
+	NeedsHuman            bool     `json:"needs_human"`
+	Risk                  string   `json:"risk"`
+	PreferredModel        string   `json:"preferred_model,omitempty"`
+	PreferredLLMProvider  string   `json:"preferred_llm_provider,omitempty"`
+	PreferredCredentialID string   `json:"preferred_llm_credential_id,omitempty"`
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n/2)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
+func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) (bool, string) {
+	provider := strings.TrimSpace(strings.ToLower(cfg.LLMProvider))
+	baseURL := strings.TrimRight(cfg.LLMBaseURL, "/")
+	apiKey := cfg.LLMAPIKey
+
+	if apiKey == "" && cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
+		baoClient := secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, s.logger)
+		if baoData, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && baoData != nil {
+			if k, _ := baoData["LLM_API_KEY"].(string); k != "" {
+				apiKey = k
+			}
+		}
+	}
+
+	headers := make(map[string]string)
+	var urlStr string
+
+	if provider == "ollama" {
+		gatewayURL := os.Getenv("FLUME_GATEWAY_URL")
+		if gatewayURL == "" {
+			gatewayURL = "http://gateway:8090"
+		}
+		urlStr = strings.TrimRight(gatewayURL, "/") + "/api/nodes"
+	} else {
+		if baseURL == "" {
+			return false, fmt.Sprintf("No base URL configured for provider %q", provider)
+		}
+		if baseURL == "http://localhost:11434" && provider != "ollama" && provider != "exo" {
+			if provider == "xai" || provider == "grok" {
+				baseURL = "https://api.x.ai"
+			} else if provider == "openai" {
+				baseURL = "https://api.openai.com"
+			} else if provider == "anthropic" {
+				baseURL = "https://api.anthropic.com"
+			}
+		}
+
+		if provider == "exo" {
+			urlStr = baseURL + "/v1/models"
+		} else if provider == "anthropic" {
+			urlStr = baseURL + "/v1/models"
+			if apiKey != "" {
+				headers["x-api-key"] = apiKey
+				headers["anthropic-version"] = "2023-06-01"
+			}
+		} else if provider == "gemini" {
+			urlStr = "https://generativelanguage.googleapis.com/v1beta/models"
+			if apiKey != "" {
+				urlStr += "?key=" + apiKey
+			}
+		} else {
+			urlStr = baseURL + "/v1/models"
+			if apiKey != "" {
+				headers["Authorization"] = "Bearer " + apiKey
+			}
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to build probe request: %v", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("%s connection FAILED: %v", strings.ToUpper(provider), err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return false, fmt.Sprintf("%s connection FAILED: responded HTTP %d", strings.ToUpper(provider), resp.StatusCode)
+	}
+	return true, fmt.Sprintf("%s connection OK — responded HTTP %d", strings.ToUpper(provider), resp.StatusCode)
+}
+
+func placeholderPlan(repo, prompt string) map[string]interface{} {
+	title := strings.TrimSpace(strings.Split(prompt, "\n")[0])
+	if len(title) > 80 {
+		title = title[:77] + "..."
+	}
+	if title == "" {
+		title = "New request"
+	}
+	return map[string]interface{}{
+		"repo":            repo,
+		"complexityScore": 1,
+		"epics": []interface{}{
+			map[string]interface{}{
+				"id":          "epic-1",
+				"title":       title,
+				"description": prompt,
+				"features": []interface{}{
+					map[string]interface{}{
+						"id":    "feat-1",
+						"title": "[Placeholder] Rename this feature",
+						"stories": []interface{}{
+							map[string]interface{}{
+								"id": "story-1",
+								"title": "[Placeholder] Rename this story",
+								"acceptanceCriteria": []interface{}{
+									"[Placeholder] Add acceptance criteria",
+								},
+								"tasks": []interface{}{
+									map[string]interface{}{
+										"id":        "task-1",
+										"title":     "[Placeholder] Add a concrete task",
+										"objective": prompt,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func buildLLMMessages(session SessionDoc) []llm.Message {
+	var msgs []llm.Message
+	msgs = append(msgs, llm.Message{
+		Role:    "system",
+		Content: plannerSystemPrompt,
+	})
+
+	for _, m := range session.Messages {
+		if m.From == "user" {
+			text := m.Text
+			if m.Plan != nil {
+				planBytes, _ := json.MarshalIndent(m.Plan, "", "  ")
+				text += fmt.Sprintf("\n\nCurrent plan state:\n```json\n%s\n```", string(planBytes))
+			}
+			msgs = append(msgs, llm.Message{
+				Role:    "user",
+				Content: text,
+			})
+		} else if m.From == "agent" {
+			plan := m.Plan
+			if plan == nil {
+				plan = map[string]interface{}{}
+			}
+			respObj := map[string]interface{}{
+				"message": m.Text,
+				"plan":    plan,
+			}
+			respBytes, _ := json.Marshal(respObj)
+			msgs = append(msgs, llm.Message{
+				Role:    "assistant",
+				Content: string(respBytes),
+			})
+		}
+	}
+	return msgs
+}
+
 // ─── POST /api/intake/session ───────────────────────────────────────────────
 
-// handleIntakeStartSession creates a new plan session.
-// Derived from Python: api/intake.py api_intake_start_session().
 func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
-		ProjectID string `json:"project_id"`
-		Title     string `json:"title,omitempty"`
+		Repo   string `json:"repo"`
+		Prompt string `json:"prompt"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.ProjectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id is required")
+	if req.Repo == "" {
+		writeError(w, http.StatusBadRequest, "repo is required")
 		return
 	}
 
-	sessionID := fmt.Sprintf("session-%d", timeNowUnixMilli())
+	sessionID := fmt.Sprintf("plan-%s", randomHex(12))
 	now := nowISO()
 
-	doc := map[string]interface{}{
-		"id":         sessionID,
-		"project_id": req.ProjectID,
-		"title":      orStr(req.Title, "New Intake Session"),
-		"messages":   []interface{}{},
-		"status":     "active",
-		"created_at": now,
-		"updated_at": now,
+	cfg := config.Get()
+	status := PlanningStatus{
+		Stage:          "queued",
+		Provider:       cfg.LLMProvider,
+		Model:          cfg.LLMModel,
+		BaseURL:        cfg.LLMBaseURL,
+		TimeoutSeconds: 120,
+		LastUpdatedAt:  now,
 	}
 
-	if err := s.es.IndexDoc(ctx, planSessionsIndex, sessionID, doc); err != nil {
+	sessionDoc := SessionDoc{
+		ID:              sessionID,
+		Repo:            req.Repo,
+		Status:          "active",
+		AgentRole:       "intake",
+		Messages:        []SessionMessage{},
+		PlanningStatus:  status,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	if err := s.es.IndexDoc(ctx, planSessionsIndex, sessionID, sessionDoc); err != nil {
 		s.logger.Error("intake session create failed", slog.String("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 
+	// Trigger background planning task
+	go s.runInitialPlanning(context.Background(), sessionID, req.Repo, req.Prompt)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"session_id": sessionID,
-		"session":    doc,
+		"session":    sessionDoc,
 	})
+}
+
+func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt string) {
+	now := nowISO()
+
+	// 1. Update status to testing_connection
+	cfg := config.Get()
+	status := PlanningStatus{
+		Stage:          "testing_connection",
+		Provider:       cfg.LLMProvider,
+		Model:          cfg.LLMModel,
+		BaseURL:        cfg.LLMBaseURL,
+		TimeoutSeconds: 120,
+		LastUpdatedAt:  now,
+	}
+	startedStr := now
+	status.ConnectionTestStartedAt = &startedStr
+
+	_ = s.updateSessionStatus(ctx, sessionID, status, nil, "")
+
+	// 2. Perform connection test
+	startTest := time.Now()
+	ok, result := s.testPlannerConnection(ctx, cfg)
+	elapsedMs := float64(time.Since(startTest).Milliseconds())
+
+	status.ConnectionTestOk = &ok
+	status.ConnectionTestResult = &result
+	status.ConnectionTestDurationMs = elapsedMs
+	status.LastUpdatedAt = nowISO()
+
+	if !ok {
+		status.Stage = "failed"
+		status.FailureText = &result
+		_ = s.updateSessionStatus(ctx, sessionID, status, nil, "")
+		return
+	}
+
+	// 3. Update status to requesting_plan
+	status.Stage = "requesting_plan"
+	reqStarted := nowISO()
+	status.RequestStartedAt = &reqStarted
+	_ = s.updateSessionStatus(ctx, sessionID, status, nil, "")
+
+	// 4. Build messages and Chat
+	userMsg := SessionMessage{
+		From:      "user",
+		Text:      prompt,
+		Timestamp: now,
+	}
+
+	sessDoc := SessionDoc{
+		ID:             sessionID,
+		Repo:           repo,
+		Status:         "active",
+		AgentRole:      "intake",
+		Messages:       []SessionMessage{userMsg},
+		PlanningStatus: status,
+	}
+
+	chatMsgs := buildLLMMessages(sessDoc)
+	startReq := time.Now()
+	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
+		Messages:    chatMsgs,
+		Temperature: 0.3,
+		MaxTokens:   8192,
+		AgentRole:   "intake",
+	})
+	elapsedSec := time.Since(startReq).Seconds()
+
+	status.RequestElapsedSeconds = elapsedSec
+	status.LastUpdatedAt = nowISO()
+
+	var assistantMsg string
+	var plan interface{}
+	var planSrc string
+
+	if err != nil || resp == nil {
+		errMsg := "LLM plan generation failed"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		s.logger.Warn("Intake LLM initial plan generation failed, using placeholder", slog.String("error", errMsg))
+		assistantMsg = "I encountered an issue processing your request via the LLM. Below is an editable placeholder template."
+		plan = placeholderPlan(repo, prompt)
+		planSrc = "placeholder"
+	} else {
+		assistantMsg, plan = parseLLMResponse(resp.Content)
+		if plan == nil {
+			s.logger.Warn("Intake LLM returned empty/unparseable plan, using placeholder")
+			assistantMsg = "I encountered an issue parsing the plan generated by the LLM. Below is an editable placeholder template."
+			plan = placeholderPlan(repo, prompt)
+			planSrc = "placeholder"
+		} else {
+			planSrc = "llm"
+		}
+	}
+
+	status.Stage = "ready"
+	agentMsg := SessionMessage{
+		From:      "agent",
+		Text:      assistantMsg,
+		Plan:      plan,
+		Timestamp: nowISO(),
+	}
+
+	_ = s.updateSessionStatus(ctx, sessionID, status, &agentMsg, planSrc)
+}
+
+func (s *Server) updateSessionStatus(ctx context.Context, sessionID string, status PlanningStatus, agentMsg *SessionMessage, planSrc string) error {
+	sessBytes, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
+	if err != nil || sessBytes == nil {
+		return fmt.Errorf("session not found")
+	}
+
+	var session SessionDoc
+	if err := json.Unmarshal(sessBytes, &session); err != nil {
+		return err
+	}
+
+	session.PlanningStatus = status
+	session.UpdatedAt = nowISO()
+
+	if agentMsg != nil {
+		session.Messages = append(session.Messages, *agentMsg)
+		session.DraftPlan = agentMsg.Plan
+		session.DraftPlanSource = planSrc
+	}
+
+	return s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
 }
 
 // ─── GET /api/intake/session/{session_id} ───────────────────────────────────
@@ -137,230 +541,553 @@ func (s *Server) handleIntakeGetSession(w http.ResponseWriter, r *http.Request) 
 
 // ─── POST /api/intake/session/{session_id}/message ──────────────────────────
 
-// handleIntakeMessage appends a user message and generates an LLM response.
-// Derived from Python: api/intake.py api_intake_message().
 func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session_id")
 	ctx := r.Context()
 
 	var req struct {
-		Message string `json:"message"`
+		Text string                 `json:"text"`
+		Plan map[string]interface{} `json:"plan,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Message == "" {
-		writeError(w, http.StatusBadRequest, "message is required")
+	if req.Text == "" {
+		writeError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+
+	sessBytes, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
+	if err != nil || sessBytes == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	var session SessionDoc
+	if err := json.Unmarshal(sessBytes, &session); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to unmarshal session")
 		return
 	}
 
 	now := nowISO()
 
-	// Append the user message to the session via Painless script
-	if err := s.es.Post(ctx, fmt.Sprintf("%s/_update/%s", planSessionsIndex, sessionID), map[string]interface{}{
-		"script": map[string]interface{}{
-			"source": "ctx._source.messages.add(params.msg); ctx._source.updated_at = params.ts;",
-			"lang":   "painless",
-			"params": map[string]interface{}{
-				"msg": map[string]interface{}{
-					"role":      "user",
-					"content":   req.Message,
-					"timestamp": now,
-				},
-				"ts": now,
-			},
-		},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to append message")
+	// Append user message
+	userMsg := SessionMessage{
+		From:      "user",
+		Text:      req.Text,
+		Plan:      req.Plan,
+		Timestamp: now,
+	}
+	session.Messages = append(session.Messages, userMsg)
+	if req.Plan != nil {
+		session.DraftPlan = req.Plan
+	}
+	session.UpdatedAt = now
+
+	// 1. Connection test
+	cfg := config.Get()
+	session.PlanningStatus.Stage = "testing_connection"
+	startedStr := now
+	session.PlanningStatus.ConnectionTestStartedAt = &startedStr
+	session.PlanningStatus.LastUpdatedAt = now
+
+	_ = s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
+
+	startTest := time.Now()
+	ok, result := s.testPlannerConnection(ctx, cfg)
+	elapsedMs := float64(time.Since(startTest).Milliseconds())
+
+	session.PlanningStatus.ConnectionTestOk = &ok
+	session.PlanningStatus.ConnectionTestResult = &result
+	session.PlanningStatus.ConnectionTestDurationMs = elapsedMs
+
+	if !ok {
+		session.PlanningStatus.Stage = "failed"
+		session.PlanningStatus.FailureText = &result
+		session.PlanningStatus.LastUpdatedAt = nowISO()
+		_ = s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
+		writeError(w, http.StatusInternalServerError, result)
 		return
 	}
 
-	// Fetch updated session
-	src, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
-	if err != nil || src == nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	var session map[string]interface{}
-	_ = unmarshalRaw(src, &session)
+	// 2. Requesting plan
+	session.PlanningStatus.Stage = "requesting_plan"
+	reqStarted := nowISO()
+	session.PlanningStatus.RequestStartedAt = &reqStarted
+	_ = s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
 
-	// Build message history
-	var messages []llm.Message
-	messages = append(messages, llm.Message{
-		Role:    "system",
-		Content: plannerSystemPrompt,
-	})
-
-	sessMsgs, _ := session["messages"].([]interface{})
-	for _, mObj := range sessMsgs {
-		m, ok := mObj.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		role, _ := m["role"].(string)
-		content, _ := m["content"].(string)
-		messages = append(messages, llm.Message{
-			Role:    role,
-			Content: content,
-		})
-	}
-
-	// Generate LLM response
+	// 3. Call LLM
+	chatMsgs := buildLLMMessages(session)
+	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
-		Messages:    messages,
+		Messages:    chatMsgs,
 		Temperature: 0.3,
 		MaxTokens:   8192,
 		AgentRole:   "intake",
 	})
+	elapsedSec := time.Since(startReq).Seconds()
 
-	assistantMsg := "Failed to generate plan."
+	session.PlanningStatus.RequestElapsedSeconds = elapsedSec
+	session.PlanningStatus.LastUpdatedAt = nowISO()
+
+	var assistantMsg string
 	var plan interface{}
+	var planSrc string
 
-	if err == nil && resp != nil {
-		assistantMsg, plan = parseLLMResponse(resp.Content)
-	} else {
-		// Fallback placeholder plan if LLM failed
-		var title string
-		if len(req.Message) > 80 {
-			title = req.Message[:77] + "..."
-		} else {
-			title = req.Message
-		}
-		plan = map[string]interface{}{
-			"complexityScore": 1,
-			"epics": []interface{}{
-				map[string]interface{}{
-					"id":          "epic-1",
-					"title":       title,
-					"description": req.Message,
-					"features": []interface{}{
-						map[string]interface{}{
-							"id":    "feat-1",
-							"title": "[Placeholder] Rename this feature",
-							"stories": []interface{}{
-								map[string]interface{}{
-									"id": "story-1",
-									"title": "[Placeholder] Rename this story",
-									"acceptanceCriteria": []interface{}{
-										"[Placeholder] Add acceptance criteria",
-									},
-									"tasks": []interface{}{
-										map[string]interface{}{
-											"id":    "task-1",
-											"title": "[Placeholder] Add a concrete task",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		assistantMsg = "I encountered an issue processing your request via the LLM. Below is an editable placeholder template."
+	if err != nil || resp == nil {
+		errMsg := "LLM plan generation failed"
 		if err != nil {
-			s.logger.Warn("Intake LLM chat generation failed, using placeholder", slog.String("error", err.Error()))
+			errMsg = err.Error()
+		}
+		s.logger.Warn("Intake LLM refine generation failed", slog.String("error", errMsg))
+		assistantMsg = "I encountered an issue processing your request via the LLM. Using current draft plan."
+		plan = session.DraftPlan
+		planSrc = session.DraftPlanSource
+	} else {
+		assistantMsg, plan = parseLLMResponse(resp.Content)
+		if plan == nil {
+			s.logger.Warn("Intake LLM returned empty/unparseable plan in refine, using previous draft")
+			assistantMsg = "I encountered an issue parsing the plan generated by the LLM. Using current draft plan."
+			plan = session.DraftPlan
+			planSrc = session.DraftPlanSource
+		} else {
+			planSrc = "llm"
 		}
 	}
 
-	// Save assistant response and plan back to session
-	assistantTime := nowISO()
-	if err := s.es.Post(ctx, fmt.Sprintf("%s/_update/%s", planSessionsIndex, sessionID), map[string]interface{}{
-		"script": map[string]interface{}{
-			"source": "ctx._source.messages.add(params.msg); ctx._source.draftPlan = params.plan; ctx._source.updated_at = params.ts;",
-			"lang":   "painless",
-			"params": map[string]interface{}{
-				"msg": map[string]interface{}{
-					"role":      "assistant",
-					"content":   assistantMsg,
-					"timestamp": assistantTime,
-				},
-				"plan": plan,
-				"ts":   assistantTime,
-			},
-		},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save assistant response")
+	session.PlanningStatus.Stage = "ready"
+	agentMsg := SessionMessage{
+		From:      "agent",
+		Text:      assistantMsg,
+		Plan:      plan,
+		Timestamp: nowISO(),
+	}
+	session.Messages = append(session.Messages, agentMsg)
+	session.DraftPlan = plan
+	session.DraftPlanSource = planSrc
+	session.UpdatedAt = nowISO()
+
+	if err := s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save updated session")
 		return
 	}
 
-	// Fetch final session state and return to client
-	finalSrc, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
-	if err != nil || finalSrc == nil {
-		writeError(w, http.StatusInternalServerError, "failed to load final session state")
-		return
-	}
-	var finalSession map[string]interface{}
-	_ = unmarshalRaw(finalSrc, &finalSession)
-	writeJSON(w, http.StatusOK, finalSession)
+	writeJSON(w, http.StatusOK, session)
 }
 
 // ─── POST /api/intake/session/{session_id}/commit ───────────────────────────
 
-// handleIntakeCommit commits the session's planned tasks to the task queue.
-// Derived from Python: api/intake.py api_intake_commit().
 func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session_id")
 	ctx := r.Context()
 
 	var req struct {
-		Tasks []map[string]interface{} `json:"tasks"`
+		Plan map[string]interface{} `json:"plan,omitempty"`
+		Repo string                 `json:"repo,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if len(req.Tasks) == 0 {
-		writeError(w, http.StatusBadRequest, "tasks list is required")
+	sessBytes, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
+	if err != nil || sessBytes == nil {
+		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	now := nowISO()
-	var created []map[string]interface{}
-
-	for _, task := range req.Tasks {
-		taskID, _ := task["id"].(string)
-		if taskID == "" {
-			taskID = fmt.Sprintf("task-%d", timeNowUnixMilli())
-		}
-
-		doc := map[string]interface{}{
-			"id":          taskID,
-			"title":       task["title"],
-			"description": task["description"],
-			"status":      "inbox",
-			"queue_state": "queued",
-			"repo":        task["project_id"],
-			"created_at":  now,
-			"updated_at":  now,
-		}
-		if priority, ok := task["priority"].(string); ok {
-			doc["priority"] = priority
-		}
-
-		if err := s.es.IndexDoc(ctx, taskRecordsIndex, taskID, doc); err != nil {
-			s.logger.Error("intake commit: task create failed",
-				slog.String("task_id", taskID),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-		created = append(created, map[string]interface{}{"id": taskID, "title": task["title"]})
+	var session SessionDoc
+	if err := json.Unmarshal(sessBytes, &session); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to unmarshal session")
+		return
 	}
 
-	// Mark session as committed
-	_ = s.es.Post(ctx, fmt.Sprintf("%s/_update/%s", planSessionsIndex, sessionID), map[string]interface{}{
-		"doc": map[string]interface{}{"status": "committed", "updated_at": now},
-	})
+	finalPlan := req.Plan
+	if finalPlan == nil {
+		if draft, ok := session.DraftPlan.(map[string]interface{}); ok {
+			finalPlan = draft
+		}
+	}
+
+	if finalPlan == nil {
+		writeError(w, http.StatusBadRequest, "no plan found to commit")
+		return
+	}
+
+	repo := req.Repo
+	if repo == "" {
+		repo = session.Repo
+	}
+
+	if repo == "" {
+		writeError(w, http.StatusBadRequest, "repo ID is required")
+		return
+	}
+
+	docs, err := s.commitPlan(ctx, repo, finalPlan)
+	if err != nil {
+		s.logger.Error("intake commit failed", slog.String("error", err.Error()))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("commit failed: %v", err))
+		return
+	}
+
+	var taskIDs []string
+	for _, doc := range docs {
+		taskIDs = append(taskIDs, doc.ID)
+	}
+
+	// Update session status to committed
+	now := nowISO()
+	session.Status = "committed"
+	session.CommittedAt = now
+	session.CommittedDocs = taskIDs
+	session.UpdatedAt = now
+
+	_ = s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"created": created,
-		"count":   len(created),
+		"ok":      true,
+		"count":   len(taskIDs),
+		"created": len(docs),
+		"taskIds": taskIDs,
 	})
+}
+
+// ─── Task Commit / Mapping Helpers ──────────────────────────────────────────
+
+func (s *Server) esCounterHWM(ctx context.Context, prefix string) int {
+	src, err := s.es.GetDoc(ctx, "flume-counters", prefix)
+	if err != nil || src == nil {
+		return 0
+	}
+	var doc struct {
+		Value int `json:"value"`
+	}
+	if err := json.Unmarshal(src, &doc); err == nil {
+		return doc.Value
+	}
+	return 0
+}
+
+func (s *Server) esCounterSetHWM(ctx context.Context, prefix string, value int) {
+	if value <= 0 {
+		return
+	}
+	now := nowISO()
+	body := map[string]interface{}{
+		"scripted_upsert": true,
+		"script": map[string]interface{}{
+			"source": "if (ctx._source.containsKey('value')) { ctx._source.value = Math.max(ctx._source.value, (long)params.v); } else { ctx._source.value = (long)params.v; } ctx._source.updated_at = params.ts; ctx._source.prefix = params.pfx;",
+			"lang":   "painless",
+			"params": map[string]interface{}{
+				"v":   value,
+				"ts":  now,
+				"pfx": prefix,
+			},
+		},
+		"upsert": map[string]interface{}{
+			"prefix":     prefix,
+			"value":      value,
+			"updated_at": now,
+		},
+	}
+	_ = s.es.Post(ctx, fmt.Sprintf("flume-counters/_update/%s", prefix), body)
+}
+
+func (s *Server) getNextIDSequence(ctx context.Context, prefix string) int {
+	maxN := s.esCounterHWM(ctx, prefix)
+
+	// Query ES to find the highest sequence number in active task records
+	query := map[string]interface{}{
+		"regexp": map[string]interface{}{
+			"id": prefix + "-[0-9]+",
+		},
+	}
+
+	res, err := s.es.Search(ctx, "agent-task-records", query, 10000)
+	if err == nil && res != nil {
+		pattern := regexp.MustCompile(fmt.Sprintf(`^%s-(\d+)$`, regexp.QuoteMeta(prefix)))
+		for _, h := range res.Hits {
+			var doc struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(h, &doc); err == nil {
+				if m := pattern.FindStringSubmatch(doc.ID); len(m) > 1 {
+					var val int
+					if _, err := fmt.Sscanf(m[1], "%d", &val); err == nil {
+						if val > maxN {
+							maxN = val
+						}
+					}
+				}
+			}
+		}
+	} else {
+		if maxN == 0 {
+			return int(timeNowUnixMilli()%1000000) + 1
+		}
+	}
+
+	return maxN + 1
+}
+
+var filenameRegexp = regexp.MustCompile(`(?i)\b([\w\.\-]+\.(?:tsx|ts|js|jsx|py|go|html|css|md|json|yml|yaml))\b`)
+
+func extractTargetFile(title string) string {
+	match := filenameRegexp.FindStringSubmatch(title)
+	if len(match) > 1 {
+		return strings.ToLower(match[1])
+	}
+	return ""
+}
+
+func coalesceStoryTasks(tasks []PlanTask) []PlanTask {
+	if len(tasks) == 0 {
+		return nil
+	}
+	var coalesced []PlanTask
+	curr := tasks[0]
+
+	for i := 1; i < len(tasks); i++ {
+		task := tasks[i]
+		tFile := extractTargetFile(task.Title)
+		cFile := extractTargetFile(curr.Title)
+		if tFile != "" && cFile != "" && tFile == cFile {
+			curr.Title = fmt.Sprintf("Compound Task: %s (+ %s)", curr.Title, task.Title)
+			curr.Objective = fmt.Sprintf("%s\n\n- %s: %s", curr.Objective, task.Title, task.Objective)
+		} else {
+			coalesced = append(coalesced, curr)
+			curr = task
+		}
+	}
+	coalesced = append(coalesced, curr)
+	return coalesced
+}
+
+func countPlanTasks(plan PlanResponse) int {
+	total := 0
+	for _, epic := range plan.Epics {
+		for _, feat := range epic.Features {
+			for _, story := range feat.Stories {
+				coalesced := coalesceStoryTasks(story.Tasks)
+				total += len(coalesced)
+			}
+		}
+	}
+	return total
+}
+
+func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo, routingModel, now string) ([]AgentTaskRecord, error) {
+	var docs []AgentTaskRecord
+
+	epicSeq := s.getNextIDSequence(ctx, "epic")
+	featSeq := s.getNextIDSequence(ctx, "feat")
+	storySeq := s.getNextIDSequence(ctx, "story")
+	taskSeq := s.getNextIDSequence(ctx, "task")
+
+	for _, epic := range plan.Epics {
+		epicID := fmt.Sprintf("epic-%d", epicSeq)
+		epicSeq++
+		docs = append(docs, AgentTaskRecord{
+			ID:         epicID,
+			Title:      epic.Title,
+			Objective:  epic.Description,
+			Repo:       repo,
+			ItemType:   "epic",
+			Owner:      "pm",
+			Status:     "planned",
+			Priority:   "high",
+			Risk:       "medium",
+			LastUpdate: now,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+			DependsOn:  []string{},
+		})
+
+		for _, feat := range epic.Features {
+			featID := fmt.Sprintf("feat-%d", featSeq)
+			featSeq++
+			docs = append(docs, AgentTaskRecord{
+				ID:         featID,
+				Title:      feat.Title,
+				Objective:  fmt.Sprintf("Feature of %s", epic.Title),
+				Repo:       repo,
+				ItemType:   "feature",
+				Owner:      "pm",
+				Status:     "planned",
+				Priority:   "medium",
+				Risk:       "medium",
+				ParentID:   epicID,
+				DependsOn:  []string{epicID},
+				LastUpdate: now,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+
+			for _, story := range feat.Stories {
+				storyID := fmt.Sprintf("story-%d", storySeq)
+				storySeq++
+				docs = append(docs, AgentTaskRecord{
+					ID:                 storyID,
+					Title:              story.Title,
+					Objective:          fmt.Sprintf("Story for %s", feat.Title),
+					Repo:               repo,
+					ItemType:           "story",
+					Owner:              "pm",
+					Status:             "planned",
+					Priority:           "medium",
+					Risk:               "medium",
+					ParentID:           featID,
+					DependsOn:          []string{featID},
+					AcceptanceCriteria: story.AcceptanceCriteria,
+					LastUpdate:         now,
+					CreatedAt:          now,
+					UpdatedAt:          now,
+				})
+
+				prevTaskID := ""
+				for _, task := range coalesceStoryTasks(story.Tasks) {
+					taskID := fmt.Sprintf("task-%d", taskSeq)
+					taskSeq++
+
+					status := "planned"
+					if prevTaskID == "" {
+						status = "ready"
+					}
+
+					var dependsOn []string
+					if prevTaskID != "" {
+						dependsOn = []string{prevTaskID}
+					}
+
+					docs = append(docs, AgentTaskRecord{
+						ID:                 taskID,
+						Title:              task.Title,
+						Objective:          orStr(task.Objective, fmt.Sprintf("Task for %s", story.Title)),
+						Repo:               repo,
+						ItemType:           "task",
+						Owner:              "implementer",
+						AssignedAgentRole:  "implementer",
+						Status:             status,
+						Priority:           "normal",
+						Risk:               "medium",
+						ParentID:           storyID,
+						DependsOn:          dependsOn,
+						AcceptanceCriteria: story.AcceptanceCriteria,
+						PreferredModel:     routingModel,
+						LastUpdate:         now,
+						CreatedAt:          now,
+						UpdatedAt:          now,
+					})
+					prevTaskID = taskID
+				}
+			}
+		}
+	}
+
+	s.esCounterSetHWM(ctx, "epic", epicSeq-1)
+	s.esCounterSetHWM(ctx, "feat", featSeq-1)
+	s.esCounterSetHWM(ctx, "story", storySeq-1)
+	s.esCounterSetHWM(ctx, "task", taskSeq-1)
+
+	return docs, nil
+}
+
+func (s *Server) buildFastPathTasks(ctx context.Context, plan PlanResponse, repo, routingModel, now string) ([]AgentTaskRecord, error) {
+	var docs []AgentTaskRecord
+
+	taskSeq := s.getNextIDSequence(ctx, "task")
+	prevTaskID := ""
+
+	for _, epic := range plan.Epics {
+		for _, feat := range epic.Features {
+			for _, story := range feat.Stories {
+				for _, task := range coalesceStoryTasks(story.Tasks) {
+					taskID := fmt.Sprintf("task-%d", taskSeq)
+					taskSeq++
+
+					status := "planned"
+					if prevTaskID == "" {
+						status = "ready"
+					}
+
+					var dependsOn []string
+					if prevTaskID != "" {
+						dependsOn = []string{prevTaskID}
+					}
+
+					docs = append(docs, AgentTaskRecord{
+						ID:                 taskID,
+						Title:              task.Title,
+						Objective:          orStr(epic.Description, story.Title),
+						Repo:               repo,
+						ItemType:           "task",
+						Owner:              "implementer",
+						AssignedAgentRole:  "implementer",
+						Status:             status,
+						Priority:           "normal",
+						Risk:               "medium",
+						DependsOn:          dependsOn,
+						AcceptanceCriteria: story.AcceptanceCriteria,
+						PreferredModel:     routingModel,
+						LastUpdate:         now,
+						CreatedAt:          now,
+						UpdatedAt:          now,
+					})
+					prevTaskID = taskID
+				}
+			}
+		}
+	}
+
+	s.esCounterSetHWM(ctx, "task", taskSeq-1)
+	return docs, nil
+}
+
+func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[string]interface{}) ([]AgentTaskRecord, error) {
+	var plan PlanResponse
+	planBytes, err := json.Marshal(planDict)
+	if err == nil {
+		_ = json.Unmarshal(planBytes, &plan)
+	}
+
+	now := nowISO()
+
+	// 1. Adaptive LLM Routing
+	complexityScore := plan.ComplexityScore
+	fastModel := os.Getenv("FLUME_FAST_MODEL")
+	if fastModel == "" {
+		fastModel = "o3-mini"
+	}
+	var routingModel string
+	if complexityScore <= 3 {
+		routingModel = fastModel
+	}
+
+	// 2. Build records
+	var docs []AgentTaskRecord
+	var errBuild error
+	totalTasks := countPlanTasks(plan)
+	if totalTasks > 0 && totalTasks <= 3 {
+		docs, errBuild = s.buildFastPathTasks(ctx, plan, repo, routingModel, now)
+	} else {
+		docs, errBuild = s.buildTaskHierarchy(ctx, plan, repo, routingModel, now)
+	}
+	if errBuild != nil {
+		return nil, errBuild
+	}
+
+	// 3. Index to Elasticsearch
+	for _, doc := range docs {
+		if err := s.es.IndexDoc(ctx, "agent-task-records", doc.ID, doc); err != nil {
+			s.logger.Error("commitPlan: failed to index doc", slog.String("id", doc.ID), slog.String("error", err.Error()))
+			return nil, fmt.Errorf("failed to index task %s: %w", doc.ID, err)
+		}
+	}
+
+	return docs, nil
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -373,11 +1100,9 @@ var (
 
 func parseLLMResponse(raw string) (string, interface{}) {
 	cleaned := strings.TrimSpace(raw)
-	// Strip <think> reasoning blocks
 	cleaned = thinkRegexp.ReplaceAllString(cleaned, "")
 	cleaned = strings.TrimSpace(cleaned)
 
-	// Unwrap outer markdown fence
 	if strings.HasPrefix(cleaned, "```") {
 		subMatches := fenceRegexp.FindStringSubmatch(cleaned)
 		if len(subMatches) > 1 {
@@ -389,7 +1114,6 @@ func parseLLMResponse(raw string) (string, interface{}) {
 		}
 	}
 
-	// Try parsing direct JSON
 	var obj map[string]interface{}
 	if err := json.Unmarshal([]byte(cleaned), &obj); err == nil {
 		if msg, ok := obj["message"].(string); ok {
@@ -398,7 +1122,6 @@ func parseLLMResponse(raw string) (string, interface{}) {
 		}
 	}
 
-	// Try regex extraction of JSON object
 	match := jsonRegexp.FindString(cleaned)
 	if match != "" {
 		var obj map[string]interface{}

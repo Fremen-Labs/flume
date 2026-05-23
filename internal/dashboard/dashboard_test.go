@@ -157,3 +157,71 @@ func TestStringHelpers(t *testing.T) {
 		t.Error("truncate should work")
 	}
 }
+
+func TestCoalesceStoryTasks(t *testing.T) {
+	tasks := []PlanTask{
+		{Title: "Create new components in index.css", Objective: "Objective 1"},
+		{Title: "Refactor existing styles in index.css", Objective: "Objective 2"},
+		{Title: "Update README.md file content", Objective: "Objective 3"},
+	}
+
+	coalesced := coalesceStoryTasks(tasks)
+	if len(coalesced) != 2 {
+		t.Fatalf("expected 2 coalesced tasks, got %d", len(coalesced))
+	}
+
+	if !strings.Contains(coalesced[0].Title, "Compound Task") {
+		t.Errorf("expected first task to be compound, got: %s", coalesced[0].Title)
+	}
+
+	if coalesced[1].Title != "Update README.md file content" {
+		t.Errorf("expected second task to remain unchanged, got: %s", coalesced[1].Title)
+	}
+}
+
+func TestIntakeStartSessionValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	srv := New(cfg, nil)
+
+	// Missing repo
+	body := `{"prompt": "Build a landing page"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/intake/session", strings.NewReader(body))
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing repo, got %d", rec.Code)
+	}
+}
+
+func TestIntakeMessageValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	srv := New(cfg, nil)
+
+	// Missing message text
+	body := `{"plan": {}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/intake/session/session-1/message", strings.NewReader(body))
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing message text, got %d", rec.Code)
+	}
+}
+
+func TestIntakeCommitValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	srv := New(cfg, nil)
+
+	// Missing repo ID in commit request should hit StatusNotFound because session is not in ES (mock not configured)
+	body := `{"plan": {}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/intake/session/session-1/commit", strings.NewReader(body))
+	srv.mux.ServeHTTP(rec, req)
+
+	// Since session does not exist in ES, it returns 404
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 since session is missing in ES, got %d", rec.Code)
+	}
+}
+
