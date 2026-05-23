@@ -144,7 +144,7 @@ func GenerateEnv(config EnvConfig) []string {
 		}
 	}
 
-	log.Info("Successfully compiled telemetry footprint securely in RAM bounds.", "isolation", "Memory-only variables injected into subprocess securely")
+	log.Debug("Telemetry environment configuration compiled successfully.", "isolation", "Memory-only variables injected into subprocess securely")
 	return env
 }
 
@@ -188,7 +188,7 @@ func SeedNodes(ctx context.Context, gatewayURL string, nodes []NodeSeedEntry) er
 		if resp.StatusCode >= 400 {
 			log.Warn("node_seed: gateway rejected node", "node_id", node.ID, "status", resp.StatusCode)
 		} else {
-			log.Info("node_seed: registered node", "node_id", node.ID, "host", node.Host, "model", node.ModelTag)
+			log.Debug("node_seed: registered node", "node_id", node.ID, "host", node.Host, "model", node.ModelTag)
 		}
 	}
 	return nil

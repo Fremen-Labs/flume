@@ -23,7 +23,7 @@ Use --purge to also remove Elasticsearch containers/volumes and all Flume Docker
 This is a hard reset that requires explicit confirmation.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := cmd.Context()
-		fmt.Println(ui.CyberGradient("Initiating Terminal Docker Annihilation Protocol..."))
+		fmt.Println(ui.CyberGradient("Destroying Flume ecosystem..."))
 
 		// Phase 5: No PID file dance needed — services are goroutines
 		// that terminate via context cancellation when the CLI exits.

@@ -23,9 +23,9 @@ type VaultKeys struct {
 	RootToken string   `json:"root_token"`
 }
 
-// AwaitOpenBao gracefully awaits native OpenBao cluster locks indefinitely.
+// AwaitOpenBao gracefully awaits OpenBao cluster locks indefinitely.
 func AwaitOpenBao(ctx context.Context, vaultURL string) error {
-	log.Info("Awaiting OpenBao KMS Cluster Generation Locks...", "url", vaultURL)
+	log.Debug("Awaiting OpenBao KMS Cluster Generation Locks...", "url", vaultURL)
 
 	for i := 0; i < 40; i++ {
 		select {
@@ -38,7 +38,7 @@ func AwaitOpenBao(ctx context.Context, vaultURL string) error {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 || resp.StatusCode == 429 || resp.StatusCode == 472 || resp.StatusCode == 473 || resp.StatusCode == 501 || resp.StatusCode == 503 {
-				log.Info("OpenBao Boot Sequenced Successfully.")
+				log.Debug("OpenBao Boot Sequenced Successfully.")
 				return nil
 			}
 		}
@@ -52,7 +52,7 @@ func AwaitOpenBao(ctx context.Context, vaultURL string) error {
 	return fmt.Errorf("openbao initialization timeout")
 }
 
-// InitializeAndUnseal loads or creates the cluster keys and unseals it natively.
+// InitializeAndUnseal loads or creates the cluster keys and unseals it.
 func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 	resp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/init", vaultURL), "", nil)
 	if err != nil {
@@ -70,7 +70,7 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 	var keys VaultKeys
 
 	if !initStatus.Initialized {
-		log.Info("First true boot detected: Initializing OpenBao cluster securely.")
+		log.Debug("First true boot detected: Initializing OpenBao cluster securely.")
 		initPayload := map[string]interface{}{
 			"secret_shares":    1,
 			"secret_threshold": 1,
@@ -86,13 +86,13 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 		defer initResp.Body.Close()
 
 		if err := json.NewDecoder(initResp.Body).Decode(&keys); err != nil {
-			return "", fmt.Errorf("failed to extract generated vault keys natively: %w", err)
+			return "", fmt.Errorf("failed to extract generated vault keys: %w", err)
 		}
 
 		os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".flume"), 0700)
 		
 		log.Warn("==================================================================")
-		log.Warn("🔐 OPENBAO NATIVE KMS DEPLOYED SUCCESSFULLY 🔐")
+		log.Warn("🔐 OPENBAO KMS DEPLOYED SUCCESSFULLY 🔐")
 		log.Warn("Please save these credentials to a secure password manager NOW.")
 		log.Warn(fmt.Sprintf("Root Token : %s", keys.RootToken))
 		if len(keys.KeysB64) > 0 {
@@ -100,7 +100,7 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 		}
 		log.Warn("==================================================================")
 	} else {
-		log.Info("Persistent OpenBao cluster detected.")
+		log.Debug("Persistent OpenBao cluster detected.")
 		// Vault is already initialized. If it is also already unsealed we need
 		// to mint a fresh root token via the generate-root workflow, because
 		// we have no persisted token from a previous run (orphaned volume).
@@ -119,21 +119,21 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 					return "", fmt.Errorf("vault root-token recovery failed: %w", rErr)
 				}
 				keys.RootToken = recoveredToken
-				log.Info("Successfully recovered root token via generate-root workflow.")
+				log.Debug("Successfully recovered root token via generate-root workflow.")
 				return keys.RootToken, nil
 			}
 		}
 	}
 
-	// Determine sealed state natively
+	// Determine sealed state
 	respHealth, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/health", vaultURL), "", nil)
 	if err != nil {
 		return "", fmt.Errorf("health check failed: %w", err)
 	}
 	defer respHealth.Body.Close()
 	
-	if respHealth.StatusCode == 503 { // Sealed natively
-		log.Warn("Your OpenBao cluster is natively sealed.")
+	if respHealth.StatusCode == 503 { // Sealed
+		log.Warn("Your OpenBao cluster is sealed.")
 		if len(keys.KeysB64) == 0 {
 			unsealKey := os.Getenv("FLUME_BAO_UNSEAL_KEY")
 			rootToken := os.Getenv("FLUME_BAO_ROOT_TOKEN")
@@ -163,18 +163,18 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 			if unsealResp != nil {
 				unsealResp.Body.Close()
 			}
-			return "", fmt.Errorf("failed to submit unseal KMS natively: %w", err)
+			return "", fmt.Errorf("failed to submit unseal KMS: %w", err)
 		}
 		unsealResp.Body.Close()
-		log.Info("OpenBao KMS Unsealed Successfully.")
+		log.Debug("OpenBao KMS Unsealed Successfully.")
 	} else {
-		log.Info("OpenBao KMS already unsealed. Continuing...")
+		log.Debug("OpenBao KMS already unsealed. Continuing...")
 	}
 
 	return keys.RootToken, nil
 }
 
-// doVaultRequest is a core helper for submitting HTTP sequences natively towards Vault.
+// doVaultRequest is a core helper for submitting HTTP requests towards Vault.
 func doVaultRequest(ctx context.Context, method, url, token string, body interface{}) (*http.Response, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	var reader io.Reader
@@ -278,9 +278,9 @@ func GenerateRootToken(ctx context.Context, vaultURL string) (string, error) {
 }
 
 
-// ConfigureSecretsEngine structures the KeyVault KV topology dynamically natively.
+// ConfigureSecretsEngine structures the KeyVault KV topology dynamically.
 func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL string, envCfg EnvConfig) error {
-	// 1. Enable KV v2 natively at "secret/"
+	// 1. Enable KV v2 at "secret/"
 	sysMountsResp, err := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/mounts", vaultURL), rootToken, nil)
 	if err != nil {
 		return fmt.Errorf("failed to query mounts: %w", err)
@@ -305,12 +305,12 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 					if mountResp != nil {
 						mountResp.Body.Close()
 					}
-					return fmt.Errorf("failed to enable secrets native engine natively: %w", mErr)
+					return fmt.Errorf("failed to enable secrets engine: %w", mErr)
 				}
 				mountResp.Body.Close()
-				log.Info("Successfully enabled Vault secret engine at secret/ natively.")
+				log.Debug("Successfully enabled Vault secret engine at secret/.")
 			} else {
-				log.Info("Secret engine 'secret/' already exists. Skipping creation.")
+				log.Debug("Secret engine 'secret/' already exists. Skipping creation.")
 			}
 		}
 	} else if !exists {
@@ -326,10 +326,10 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 			if mountResp != nil {
 				mountResp.Body.Close()
 			}
-			return fmt.Errorf("failed to enable secrets native engine natively: %w", mErr)
+			return fmt.Errorf("failed to enable secrets engine: %w", mErr)
 		}
 		mountResp.Body.Close()
-		log.Info("Successfully enabled Vault secret engine at secret/ natively.")
+		log.Debug("Successfully enabled Vault secret engine at secret/.")
 	}
 
 	// 2. Resolve KV payload
@@ -337,7 +337,7 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 	if esURL != "" {
 		mintedKey, err := MintElasticsearchAPIKey(ctx, esURL)
 		if err != nil {
-			log.Warn("Failed to mint Elasticsearch API Key natively. Flume dashboard will rely on FLUME_ELASTIC_PASSWORD", "error", err)
+			log.Warn("Failed to mint Elasticsearch API Key. Flume dashboard will rely on FLUME_ELASTIC_PASSWORD", "error", err)
 		} else {
 			esKey = mintedKey
 		}
@@ -405,9 +405,9 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 		if writeResp != nil {
 			body, _ := io.ReadAll(writeResp.Body)
 			writeResp.Body.Close()
-			return fmt.Errorf("failed to sink KV bindings into OpenBao natively (%v): %s", writeResp.StatusCode, string(body))
+			return fmt.Errorf("failed to sink KV bindings into OpenBao (%v): %s", writeResp.StatusCode, string(body))
 		}
-		return fmt.Errorf("failed to sink KV bindings into OpenBao natively: %w", wErr)
+		return fmt.Errorf("failed to sink KV bindings into OpenBao: %w", wErr)
 	}
 	writeResp.Body.Close()
 
@@ -415,14 +415,14 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 	for k := range kvPayload {
 		keysWritten = append(keysWritten, k)
 	}
-	log.Info("Injected Infrastructure Configuration + API keys seamlessly into OpenBao KV.", "keys", strings.Join(keysWritten, ", "))
+	log.Debug("Injected Infrastructure Configuration + API keys into OpenBao KV.", "keys", strings.Join(keysWritten, ", "))
 
 	return nil
 }
 
-// ProvisionAppRole enables the AppRole engine seamlessly and retrieves the dynamically bound flume-worker Token secret.
+// ProvisionAppRole enables the AppRole engine and retrieves the dynamically bound flume-worker Token secret.
 func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, error) {
-	// Enable approle dynamically natively
+	// Enable approle dynamically
 	aResp, aErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/auth", vaultURL), rootToken, nil)
 	if aErr != nil {
 		return "", fmt.Errorf("failed to query auth methods: %w", aErr)
@@ -445,13 +445,13 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 		authConf := map[string]interface{}{"type": "approle"}
 		enResp, enErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/auth/approle", vaultURL), rootToken, authConf)
 		if enErr == nil && enResp.StatusCode == 204 {
-			log.Info("Enabled AppRole authentication engine.")
+			log.Debug("Enabled AppRole authentication engine.")
 		}
 		if enResp != nil {
 			enResp.Body.Close()
 		}
 	} else {
-		log.Info("AppRole authentication engine already enabled.")
+		log.Debug("AppRole authentication engine already enabled.")
 	}
 
 	// Policy configuration
@@ -498,11 +498,11 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 		return "", fmt.Errorf("failed to decode secret-id payload natively: %w", err)
 	}
 
-	log.Info("Successfully provisioned dynamic AppRole flume-worker seamlessly.")
+	log.Debug("Successfully provisioned dynamic AppRole flume-worker.")
 	return secData.Data.SecretId, nil
 }
 
-// DeployVaultTopology sequences the Native HTTP Client bootstrap without containerizing natively.
+// DeployVaultTopology sequences the HTTP Client bootstrap without containerizing.
 func DeployVaultTopology(ctx context.Context, vaultPort string, esURL string, envCfg EnvConfig) (string, string, error) {
 	vaultURL := fmt.Sprintf("http://localhost:%s", vaultPort)
 

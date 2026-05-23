@@ -41,6 +41,7 @@ const OpenbaoMask = "***OPENBAO_DELEGATED***"
 type ESStore struct {
 	esURL      string
 	esAPIKey   string
+	esPassword string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
@@ -56,9 +57,16 @@ func NewESStore(logger *slog.Logger) *ESStore {
 	}
 	esURL = strings.TrimRight(esURL, "/")
 
+	esAPIKey := os.Getenv("ES_API_KEY")
+	esPassword := ""
+	if esAPIKey == "" {
+		esPassword = os.Getenv("FLUME_ELASTIC_PASSWORD")
+	}
+
 	return &ESStore{
-		esURL:    esURL,
-		esAPIKey: os.Getenv("ES_API_KEY"),
+		esURL:      esURL,
+		esAPIKey:   esAPIKey,
+		esPassword: esPassword,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -89,6 +97,8 @@ func (s *ESStore) request(ctx context.Context, method, path string, body interfa
 	req.Header.Set("Content-Type", "application/json")
 	if s.esAPIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+s.esAPIKey)
+	} else if s.esPassword != "" {
+		req.SetBasicAuth("elastic", s.esPassword)
 	}
 
 	resp, err := s.httpClient.Do(req)
@@ -134,6 +144,8 @@ func (s *ESStore) IndexExists(ctx context.Context, index string) bool {
 	}
 	if s.esAPIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+s.esAPIKey)
+	} else if s.esPassword != "" {
+		req.SetBasicAuth("elastic", s.esPassword)
 	}
 
 	resp, err := s.httpClient.Do(req)

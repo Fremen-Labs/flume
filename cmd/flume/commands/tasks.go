@@ -69,7 +69,7 @@ var tasksStopAllCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to stop tasks: %w", err)
 		}
-		log.Info("All tasks stopped", "result", result)
+		log.Debug("All tasks stopped", "result", result)
 		fmt.Println(ui.SuccessBlue("All running tasks stopped."))
 		return nil
 	},

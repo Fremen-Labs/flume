@@ -183,6 +183,8 @@ func (c *Config) OverlayFromES(ctx context.Context, logger *slog.Logger) {
 	}
 	if c.ESAPIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+c.ESAPIKey)
+	} else if password := os.Getenv("FLUME_ELASTIC_PASSWORD"); password != "" {
+		req.SetBasicAuth("elastic", password)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

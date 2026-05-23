@@ -242,12 +242,14 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 		return
 	}
 
-	s.logger.Info("Git clone succeeded, starting AST ingestion", slog.String("id", id))
+	s.logger.Info("Git clone succeeded", slog.String("id", id))
 
-	// 5. Update status to indexing
-	s.updateProjectStatus(id, "indexing", nil, nil)
+	// 5. Immediately mark as 'cloned' with the local path so the project
+	//    is browseable via either local git or remote API regardless of
+	//    whether the optional AST ingestion succeeds.
+	s.updateProjectStatus(id, "cloned", nil, &destPath)
 
-	// 6. Run elastro AST ingestion
+	// 6. Run elastro AST ingestion (best-effort — failure is non-fatal)
 	elastroBin := "elastro"
 	if resolved, err := exec.LookPath("elastro"); err == nil {
 		elastroBin = resolved
@@ -271,18 +273,24 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 
 	s.logger.Info("Executing elastro rag ingest", slog.String("id", id), slog.String("bin", elastroBin))
 	if output, err := ingestCmd.CombinedOutput(); err != nil {
-		s.logger.Error("elastro ingestion failed", slog.String("id", id), slog.String("error", err.Error()), slog.String("output", string(output)))
+		// AST ingestion failed — log the error but keep status as 'cloned'
+		// so the repo remains browseable via the remote REST API.
+		s.logger.Warn("elastro ingestion failed (non-fatal — project remains browseable)",
+			slog.String("id", id), slog.String("error", err.Error()),
+			slog.String("output", string(output)))
+		// Clean up the ephemeral clone since we'll fall back to remote API
 		_ = os.RemoveAll(destPath)
-		errStr := fmt.Sprintf("AST ingestion failed: %s (Output: %s)", err, string(output))
-		s.updateProjectStatus(id, "ast_failed", &errStr, nil)
+		// Keep status 'cloned' but clear the now-deleted local path
+		s.updateProjectStatus(id, "cloned", nil, nil)
+		s.logger.Info("Project cloned successfully (AST ingest skipped)", slog.String("id", id))
 		return
 	}
 
-	// 7. Delete ephemeral clone post-ingest
+	// 7. Delete ephemeral clone post-ingest — remote API is sufficient
 	s.logger.Info("Deleting ephemeral clone post-ingest", slog.String("id", id))
 	_ = os.RemoveAll(destPath)
 
-	// 8. Update status to indexed
+	// 8. Update status to indexed (path cleared since clone is deleted)
 	s.updateProjectStatus(id, "indexed", nil, nil)
 	s.logger.Info("Project cloned and indexed successfully", slog.String("id", id))
 }

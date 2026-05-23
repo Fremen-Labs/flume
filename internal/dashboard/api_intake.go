@@ -145,6 +145,27 @@ type SessionDoc struct {
 	CommittedDocs   []string         `json:"committedDocs,omitempty"`
 }
 
+func prepareSessionResponse(session SessionDoc) map[string]interface{} {
+	return map[string]interface{}{
+		"id":              session.ID,
+		"sessionId":       session.ID,
+		"repo":            session.Repo,
+		"status":          session.Status,
+		"agent_role":      session.AgentRole,
+		"messages":        session.Messages,
+		"draftPlan":       session.DraftPlan,       // keep draftPlan for compatibility with CLI/tests
+		"plan":            session.DraftPlan,       // for frontend compatibility
+		"draftPlanSource": session.DraftPlanSource, // keep draftPlanSource for compatibility
+		"planSource":      session.DraftPlanSource, // for frontend compatibility
+		"planningStatus":  session.PlanningStatus,
+		"created_at":      session.CreatedAt,
+		"updated_at":      session.UpdatedAt,
+		"committed_at":    session.CommittedAt,
+		"committedDocs":   session.CommittedDocs,
+	}
+}
+
+
 type AgentTaskRecord struct {
 	ID                    string   `json:"id"`
 	Title                 string   `json:"title"`
@@ -386,11 +407,12 @@ func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request
 	// Trigger background planning task
 	go s.runInitialPlanning(context.Background(), sessionID, req.Repo, req.Prompt)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":    true,
-		"session_id": sessionID,
-		"session":    sessionDoc,
-	})
+	resp := prepareSessionResponse(sessionDoc)
+	resp["success"] = true
+	resp["session_id"] = sessionID
+	resp["session"] = sessionDoc
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt string) {
@@ -534,9 +556,28 @@ func (s *Server) handleIntakeGetSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var session map[string]interface{}
-	_ = unmarshalRaw(src, &session)
-	writeJSON(w, http.StatusOK, session)
+	var session SessionDoc
+	if err := json.Unmarshal(src, &session); err != nil {
+		var rawSession map[string]interface{}
+		_ = json.Unmarshal(src, &rawSession)
+		if rawSession != nil {
+			if id, ok := rawSession["id"].(string); ok {
+				rawSession["sessionId"] = id
+			}
+			if draftPlan, ok := rawSession["draftPlan"]; ok {
+				rawSession["plan"] = draftPlan
+			}
+			if draftPlanSource, ok := rawSession["draftPlanSource"]; ok {
+				rawSession["planSource"] = draftPlanSource
+			}
+			writeJSON(w, http.StatusOK, rawSession)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to parse session")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, prepareSessionResponse(session))
 }
 
 // ─── POST /api/intake/session/{session_id}/message ──────────────────────────
@@ -674,7 +715,7 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, session)
+	writeJSON(w, http.StatusOK, prepareSessionResponse(session))
 }
 
 // ─── POST /api/intake/session/{session_id}/commit ───────────────────────────

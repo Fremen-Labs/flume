@@ -61,7 +61,7 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 		},
 	}
 
-	result, err := c.es.Search(ctx, "flume-tasks", query, 10)
+	result, err := c.es.Search(ctx, "agent-task-records", query, 10)
 	if err != nil {
 		c.logger.Error("claim search failed", slog.String("error", err.Error()))
 		return nil
@@ -70,6 +70,12 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 	for _, hit := range result.Hits {
 		var task ftypes.Task
 		if json.Unmarshal(hit, &task) != nil {
+			continue
+		}
+
+		// Safeguard: verify task has a valid ID
+		if task.ID == "" {
+			c.logger.Warn("claim: task document has no ID, skipping", slog.String("hit", string(hit)))
 			continue
 		}
 
@@ -126,7 +132,7 @@ func (c *Claimer) isDuplicateTask(ctx context.Context, title, taskID string) boo
 		},
 	}
 
-	result, err := c.es.Search(ctx, "flume-tasks", query, 50)
+	result, err := c.es.Search(ctx, "agent-task-records", query, 50)
 	if err != nil {
 		c.logger.Warn("dedup check error", slog.String("error", err.Error()))
 		return false // fail open
@@ -174,7 +180,7 @@ func (c *Claimer) isWIPSaturated(ctx context.Context, task ftypes.Task) bool {
 		},
 	}
 
-	count, err := c.es.Count(ctx, "flume-tasks", query)
+	count, err := c.es.Count(ctx, "agent-task-records", query)
 	if err != nil {
 		return false // fail open
 	}
@@ -217,7 +223,7 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 		},
 	}
 
-	err := c.es.IndexDoc(ctx, "flume-tasks", taskID, update)
+	err := c.es.IndexDoc(ctx, "agent-task-records", taskID, update)
 	if err != nil {
 		c.logger.Warn("atomic claim failed",
 			slog.String("task_id", taskID),

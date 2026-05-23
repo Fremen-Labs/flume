@@ -36,7 +36,7 @@ func ResolveWorkerCount(flag string) int {
 		return defaultWorkerCount
 	case "auto":
 		count := autoWorkerCount()
-		log.Infof("Auto worker count resolved: %d", count)
+		log.Debugf("Auto worker count resolved: %d", count)
 		return count
 	default:
 		n, err := strconv.Atoi(flag)
@@ -53,7 +53,7 @@ func ResolveWorkerCount(flag string) int {
 }
 
 // autoWorkerCount determines the optimal worker count from available hardware.
-// Strategy:
+// Heuristics:
 //
 //  1. CPU budget: NumCPU / 2  (leave half for system processes + LLM serve)
 //  2. RAM budget: totalRAM_GiB / ramPerWorkerGiB
@@ -70,7 +70,7 @@ func autoWorkerCount() int {
 		ramBudget = 1
 	}
 
-	log.Infof("Auto-detecting worker count — CPU cores: %d → budget: %d | RAM: %d GiB → budget: %d",
+	log.Debugf("Auto-detecting worker count — CPU cores: %d → budget: %d | RAM: %d GiB → budget: %d",
 		runtime.NumCPU(), cpuBudget, ramGiB, ramBudget)
 
 	count := cpuBudget

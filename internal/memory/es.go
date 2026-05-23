@@ -45,6 +45,7 @@ type MemoryEntry struct {
 type Store struct {
 	esURL      string
 	esAPIKey   string
+	esPassword string
 	index      string
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -66,10 +67,17 @@ func NewStore(logger *slog.Logger) *Store {
 
 	verifyTLS := strings.ToLower(os.Getenv("ES_VERIFY_TLS")) == "true"
 
+	esAPIKey := os.Getenv("ES_API_KEY")
+	esPassword := ""
+	if esAPIKey == "" {
+		esPassword = os.Getenv("FLUME_ELASTIC_PASSWORD")
+	}
+
 	return &Store{
-		esURL:    strings.TrimRight(esURL, "/"),
-		esAPIKey: os.Getenv("ES_API_KEY"),
-		index:    index,
+		esURL:      strings.TrimRight(esURL, "/"),
+		esAPIKey:   esAPIKey,
+		esPassword: esPassword,
+		index:      index,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -286,6 +294,8 @@ func (s *Store) request(ctx context.Context, method, path string, body interface
 	req.Header.Set("Content-Type", "application/json")
 	if s.esAPIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+s.esAPIKey)
+	} else if s.esPassword != "" {
+		req.SetBasicAuth("elastic", s.esPassword)
 	}
 
 	resp, err := s.httpClient.Do(req)

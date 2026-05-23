@@ -11,6 +11,7 @@ import (
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/Fremen-Labs/flume/src/gateway"
 	_ "github.com/Fremen-Labs/flume/src/gateway/skills/generated"
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +34,6 @@ func init() {
     rootCmd.AddCommand(commands.ProjectsCmd)
     rootCmd.AddCommand(commands.UpgradeCmd)
     rootCmd.AddCommand(commands.SkillsCmd)
-    rootCmd.AddCommand(commands.TestEnvCmd)
 
     // Phase 5: Standalone service subcommands for distributed deployments
     rootCmd.AddCommand(commands.GatewayCmd)
@@ -44,6 +44,10 @@ func init() {
 func main() {
 	// Initialize unified structured logger (off by default, INFO level)
 	gateway.InitLogger()
+
+	// Suppress internal log noise from orchestrator packages.
+	// Only WARN and ERROR reach the user — all boot progress is styled via lipgloss.
+	log.SetLevel(log.WarnLevel)
 
 	// Execute the 90s SciFi Artifact Banner physically BEFORE TTY interception!
 	fmt.Println(ui.SciFiLogo())

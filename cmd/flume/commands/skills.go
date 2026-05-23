@@ -181,7 +181,7 @@ func runSkillsReload(cmd *cobra.Command, args []string) {
 	}
 
 	url := strings.TrimRight(gwURL, "/") + "/skills/reload"
-	log.Info("sending skill reload request", slog.String("url", url))
+	log.Debug("sending skill reload request", slog.String("url", url))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(url, "application/json", nil)

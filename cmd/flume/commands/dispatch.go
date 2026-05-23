@@ -3,12 +3,14 @@ package commands
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
-	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
@@ -47,10 +49,10 @@ var defaultESQuery = map[string]interface{}{
 
 var DispatchCmd = &cobra.Command{
 	Use:   "dispatch",
-	Short: "Run the deterministic Go-native DAG scheduler to sort and route tasks seamlessly",
+	Short: "Run the deterministic Go-native DAG scheduler to sort and route tasks",
 	Run: func(cmd *cobra.Command, args []string) {
 		esURL, _ := cmd.Flags().GetString("es-url")
-		log.Info("Booting Go-Native Topological DAG Scheduler", "target", esURL)
+		log.Info("Booting Topological DAG Scheduler", "target", esURL)
 
 		// Create a Wake channel for Event-Driven Push Model (Thundering herd mitigation)
 		wakeCh := make(chan struct{}, 1)
@@ -79,7 +81,7 @@ func serveControlPlane(wakeCh chan struct{}) {
 		// Non-blocking trigger to wake the reconciliation loop
 		select {
 		case wakeCh <- struct{}{}:
-			log.Info("Webhook triggered DAG reconciliation loop actively.")
+			log.Info("Webhook triggered DAG reconciliation loop.")
 		default:
 			// Loop already awake, drop redundant events safely
 		}
@@ -101,13 +103,17 @@ func serveControlPlane(wakeCh chan struct{}) {
 }
 
 func runReconciliationLoop(esURL string, wakeCh chan struct{}) {
+	tr := &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		DisableKeepAlives:   false,
+	}
+	if strings.HasPrefix(esURL, "https://") {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	client := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			IdleConnTimeout:     30 * time.Second,
-			DisableKeepAlives:   false,
-		},
-		Timeout: 10 * time.Second,
+		Transport: tr,
+		Timeout:   10 * time.Second,
 	}
 
 	queryBytes, err := json.Marshal(defaultESQuery)
@@ -115,7 +121,7 @@ func runReconciliationLoop(esURL string, wakeCh chan struct{}) {
 		log.Fatalf("FATAL: Failed to marshal default ES query configuration: %v", err)
 	}
 
-	log.Info("Native DAG Dispatcher Active. Listening for blocked nodes...")
+	log.Info("DAG Dispatcher Active. Listening for blocked nodes...")
 
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -133,12 +139,15 @@ func runReconciliationLoop(esURL string, wakeCh chan struct{}) {
 }
 
 func executeSync(ctx context.Context, client *http.Client, esURL string, queryBytes []byte) {
-	req, err := http.NewRequestWithContext(ctx, "POST", esURL+"/flume-tasks-*/_search", bytes.NewBuffer(queryBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", esURL+"/agent-task-records-*/_search", bytes.NewBuffer(queryBytes))
 	if err != nil {
 		log.Error("Failed to construct ES request natively", "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if password := os.Getenv("FLUME_ELASTIC_PASSWORD"); password != "" {
+		req.SetBasicAuth("elastic", password)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -179,7 +188,7 @@ func processDAG(tasks []ESTask) []ESTask {
 	return unblocked
 }
 
-// dispatchReadyTasks executes ES state mutations natively locking dependencies
+// dispatchReadyTasks executes ES state mutations locking dependencies
 func dispatchReadyTasks(ctx context.Context, client *http.Client, esURL string, tasks []ESTask) {
 	updatePayload := []byte(`{"doc": {"status": "ready"}}`)
 
@@ -188,24 +197,27 @@ func dispatchReadyTasks(ctx context.Context, client *http.Client, esURL string, 
 		
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(updatePayload))
 		if err != nil {
-			log.Error("Failed to construct ES Update request natively", "error", err, "doc_id", t.ID)
+			log.Error("Failed to construct ES Update request", "error", err, "doc_id", t.ID)
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if password := os.Getenv("FLUME_ELASTIC_PASSWORD"); password != "" {
+			req.SetBasicAuth("elastic", password)
+		}
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Error("Failed to dispatch task state natively", "error", err, "doc_id", t.ID)
+			log.Error("Failed to dispatch task state", "error", err, "doc_id", t.ID)
 			continue
 		}
 		
-		// Drain and close body rigorously
+		// Drain and close body
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
-			log.Info(ui.NeonGreen(fmt.Sprintf("[DAG UNBLOCK] Node %s strictly routed to ready pool.", t.ID)))
+			log.Info("[DAG UNBLOCK] Node routed to ready pool", "node_id", t.ID)
 		} else {
-			log.Error("Elasticsearch failed to mutate state dynamically", "doc_id", t.ID, "status", resp.Status)
+			log.Error("Elasticsearch failed to mutate state", "doc_id", t.ID, "status", resp.Status)
 		}
 	}
 }

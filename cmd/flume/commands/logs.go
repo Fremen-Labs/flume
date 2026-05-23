@@ -27,7 +27,7 @@ Use --follow for continuous polling. Filter by worker role with --worker.`,
 		client := ui.NewFlumeClient()
 
 		if logsFollow {
-			log.Info("Following logs (Ctrl+C to stop)...")
+			fmt.Println(ui.CyberGradient("Following logs (Ctrl+C to stop)..."))
 			var lastLen int
 			for {
 				entries, err := fetchLogs(client)

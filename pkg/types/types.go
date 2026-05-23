@@ -50,10 +50,10 @@ var ValidTransitions = map[TaskStatus][]TaskStatus{
 type Task struct {
 	ID              string     `json:"id"`
 	Title           string     `json:"title"`
-	Description     string     `json:"description,omitempty"`
+	Description     string     `json:"objective,omitempty"`
 	Status          TaskStatus `json:"status"`
-	Priority        int        `json:"priority,omitempty"`
-	ProjectID       string     `json:"project_id,omitempty"`
+	Priority        string     `json:"priority,omitempty"`
+	ProjectID       string     `json:"repo,omitempty"`
 	ParentID        string     `json:"parent_id,omitempty"`
 	AssignedWorker  string     `json:"assigned_worker,omitempty"`
 	WorkerRole      string     `json:"worker_role,omitempty"`

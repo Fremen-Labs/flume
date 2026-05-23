@@ -2,19 +2,21 @@ package commands
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/services"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/Fremen-Labs/flume/internal/config"
-	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -39,14 +41,19 @@ var StartCmd = &cobra.Command{
 	Short: "Initiate Flume V3 Edge Orchestrator",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		log.Info("Booting Flume Matrix...")
+		fmt.Println(ui.BootPhase("Booting Flume orchestrator..."))
 
-		log.Infof("💾 Jacking into the local mainframe... Scanning global systemic hardware matrices 🔌")
+		fmt.Println(ui.BootPhase("Scanning system dependencies..."))
 		eco := orchestrator.PerformReconnaissance()
-		log.Info("[SYSTEM RECON]", "Docker", eco.HasDocker, "Elastic", eco.HasElastic, "OpenBao", eco.HasOpenBao, "Elastro", eco.HasElastro)
+		fmt.Print(ui.ReconReport(map[string]bool{
+			"Docker":        eco.HasDocker,
+			"Elasticsearch": eco.HasElastic,
+			"OpenBao":       eco.HasOpenBao,
+			"Elastro":       eco.HasElastro,
+		}))
 
 		if err := orchestrator.EvaluateAndInstall(eco); err != nil {
-			log.Error("Unmet Dependency Bounds", "error", err)
+			fmt.Println(ui.ErrorRed(fmt.Sprintf("Dependency check failed: %v", err)))
 			return err
 		}
 
@@ -59,8 +66,7 @@ var StartCmd = &cobra.Command{
 			if inUse {
 				newPort := ui.PromptForPort(port)
 				if newPort == 0 {
-					log.Error("Port exhaustion detected gracefully natively.")
-					return fmt.Errorf("port exhaustion on %d", port)
+					return fmt.Errorf("port conflict on %d — aborting", port)
 				}
 				if port == 8765 {
 					dashboardPort = fmt.Sprintf("%d", newPort)
@@ -95,96 +101,92 @@ var StartCmd = &cobra.Command{
 
 		adminToken, tErr := orchestrator.GenerateAdminToken()
 		if tErr != nil {
-			log.Error("Failed to seed explicit cryptographic bounds natively", "error", tErr)
+			fmt.Println(ui.ErrorRed(fmt.Sprintf("Failed to generate admin token: %v", tErr)))
 			return tErr
 		}
 		envCfg.AdminToken = adminToken
 
 		esPass, esErr := orchestrator.GenerateElasticPassword()
 		if esErr != nil {
-			log.Error("Failed to generate Elasticsearch password natively", "error", esErr)
+			fmt.Println(ui.ErrorRed(fmt.Sprintf("Failed to generate Elasticsearch password: %v", esErr)))
 			return esErr
 		}
 		envCfg.ElasticPassword = esPass
 		os.Setenv("FLUME_ELASTIC_PASSWORD", esPass)
 
-		if isHeadlessEnv(os.Getenv, os.Stdin.Stat) && envCfg.Provider == "" && ConfigFlag == "" {
-			log.Error("Non-interactive terminal detected without an explicit Provider or Config flag. Please pass -p [provider] or --config natively to prevent pipeline hanging.")
-			return fmt.Errorf("headless tty pseudo-hang prevented")
-		}
-
 		if ConfigFlag != "" {
 			var err error
-			log.Info("Loading Mesh Architecture IaC definition", "config", ConfigFlag)
+			fmt.Println(ui.BootPhase(fmt.Sprintf("Loading mesh config: %s", ConfigFlag)))
 			envCfg, err = parseMeshConfig(ConfigFlag)
 			if err != nil {
-				log.Error("Failed to parse mesh IaC configuration natively", "error", err)
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Failed to parse mesh config: %v", err)))
 				return err
 			}
 			envCfg.IsNative = NativeFlag
-		} else if !isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
-			log.Warn("Escalating to User Auth Layer.")
-			promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
-			if err != nil {
-				log.Error("Interactive Wizard aborted.", "error", err)
-				return err
-			}
-			envCfg.Provider = promptCfg.Provider
-			envCfg.APIKey = promptCfg.APIKey
-			envCfg.Model = promptCfg.Model
-			envCfg.ExternalElastic = promptCfg.ExternalElastic
-			envCfg.ESUrl = promptCfg.ElasticURL
-			envCfg.RepoType = promptCfg.RepoType
-			envCfg.GithubToken = promptCfg.GithubToken
-			envCfg.ADOOrg = promptCfg.ADOOrg
-			// ADOProject is no longer collected in the CLI wizard — not used in
-			// connection string construction. Retained in EnvConfig for forward-compat.
-			envCfg.ADOToken = promptCfg.ADOToken
-
-			if promptCfg.Provider == "ollama" {
-				if promptCfg.Host == "" {
-					promptCfg.Host = "127.0.0.1"
+		} else if envCfg.Provider == "" {
+			if isHeadlessEnv(os.Getenv, os.Stdin.Stat) {
+				return fmt.Errorf("non-interactive terminal detected without a provider — pass -p [provider] or --config")
+			} else {
+				promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
+				if err != nil {
+					fmt.Println(ui.ErrorRed("Setup wizard cancelled."))
+					return err
 				}
-				envCfg.Host = promptCfg.Host
-				envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
-				envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
-				envCfg.APIKey = ""
-			}
+				envCfg.Provider = promptCfg.Provider
+				envCfg.APIKey = promptCfg.APIKey
+				envCfg.Model = promptCfg.Model
+				envCfg.ExternalElastic = promptCfg.ExternalElastic
+				envCfg.ESUrl = promptCfg.ElasticURL
+				envCfg.RepoType = promptCfg.RepoType
+				envCfg.GithubToken = promptCfg.GithubToken
+				envCfg.ADOOrg = promptCfg.ADOOrg
+				envCfg.ADOToken = promptCfg.ADOToken
 
-			// Map wizard-collected nodes to EnvConfig.
-			for _, cp := range promptCfg.CloudProviders {
-				envCfg.CloudProviders = append(envCfg.CloudProviders, orchestrator.CloudProviderEntry{
-					Provider: cp.Provider,
-					Model:    cp.Model,
-					APIKey:   cp.APIKey,
-				})
-			}
-			
-			for _, n := range promptCfg.Nodes {
-				mem := 0.0
-				if n.MemoryGB != "" {
-					if v, err := strconv.ParseFloat(n.MemoryGB, 64); err == nil {
-						mem = v
+				if promptCfg.Provider == "ollama" {
+					if promptCfg.Host == "" {
+						promptCfg.Host = "127.0.0.1"
 					}
+					envCfg.Host = promptCfg.Host
+					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
+					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
+					envCfg.APIKey = ""
 				}
-				port := n.Port
-				if port == "" {
-					port = "11434"
+
+				// Map wizard-collected nodes to EnvConfig.
+				for _, cp := range promptCfg.CloudProviders {
+					envCfg.CloudProviders = append(envCfg.CloudProviders, orchestrator.CloudProviderEntry{
+						Provider: cp.Provider,
+						Model:    cp.Model,
+						APIKey:   cp.APIKey,
+					})
 				}
-				envCfg.Nodes = append(envCfg.Nodes, orchestrator.NodeConfigEntry{
-					ID:       n.ID,
-					Host:     n.Host,
-					Port:     port,
-					ModelTag: n.ModelTag,
-					MemoryGB: mem,
-				})
+				
+				for _, n := range promptCfg.Nodes {
+					mem := 0.0
+					if n.MemoryGB != "" {
+						if v, err := strconv.ParseFloat(n.MemoryGB, 64); err == nil {
+							mem = v
+						}
+					}
+					port := n.Port
+					if port == "" {
+						port = "11434"
+					}
+					envCfg.Nodes = append(envCfg.Nodes, orchestrator.NodeConfigEntry{
+						ID:       n.ID,
+						Host:     n.Host,
+						Port:     port,
+						ModelTag: n.ModelTag,
+						MemoryGB: mem,
+					})
+				}
 			}
 		}
 
 		generatedEnv := orchestrator.GenerateEnv(envCfg)
 
 		if NativeFlag {
-			log.Info("Executing Flume High Performance Native Subsystems.")
+			fmt.Println(ui.BootPhase("Starting native high-performance subsystems..."))
 
 			dockerArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
@@ -206,18 +208,36 @@ var StartCmd = &cobra.Command{
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
-				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Data grid boot failed: %v", err)))
+				_ = combinedOutput
 				return err
 			}
 
-			esUrl := "https://localhost:" + esPort
+			esScheme := "https"
+			probeURL := fmt.Sprintf("https://localhost:%s/_cluster/health", esPort)
+			if probeReq, err := http.NewRequestWithContext(ctx, "GET", probeURL, nil); err == nil {
+				probeClient := &http.Client{
+					Timeout: 2 * time.Second,
+					Transport: &http.Transport{
+						TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+					},
+				}
+				if probeResp, probeErr := probeClient.Do(probeReq); probeErr != nil {
+					if strings.Contains(probeErr.Error(), "wrong version number") || strings.Contains(probeErr.Error(), "http:") {
+						esScheme = "http"
+					}
+				} else {
+					probeResp.Body.Close()
+				}
+			}
+			esUrl := esScheme + "://localhost:" + esPort
 			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
 				esUrl = envCfg.ESUrl
 			}
 
 			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
-				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Vault deployment failed: %v", vErr)))
 				return vErr
 			}
 			generatedEnv = append(generatedEnv, "BAO_SECRET_ID="+secID)
@@ -226,18 +246,12 @@ var StartCmd = &cobra.Command{
 			// Bootstrap ALL ES indices before any application containers start.
 			// Must run after OpenBao is deployed (some indices store credential metadata).
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
-				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
+				fmt.Println(ui.WarningGold(fmt.Sprintf("ES index bootstrap: %v (non-fatal)", err)))
 			}
 
 			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
-				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
-			}
-
-			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
-				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
-			} else {
-				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
+				fmt.Println(ui.WarningGold(fmt.Sprintf("LLM config seed: %v (non-fatal)", err)))
 			}
 
 			// Phase 5: Start all application services in-process.
@@ -246,7 +260,7 @@ var StartCmd = &cobra.Command{
 			services.SetEnvForServices(generatedEnv)
 			services.SetEnvForServices(portEnvOverrides)
 			os.Setenv("FLUME_NATIVE_MODE", "1")
-			os.Setenv("ES_URL", "https://localhost:"+esPort)
+			os.Setenv("ES_URL", esUrl)
 			os.Setenv("OPENBAO_ADDR", "http://localhost:"+vaultPort)
 
 			logger := slog.Default()
@@ -256,11 +270,11 @@ var StartCmd = &cobra.Command{
 			// Start services — blocks until ctx cancelled or fatal error
 			go func() {
 				if err := sup.StartAll(ctx); err != nil {
-					log.Error("Service mesh error", "err", err)
+					fmt.Println(ui.ErrorRed(fmt.Sprintf("Service mesh error: %v", err)))
 				}
 			}()
 		} else {
-			log.Warn("🚀 Initiating hyper-threaded uplink... Deploying Docker Swarm Topology 💿")
+			fmt.Println(ui.BootPhase("Deploying Docker topology..."))
 
 			dockerArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
@@ -284,18 +298,42 @@ var StartCmd = &cobra.Command{
 			err := c.Run()
 			if err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
-				log.Error("Data grid boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Data grid boot failed: %v", err)))
+				_ = combinedOutput
 				return err
 			}
 
-			esUrl := "https://localhost:" + esPort
+			esScheme := "https"
+			probeURL := fmt.Sprintf("https://localhost:%s/_cluster/health", esPort)
+			if probeReq, err := http.NewRequestWithContext(ctx, "GET", probeURL, nil); err == nil {
+				probeClient := &http.Client{
+					Timeout: 2 * time.Second,
+					Transport: &http.Transport{
+						TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+					},
+				}
+				if probeResp, probeErr := probeClient.Do(probeReq); probeErr != nil {
+					if strings.Contains(probeErr.Error(), "wrong version number") || strings.Contains(probeErr.Error(), "http:") {
+						esScheme = "http"
+					}
+				} else {
+					probeResp.Body.Close()
+				}
+			}
+			esUrl := esScheme + "://localhost:" + esPort
 			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
 				esUrl = envCfg.ESUrl
 			}
 
+			esUrlDocker := esScheme + "://elasticsearch:9200"
+			if envCfg.ExternalElastic && envCfg.ESUrl != "" {
+				esUrlDocker = envCfg.ESUrl
+			}
+			fullEnv = append(fullEnv, "ES_URL="+esUrlDocker)
+
 			secID, rootToken, vErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
 			if vErr != nil {
-				log.Error("Failed to deploy Vault architecture natively", "err", vErr)
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Vault deployment failed: %v", vErr)))
 				return vErr
 			}
 			fullEnv = append(fullEnv, "BAO_SECRET_ID="+secID)
@@ -308,18 +346,12 @@ var StartCmd = &cobra.Command{
 			// Must run after OpenBao is deployed (some indices store credential metadata).
 			// Use localhost since we're still on the host machine at this point in boot.
 			if err := orchestrator.BootstrapElasticsearch(ctx, esUrl, ""); err != nil {
-				log.Warn("ES index bootstrap encountered errors (non-fatal)", "error", err)
+				fmt.Println(ui.WarningGold(fmt.Sprintf("ES index bootstrap: %v (non-fatal)", err)))
 			}
 
 			// Seed non-sensitive LLM config into ES so Settings page reads correctly on first load.
 			if err := orchestrator.SeedLLMConfig(ctx, esUrl, "", envCfg); err != nil {
-				log.Warn("Failed to seed LLM config into Elasticsearch", "error", err)
-			}
-
-			if saveErr := orchestrator.SaveCredentials(envCfg); saveErr != nil {
-				log.Warn("Failed to save credential snapshot (flume upgrade will require re-entry)", "error", saveErr)
-			} else {
-				log.Info("Credential snapshot saved to ~/.flume/credentials.enc")
+				fmt.Println(ui.WarningGold(fmt.Sprintf("LLM config seed: %v (non-fatal)", err)))
 			}
 
 			// Start application containers (dashboard, gateway, workers).
@@ -344,10 +376,11 @@ var StartCmd = &cobra.Command{
 
 			if err := appCmd.Run(); err != nil {
 				combinedOutput := outBuf.String() + "\n" + errBuf.String()
-				log.Error("Application container boot failed", "error", err, "output", strings.TrimSpace(combinedOutput))
+				fmt.Println(ui.ErrorRed(fmt.Sprintf("Application container boot failed: %v", err)))
+				_ = combinedOutput // logged at debug level
 				return err
 			}
-			log.Info("Application containers started successfully.")
+			fmt.Println(ui.SuccessBlue("Application containers started."))
 		}
 
 		if err := orchestrator.AwaitOrchestration(); err != nil {
@@ -409,9 +442,9 @@ var StartCmd = &cobra.Command{
 
 		if len(seedEntries) > 0 {
 			if err := orchestrator.SeedNodes(ctx, gatewayURL, seedEntries); err != nil {
-				log.Warn("Node mesh seeding encountered errors (non-fatal)", "error", err)
+				fmt.Println(ui.WarningGold(fmt.Sprintf("Node mesh seeding: %v (non-fatal)", err)))
 			} else {
-				log.Info("Node mesh seeded successfully", "count", len(seedEntries))
+				fmt.Println(ui.SuccessBlue(fmt.Sprintf("Node mesh seeded: %d node(s)", len(seedEntries))))
 			}
 		}
 

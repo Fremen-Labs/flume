@@ -128,7 +128,7 @@ func parseSemver(v string) [3]int {
 // and a warning is logged (allows shipping without checksum files during early
 // release cycles).
 func SelfUpdate(downloadURL string) error {
-	log.Infof("Downloading update from %s", downloadURL)
+	log.Debugf("Downloading update from %s", downloadURL)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 
@@ -175,7 +175,7 @@ func SelfUpdate(downloadURL string) error {
 		if !strings.EqualFold(expectedHash, actualHash) {
 			return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedHash, actualHash)
 		}
-		log.Info("Binary checksum verified.")
+		log.Debug("Binary checksum verified.")
 	} else {
 		log.Warn("No checksum file found — skipping verification.")
 	}
@@ -190,6 +190,6 @@ func SelfUpdate(downloadURL string) error {
 		return fmt.Errorf("failed to replace binary (may need sudo): %w", err)
 	}
 
-	log.Infof("Binary updated successfully: %s", exePath)
+	log.Debugf("Binary updated successfully: %s", exePath)
 	return nil
 }

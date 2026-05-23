@@ -1,17 +1,13 @@
 package commands
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/orchestrator"
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +39,6 @@ Worker count options:
 		latest, assetURL, vErr := orchestrator.LatestRelease("Fremen-Labs/flume")
 		if vErr != nil {
 			// Non-fatal: network may be unavailable, proceed with image rebuild only
-			log.Warn("Version check failed — skipping binary update", "error", vErr)
 			fmt.Println(ui.WarningGold("skipped (offline)"))
 		} else if orchestrator.CompareVersions(orchestrator.CurrentVersion, latest) {
 			fmt.Println(ui.SuccessBlue(fmt.Sprintf("update available  %s → %s", orchestrator.CurrentVersion, latest)))
@@ -51,7 +46,6 @@ Worker count options:
 				fmt.Print(ui.WarningGold(fmt.Sprintf("  Downloading %s... ", latest)))
 				if err := orchestrator.SelfUpdate(assetURL); err != nil {
 					// Non-fatal: continue with image rebuild even if binary update fails
-					log.Warn("Binary self-update failed", "error", err)
 					fmt.Println(ui.WarningGold("failed (will retry next upgrade)"))
 				} else {
 					fmt.Println(ui.SuccessBlue("✓"))
@@ -62,96 +56,9 @@ Worker count options:
 			fmt.Println(ui.SuccessBlue(fmt.Sprintf("already on latest (%s)  ✓", orchestrator.CurrentVersion)))
 		}
 
-		// ── Phase 2: Load credential snapshot ────────────────────────────────
-		fmt.Print(ui.WarningGold("  Loading credential snapshot... "))
-		envCfg, err := orchestrator.LoadCredentials()
-		if err != nil {
-			fmt.Println(ui.WarningGold("not found"))
-			fmt.Println(ui.WarningGold("  No credential snapshot at ~/.flume/credentials.enc"))
-			fmt.Println(ui.WarningGold("  Run 'flume start' first to create one, or enter credentials now:"))
-			fmt.Println()
-			// Fall back to interactive prompt (reuse start flow)
-			return runUpgradeFallback(ctx, upgradeWorkersFlag)
-		}
-		fmt.Println(ui.SuccessBlue(fmt.Sprintf("✓  (provider: %s · model: %s)", envCfg.Provider, envCfg.Model)))
-
-		// ── Phase 3: Resolve worker count ─────────────────────────────────────
-		workerCount := orchestrator.ResolveWorkerCount(upgradeWorkersFlag)
-		fmt.Println(ui.CyberGradient(fmt.Sprintf("  Worker count: %s", orchestrator.WorkerCountDescription(upgradeWorkersFlag))))
-
-		// ── Phase 4: Image rebuild skipped ──────────────────────────────────
-		// Phase 5+: all application services (gateway, dashboard, worker-manager)
-		// run in-process via the Go binary. No Docker images to rebuild.
-		fmt.Println(ui.SuccessBlue("  Application services run in-process — no Docker images to rebuild."))
-
-		// ── Phase 5: Rolling stop (ES + OpenBao stay running) ─────────────────
-		fmt.Print(ui.WarningGold("  Stopping workers (ES + OpenBao unaffected)... "))
-		stopServices := buildStopServiceNames(workerCount)
-		stopArgs := append([]string{"compose", "stop"}, stopServices...)
-		stopCmd := exec.CommandContext(ctx, "docker", stopArgs...)
-		stopCmd.Env = append(os.Environ(), "OPENBAO_TOKEN=flume-dev-token")
-		var stopBuf bytes.Buffer
-		stopCmd.Stderr = &stopBuf
-		if err := stopCmd.Run(); err != nil {
-			// Non-fatal: containers may already be stopped
-			log.Warn("Stop had warnings", "output", stopBuf.String())
-		}
-		fmt.Println(ui.SuccessBlue("✓"))
-
-		// ── Phase 6: Re-provision AppRole (OpenBao KV data preserved) ─────────
-		fmt.Print(ui.WarningGold("  Re-provisioning AppRole credentials... "))
-		vaultPort := "8200"
-		esUrl := "https://localhost:9200"
-		if envCfg.ExternalElastic && envCfg.ESUrl != "" {
-			esUrl = envCfg.ESUrl
-		}
-		secretID, rootToken, vaultErr := orchestrator.DeployVaultTopology(ctx, vaultPort, esUrl, envCfg)
-		if vaultErr != nil {
-			return fmt.Errorf("vault provisioning failed: %w", vaultErr)
-		}
-		fmt.Println(ui.SuccessBlue("✓"))
-
-		// ── Phase 7: Start upgraded containers ────────────────────────────────
-		fmt.Println(ui.CyberGradient(fmt.Sprintf("  Starting upgraded containers (%d workers)...", workerCount)))
-
-		generatedEnv := orchestrator.GenerateEnv(envCfg)
-		fullEnv := append(os.Environ(), generatedEnv...)
-		fullEnv = append(fullEnv, "BAO_SECRET_ID="+secretID)
-		fullEnv = append(fullEnv, "OPENBAO_TOKEN="+rootToken)
-
-		upServices := orchestrator.BuildWorkerServiceNames(workerCount)
-		upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait"}, upServices...)
-		upCmd := exec.CommandContext(ctx, "docker", upArgs...)
-		upCmd.Env = fullEnv
-
-		var upOut, upErr bytes.Buffer
-		upCmd.Stdout = io.MultiWriter(os.Stdout, &upOut)
-		upCmd.Stderr = io.MultiWriter(os.Stderr, &upErr)
-		if err := upCmd.Run(); err != nil {
-			combined := upOut.String() + "\n" + upErr.String()
-			log.Error("Container startup failed", "output", strings.TrimSpace(combined))
-			return fmt.Errorf("container startup failed: %w", err)
-		}
-
-		// ── Phase 8: Health check ─────────────────────────────────────────────
-		if err := orchestrator.AwaitOrchestration(); err != nil {
-			log.Error("Health check failed after upgrade. Run 'flume doctor' for diagnostics.")
-			return err
-		}
-
-		// Refresh credential snapshot timestamp
-		_ = orchestrator.SaveCredentials(envCfg)
-
-		// ── Pruning builder cache to avoid Docker VM disk exhaustion ──────────
-		pruneCmd := exec.CommandContext(ctx, "docker", "builder", "prune", "-f")
-		pruneCmd.Stdout = os.Stdout
-		pruneCmd.Stderr = os.Stderr
-		pruneCmd.Run() // best-effort
-
-		fmt.Println()
-		fmt.Println(ui.SuccessBlue(fmt.Sprintf("  ✓ Upgrade complete.  Flume %s running on http://localhost:8765", latest)))
-		fmt.Println(ui.CyberGradient("    ES data preserved · Credentials preserved · Build cache pruned"))
-		return nil
+		// ── Phase 2: Configuration Entry ─────────────────────────────────────
+		// Since credential snapshots are removed, run the setup wizard directly.
+		return runUpgradeFallback(ctx, upgradeWorkersFlag)
 	},
 }
 
@@ -160,10 +67,10 @@ func buildStopServiceNames(workerCount int) []string {
 	return []string{"dashboard", "gateway", "worker"}
 }
 
-// runUpgradeFallback falls through to a condensed interactive credential prompt
-// when no snapshot exists, then performs the normal upgrade flow.
+// runUpgradeFallback falls through to an interactive credential prompt
+// then performs the normal upgrade flow.
 func runUpgradeFallback(ctx context.Context, workersFlag string) error {
-	log.Info("Falling back to interactive credential entry...")
+	fmt.Println(ui.BootPhase("Launching configuration wizard..."))
 	promptCfg, err := ui.RunInteractivePrompt(orchestrator.CheckExoActive())
 	if err != nil {
 		return fmt.Errorf("interactive prompt aborted: %w", err)
@@ -188,13 +95,8 @@ func runUpgradeFallback(ctx context.Context, workersFlag string) error {
 		envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
 	}
 
-	// Save snapshot so future upgrades are seamless
-	if err := orchestrator.SaveCredentials(envCfg); err != nil {
-		log.Warn("Failed to save credential snapshot", "error", err)
-	}
-
 	// Now do a normal flume start sequence since this is effectively a first run
-	log.Info("Credentials captured. Running full start sequence...")
+	fmt.Println(ui.BootPhase("Credentials captured. Starting Flume..."))
 	return runStartSequence(ctx, envCfg, workersFlag)
 }
 

@@ -68,7 +68,7 @@ func esRequest(ctx context.Context, esURL, apiKey, endpoint, method string, payl
 	return respBody, resp.StatusCode, nil
 }
 
-// MintElasticsearchAPIKey natively mints a new API key scoped to the flume_role.
+// MintElasticsearchAPIKey mints a new API key scoped to the flume_role.
 func MintElasticsearchAPIKey(ctx context.Context, esURL string) (string, error) {
 	log.Debug("[ELASTICSEARCH SEC] Minting dynamic Elasticsearch API Key via xpack.security...")
 
@@ -91,7 +91,7 @@ func MintElasticsearchAPIKey(ctx context.Context, esURL string) (string, error) 
 	// to fall back to FLUME_ELASTIC_PASSWORD basic auth.
 	respBody, status, err := esRequest(ctx, esURL, "", "_security/api_key", "POST", payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to mint ES API key natively: %w", err)
+		return "", fmt.Errorf("failed to mint ES API key: %w", err)
 	}
 	if status != 200 {
 		return "", fmt.Errorf("unexpected status %d minting ES API key: %s", status, string(respBody))
@@ -101,10 +101,10 @@ func MintElasticsearchAPIKey(ctx context.Context, esURL string) (string, error) 
 		Encoded string `json:"encoded"`
 	}
 	if err := json.Unmarshal(respBody, &resData); err != nil {
-		return "", fmt.Errorf("failed to parse ES API key response natively: %w", err)
+		return "", fmt.Errorf("failed to parse ES API key response: %w", err)
 	}
 
-	log.Info("[ELASTICSEARCH SEC] ✅ Elasticsearch API key minted successfully")
+	log.Debug("[ELASTICSEARCH SEC] ✅ Elasticsearch API key minted successfully")
 	return resData.Encoded, nil
 }
 
@@ -442,7 +442,7 @@ var allTemplates = []templateDef{
 // Each index uses an idempotent HEAD→PUT pattern: skip if the index already
 // exists, create with the explicit mapping if it doesn't.
 func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
-	log.Info("[ES INDEX BOOTSTRAP] Creating all Elasticsearch indices", "url", esURL, "indices", len(allIndices), "templates", len(allTemplates))
+	log.Debug("[ES INDEX BOOTSTRAP] Creating all Elasticsearch indices", "url", esURL, "indices", len(allIndices), "templates", len(allTemplates))
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -477,7 +477,7 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		}
 		resp.Body.Close()
 		if resp.StatusCode < 400 {
-			log.Info("[ES INDEX BOOTSTRAP] ✅ Applied index template", "template", tpl.Name)
+			log.Debug("[ES INDEX BOOTSTRAP] ✅ Applied index template", "template", tpl.Name)
 		} else {
 			log.Warn("[ES INDEX BOOTSTRAP] Template apply returned non-success", "template", tpl.Name, "status", resp.StatusCode)
 		}
@@ -584,7 +584,7 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		putResp.Body.Close()
 
 		if putResp.StatusCode < 400 {
-			log.Info("[ES INDEX BOOTSTRAP] ✅ Created index", "index", idx.Name)
+			log.Debug("[ES INDEX BOOTSTRAP] ✅ Created index", "index", idx.Name)
 			created++
 		} else {
 			log.Warn("[ES INDEX BOOTSTRAP] Index creation returned non-success", "index", idx.Name, "status", putResp.StatusCode)
@@ -592,7 +592,7 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 		}
 	}
 
-	log.Info("[ES INDEX BOOTSTRAP] Index bootstrap complete", "created", created, "skipped_existing", skipped, "failed", failed, "total", len(allIndices))
+	log.Debug("[ES INDEX BOOTSTRAP] Index bootstrap complete", "created", created, "skipped_existing", skipped, "failed", failed, "total", len(allIndices))
 
 	if failed > 0 {
 		return fmt.Errorf("failed to create %d indices", failed)
@@ -600,10 +600,10 @@ func EnsureAllIndices(ctx context.Context, esURL, apiKey string) error {
 	return nil
 }
 
-// SeedPainlessScripts securely uploads native compilation scripts into ES
-// drastically reducing HTTP wire overhead natively during swarm operations.
+// SeedPainlessScripts securely uploads compilation scripts into ES
+// drastically reducing HTTP wire overhead during swarm operations.
 func SeedPainlessScripts(ctx context.Context, esURL, apiKey string) error {
-	log.Debug("[ELASTICSEARCH SCRIPTS] Seeding Enterprise Painless execution routines natively")
+	log.Debug("[ELASTICSEARCH SCRIPTS] Seeding Enterprise Painless execution routines")
 
 	scripts := map[string]string{
 		"flume-task-claim": `
@@ -659,9 +659,9 @@ func SeedPainlessScripts(ctx context.Context, esURL, apiKey string) error {
 		endpoint := fmt.Sprintf("_scripts/%s", id)
 		_, _, err := esRequest(ctx, esURL, apiKey, endpoint, "PUT", payload)
 		if err != nil {
-			log.Warn("[ELASTICSEARCH SCRIPTS] Failed to seed Painless script natively", "id", id, "error", err)
+			log.Warn("[ELASTICSEARCH SCRIPTS] Failed to seed Painless script", "id", id, "error", err)
 		} else {
-			log.Info(fmt.Sprintf("[ELASTICSEARCH SCRIPTS] ✅ Native Painless routine deployed: %s", id))
+			log.Debug(fmt.Sprintf("[ELASTICSEARCH SCRIPTS] ✅ Painless routine deployed: %s", id))
 		}
 	}
 	return nil
@@ -674,7 +674,7 @@ func SeedPainlessScripts(ctx context.Context, esURL, apiKey string) error {
 //
 //	ES healthy → OpenBao deployed → BootstrapElasticsearch() → SeedLLMConfig() → containers
 func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
-	log.Info("[ELASTICSEARCH BOOTSTRAP] Bootstrapping Kubernetes-Grade Integration", "url", esURL)
+	log.Debug("[ELASTICSEARCH BOOTSTRAP] Bootstrapping integration", "url", esURL)
 
 	// 1. Create ILM Policy
 	ilmPolicy := map[string]interface{}{
@@ -705,7 +705,7 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 	if err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create ILM policy", "error", err)
 	} else {
-		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ ILM Policy 'flume-task-records-policy' created")
+		log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ ILM Policy 'flume-task-records-policy' created")
 	}
 
 	// 2. Create Index Template mapping pattern to ILM policy
@@ -752,7 +752,7 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 	if err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create Index Template", "error", err)
 	} else {
-		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-records-template' created")
+		log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-records-template' created")
 	}
 
 	// 3. Create Index Template for flume-task-events (using the same ILM policy)
@@ -784,7 +784,7 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 	if err != nil {
 		log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create flume-task-events Index Template", "error", err)
 	} else {
-		log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-events-template' created")
+		log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ Index Template 'flume-task-events-template' created")
 	}
 
 	// 4. Create the initial ILM write index for flume-task-events if it doesn't exist
@@ -801,7 +801,7 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 		if err != nil {
 			log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to create initial flume-task-events index", "error", err)
 		} else {
-			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Initial flume-task-events index created")
+			log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ Initial flume-task-events index created")
 		}
 	}
 
@@ -878,11 +878,11 @@ func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) err
 	for attempt := 1; attempt <= seedMaxRetries; attempt++ {
 		_, _, err := esRequest(ctx, esURL, apiKey, "flume-llm-config/_doc/singleton", "PUT", existing)
 		if err == nil {
-			log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config",
+			log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded flume-llm-config",
 				"provider", provider, "model", cfg.Model, "attempt", attempt)
-				
-			// BOOTSTRAP EXTENSION: Native Routing Policy Injection
-			// Bind the frontier models natively into the Gateway's Routing Policy map
+
+			// BOOTSTRAP EXTENSION: Routing Policy Injection
+			// Bind the frontier models into the Gateway's Routing Policy map
 			if len(cfg.CloudProviders) > 0 {
 				var frontierMix []map[string]interface{}
 				for _, cp := range cfg.CloudProviders {
@@ -908,11 +908,11 @@ func SeedLLMConfig(ctx context.Context, esURL, apiKey string, cfg EnvConfig) err
 
 				_, _, rErr := esRequest(ctx, esURL, apiKey, "flume-routing-policy/_doc/singleton", "PUT", routingPayload)
 				if rErr == nil {
-					log.Info("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded Native Routing Policy for Frontier Mesh.")
-					slog.Info("orchestrator: safely bootstrapped flume-routing-policy document natively into ES",
+					log.Debug("[ELASTICSEARCH BOOTSTRAP] ✅ Seeded Routing Policy for Frontier Mesh.")
+					slog.Debug("orchestrator: safely bootstrapped flume-routing-policy document into ES",
 						slog.Int("provider_count", len(cfg.CloudProviders)))
 				} else {
-					log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to seed routing policy natively", "error", rErr)
+					log.Warn("[ELASTICSEARCH BOOTSTRAP] Failed to seed routing policy", "error", rErr)
 					slog.Warn("orchestrator: failed to bootstrap flume-routing-policy", "error", rErr)
 				}
 			}

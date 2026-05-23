@@ -349,7 +349,7 @@ func (m *Manager) isClusterPaused(ctx context.Context) bool {
 func (m *Manager) countAvailableByStatus(ctx context.Context) map[string]int {
 	counts := make(map[string]int)
 	for _, status := range []string{"ready", "planned", "review"} {
-		n, err := m.es.Count(ctx, "flume-tasks", map[string]interface{}{
+		n, err := m.es.Count(ctx, "agent-task-records", map[string]interface{}{
 			"term": map[string]string{"status": status},
 		})
 		if err != nil {
@@ -366,7 +366,7 @@ func (m *Manager) countAvailableByStatus(ctx context.Context) map[string]int {
 
 func (m *Manager) fetchBusyWorkers(ctx context.Context) map[string]BusyWorker {
 	busy := make(map[string]BusyWorker)
-	result, err := m.es.Search(ctx, "flume-tasks", map[string]interface{}{
+	result, err := m.es.Search(ctx, "agent-task-records", map[string]interface{}{
 		"match": map[string]string{"queue_state": "active"},
 	}, 500)
 	if err != nil {
