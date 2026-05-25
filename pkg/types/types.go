@@ -22,27 +22,29 @@ import "time"
 type TaskStatus string
 
 const (
-	TaskStatusInbox    TaskStatus = "inbox"
-	TaskStatusPlanned  TaskStatus = "planned"
-	TaskStatusReady    TaskStatus = "ready"
-	TaskStatusRunning  TaskStatus = "running"
-	TaskStatusReview   TaskStatus = "review"
-	TaskStatusDone     TaskStatus = "done"
-	TaskStatusBlocked  TaskStatus = "blocked"
-	TaskStatusArchived TaskStatus = "archived"
+	TaskStatusInbox           TaskStatus = "inbox"
+	TaskStatusPlanned         TaskStatus = "planned"
+	TaskStatusReady           TaskStatus = "ready"
+	TaskStatusRunning         TaskStatus = "running"
+	TaskStatusReview          TaskStatus = "review"
+	TaskStatusReviewConsensus TaskStatus = "review-consensus"
+	TaskStatusDone            TaskStatus = "done"
+	TaskStatusBlocked         TaskStatus = "blocked"
+	TaskStatusArchived        TaskStatus = "archived"
 )
 
 // ValidTransitions defines the FSM for task state changes.
 // Direct port from Python: TaskStateMachine.TRANSITIONS.
 var ValidTransitions = map[TaskStatus][]TaskStatus{
-	TaskStatusInbox:    {TaskStatusPlanned, TaskStatusReady, TaskStatusArchived},
-	TaskStatusPlanned:  {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
-	TaskStatusReady:    {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
-	TaskStatusRunning:  {TaskStatusReview, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
-	TaskStatusReview:   {TaskStatusDone, TaskStatusRunning, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
-	TaskStatusDone:     {TaskStatusArchived, TaskStatusReady, TaskStatusBlocked},
-	TaskStatusBlocked:  {TaskStatusReady, TaskStatusArchived},
-	TaskStatusArchived: {TaskStatusReady},
+	TaskStatusInbox:           {TaskStatusPlanned, TaskStatusReady, TaskStatusArchived},
+	TaskStatusPlanned:         {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
+	TaskStatusReady:           {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
+	TaskStatusRunning:         {TaskStatusReview, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
+	TaskStatusReview:          {TaskStatusReviewConsensus, TaskStatusDone, TaskStatusRunning, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
+	TaskStatusReviewConsensus: {TaskStatusDone, TaskStatusRunning, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
+	TaskStatusDone:            {TaskStatusArchived, TaskStatusReady, TaskStatusBlocked},
+	TaskStatusBlocked:         {TaskStatusReady, TaskStatusArchived},
+	TaskStatusArchived:        {TaskStatusReady},
 }
 
 // Task represents a work item in the Flume queue.
@@ -72,6 +74,9 @@ type Task struct {
 	UpdatedAt       time.Time  `json:"updated_at,omitempty"`
 	LastUpdate      time.Time  `json:"last_update,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	DependsOn       []string   `json:"depends_on,omitempty"`
+	ReviewVerdict   string     `json:"review_verdict,omitempty"`
+	Feedback        string     `json:"feedback,omitempty"`
 }
 
 // ─── Worker ─────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -30,15 +32,17 @@ import (
 //   - compute_ready_for_repo (L1636-1864, 25 parents, 4 children)
 type Runner struct {
 	es       *es.Client
+	llm      *llm.Client
 	logger   *slog.Logger
 	registry *ProviderRegistry
 	tools    *ToolRegistry
 }
 
 // NewRunner creates a new task execution runner.
-func NewRunner(esClient *es.Client, logger *slog.Logger) *Runner {
+func NewRunner(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger) *Runner {
 	return &Runner{
 		es:       esClient,
+		llm:      llmClient,
 		logger:   logger.With(slog.String("component", "runner")),
 		registry: NewProviderRegistry(logger),
 		tools:    NewToolRegistry(logger),
@@ -71,6 +75,13 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 	switch worker.Role {
 	case "implementer":
 		result, err = r.handleImplementer(ctx, task, worker)
+		if err == nil && result.Success && result.NextStatus == ftypes.TaskStatusReview {
+			result.NextStatus = ftypes.TaskStatusReviewConsensus
+			if spawnErr := r.spawnReviewTasks(ctx, task); spawnErr != nil {
+				r.logger.Error("failed to spawn review tasks", slog.String("error", spawnErr.Error()))
+				result.NextStatus = ftypes.TaskStatusReview
+			}
+		}
 	case "reviewer":
 		result, err = r.handleReviewer(ctx, task, worker)
 	case "tester":
@@ -166,8 +177,86 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 
 // handleReviewer runs the reviewer agent.
 func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
-	r.logger.Info("reviewer: starting",
-		slog.String("task_id", task.ID))
+	r.logger.Info("reviewer: starting", slog.String("task_id", task.ID))
+
+	// Fetch parent task
+	var parent ftypes.Task
+	if task.ParentID != "" {
+		parentDoc, err := r.es.GetDoc(ctx, "agent-task-records", task.ParentID)
+		if err == nil && parentDoc != nil {
+			_ = json.Unmarshal(parentDoc, &parent)
+		}
+	}
+	if parent.ID == "" {
+		parent = task
+	}
+
+	// Get project local path
+	repoPath := ""
+	if parent.ProjectID != "" {
+		projDoc, err := r.es.GetDoc(ctx, "flume-projects", parent.ProjectID)
+		if err == nil && projDoc != nil {
+			var proj ftypes.Project
+			if json.Unmarshal(projDoc, &proj) == nil {
+				repoPath = proj.LocalPath
+			}
+		}
+	}
+
+	diffOut := ""
+	if repoPath != "" {
+		branch := resolveBranchName(parent)
+		defaultBranch, _ := resolveDefaultBranch(repoPath)
+		var err error
+		diffOut, err = gitCmd(repoPath, "diff", defaultBranch+"..."+branch)
+		if err != nil {
+			r.logger.Warn("reviewer: git diff failed", slog.String("error", err.Error()))
+		}
+	}
+
+	reviewerSystemPrompt := readSystemPrompt("reviewer")
+	req := llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "system", Content: reviewerSystemPrompt},
+			{Role: "user", Content: fmt.Sprintf("Please review this implementation:\nTask: %s\nDiff:\n%s", parent.Title, diffOut)},
+		},
+		Model:     worker.Model,
+		Provider:  worker.Provider,
+		AgentRole: "reviewer",
+		TaskID:    task.ID,
+	}
+
+	resp, err := r.llm.Chat(ctx, req)
+	if err != nil {
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	approved := true
+	var reviewResult struct {
+		Approved bool `json:"approved"`
+	}
+	content := cleanJSONContent(resp.Content)
+	if json.Unmarshal([]byte(content), &reviewResult) == nil {
+		approved = reviewResult.Approved
+	} else {
+		// Fallback check
+		if strings.Contains(strings.ToLower(resp.Content), `"approved": false`) ||
+			strings.Contains(strings.ToLower(resp.Content), `approved: false`) {
+			approved = false
+		}
+	}
+
+	verdict := "approved"
+	if !approved {
+		verdict = "rejected"
+	}
+
+	update := map[string]interface{}{
+		"review_verdict": verdict,
+		"feedback":       resp.Content,
+		"updated_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
 
 	return ftypes.AgentResult{
 		Success:    true,
@@ -177,8 +266,66 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 
 // handleTester runs the tester agent.
 func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
-	r.logger.Info("tester: starting",
-		slog.String("task_id", task.ID))
+	r.logger.Info("tester: starting", slog.String("task_id", task.ID))
+
+	// Fetch parent task
+	var parent ftypes.Task
+	if task.ParentID != "" {
+		parentDoc, err := r.es.GetDoc(ctx, "agent-task-records", task.ParentID)
+		if err == nil && parentDoc != nil {
+			_ = json.Unmarshal(parentDoc, &parent)
+		}
+	}
+	if parent.ID == "" {
+		parent = task
+	}
+
+	// Get project local path
+	repoPath := ""
+	if parent.ProjectID != "" {
+		projDoc, err := r.es.GetDoc(ctx, "flume-projects", parent.ProjectID)
+		if err == nil && projDoc != nil {
+			var proj ftypes.Project
+			if json.Unmarshal(projDoc, &proj) == nil {
+				repoPath = proj.LocalPath
+			}
+		}
+	}
+
+	verdict := "approved"
+	feedback := "No repository or local path configured for testing."
+
+	if repoPath != "" {
+		branch := resolveBranchName(parent)
+		// Check out the branch
+		if err := gitCheckoutBranch(repoPath, branch); err != nil {
+			verdict = "rejected"
+			feedback = "Failed to checkout branch for testing: " + err.Error()
+		} else {
+			// Determine test command
+			var cmd *exec.Cmd
+			if _, err := os.Stat(repoPath + "/go.mod"); err == nil {
+				cmd = exec.Command("go", "test", "./...")
+			} else if _, err := os.Stat(repoPath + "/package.json"); err == nil {
+				cmd = exec.Command("npm", "test")
+			} else {
+				cmd = exec.Command("make", "test")
+			}
+			cmd.Dir = repoPath
+			out, testErr := cmd.CombinedOutput()
+			feedback = string(out)
+			if testErr != nil {
+				verdict = "rejected"
+			}
+		}
+	}
+
+	update := map[string]interface{}{
+		"review_verdict": verdict,
+		"feedback":       feedback,
+		"updated_at":     time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
 
 	return ftypes.AgentResult{
 		Success:    true,
@@ -188,12 +335,80 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 
 // handlePM runs the PM agent for task decomposition.
 func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
-	r.logger.Info("pm: decomposing",
-		slog.String("task_id", task.ID))
+	r.logger.Info("pm: decomposing", slog.String("task_id", task.ID))
+
+	pmSystemPrompt := readSystemPrompt("pm")
+	req := llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "system", Content: pmSystemPrompt},
+			{Role: "user", Content: fmt.Sprintf("Please decompose the following task:\nTitle: %s\nObjective: %s", task.Title, task.Description)},
+		},
+		Model:     worker.Model,
+		Provider:  worker.Provider,
+		AgentRole: "pm",
+		TaskID:    task.ID,
+	}
+
+	resp, err := r.llm.Chat(ctx, req)
+	if err != nil {
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	type SubtaskPlan struct {
+		ID        string   `json:"id"`
+		Title     string   `json:"title"`
+		Objective string   `json:"objective"`
+		DependsOn []string `json:"depends_on"`
+	}
+	var plan struct {
+		Tasks []SubtaskPlan `json:"tasks"`
+	}
+
+	content := cleanJSONContent(resp.Content)
+	if err := json.Unmarshal([]byte(content), &plan); err != nil {
+		r.logger.Error("pm: failed to parse subtask plan JSON", slog.String("raw", resp.Content), slog.String("error", err.Error()))
+		return ftypes.AgentResult{Success: false, Errors: []string{"failed to parse plan: " + err.Error()}}, err
+	}
+
+	// Map relative IDs to unique IDs
+	idMap := make(map[string]string)
+	for _, t := range plan.Tasks {
+		idMap[t.ID] = fmt.Sprintf("task-%s", generateShortID())
+	}
+
+	now := time.Now().UTC()
+	for _, t := range plan.Tasks {
+		newID := idMap[t.ID]
+		var dependsOn []string
+		for _, dep := range t.DependsOn {
+			if mapped, ok := idMap[dep]; ok {
+				dependsOn = append(dependsOn, mapped)
+			}
+		}
+
+		subtask := ftypes.Task{
+			ID:             newID,
+			Title:          t.Title,
+			Description:    t.Objective,
+			Status:         ftypes.TaskStatusPlanned,
+			ProjectID:      task.ProjectID,
+			ParentID:       task.ID,
+			WorkerRole:     "implementer",
+			DependsOn:      dependsOn,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			LastUpdate:     now,
+		}
+		if indexErr := r.es.IndexDoc(ctx, "agent-task-records", subtask.ID, subtask); indexErr != nil {
+			r.logger.Error("pm: failed to index subtask", slog.String("id", subtask.ID), slog.String("error", indexErr.Error()))
+		}
+	}
+
+	r.logger.Info("pm: task decomposed successfully", slog.Int("subtasks", len(plan.Tasks)))
 
 	return ftypes.AgentResult{
 		Success:    true,
-		NextStatus: ftypes.TaskStatusDone,
+		NextStatus: ftypes.TaskStatusRunning, // PM task is running while subtasks execute
 	}, nil
 }
 
@@ -562,4 +777,94 @@ func implementerMaxLLMFailuresCap() int {
 		}
 	}
 	return cap
+}
+
+// spawnReviewTasks creates a reviewer and tester subtask for review-consensus.
+func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error {
+	now := time.Now().UTC()
+
+	// Reviewer task
+	revTask := ftypes.Task{
+		ID:             fmt.Sprintf("task-rev-%s", generateShortID()),
+		Title:          "Review: " + parent.Title,
+		Description:    "Verify functional purity and state constraints for: " + parent.Description,
+		Status:         ftypes.TaskStatusReview,
+		ProjectID:      parent.ProjectID,
+		ParentID:       parent.ID,
+		WorkerRole:     "reviewer",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastUpdate:     now,
+	}
+
+	// Tester task
+	testTask := ftypes.Task{
+		ID:             fmt.Sprintf("task-test-%s", generateShortID()),
+		Title:          "Test: " + parent.Title,
+		Description:    "Run tests and evaluate outcomes for: " + parent.Description,
+		Status:         ftypes.TaskStatusReview,
+		ProjectID:      parent.ProjectID,
+		ParentID:       parent.ID,
+		WorkerRole:     "tester",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastUpdate:     now,
+	}
+
+	if err := r.es.IndexDoc(ctx, "agent-task-records", revTask.ID, revTask); err != nil {
+		return fmt.Errorf("index reviewer task: %w", err)
+	}
+
+	if err := r.es.IndexDoc(ctx, "agent-task-records", testTask.ID, testTask); err != nil {
+		return fmt.Errorf("index tester task: %w", err)
+	}
+
+	r.logger.Info("spawned reviewer and tester subtasks",
+		slog.String("parent_id", parent.ID),
+		slog.String("rev_task_id", revTask.ID),
+		slog.String("test_task_id", testTask.ID))
+
+	return nil
+}
+
+func readSystemPrompt(role string) string {
+	path := fmt.Sprintf("src/agents/%s/SYSTEM_PROMPT.md", role)
+	if role == "pm" {
+		path = "src/agents/pm-dispatcher/SYSTEM_PROMPT.md"
+	}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return string(data)
+	}
+	// Fallback prompts
+	switch role {
+	case "pm":
+		return "You are the PM (Product Manager) agent. Your job is to decompose the user's task or feature request into a set of structured child tasks (workitems) that form a DAG (Directed Acyclic Graph).\nYou must output a JSON object conforming exactly to this schema:\n{\n  \"tasks\": [\n    {\n      \"id\": \"task_1\",\n      \"title\": \"Short title\",\n      \"objective\": \"Detailed description of what the implementer agent needs to do\",\n      \"depends_on\": []\n    }\n  ]\n}"
+	case "reviewer":
+		return "You are the Reviewer microservice. Your sole responsibility is to evaluate proposed codebase permutations against explicit architectural constraints. You must strictly conform to this JSON schema: {\"approved\": boolean, \"violations\": [{\"rule\": \"Global State\", \"details\": \"...\"}]}"
+	case "tester":
+		return "You are the Tester microservice. Run tests and verify the code correctness."
+	default:
+		return ""
+	}
+}
+
+func cleanJSONContent(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```json") {
+		s = strings.TrimPrefix(s, "```json")
+		s = strings.TrimSuffix(s, "```")
+		s = strings.TrimSpace(s)
+	} else if strings.HasPrefix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+		s = strings.TrimSuffix(s, "```")
+		s = strings.TrimSpace(s)
+	}
+	return s
+}
+
+func generateShortID() string {
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }

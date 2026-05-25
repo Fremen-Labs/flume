@@ -3,11 +3,17 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/git"
+	"github.com/Fremen-Labs/flume/internal/llm"
+	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
 // Sweeper handles periodic maintenance sweeps for the task queue.
@@ -21,6 +27,7 @@ import (
 //   - Block: Halt tasks when node capacity is exceeded
 type Sweeper struct {
 	es     *es.Client
+	llm    *llm.Client
 	logger *slog.Logger
 
 	// Throttle state — derived from Python: SWEEP_LAST_RUN, SWEEP_INTERVALS
@@ -31,19 +38,24 @@ type Sweeper struct {
 }
 
 // NewSweeper creates a new sweep orchestrator.
-func NewSweeper(esClient *es.Client, logger *slog.Logger) *Sweeper {
+func NewSweeper(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger) *Sweeper {
 	return &Sweeper{
 		es:     esClient,
+		llm:    llmClient,
 		logger: logger.With(slog.String("component", "orchestration.sweeps")),
 		lastRun: map[string]time.Time{
 			"stuck_impl":   {},
 			"stuck_review": {},
 			"promote":      {},
+			"consensus":    {},
+			"parent_comp":  {},
 		},
 		intervals: map[string]time.Duration{
 			"stuck_impl":   30 * time.Second,
 			"stuck_review": 30 * time.Second,
 			"promote":      5 * time.Second,
+			"consensus":    5 * time.Second,
+			"parent_comp":  5 * time.Second,
 		},
 	}
 }
@@ -85,8 +97,25 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 			s.logger.Info("dependency sweep: promoted tasks to ready",
 				slog.Int("count", count))
 		}
-		return
+		s.mu.Lock()
 	}
+
+	// Consensus review sweep
+	if now.Sub(s.lastRun["consensus"]) >= s.intervals["consensus"] {
+		s.lastRun["consensus"] = now
+		s.mu.Unlock()
+		s.evaluateReviewConsensus(ctx)
+		s.mu.Lock()
+	}
+
+	// Parent completion sweep
+	if now.Sub(s.lastRun["parent_comp"]) >= s.intervals["parent_comp"] {
+		s.lastRun["parent_comp"] = now
+		s.mu.Unlock()
+		s.parentCompletionSweep(ctx)
+		s.mu.Lock()
+	}
+
 	s.mu.Unlock()
 }
 
@@ -220,14 +249,15 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 	promoted := 0
 	for _, hit := range result.Hits {
 		var task struct {
-			ID       string `json:"id"`
-			ParentID string `json:"parent_id"`
+			ID        string   `json:"id"`
+			ParentID  string   `json:"parent_id"`
+			DependsOn []string `json:"depends_on"`
 		}
 		if json.Unmarshal(hit, &task) != nil {
 			continue
 		}
 
-		// Check if dependencies are met (parent complete or no parent)
+		// Check parent status if there is a parent task
 		if task.ParentID != "" {
 			parentDoc, err := s.es.GetDoc(ctx, "agent-task-records", task.ParentID)
 			if err != nil || parentDoc == nil {
@@ -239,9 +269,37 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 			if json.Unmarshal(parentDoc, &parent) != nil {
 				continue
 			}
-			if parent.Status != "done" && parent.Status != "archived" {
-				continue // parent not yet complete
+			if parent.Status == "planned" || parent.Status == "blocked" || parent.Status == "archived" {
+				continue // parent not active or terminal
 			}
+		}
+
+		// Check DependsOn sibling dependencies
+		dependsOnMet := true
+		for _, depID := range task.DependsOn {
+			if depID == "" {
+				continue
+			}
+			depDoc, err := s.es.GetDoc(ctx, "agent-task-records", depID)
+			if err != nil || depDoc == nil {
+				dependsOnMet = false
+				break
+			}
+			var dep struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(depDoc, &dep) != nil {
+				dependsOnMet = false
+				break
+			}
+			if dep.Status != "done" && dep.Status != "archived" {
+				dependsOnMet = false
+				break
+			}
+		}
+
+		if !dependsOnMet {
+			continue
 		}
 
 		update := map[string]interface{}{
@@ -347,6 +405,246 @@ func (s *Sweeper) ExecuteBlockSweep(ctx context.Context, nodeLoads, nodeCaps map
 					slog.String("task_id", task.ID),
 					slog.String("host", host))
 			}
+		}
+	}
+}
+
+func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
+	// Query all tasks with status "review-consensus"
+	query := map[string]interface{}{
+		"term": map[string]string{"status": "review-consensus"},
+	}
+
+	result, err := s.es.Search(ctx, "agent-task-records", query, 50)
+	if err != nil {
+		return
+	}
+
+	for _, hit := range result.Hits {
+		var task ftypes.Task
+		if json.Unmarshal(hit, &task) != nil {
+			continue
+		}
+
+		// Query all child tasks
+		childQuery := map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must": []interface{}{
+					map[string]interface{}{"term": map[string]string{"parent_id": task.ID}},
+					map[string]interface{}{"terms": map[string]interface{}{"worker_role": []string{"reviewer", "tester"}}},
+				},
+			},
+		}
+
+		childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 10)
+		if err != nil {
+			continue
+		}
+
+		// Verify if all child tasks are completed
+		allCompleted := true
+		hasChildren := false
+		var reviewerTask, testerTask *ftypes.Task
+
+		for _, chHit := range childRes.Hits {
+			var child ftypes.Task
+			if json.Unmarshal(chHit, &child) == nil {
+				hasChildren = true
+				if child.Status != ftypes.TaskStatusDone && child.Status != ftypes.TaskStatusArchived && child.Status != ftypes.TaskStatusBlocked {
+					allCompleted = false
+					break
+				}
+				if child.WorkerRole == "reviewer" {
+					childCopy := child
+					reviewerTask = &childCopy
+				} else if child.WorkerRole == "tester" {
+					childCopy := child
+					testerTask = &childCopy
+				}
+			}
+		}
+
+		if !hasChildren || !allCompleted {
+			continue
+		}
+
+		// We have review tasks, and they are complete!
+		// Evaluate consensus
+		approved := true
+		var explanation strings.Builder
+		explanation.WriteString("Aggregated Consensus Review:\n")
+
+		if reviewerTask != nil {
+			explanation.WriteString(fmt.Sprintf("- Reviewer: verdict=%s, feedback=%s\n", reviewerTask.ReviewVerdict, reviewerTask.Feedback))
+			if reviewerTask.ReviewVerdict != "approved" {
+				approved = false
+			}
+		}
+		if testerTask != nil {
+			explanation.WriteString(fmt.Sprintf("- Tester: verdict=%s, feedback=%s\n", testerTask.ReviewVerdict, testerTask.Feedback))
+			if testerTask.ReviewVerdict != "approved" {
+				approved = false
+			}
+		}
+
+		// Use an agent prompt to summarize or make a finalized decision
+		if s.llm != nil {
+			consensusSystemPrompt := "You are the Flume Consensus Agent. Evaluate the reviewer feedback and test outcomes, and synthesize a final verdict explaining whether the PR should be created and merged."
+			req := llm.ChatRequest{
+				Messages: []llm.Message{
+					{Role: "system", Content: consensusSystemPrompt},
+					{Role: "user", Content: fmt.Sprintf("Parent Task: %s\n%s", task.Title, explanation.String())},
+				},
+				Model:     task.Model,
+				Provider:  task.Provider,
+				AgentRole: "critic",
+				TaskID:    task.ID,
+			}
+			resp, chatErr := s.llm.Chat(ctx, req)
+			if chatErr == nil {
+				explanation.WriteString(fmt.Sprintf("\nConsensus Critic Synthesis:\n%s", resp.Content))
+			}
+		}
+
+		if approved {
+			s.logger.Info("consensus review approved: creating PR and marking task done", slog.String("task_id", task.ID))
+
+			// Post-review PR creation hook
+			if task.ProjectID != "" {
+				projDoc, projErr := s.es.GetDoc(ctx, "flume-projects", task.ProjectID)
+				if projErr == nil && projDoc != nil {
+					var proj ftypes.Project
+					if json.Unmarshal(projDoc, &proj) == nil {
+						// Create git client
+						projMap := make(map[string]interface{})
+						_ = json.Unmarshal(projDoc, &projMap)
+						client, clientErr := git.GetClient(ctx, projMap)
+						if clientErr == nil {
+							branch := resolveBranchName(task)
+							defaultBranch := "main"
+							if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
+								defaultBranch = override
+							}
+							prTitle := fmt.Sprintf("[Flume PR] %s", task.Title)
+							prBody := fmt.Sprintf("This PR was automatically generated by Flume for task: %s\n\n%s", task.ID, explanation.String())
+							_, prErr := client.CreatePullRequest(ctx, prTitle, prBody, branch, defaultBranch)
+							if prErr != nil {
+								s.logger.Error("post-review hook: failed to create Pull Request", slog.String("error", prErr.Error()))
+							} else {
+								s.logger.Info("post-review hook: Pull Request created successfully")
+							}
+						}
+					}
+				}
+			}
+
+			// Update task to done
+			now := time.Now().UTC()
+			update := map[string]interface{}{
+				"status":        string(ftypes.TaskStatusDone),
+				"completed_at":  now.Format(time.RFC3339),
+				"updated_at":    now.Format(time.RFC3339),
+				"feedback":      explanation.String(),
+				"active_worker": nil,
+				"queue_state":   "available",
+			}
+			_ = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
+
+		} else {
+			s.logger.Warn("consensus review rejected: resetting task to ready for rework", slog.String("task_id", task.ID))
+
+			// Reset parent task to ready for rework
+			attempts := task.Attempts + 1
+			maxAttempts := task.MaxAttempts
+			if maxAttempts == 0 {
+				maxAttempts = 3
+			}
+
+			var update map[string]interface{}
+			if attempts >= maxAttempts {
+				update = map[string]interface{}{
+					"status":        string(ftypes.TaskStatusBlocked),
+					"attempts":      attempts,
+					"error_message": fmt.Sprintf("Consensus review failed after %d attempts", attempts),
+					"feedback":      explanation.String(),
+					"active_worker": nil,
+					"queue_state":   "available",
+					"updated_at":    time.Now().UTC().Format(time.RFC3339),
+				}
+			} else {
+				update = map[string]interface{}{
+					"status":        string(ftypes.TaskStatusReady),
+					"attempts":      attempts,
+					"feedback":      explanation.String(),
+					"active_worker": nil,
+					"queue_state":   "available",
+					"updated_at":    time.Now().UTC().Format(time.RFC3339),
+				}
+			}
+
+			_ = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
+		}
+	}
+}
+
+func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
+	query := map[string]interface{}{
+		"bool": map[string]interface{}{
+			"must": []interface{}{
+				map[string]interface{}{"terms": map[string]interface{}{"status": []string{"running", "ready", "review-consensus"}}},
+			},
+			"must_not": []interface{}{
+				map[string]interface{}{"exists": map[string]string{"field": "parent_id"}},
+			},
+		},
+	}
+
+	result, err := s.es.Search(ctx, "agent-task-records", query, 100)
+	if err != nil {
+		return
+	}
+
+	for _, hit := range result.Hits {
+		var parent ftypes.Task
+		if json.Unmarshal(hit, &parent) != nil {
+			continue
+		}
+
+		// Find all child tasks
+		childQuery := map[string]interface{}{
+			"term": map[string]string{"parent_id": parent.ID},
+		}
+
+		childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 100)
+		if err != nil {
+			continue
+		}
+
+		allChildrenDone := true
+		hasChildren := false
+
+		for _, chHit := range childRes.Hits {
+			var child ftypes.Task
+			if json.Unmarshal(chHit, &child) == nil {
+				hasChildren = true
+				if child.Status != ftypes.TaskStatusDone && child.Status != ftypes.TaskStatusArchived {
+					allChildrenDone = false
+					break
+				}
+			}
+		}
+
+		if hasChildren && allChildrenDone {
+			s.logger.Info("parentCompletionSweep: marking parent done — all children terminal",
+				slog.String("parent_id", parent.ID),
+				slog.String("title", parent.Title))
+
+			update := map[string]interface{}{
+				"status":       string(ftypes.TaskStatusDone),
+				"completed_at": time.Now().UTC().Format(time.RFC3339),
+				"updated_at":   time.Now().UTC().Format(time.RFC3339),
+			}
+			_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
 		}
 	}
 }
