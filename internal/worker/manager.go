@@ -76,8 +76,8 @@ func NewManager(cfg *config.Config, esClient *es.Client, logger *slog.Logger) *M
 
 	llmClient := llm.New(m.logger)
 	m.claimer = NewClaimer(esClient, llmClient, m.logger, nodeID)
-	m.sweeper = NewSweeper(esClient, m.logger)
-	runner := NewRunner(esClient, m.logger)
+	m.sweeper = NewSweeper(esClient, llmClient, m.logger)
+	runner := NewRunner(esClient, llmClient, m.logger)
 	m.pool = NewPool(runner, m.logger)
 
 	return m
