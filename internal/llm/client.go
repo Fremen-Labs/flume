@@ -502,3 +502,37 @@ func truncateStr(s string, maxLen int) string {
 	}
 	return s[:maxLen]
 }
+
+// Embed returns the vector embedding for the input text using the gateway.
+func (c *Client) Embed(ctx context.Context, text string, model string, provider string) ([]float64, error) {
+	if !c.gatewayAvailable(ctx) {
+		return nil, fmt.Errorf("llm: gateway unavailable for embeddings")
+	}
+
+	payload := map[string]interface{}{
+		"input":    text,
+		"model":    model,
+		"provider": provider,
+	}
+
+	res, err := c.postGateway(ctx, "/v1/embeddings", payload, 30)
+	if err != nil {
+		return nil, err
+	}
+
+	rawEmbed, ok := res["embedding"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("llm: invalid embedding response format")
+	}
+
+	embedding := make([]float64, len(rawEmbed))
+	for i, v := range rawEmbed {
+		if f, ok := v.(float64); ok {
+			embedding[i] = f
+		} else {
+			return nil, fmt.Errorf("llm: non-float64 value in embedding array")
+		}
+	}
+
+	return embedding, nil
+}

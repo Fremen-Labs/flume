@@ -23,14 +23,16 @@ type Pool struct {
 	active    atomic.Int32
 	maxSize   int64
 	shutdown  atomic.Bool
+	runner    *Runner
 }
 
 // NewPool creates a goroutine pool with default concurrency.
-func NewPool(logger *slog.Logger) *Pool {
+func NewPool(runner *Runner, logger *slog.Logger) *Pool {
 	return &Pool{
 		logger:  logger.With(slog.String("component", "pool")),
 		sem:     semaphore.NewWeighted(16), // Default max concurrent workers
 		maxSize: 16,
+		runner:  runner,
 	}
 }
 
@@ -78,9 +80,10 @@ func (p *Pool) SyncWorkerProcesses(ctx context.Context, state *ClusterState) {
 
 		workerName := ws.Name
 		taskID := ws.CurrentTaskID
+		worker := ws.Worker
 
 		_ = p.Submit(ctx, workerName, func(ctx context.Context) error {
-			return executeWorkerTask(ctx, workerName, taskID, p.logger)
+			return p.runner.RunWorker(ctx, worker, taskID)
 		})
 	}
 }
@@ -109,38 +112,6 @@ func (p *Pool) Shutdown(ctx context.Context) {
 	case <-ctx.Done():
 		p.logger.Warn("pool shutdown timed out, some workers may still be running")
 	}
-}
-
-// executeWorkerTask is the goroutine entry point for a single task execution.
-// Derived from Python: worker_handlers.execute_worker_task() (L2234-2286)
-func executeWorkerTask(ctx context.Context, workerName, taskID string, logger *slog.Logger) error {
-	logger.Info("pool-worker: executing task",
-		slog.String("worker", workerName),
-		slog.String("task_id", taskID))
-
-	// The actual handler dispatch will be implemented in handlers.go
-	// For Phase 1, this is the goroutine skeleton that replaces
-	// Python's multiprocessing.Process fork.
-	handler := resolveHandler(workerName)
-	if handler == nil {
-		logger.Warn("no handler found for worker", slog.String("worker", workerName))
-		return nil
-	}
-
-	result, err := handler.Execute(ctx, taskID)
-	if err != nil {
-		logger.Error("pool-worker: task failed",
-			slog.String("worker", workerName),
-			slog.String("task_id", taskID),
-			slog.String("error", err.Error()))
-		return err
-	}
-
-	logger.Info("pool-worker: task completed",
-		slog.String("worker", workerName),
-		slog.String("task_id", taskID),
-		slog.Bool("success", result.Success))
-	return nil
 }
 
 // ErrPoolShutdown is returned when submitting to a shutdown pool.

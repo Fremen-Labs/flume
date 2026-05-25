@@ -888,3 +888,132 @@ func normalizeMessagesForAnthropic(msgs []Message) (string, []interface{}) {
 
 	return system, out
 }
+
+// Embed resolves the provider API key and dispatches to the correct embedding provider.
+func (r *ProviderRouter) Embed(ctx context.Context, text string, provider, model, credID string) ([]float64, error) {
+	log := WithContext(ctx)
+	apiKey, err := r.resolveAPIKey(ctx, provider, credID)
+	if err != nil {
+		log.Warn("api key resolution failed for embedding — attempting without key", slog.String("provider", provider), slog.String("error", err.Error()))
+		err = nil // some providers (like local OpenAICompat or Ollama) don't need a key
+	}
+
+	switch provider {
+	case ProviderOllama:
+		return r.ollamaEmbed(ctx, text, model)
+	case ProviderOpenAI, ProviderOpenAICompat, ProviderGemini, ProviderXAI, ProviderGrok:
+		return r.openaiEmbed(ctx, text, model, provider, apiKey)
+	default:
+		return nil, fmt.Errorf("embeddings not supported for provider %q", provider)
+	}
+}
+
+func (r *ProviderRouter) ollamaEmbed(ctx context.Context, text, model string) ([]float64, error) {
+	baseURL := r.config.GetOllamaBaseURL()
+	if model == "" {
+		model = "nomic-embed-text"
+	}
+
+	payload := map[string]interface{}{
+		"model":  model,
+		"prompt": text,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	url := strings.TrimRight(baseURL, "/") + "/api/embeddings"
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var out struct {
+		Embedding []float64 `json:"embedding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Embedding, nil
+}
+
+func (r *ProviderRouter) openaiEmbed(ctx context.Context, text, model, provider, apiKey string) ([]float64, error) {
+	baseURL := r.config.GetBaseURL(provider)
+	if baseURL == "" {
+		if provider == ProviderGemini {
+			baseURL = ProviderBaseURLs[ProviderGemini]
+		} else {
+			baseURL = ProviderBaseURLs[ProviderOpenAI]
+		}
+	}
+	if model == "" {
+		if provider == ProviderGemini {
+			model = "text-embedding-004"
+		} else {
+			model = "text-embedding-3-small"
+		}
+	}
+
+	normBase := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(normBase, "/v1") {
+		normBase = strings.TrimSuffix(normBase, "/v1")
+	}
+	url := normBase + "/v1/embeddings"
+
+	payload := map[string]interface{}{
+		"model": model,
+		"input": text,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var out struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("openai embed returned no embedding data")
+	}
+	return out.Data[0].Embedding, nil
+}

@@ -357,7 +357,7 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 			"status":     "ready",
 			"updated_at": time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := r.es.IndexDoc(ctx, "agent-task-records", id, update); err == nil {
+		if err := r.es.UpdateDoc(ctx, "agent-task-records", id, update); err == nil {
 			promoted++
 			r.logger.Info("compute_ready: promoted to ready",
 				slog.String("task_id", id))
@@ -390,7 +390,7 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 				"status":     "done",
 				"updated_at": time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := r.es.IndexDoc(ctx, "agent-task-records", id, update); err == nil {
+			if err := r.es.UpdateDoc(ctx, "agent-task-records", id, update); err == nil {
 				r.logger.Info("compute_ready: marked parent done — all children terminal",
 					slog.String("task_id", id),
 					slog.String("title", task.Title))
@@ -416,7 +416,7 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 
-	if err := r.es.IndexDoc(ctx, "agent-task-records", taskID, update); err == nil {
+	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
 			slog.String("reset_to", targetStatus))
@@ -434,7 +434,7 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 		now := time.Now().UTC().Format(time.RFC3339)
 		update["completed_at"] = now
 	}
-	_ = r.es.IndexDoc(ctx, "agent-task-records", taskID, update)
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
 }
 
 // ─── Git Helpers ────────────────────────────────────────────────────────────
@@ -535,7 +535,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			"queue_state":    "available",
 			"updated_at":     time.Now().UTC().Format(time.RFC3339),
 		}
-		_ = r.es.IndexDoc(ctx, "agent-task-records", taskID, update)
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
 	} else {
 		r.logger.Warn("implementer: task re-queued for retry",
 			slog.String("task_id", taskID),
@@ -548,7 +548,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		_ = r.es.IndexDoc(ctx, "agent-task-records", taskID, update)
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
 	}
 }
 

@@ -91,6 +91,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
+	s.mux.HandleFunc("POST /v1/embeddings", s.handleEmbeddings)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /livez", s.handleLivez)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
@@ -198,6 +199,44 @@ func (s *Server) handleChatTools(w http.ResponseWriter, r *http.Request) {
 // The withTools flag controls tool-call semantics, guardrail sanitization,
 // and the log label. All other logic (decode, validate, route, error classify)
 // is shared to eliminate the previous 95% code duplication.
+// EmbeddingsRequest is the payload for /v1/embeddings.
+type EmbeddingsRequest struct {
+	Input    string `json:"input"`
+	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
+func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	requestID := shortID()
+	log := RequestLogger(requestID, "", "", "")
+	ctx := ContextWithLogger(r.Context(), log)
+
+	var req EmbeddingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Error("embeddings decode failed", slog.String("error", err.Error()))
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	dummyChatReq := &ChatRequest{
+		Model:    req.Model,
+		Provider: req.Provider,
+	}
+	model, provider, credID := s.config.ResolveModel(dummyChatReq)
+
+	embedding, err := s.router.Embed(ctx, req.Input, provider, model, credID)
+	if err != nil {
+		log.Error("embeddings routing failed", slog.String("error", err.Error()))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"embedding": embedding,
+	})
+}
+
 func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools bool) {
 	requestID := shortID()
 	start := time.Now()

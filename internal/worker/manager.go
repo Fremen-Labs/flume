@@ -29,6 +29,7 @@ import (
 
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -73,9 +74,11 @@ func NewManager(cfg *config.Config, esClient *es.Client, logger *slog.Logger) *M
 		wakeChan: make(chan struct{}, 1),
 	}
 
-	m.claimer = NewClaimer(esClient, m.logger, nodeID)
+	llmClient := llm.New(m.logger)
+	m.claimer = NewClaimer(esClient, llmClient, m.logger, nodeID)
 	m.sweeper = NewSweeper(esClient, m.logger)
-	m.pool = NewPool(m.logger)
+	runner := NewRunner(esClient, m.logger)
+	m.pool = NewPool(runner, m.logger)
 
 	return m
 }

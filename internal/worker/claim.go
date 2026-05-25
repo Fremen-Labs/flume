@@ -2,14 +2,20 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -20,23 +26,26 @@ import (
 //  1. Pre-flight: Check if role has available tasks
 //  2. Dedup: Skip tasks whose normalized title matches an in-progress task
 //  3. WIP Gate: Respect per-repo concurrency limits
-//  4. Atomic Claim: ES _update_by_query with Painless script
+//  4. Git Overlap & Lock Checks: Ensure branch and repository are safe and don't overlap on modified files
+//  5. Atomic OCC Claim: ES _update with if_seq_no and if_primary_term parameters
 type Claimer struct {
-	es     *es.Client
-	logger *slog.Logger
-	nodeID string
+	es        *es.Client
+	llmClient *llm.Client
+	logger    *slog.Logger
+	nodeID    string
 
 	// Dedup normalization regex
 	normRe *regexp.Regexp
 }
 
 // NewClaimer creates a new task claimer.
-func NewClaimer(esClient *es.Client, logger *slog.Logger, nodeID string) *Claimer {
+func NewClaimer(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger, nodeID string) *Claimer {
 	return &Claimer{
-		es:     esClient,
-		logger: logger.With(slog.String("component", "orchestration.claim")),
-		nodeID: nodeID,
-		normRe: regexp.MustCompile(`[^a-z0-9 ]`),
+		es:        esClient,
+		llmClient: llmClient,
+		logger:    logger.With(slog.String("component", "orchestration.claim")),
+		nodeID:    nodeID,
+		normRe:    regexp.MustCompile(`[^a-z0-9 ]`),
 	}
 }
 
@@ -67,15 +76,18 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 		return nil
 	}
 
-	for _, hit := range result.Hits {
+	for _, rawHit := range result.RawHits {
 		var task ftypes.Task
-		if json.Unmarshal(hit, &task) != nil {
+		if json.Unmarshal(rawHit.Source, &task) != nil {
 			continue
 		}
 
 		// Safeguard: verify task has a valid ID
 		if task.ID == "" {
-			c.logger.Warn("claim: task document has no ID, skipping", slog.String("hit", string(hit)))
+			task.ID = rawHit.ID
+		}
+		if task.ID == "" {
+			c.logger.Warn("claim: task document has no ID, skipping", slog.String("hit", string(rawHit.Source)))
 			continue
 		}
 
@@ -94,8 +106,21 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 			continue
 		}
 
-		// Attempt atomic claim via ES update
-		claimed := c.atomicClaim(ctx, task.ID, worker)
+		// Pre-claim Git lock and overlap check
+		if c.checkGitOverlap(ctx, task) {
+			continue
+		}
+
+		// Attempt atomic claim via ES update with Optimistic Concurrency Control
+		var seq int64
+		var prim int64
+		if rawHit.SeqNo != nil {
+			seq = *rawHit.SeqNo
+		}
+		if rawHit.PrimaryTerm != nil {
+			prim = *rawHit.PrimaryTerm
+		}
+		claimed := c.atomicClaim(ctx, task.ID, worker, seq, prim)
 		if claimed {
 			c.logger.Info("task claimed",
 				slog.String("worker", worker.Name),
@@ -138,6 +163,7 @@ func (c *Claimer) isDuplicateTask(ctx context.Context, title, taskID string) boo
 		return false // fail open
 	}
 
+	// 1. Text-based normalized match (fast path)
 	for _, hit := range result.Hits {
 		var existing struct {
 			Title string `json:"title"`
@@ -148,6 +174,32 @@ func (c *Claimer) isDuplicateTask(ctx context.Context, title, taskID string) boo
 			}
 		}
 	}
+
+	// 2. Semantic similarity using embeddings (slow path fallback)
+	if c.llmClient != nil {
+		candidateVector, err := c.llmClient.Embed(ctx, title, "", "")
+		if err == nil && len(candidateVector) > 0 {
+			for _, hit := range result.Hits {
+				var existing struct {
+					Title string `json:"title"`
+				}
+				if json.Unmarshal(hit, &existing) == nil && existing.Title != "" {
+					existingVector, err := c.llmClient.Embed(ctx, existing.Title, "", "")
+					if err == nil && len(existingVector) > 0 {
+						sim := cosineSimilarity(candidateVector, existingVector)
+						if sim > 0.85 {
+							c.logger.Info("semantic duplicate detected",
+								slog.String("title1", title),
+								slog.String("title2", existing.Title),
+								slog.Float64("similarity", sim))
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return false
 }
 
@@ -175,7 +227,7 @@ func (c *Claimer) isWIPSaturated(ctx context.Context, task ftypes.Task) bool {
 		"bool": map[string]interface{}{
 			"must": []interface{}{
 				map[string]interface{}{"term": map[string]string{"status": "running"}},
-				map[string]interface{}{"term": map[string]string{"project_id": task.ProjectID}},
+				map[string]interface{}{"term": map[string]string{"repo": task.ProjectID}},
 			},
 		},
 	}
@@ -207,34 +259,155 @@ func (c *Claimer) loadRepoWIPLimits(ctx context.Context, repoID string) WIPLimit
 	return limits.WIP
 }
 
-// atomicClaim performs the ES _update_by_query to atomically claim a task.
-func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.Worker) bool {
+// atomicClaim performs the ES _update to atomically claim a task.
+func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.Worker, seqNo, primaryTerm int64) bool {
 	now := time.Now().UTC().Format(time.RFC3339)
 	update := map[string]interface{}{
-		"doc": map[string]interface{}{
-			"status":         "running",
-			"active_worker":  worker.Name,
-			"execution_host": worker.ExecutionHost,
-			"model":          worker.Model,
-			"worker_role":    worker.Role,
-			"queue_state":    "active",
-			"claimed_at":     now,
-			"updated_at":     now,
-		},
+		"status":         "running",
+		"active_worker":  worker.Name,
+		"execution_host": worker.ExecutionHost,
+		"model":          worker.Model,
+		"worker_role":    worker.Role,
+		"queue_state":    "active",
+		"claimed_at":     now,
+		"updated_at":     now,
 	}
 
-	err := c.es.IndexDoc(ctx, "agent-task-records", taskID, update)
+	err := c.es.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seqNo, primaryTerm)
 	if err != nil {
-		c.logger.Warn("atomic claim failed",
-			slog.String("task_id", taskID),
-			slog.String("error", err.Error()))
+		if err == es.ErrConflict {
+			c.logger.Warn("atomic claim conflict: task already claimed by another worker",
+				slog.String("task_id", taskID))
+		} else {
+			c.logger.Warn("atomic claim failed",
+				slog.String("task_id", taskID),
+				slog.String("error", err.Error()))
+		}
 		return false
 	}
 	return true
 }
 
+// checkGitOverlap checks if the task modifies any files that are currently being modified by other running tasks in the same project.
+func (c *Claimer) checkGitOverlap(ctx context.Context, task ftypes.Task) bool {
+	if task.ProjectID == "" {
+		return false
+	}
+
+	// Get project local path
+	projDoc, err := c.es.GetDoc(ctx, "flume-projects", task.ProjectID)
+	if err != nil || projDoc == nil {
+		return false
+	}
+	var project ftypes.Project
+	if json.Unmarshal(projDoc, &project) != nil || project.LocalPath == "" {
+		return false
+	}
+
+	repoPath := project.LocalPath
+	branch := c.branchName(task)
+
+	// Check branch and repo locks
+	if c.isRepoLocked(repoPath, branch) {
+		c.logger.Warn("git lock detected: skipping task due to lock in repository",
+			slog.String("task_id", task.ID),
+			slog.String("repo_path", repoPath))
+		return true
+	}
+
+	// Get modified files for the candidate task
+	candidateFiles := c.getModifiedFiles(repoPath, branch)
+	if len(candidateFiles) == 0 {
+		return false // No files modified or branch doesn't exist yet
+	}
+
+	// Search for other running tasks in the same project
+	query := map[string]interface{}{
+		"bool": map[string]interface{}{
+			"must": []interface{}{
+				map[string]interface{}{"term": map[string]string{"status": "running"}},
+				map[string]interface{}{"term": map[string]string{"repo": task.ProjectID}},
+			},
+			"must_not": []interface{}{
+				map[string]interface{}{"term": map[string]string{"_id": task.ID}},
+			},
+		},
+	}
+	result, err := c.es.Search(ctx, "agent-task-records", query, 50)
+	if err != nil {
+		return false
+	}
+
+	for _, hit := range result.Hits {
+		var runningTask ftypes.Task
+		if json.Unmarshal(hit, &runningTask) == nil {
+			runningBranch := c.branchName(runningTask)
+			runningFiles := c.getModifiedFiles(repoPath, runningBranch)
+			for _, cf := range candidateFiles {
+				for _, rf := range runningFiles {
+					if cf == rf {
+						c.logger.Info("git overlap: skipping task due to file overlap with running task",
+							slog.String("task_id", task.ID),
+							slog.String("running_task_id", runningTask.ID),
+							slog.String("conflicting_file", cf))
+						return true // Overlap detected
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func (c *Claimer) isRepoLocked(repoPath, branch string) bool {
+	// Check git index lock
+	indexLock := fmt.Sprintf("%s/.git/index.lock", strings.TrimRight(repoPath, "/"))
+	if _, err := os.Stat(indexLock); err == nil {
+		return true
+	}
+	// Check branch ref lock
+	branchLock := fmt.Sprintf("%s/.git/refs/heads/%s.lock", strings.TrimRight(repoPath, "/"), branch)
+	if _, err := os.Stat(branchLock); err == nil {
+		return true
+	}
+	return false
+}
+
+func (c *Claimer) getModifiedFiles(repoPath, branch string) []string {
+	// Check if branch exists
+	_, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", branch).Output()
+	if err != nil {
+		return nil // Branch doesn't exist yet
+	}
+
+	defaultBranch := "main"
+	if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
+		defaultBranch = override
+	}
+
+	// Try comparing origin/defaultBranch
+	out, err := exec.Command("git", "-C", repoPath, "diff", "--name-only", "origin/"+defaultBranch+"..."+branch).Output()
+	if err != nil {
+		// Fallback to local defaultBranch
+		out, err = exec.Command("git", "-C", repoPath, "diff", "--name-only", defaultBranch+"..."+branch).Output()
+		if err != nil {
+			return nil
+		}
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var files []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	return files
+}
+
 // roleToTargetStatus maps worker roles to the task status they consume.
-// Derived from Python: manager.py L325-329
 func roleToTargetStatus(role string) string {
 	switch role {
 	case "pm":
@@ -244,6 +417,44 @@ func roleToTargetStatus(role string) string {
 	default:
 		return "ready"
 	}
+}
+
+func (c *Claimer) branchName(task ftypes.Task) string {
+	scope := task.ID
+	if task.ParentID != "" {
+		scope = task.ParentID
+	}
+
+	hash := sha256.Sum256([]byte(scope))
+	shortHash := hex.EncodeToString(hash[:4])
+
+	segment := branchSanitizeRe.ReplaceAllString(task.Title, "-")
+	if len(segment) > 40 {
+		segment = segment[:40]
+	}
+	segment = strings.Trim(segment, "-")
+
+	prefix := "feature"
+	if scope := os.Getenv("FLUME_AUTO_PR_SCOPE"); scope != "" {
+		prefix = scope
+	}
+	return fmt.Sprintf("%s/%s-%s", prefix, segment, shortHash)
+}
+
+func cosineSimilarity(a, b []float64) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dotProduct, normA, normB float64
+	for i := range a {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 // ─── Dedup Cleanup ──────────────────────────────────────────────────────────

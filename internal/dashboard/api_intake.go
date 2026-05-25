@@ -146,11 +146,18 @@ type SessionDoc struct {
 }
 
 func prepareSessionResponse(session SessionDoc) map[string]interface{} {
+	status := session.Status
+	if session.PlanningStatus.Stage == "ready" {
+		status = "ready"
+	} else if session.PlanningStatus.Stage == "failed" {
+		status = "failed"
+	}
+
 	return map[string]interface{}{
 		"id":              session.ID,
 		"sessionId":       session.ID,
 		"repo":            session.Repo,
-		"status":          session.Status,
+		"status":          status,
 		"agent_role":      session.AgentRole,
 		"messages":        session.Messages,
 		"draftPlan":       session.DraftPlan,       // keep draftPlan for compatibility with CLI/tests
