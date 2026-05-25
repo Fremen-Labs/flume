@@ -17,8 +17,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Fremen-Labs/flume/internal/git"
 )
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
@@ -263,20 +268,216 @@ func (s *Server) handleTaskDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Implement git diff via exec.Command (local) or GitHostClient (remote).
-	// Phase 2 stub — the diff endpoint requires git subprocess integration
-	// which will be wired during Phase 3 (git client port).
+	repoID, _ := src["repo"].(string)
+	var proj map[string]interface{}
+	if repoID != "" {
+		projSrc, err := s.es.GetDoc(r.Context(), projectsIndex, repoID)
+		if err == nil && projSrc != nil {
+			_ = unmarshalRaw(projSrc, &proj)
+		}
+	}
+
+	cloneStatus, _ := proj["clone_status"].(string)
+	repoURL, _ := proj["repoUrl"].(string)
+	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
+
+	localPath, _ := proj["path"].(string)
+	if localPath == "" {
+		localPath, _ = src["worktree"].(string)
+	}
+
+	hasLocalClone := false
+	if localPath != "" {
+		if _, err := os.Stat(filepath.Join(localPath, ".git")); err == nil {
+			hasLocalClone = true
+		}
+	}
+
+	if !hasLocalClone && (cloneStatus == "indexed" || cloneStatus == "cloned") && isRemote {
+		client, err := git.GetClient(r.Context(), proj)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"diff": "", "error": err.Error()})
+			return
+		}
+
+		base := "main"
+		if gitflow, ok := proj["gitflow"].(map[string]interface{}); ok {
+			if df, ok := gitflow["defaultBranch"].(string); ok && df != "" {
+				base = df
+			}
+		}
+		if base == "main" {
+			if df, err := client.GetDefaultBranch(r.Context()); err == nil {
+				base = df
+			}
+		}
+
+		result, err := client.GetDiff(r.Context(), base, branch)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"diff": "", "error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"diff":      result.Diff,
+			"branch":    branch,
+			"base":      base,
+			"files":     result.Files,
+			"truncated": result.Truncated,
+		})
+		return
+	}
+
+	if localPath == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"diff":  "",
+			"error": "Repository not available locally; configure a PAT to enable API-based diff.",
+		})
+		return
+	}
+
+	if !hasLocalClone {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"diff":  "",
+			"error": "Not a git repository locally",
+		})
+		return
+	}
+
+	base := "main"
+	cmd := exec.CommandContext(r.Context(), "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = localPath
+	if out, err := cmd.Output(); err == nil {
+		outStr := strings.TrimSpace(string(out))
+		parts := strings.Split(outStr, "/")
+		if len(parts) > 0 {
+			base = parts[len(parts)-1]
+		}
+	}
+
+	diffCmd := exec.CommandContext(r.Context(), "git", "diff", fmt.Sprintf("origin/%s...%s", base, branch))
+	diffCmd.Dir = localPath
+	diffOut, _ := diffCmd.CombinedOutput()
+	diffText := string(diffOut)
+	if len(diffText) > 80000 {
+		diffText = diffText[:80000] + "\n\n... [diff truncated at 80k chars] ..."
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"diff":   "",
+		"diff":   diffText,
 		"branch": branch,
-		"error":  "diff not yet implemented in Go dashboard — use Python endpoint",
+		"base":   fmt.Sprintf("origin/%s", base),
 	})
 }
 
 // ─── GET /api/tasks/{task_id}/commits ───────────────────────────────────────
 
 func (s *Server) handleTaskCommits(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement via GitHostClient (Phase 3).
+	taskID := r.PathValue("task_id")
+	_, src, err := s.findTaskByLogicalID(r.Context(), taskID)
+	if err != nil || src == nil {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	branch, _ := src["branch"].(string)
+	if branch == "" {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	repoID, _ := src["repo"].(string)
+	var proj map[string]interface{}
+	if repoID != "" {
+		projSrc, err := s.es.GetDoc(r.Context(), projectsIndex, repoID)
+		if err == nil && projSrc != nil {
+			_ = unmarshalRaw(projSrc, &proj)
+		}
+	}
+
+	cloneStatus, _ := proj["clone_status"].(string)
+	repoURL, _ := proj["repoUrl"].(string)
+	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
+
+	localPath, _ := proj["path"].(string)
+	if localPath == "" {
+		localPath, _ = src["worktree"].(string)
+	}
+
+	hasLocalClone := false
+	if localPath != "" {
+		if _, err := os.Stat(filepath.Join(localPath, ".git")); err == nil {
+			hasLocalClone = true
+		}
+	}
+
+	if !hasLocalClone && (cloneStatus == "indexed" || cloneStatus == "cloned") && isRemote {
+		client, err := git.GetClient(r.Context(), proj)
+		if err != nil {
+			writeJSON(w, http.StatusOK, []interface{}{})
+			return
+		}
+
+		base := "main"
+		if gitflow, ok := proj["gitflow"].(map[string]interface{}); ok {
+			if df, ok := gitflow["defaultBranch"].(string); ok && df != "" {
+				base = df
+			}
+		}
+		if base == "main" {
+			if df, err := client.GetDefaultBranch(r.Context()); err == nil {
+				base = df
+			}
+		}
+
+		commits, err := client.GetCommits(r.Context(), branch, base)
+		if err != nil {
+			writeJSON(w, http.StatusOK, []interface{}{})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, commits)
+		return
+	}
+
+	if hasLocalClone && localPath != "" {
+		base := "main"
+		cmd := exec.CommandContext(r.Context(), "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+		cmd.Dir = localPath
+		if out, err := cmd.Output(); err == nil {
+			outStr := strings.TrimSpace(string(out))
+			parts := strings.Split(outStr, "/")
+			if len(parts) > 0 {
+				base = parts[len(parts)-1]
+			}
+		}
+
+		logCmd := exec.CommandContext(r.Context(), "git", "log", fmt.Sprintf("origin/%s..%s", base, branch), "--pretty=format:%H|%an|%ad|%s", "--date=iso")
+		logCmd.Dir = localPath
+		logOut, err := logCmd.Output()
+		if err == nil {
+			var commits []git.Commit
+			lines := strings.Split(string(logOut), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, "|", 4)
+				if len(parts) == 4 {
+					commits = append(commits, git.Commit{
+						SHA:     parts[0],
+						Author:  parts[1],
+						Date:    parts[2],
+						Message: parts[3],
+					})
+				}
+			}
+			writeJSON(w, http.StatusOK, commits)
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, []interface{}{})
 }
 

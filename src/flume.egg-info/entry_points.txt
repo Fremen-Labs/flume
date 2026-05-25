@@ -1,2 +1,0 @@
-[console_scripts]
-flume = flume_cli.cli:cli

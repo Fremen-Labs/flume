@@ -6,29 +6,23 @@ import (
 	"os/exec"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/charmbracelet/log"
+	"log/slog"
 )
 
 // EvaluateAndInstall checks the structural ecology and dynamically pulls missing artifacts natively via OS pipelines.
+//
+// Phase 5: Python, uv, and pipx are no longer required. Only Docker, Go,
+// and Elastro are checked and installed.
 func EvaluateAndInstall(eco SystemEcology) error {
 	var missing []string
 
 	if !eco.HasDocker {
 		missing = append(missing, "Docker Desktop")
 	}
-	if !eco.HasUV {
-		missing = append(missing, "uv Python Manager")
-	}
-	if !eco.HasPython {
-		missing = append(missing, "Python 3")
-	}
 	if !eco.HasGo {
 		missing = append(missing, "Go Compiler")
 	}
 	if !eco.HasElastro {
-		if _, err := exec.LookPath("pipx"); err != nil {
-			missing = append(missing, "pipx Environment")
-		}
 		missing = append(missing, "Elastro CLI")
 	}
 
@@ -47,14 +41,8 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		switch dep {
 		case "Docker Desktop":
 			cmd = installPackage("docker")
-		case "uv Python Manager":
-			cmd = exec.Command("sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh")
-		case "Python 3":
-			cmd = installPackage("python")
 		case "Go Compiler":
 			cmd = installPackage("go")
-		case "pipx Environment":
-			cmd = exec.Command("sh", "-c", "python3 -m pip install --user pipx && python3 -m pipx ensurepath")
 		case "Elastro CLI":
 			cmd = exec.Command("sh", "-c", "curl -sSfL https://raw.githubusercontent.com/Fremen-Labs/elastro/main/install.sh | bash")
 		}
@@ -66,11 +54,8 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			log.Error("Failed to permanently bind telemetry package into the OS.", "package", dep, "error", err)
+			slog.Error("Failed to permanently bind telemetry package into the OS.", "package", dep, "error", err)
 			return err
-		}
-		if dep == "uv Python Manager" || dep == "pipx Environment" {
-			os.Setenv("PATH", os.Getenv("PATH")+":"+os.Getenv("HOME")+"/.local/bin")
 		}
 		fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))
 	}
@@ -82,8 +67,6 @@ func installPackage(dep string) *exec.Cmd {
 		switch dep {
 		case "docker":
 			return exec.Command("sudo", "apt-get", "install", "-y", "docker.io")
-		case "python":
-			return exec.Command("sudo", "apt-get", "install", "-y", "python3")
 		case "go":
 			return exec.Command("sudo", "apt-get", "install", "-y", "golang")
 		}
@@ -91,8 +74,6 @@ func installPackage(dep string) *exec.Cmd {
 		switch dep {
 		case "docker":
 			return exec.Command("sudo", "yum", "install", "-y", "docker")
-		case "python":
-			return exec.Command("sudo", "yum", "install", "-y", "python3")
 		case "go":
 			return exec.Command("sudo", "yum", "install", "-y", "golang")
 		}
@@ -100,8 +81,6 @@ func installPackage(dep string) *exec.Cmd {
 		switch dep {
 		case "docker":
 			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "docker")
-		case "python":
-			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "python")
 		case "go":
 			return exec.Command("sudo", "pacman", "-S", "--noconfirm", "go")
 		}
@@ -109,8 +88,6 @@ func installPackage(dep string) *exec.Cmd {
 		switch dep {
 		case "docker":
 			return exec.Command("brew", "install", "--cask", "docker")
-		case "python":
-			return exec.Command("brew", "install", "python")
 		case "go":
 			return exec.Command("brew", "install", "go")
 		}

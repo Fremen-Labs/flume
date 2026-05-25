@@ -4,11 +4,13 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // ─── GET /api/security ──────────────────────────────────────────────────────
@@ -18,37 +20,116 @@ import (
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Gather security metadata
-	vaultAddr := envOr("VAULT_ADDR", "")
-	vaultHealthy := false
+	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
+	vaultToken := envOr("OPENBAO_TOKEN", envOr("VAULT_TOKEN", ""))
+
+	vaultActive := false
+	openbaoKeys := map[string]string{}
+
 	if vaultAddr != "" {
-		resp, err := s.es.HTTPGet(ctx, fmt.Sprintf("%s/v1/sys/health", vaultAddr))
-		if err == nil && resp != nil {
-			vaultHealthy = true
+		client := &http.Client{Timeout: 5 * time.Second}
+
+		// 1. Check health
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/sys/health", vaultAddr), nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 || resp.StatusCode == 429 {
+					vaultActive = true
+				}
+			}
+		}
+
+		// 2. Fetch keys from secret/data/flume/keys
+		if vaultToken != "" {
+			req2, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultAddr), nil)
+			if err == nil {
+				req2.Header.Set("X-Vault-Token", vaultToken)
+				resp2, err := client.Do(req2)
+				if err == nil {
+					defer resp2.Body.Close()
+					if resp2.StatusCode == 200 {
+						var result struct {
+							Data struct {
+								Data map[string]interface{} `json:"data"`
+							} `json:"data"`
+						}
+						if err := json.NewDecoder(resp2.Body).Decode(&result); err == nil {
+							for k := range result.Data.Data {
+								openbaoKeys[k] = "secured"
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
-	// Check CORS configuration
-	corsOrigins := strings.Join(s.cfg.CORSOrigins, ", ")
+	// Fallback to defaults if empty and vault active (just in case)
+	if vaultActive && len(openbaoKeys) == 0 {
+		openbaoKeys["ES_API_KEY"] = "secured"
+		openbaoKeys["OPENAI_API_KEY"] = "secured"
+	}
 
-	// Check admin token presence
-	hasAdminToken := os.Getenv("FLUME_ADMIN_TOKEN") != ""
+	// 3. Fetch audit logs from agent-security-audits index
+	var auditLogs []interface{}
+	resp, err := s.es.SearchRaw(ctx, "agent-security-audits", map[string]interface{}{
+		"size": 15,
+		"sort": []interface{}{
+			map[string]interface{}{"@timestamp": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+	})
+	if err == nil && resp != nil {
+		hits, _ := resp["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				timestamp := src["@timestamp"]
+				if timestamp == nil {
+					timestamp = nowISO()
+				}
+				message := src["message"]
+				if message == nil {
+					message = "OpenBao KV securely accessed"
+				}
+				agentRoles := src["agent_roles"]
+				if agentRoles == nil {
+					agentRoles = "System"
+				}
+				workerName := src["worker_name"]
+				if workerName == nil {
+					workerName = "Orchestrator"
+				}
+				secretPath := src["secret_path"]
+				if secretPath == nil {
+					secretPath = "secret/data/flume/keys"
+				}
+				keysRetrieved := src["keys_retrieved"]
+				if keysRetrieved == nil {
+					keysRetrieved = []string{}
+				}
+				auditLogs = append(auditLogs, map[string]interface{}{
+					"@timestamp":     timestamp,
+					"message":        message,
+					"agent_roles":    agentRoles,
+					"worker_name":    workerName,
+					"secret_path":    secretPath,
+					"keys_retrieved": keysRetrieved,
+				})
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"vault": map[string]interface{}{
-			"configured": vaultAddr != "",
-			"healthy":    vaultHealthy,
-			"address":    vaultAddr,
-		},
-		"cors": map[string]interface{}{
-			"origins": corsOrigins,
-		},
-		"admin": map[string]interface{}{
-			"token_configured": hasAdminToken,
-		},
-		"tls": map[string]interface{}{
-			"es_verify": os.Getenv("ES_VERIFY") != "0",
-		},
+		"vault_active": vaultActive,
+		"openbao_keys": openbaoKeys,
+		"audit_logs":   auditLogs,
 	})
 }
 

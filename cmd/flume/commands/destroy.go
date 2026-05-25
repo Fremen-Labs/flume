@@ -6,10 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/spf13/cobra"
@@ -26,35 +23,16 @@ Use --purge to also remove Elasticsearch containers/volumes and all Flume Docker
 This is a hard reset that requires explicit confirmation.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := cmd.Context()
-		fmt.Println(ui.CyberGradient("Initiating Terminal Docker Annihilation Protocol..."))
+		fmt.Println(ui.CyberGradient("Destroying Flume ecosystem..."))
 
-		// --- Kill any native daemon PID ---
-		pidFile := filepath.Join(os.Getenv("HOME"), ".flume", "flume-daemon.pid")
-		if pidBytes, err := os.ReadFile(pidFile); err == nil {
-			if pid, parseErr := strconv.Atoi(string(pidBytes)); parseErr == nil {
-				if process, pErr := os.FindProcess(pid); pErr == nil {
-					if err := process.Signal(syscall.Signal(0)); err == nil {
-						fmt.Println(ui.CyberGradient(fmt.Sprintf("Transmitting SIGTERM mapping to sub-orchestrator PID [%d] natively...", pid)))
-						process.Signal(syscall.SIGTERM)
-						time.Sleep(1 * time.Second)
-
-						if checkErr := process.Signal(syscall.Signal(0)); checkErr == nil {
-							fmt.Println(ui.WarningGold(fmt.Sprintf("PID [%d] did not respond to SIGTERM, escalating to SIGKILL...", pid)))
-							process.Signal(syscall.SIGKILL)
-							time.Sleep(1 * time.Second)
-						}
-					} else {
-						fmt.Println(ui.WarningGold(fmt.Sprintf("Stale PID file detected. Sub-orchestrator PID [%d] is not running natively.", pid)))
-					}
-				}
-			}
-			os.Remove(pidFile)
-		}
+		// Phase 5: No PID file dance needed — services are goroutines
+		// that terminate via context cancellation when the CLI exits.
 
 		// Supply a placeholder so compose doesn't warn about an unset OPENBAO_TOKEN variable.
 		destroyEnv := append(os.Environ(), "OPENBAO_TOKEN=flume-dev-token")
 
-		// --- Standard destroy: always include managed_elastic profile so ES containers/volumes are also stopped ---
+		// --- Standard destroy: stop ALL Flume containers ---
+		// docker compose down removes all services defined in the compose file.
 		fmt.Println(ui.CyberGradient("Removing Flume containers and volumes (openbao, workers, dashboard, elasticsearch)..."))
 		downArgs := []string{"compose", "--profile", "managed_elastic", "down", "-v"}
 		c := exec.CommandContext(ctx, "docker", downArgs...)
@@ -66,7 +44,7 @@ This is a hard reset that requires explicit confirmation.`,
 			return
 		}
 
-		// --- Purge mode: remove ALL Flume Docker images too ---
+		// --- Purge mode: clean Docker build artifacts ---
 		if destroyPurgeFlag {
 			if !confirmPurge() {
 				fmt.Println(ui.WarningGold("Purge cancelled. Containers and volumes were already removed above."))
@@ -76,18 +54,17 @@ This is a hard reset that requires explicit confirmation.`,
 			}
 
 			fmt.Println(ui.WarningGold("⚡ PURGE MODE: Removing all Flume Docker images..."))
-			flumeImages := []string{"flume-dashboard", "flume-worker"}
-			for _, img := range flumeImages {
-				rmImg := exec.CommandContext(ctx, "docker", "rmi", "-f", img)
-				rmImg.Stdout = os.Stdout
-				rmImg.Stderr = os.Stderr
-				if err := rmImg.Run(); err != nil {
-					fmt.Println(ui.WarningGold(fmt.Sprintf("Could not remove image %s (may not exist): %s", img, err.Error())))
+			// Remove the unified Go flume image (used by dashboard, gateway, worker services)
+			for _, img := range []string{"flume-dashboard", "flume-gateway", "flume-worker"} {
+				rmiCmd := exec.CommandContext(ctx, "docker", "rmi", img+":latest")
+				rmiCmd.Stderr = os.Stderr
+				if err := rmiCmd.Run(); err != nil {
+					fmt.Println(ui.WarningGold(fmt.Sprintf("  Image %s not found (skipped)", img)))
 				} else {
-					fmt.Println(ui.SuccessBlue(fmt.Sprintf("Removed image: %s", img)))
+					fmt.Println(ui.SuccessBlue("✔ Removed image: " + img))
 				}
 			}
-			fmt.Println(ui.SuccessBlue("All Flume Docker images purged."))
+			fmt.Println(ui.SuccessBlue("✔ All Flume Docker images purged."))
 		}
 
 		// Always prune the full builder cache on every destroy (purge or not).
@@ -114,9 +91,8 @@ func confirmPurge() bool {
 	fmt.Println(ui.ErrorRed("  ⚠  HARD PURGE — POINT OF NO RETURN  ⚠"))
 	fmt.Println(ui.ErrorRed("═══════════════════════════════════════════════════════════"))
 	fmt.Println(ui.WarningGold("  This will permanently remove:"))
-	fmt.Println(ui.WarningGold("    • All Flume Docker images (flume-dashboard, flume-worker)"))
-	fmt.Println(ui.WarningGold("    • All associated build cache layers"))
-	fmt.Println(ui.WarningGold("  The next `flume start` will perform a full image rebuild."))
+	fmt.Println(ui.WarningGold("    • All Docker build cache layers"))
+	fmt.Println(ui.WarningGold("    • All workspace state artifacts"))
 	fmt.Println()
 	fmt.Print(ui.NeonGreen("  Are you sure? Type 'yes' to confirm: "))
 

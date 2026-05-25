@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
-import { Trash2, ShieldAlert, ShieldCheck, ShieldX } from 'lucide-react';
-import type { FrontierModelWeight } from '@/types';
+import { Trash2, ShieldAlert, ShieldCheck, ShieldX, KeyRound } from 'lucide-react';
+import type { FrontierModelWeight, LlmCredentialSummary } from '@/types';
 
 // Provider color mapping for visual differentiation
 const PROVIDER_COLORS: Record<string, { gradient: string; badge: string; icon: string }> = {
@@ -12,12 +12,14 @@ const PROVIDER_COLORS: Record<string, { gradient: string; badge: string; icon: s
 
 interface Props {
   model: FrontierModelWeight;
+  credentials: LlmCredentialSummary[];
   onWeightChange: (weight: number) => void;
   onBudgetChange: (budget: number) => void;
+  onCredentialChange: (credentialId: string) => void;
   onRemove: () => void;
 }
 
-export function FrontierModelCard({ model, onWeightChange, onBudgetChange, onRemove }: Props) {
+export function FrontierModelCard({ model, credentials, onWeightChange, onBudgetChange, onCredentialChange, onRemove }: Props) {
   const colors = PROVIDER_COLORS[model.provider] ?? PROVIDER_COLORS.openai;
   const utilization = model.budget_usd > 0 ? (model.spent_usd / model.budget_usd) * 100 : 0;
 
@@ -122,6 +124,30 @@ export function FrontierModelCard({ model, onWeightChange, onBudgetChange, onRem
             {model.circuit_open ? 'CIRCUIT OPEN' : `${utilization.toFixed(1)}%`}
           </span>
         </div>
+      </div>
+
+      {/* API Credential */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-muted-foreground flex items-center gap-1">
+            <KeyRound className="w-3.5 h-3.5 text-indigo-400" /> API Credential
+          </span>
+        </div>
+        <select
+          value={model.credential_id || ''}
+          onChange={(e) => onCredentialChange(e.target.value)}
+          className="w-full bg-slate-900/60 border border-border/20 rounded-md px-2 py-1.5 text-[11px] text-foreground focus:outline-none focus:border-indigo-500/50"
+        >
+          {credentials.length === 0 ? (
+            <option value="" disabled className="bg-slate-950 text-foreground">No credentials found</option>
+          ) : (
+            credentials.map((c) => (
+              <option key={c.id} value={c.id} className="bg-slate-950 text-foreground">
+                {c.label}
+              </option>
+            ))
+          )}
+        </select>
       </div>
     </motion.div>
   );

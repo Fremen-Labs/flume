@@ -6,13 +6,81 @@
 package dashboard
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
+
+type LastCommit struct {
+	Hash    string `json:"hash"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+	Subject string `json:"subject"`
+}
+
+type RepoInfo struct {
+	ID            string      `json:"id"`
+	Path          string      `json:"path"`
+	Exists        bool        `json:"exists"`
+	IsGit         bool        `json:"is_git"`
+	CurrentBranch string      `json:"current_branch,omitempty"`
+	LastCommit    *LastCommit `json:"last_commit,omitempty"`
+}
+
+func gitRepoInfo(id string, path string) RepoInfo {
+	info := RepoInfo{
+		ID:     id,
+		Path:   path,
+		Exists: false,
+		IsGit:  false,
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil || !fi.IsDir() {
+		return info
+	}
+	info.Exists = true
+
+	gitDir := filepath.Join(path, ".git")
+	_, err = os.Stat(gitDir)
+	if err != nil {
+		return info
+	}
+	info.IsGit = true
+
+	// 1. Get current branch
+	cmd := exec.Command("git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
+	if out, err := cmd.Output(); err == nil {
+		info.CurrentBranch = strings.TrimSpace(string(out))
+	}
+
+	// 2. Get last commit info
+	cmd2 := exec.Command("git", "-C", path, "log", "-1", "--pretty=format:%H\n%an\n%ai\n%s")
+	if out, err := cmd2.Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		if len(lines) >= 4 {
+			info.LastCommit = &LastCommit{
+				Hash:    lines[0],
+				Author:  lines[1],
+				Date:    lines[2],
+				Subject: lines[3],
+			}
+		}
+	}
+
+	return info
+}
 
 // ─── GET /api/health ────────────────────────────────────────────────────────
 
@@ -33,48 +101,314 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Count tasks by status
-	statuses := []string{"inbox", "planned", "ready", "running", "review", "done", "blocked"}
-	counts := map[string]int{}
-
-	for _, status := range statuses {
-		count, err := s.es.Count(ctx, "agent-task-records", map[string]interface{}{
-			"term": map[string]interface{}{"status": status},
-		})
-		if err != nil {
-			s.logger.Debug("snapshot: count failed", slog.String("status", status), slog.String("error", err.Error()))
-			continue
-		}
-		counts[status] = count
-	}
-
-	// Fetch running tasks with worker info
-	running, err := s.es.SearchRaw(ctx, "agent-task-records", map[string]interface{}{
-		"size": 50,
+	// 1. Projects
+	var projects []interface{}
+	projectsRes, err := s.es.SearchRaw(ctx, "flume-projects", map[string]interface{}{
+		"size": 1000,
 		"query": map[string]interface{}{
-			"term": map[string]interface{}{"status": "running"},
+			"match_all": map[string]interface{}{},
 		},
-		"_source": []string{"id", "title", "active_worker", "owner", "model", "updated_at"},
-		"sort":    []interface{}{map[string]interface{}{"updated_at": map[string]string{"order": "desc"}}},
 	})
-	var runningTasks []interface{}
-	if err == nil {
-		hits, _ := running["hits"].(map[string]interface{})
+	if err == nil && projectsRes != nil {
+		hits, _ := projectsRes["hits"].(map[string]interface{})
 		hitsArr, _ := hits["hits"].([]interface{})
 		for _, h := range hitsArr {
 			hit, _ := h.(map[string]interface{})
 			src, _ := hit["_source"].(map[string]interface{})
 			if src != nil {
-				runningTasks = append(runningTasks, src)
+				projects = append(projects, src)
+			}
+		}
+	}
+
+	// 2. Tasks (recent, not archived, limit 1000)
+	var tasks []interface{}
+	tasksRes, err := s.es.SearchRaw(ctx, "agent-task-records", map[string]interface{}{
+		"size": 1000,
+		"sort": []interface{}{
+			map[string]interface{}{"updated_at": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+		"query": map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must_not": []interface{}{
+					map[string]interface{}{"term": map[string]string{"status": "archived"}},
+				},
+			},
+		},
+	})
+	if err == nil && tasksRes != nil {
+		hits, _ := tasksRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			esID, _ := hit["_id"].(string)
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				taskMap := map[string]interface{}{}
+				for k, v := range src {
+					taskMap[k] = v
+				}
+				taskMap["_id"] = esID
+				thoughts, _ := src["execution_thoughts"].([]interface{})
+				taskMap["execution_thoughts_count"] = len(thoughts)
+				delete(taskMap, "execution_thoughts")
+				tasks = append(tasks, taskMap)
+			}
+		}
+	}
+
+	// 3. Reviews
+	var reviews []interface{}
+	reviewsRes, err := s.es.SearchRaw(ctx, "agent-review-records", map[string]interface{}{
+		"size": 100,
+		"sort": []interface{}{
+			map[string]interface{}{"created_at": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+	})
+	if err == nil && reviewsRes != nil {
+		hits, _ := reviewsRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			esID, _ := hit["_id"].(string)
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				item := map[string]interface{}{}
+				for k, v := range src {
+					item[k] = v
+				}
+				item["_id"] = esID
+				reviews = append(reviews, item)
+			}
+		}
+	}
+
+	// 4. Failures
+	var failures []interface{}
+	failuresRes, err := s.es.SearchRaw(ctx, "agent-failure-records", map[string]interface{}{
+		"size": 100,
+		"sort": []interface{}{
+			map[string]interface{}{"updated_at": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+	})
+	if err == nil && failuresRes != nil {
+		hits, _ := failuresRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			esID, _ := hit["_id"].(string)
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				item := map[string]interface{}{}
+				for k, v := range src {
+					item[k] = v
+				}
+				item["_id"] = esID
+				failures = append(failures, item)
+			}
+		}
+	}
+
+	// 5. Provenance
+	var provenance []interface{}
+	provenanceRes, err := s.es.SearchRaw(ctx, "agent-provenance-records", map[string]interface{}{
+		"size": 100,
+		"sort": []interface{}{
+			map[string]interface{}{"created_at": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+	})
+	if err == nil && provenanceRes != nil {
+		hits, _ := provenanceRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			esID, _ := hit["_id"].(string)
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				item := map[string]interface{}{}
+				for k, v := range src {
+					item[k] = v
+				}
+				item["_id"] = esID
+				provenance = append(provenance, item)
+			}
+		}
+	}
+
+	// 6. Workers
+	var workers []interface{}
+	workersRes, err := s.es.SearchRaw(ctx, "agent-system-workers", map[string]interface{}{
+		"size": 100,
+		"sort": []interface{}{
+			map[string]interface{}{"updated_at": map[string]string{"order": "desc", "unmapped_type": "date"}},
+		},
+	})
+	if err == nil && workersRes != nil {
+		hits, _ := workersRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				nodeWorkers, _ := src["workers"].([]interface{})
+				workers = append(workers, nodeWorkers...)
+			}
+		}
+	}
+
+	// 7. Repos
+	var repos []interface{}
+	for _, p := range projects {
+		pm, _ := p.(map[string]interface{})
+		if pm == nil {
+			continue
+		}
+		localPath, _ := pm["path"].(string)
+		cloneStatus, _ := pm["clone_status"].(string)
+		projectID, _ := pm["id"].(string)
+		if localPath != "" && cloneStatus == "local" {
+			repos = append(repos, gitRepoInfo(projectID, localPath))
+		}
+	}
+
+	// 8. Token telemetry savings
+	tokenMetrics := map[string]interface{}{
+		"savings":                      0,
+		"baseline_tokens":              0,
+		"baseline_full_context_tokens": 0,
+		"actual_tokens_sent":           0,
+		"total_input_tokens":           0,
+		"total_output_tokens":          0,
+		"estimated_cost_usd":           0.0,
+		"historical_burn":              []interface{}{},
+	}
+	elastroSavings := 0
+
+	aggRes, err := s.es.SearchRaw(ctx, "agent-token-telemetry", map[string]interface{}{
+		"size": 0,
+		"aggs": map[string]interface{}{
+			"total_elastro_savings":       map[string]interface{}{"sum": map[string]string{"field": "savings"}},
+			"total_baseline_tokens":       map[string]interface{}{"sum": map[string]string{"field": "baseline_tokens"}},
+			"total_baseline_full_context": map[string]interface{}{"sum": map[string]string{"field": "baseline_full_context_tokens"}},
+			"total_actual_tokens":         map[string]interface{}{"sum": map[string]string{"field": "actual_tokens_sent"}},
+			"total_input_tokens":          map[string]interface{}{"sum": map[string]string{"field": "input_tokens"}},
+			"total_output_tokens":         map[string]interface{}{"sum": map[string]string{"field": "output_tokens"}},
+			"by_worker": map[string]interface{}{
+				"terms": map[string]interface{}{"field": "worker_name", "size": 100},
+				"aggs": map[string]interface{}{
+					"input":  map[string]interface{}{"sum": map[string]string{"field": "input_tokens"}},
+					"output": map[string]interface{}{"sum": map[string]string{"field": "output_tokens"}},
+					"role":   map[string]interface{}{"terms": map[string]string{"field": "worker_role"}},
+				},
+			},
+		},
+	})
+
+	if err == nil && aggRes != nil {
+		aggs, _ := aggRes["aggregations"].(map[string]interface{})
+		if aggs != nil {
+			var getSumInt = func(name string) int {
+				m, _ := aggs[name].(map[string]interface{})
+				if m == nil {
+					return 0
+				}
+				v, _ := m["value"].(float64)
+				return int(v)
+			}
+
+			tIn := getSumInt("total_input_tokens")
+			tOut := getSumInt("total_output_tokens")
+			savings := getSumInt("total_elastro_savings")
+			elastroSavings = savings
+
+			costIn := 0.002
+			costOut := 0.010
+			if envCostIn := os.Getenv("FLUME_COST_PER_1K_INPUT"); envCostIn != "" {
+				var f float64
+				if _, err := fmt.Sscanf(envCostIn, "%f", &f); err == nil {
+					costIn = f
+				}
+			}
+			if envCostOut := os.Getenv("FLUME_COST_PER_1K_OUTPUT"); envCostOut != "" {
+				var f float64
+				if _, err := fmt.Sscanf(envCostOut, "%f", &f); err == nil {
+					costOut = f
+				}
+			}
+
+			estimatedCost := (float64(tIn)/1000.0 * costIn) + (float64(tOut)/1000.0 * costOut)
+
+			var historicalBurn []interface{}
+			byWorker, _ := aggs["by_worker"].(map[string]interface{})
+			if byWorker != nil {
+				buckets, _ := byWorker["buckets"].([]interface{})
+				for _, b := range buckets {
+					bm, _ := b.(map[string]interface{})
+					if bm == nil {
+						continue
+					}
+					workerName, _ := bm["key"].(string)
+
+					inputM, _ := bm["input"].(map[string]interface{})
+					inputVal, _ := inputM["value"].(float64)
+
+					outputM, _ := bm["output"].(map[string]interface{})
+					outputVal, _ := outputM["value"].(float64)
+
+					role := "unknown"
+					roleM, _ := bm["role"].(map[string]interface{})
+					if roleM != nil {
+						roleBuckets, _ := roleM["buckets"].([]interface{})
+						if len(roleBuckets) > 0 {
+							rbm, _ := roleBuckets[0].(map[string]interface{})
+							if rbm != nil {
+								role, _ = rbm["key"].(string)
+							}
+						}
+					}
+
+					historicalBurn = append(historicalBurn, map[string]interface{}{
+						"worker_name":   workerName,
+						"input_tokens":  int(inputVal),
+						"output_tokens": int(outputVal),
+						"role":          role,
+					})
+				}
+			}
+
+			tokenMetrics = map[string]interface{}{
+				"savings":                      savings,
+				"baseline_tokens":              getSumInt("total_baseline_tokens"),
+				"baseline_full_context_tokens": getSumInt("total_baseline_full_context"),
+				"actual_tokens_sent":           getSumInt("total_actual_tokens"),
+				"total_input_tokens":           tIn,
+				"total_output_tokens":          tOut,
+				"estimated_cost_usd":           estimatedCost,
+				"historical_burn":              historicalBurn,
 			}
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"counts":       counts,
-		"running":      orSliceIface(runningTasks),
-		"timestamp":    nowISO(),
-		"go_dashboard": true,
+		"workers":         orSliceIface(workers),
+		"tasks":           orSliceIface(tasks),
+		"reviews":         orSliceIface(reviews),
+		"failures":        orSliceIface(failures),
+		"provenance":      orSliceIface(provenance),
+		"repos":           orSliceIface(repos),
+		"projects":        orSliceIface(projects),
+		"elastro_savings": elastroSavings,
+		"token_metrics":   tokenMetrics,
+		"timestamp":       nowISO(),
 	})
 }
 
@@ -85,24 +419,105 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// ES cluster health
+	// 1. ES cluster health
 	esHealthy := false
 	if err := s.es.Ping(ctx); err == nil {
 		esHealthy = true
 	}
 
-	// Worker count
-	workerResult, err := s.es.SearchRaw(ctx, "agent-system-workers", map[string]interface{}{
-		"size":    0,
-		"_source": false,
+	// 2. Fetch workers array
+	var workers []interface{}
+	workersRes, err := s.es.SearchRaw(ctx, "agent-system-workers", map[string]interface{}{
+		"size": 100,
 	})
-	workerCount := 0
-	if err == nil {
-		hits, _ := workerResult["hits"].(map[string]interface{})
-		total, _ := hits["total"].(map[string]interface{})
-		if v, ok := total["value"].(float64); ok {
-			workerCount = int(v)
+	if err == nil && workersRes != nil {
+		hits, _ := workersRes["hits"].(map[string]interface{})
+		hitsArr, _ := hits["hits"].([]interface{})
+		for _, h := range hitsArr {
+			hit, _ := h.(map[string]interface{})
+			src, _ := hit["_source"].(map[string]interface{})
+			if src != nil {
+				if nodeWorkers, ok := src["workers"].([]interface{}); ok {
+					workers = append(workers, nodeWorkers...)
+				}
+			}
 		}
+	}
+	if workers == nil {
+		workers = []interface{}{}
+	}
+
+	// 3. Calculate standby/active worker counts
+	totalNodes := len(workers)
+	activeStreams := 0
+	standbyNodes := 0
+	for _, wVal := range workers {
+		if wMap, ok := wVal.(map[string]interface{}); ok {
+			status, _ := wMap["status"].(string)
+			if status == "claimed" || status == "active" || status == "busy" || status == "running" {
+				activeStreams++
+			} else {
+				standbyNodes++
+			}
+		}
+	}
+
+	// 4. Fetch AST count from flume-elastro-graph
+	elasticAstCount, err := s.es.Count(ctx, "flume-elastro-graph", map[string]interface{}{})
+	if err != nil {
+		elasticAstCount = 0
+	}
+
+	// 5. Fetch Vault status
+	vaultSealed := true
+	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
+	if vaultAddr != "" {
+		client := &http.Client{Timeout: 1 * time.Second}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/sys/health", vaultAddr), nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 || resp.StatusCode == 429 {
+					vaultSealed = false
+				}
+			}
+		}
+	}
+
+	// 6. Fetch Completed Tasks Count
+	completedWork, err := s.es.Count(ctx, "agent-task-records", map[string]interface{}{
+		"term": map[string]interface{}{"status": "done"},
+	})
+	if err != nil {
+		completedWork = 0
+	}
+
+	// 7. Gateway LLM latency check
+	llmLatency := "---"
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://localhost:8090"
+	}
+	start := time.Now()
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/health", nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				llmLatency = fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+			}
+		}
+	}
+
+	// 8. Build telemetry
+	telemetry := map[string]interface{}{
+		"completedWork":   completedWork,
+		"llmLatency":      llmLatency,
+		"elasticAstCount": elasticAstCount,
+		"vaultSealed":     vaultSealed,
 	}
 
 	var memStats runtime.MemStats
@@ -113,9 +528,11 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 			"healthy": esHealthy,
 			"url":     s.cfg.ESUrl,
 		},
-		"workers": map[string]interface{}{
-			"count": workerCount,
-		},
+		"workers":       workers,
+		"standbyNodes":  standbyNodes,
+		"activeStreams": activeStreams,
+		"totalNodes":    totalNodes,
+		"telemetry":     telemetry,
 		"runtime": map[string]interface{}{
 			"go_version":  runtime.Version(),
 			"goroutines":  runtime.NumGoroutine(),
@@ -123,8 +540,9 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 			"sys_mb":      memStats.Sys / 1024 / 1024,
 			"native_mode": s.cfg.NativeMode,
 		},
-		"uptime":    time.Since(s.startTime).String(),
-		"timestamp": nowISO(),
+		"uptime":     time.Since(s.startTime).String(),
+		"updated_at": nowISO(),
+		"timestamp":  nowISO(),
 	})
 }
 
@@ -264,10 +682,10 @@ func (s *Server) handleAutonomySweep(w http.ResponseWriter, r *http.Request) {
 	sweepName := r.PathValue("sweep_name")
 
 	validSweeps := map[string]bool{
-		"parent-revival":     true,
-		"stuck-worker":      true,
-		"plan-progress":     true,
-		"orphan-gc":         true,
+		"parent-revival": true,
+		"stuck-worker":   true,
+		"plan-progress":  true,
+		"orphan-gc":      true,
 	}
 
 	if !validSweeps[sweepName] {
@@ -275,8 +693,22 @@ func (s *Server) handleAutonomySweep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Wire to actual sweep goroutine triggers
 	s.logger.Info("autonomy sweep triggered", slog.String("sweep", sweepName))
+
+	s.mu.RLock()
+	cb := s.onSweepTrigger
+	s.mu.RUnlock()
+
+	var err error
+	if cb != nil {
+		err = cb(sweepName)
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"sweep":      sweepName,
@@ -299,6 +731,21 @@ func (s *Server) handleAutoUnblockStatus(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAutoUnblockSweep(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("auto-unblock sweep triggered")
+
+	s.mu.RLock()
+	cb := s.onSweepTrigger
+	s.mu.RUnlock()
+
+	var err error
+	if cb != nil {
+		err = cb("auto-unblock")
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
 		"message":    "sweep triggered",
@@ -313,4 +760,337 @@ func orSliceIface(s []interface{}) []interface{} {
 		return []interface{}{}
 	}
 	return s
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+type GatewayNodesResponse struct {
+	Nodes []struct {
+		ID     string `json:"id"`
+		Health struct {
+			Status       string   `json:"status"`
+			LatencyMS    int      `json:"latency_ms"`
+			CurrentLoad  float64  `json:"current_load"`
+			LoadedModels []string `json:"loaded_models"`
+		} `json:"health"`
+	} `json:"nodes"`
+}
+
+type connState struct {
+	escalations int
+	throttled   int
+}
+
+type TelemetryEvent struct {
+	ID    string `json:"id"`
+	Time  string `json:"time"`
+	Level string `json:"level"`
+	Msg   string `json:"msg"`
+}
+
+
+
+func (s *Server) loadWorkers(ctx context.Context) ([]map[string]interface{}, error) {
+	var workers []map[string]interface{}
+	workersRes, err := s.es.SearchRaw(ctx, "agent-system-workers", map[string]interface{}{
+		"size": 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	hits, _ := workersRes["hits"].(map[string]interface{})
+	hitsArr, _ := hits["hits"].([]interface{})
+	for _, h := range hitsArr {
+		hit, _ := h.(map[string]interface{})
+		src, _ := hit["_source"].(map[string]interface{})
+		if src != nil {
+			if nodeWorkers, ok := src["workers"].([]interface{}); ok {
+				for _, nw := range nodeWorkers {
+					if wMap, ok := nw.(map[string]interface{}); ok {
+						workers = append(workers, wMap)
+					}
+				}
+			}
+		}
+	}
+	return workers, nil
+}
+
+func (s *Server) gatherTelemetryEvents(ctx context.Context, state *connState) []TelemetryEvent {
+	var events []TelemetryEvent
+	nowStr := time.Now().Format("15:04:05")
+
+	// --- 1. Gateway Prometheus metrics ---
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://localhost:8090"
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/metrics", nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var bodyBytes []byte
+				if buf, err := io.ReadAll(resp.Body); err == nil {
+					bodyBytes = buf
+				}
+
+				var goroutines int
+				var allocMB float64
+				var escalations int
+				var blocked int
+				var throttled int
+				var activeModels []string
+
+				for _, line := range strings.Split(string(bodyBytes), "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" || strings.HasPrefix(line, "#") {
+						continue
+					}
+					parts := strings.SplitN(line, " ", 2)
+					if len(parts) != 2 {
+						continue
+					}
+					k, v := parts[0], parts[1]
+					var fVal float64
+					fmt.Sscanf(v, "%f", &fVal)
+
+					if k == "go_goroutines" {
+						goroutines = int(fVal)
+					} else if k == "go_memstats_alloc_bytes" {
+						allocMB = fVal / 1048576.0
+					} else if k == "flume_escalation_total" {
+						escalations = int(fVal)
+					} else if k == "flume_tasks_blocked_total" {
+						blocked = int(fVal)
+					} else if k == "flume_concurrency_throttled_total" {
+						throttled = int(fVal)
+					} else if strings.HasPrefix(k, "flume_active_models{") && int(fVal) == 1 {
+						idx := strings.Index(k, `model="`)
+						if idx != -1 {
+							sub := k[idx+7:]
+							endIdx := strings.Index(sub, `"`)
+							if endIdx != -1 {
+								activeModels = append(activeModels, sub[:endIdx])
+							}
+						}
+					}
+				}
+
+				events = append(events, TelemetryEvent{
+					ID:    randomHex(16),
+					Time:  nowStr,
+					Level: "INFO",
+					Msg:   fmt.Sprintf("Gateway alive — %d goroutines, %.1fMB heap", goroutines, allocMB),
+				})
+
+				if len(activeModels) > 0 {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "INFO",
+						Msg:   fmt.Sprintf("Active models: %s", strings.Join(activeModels, ", ")),
+					})
+				}
+
+				prevEsc := state.escalations
+				if escalations > prevEsc {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Escalation events: %d (+%d)", escalations, escalations-prevEsc),
+					})
+				}
+				state.escalations = escalations
+
+				if blocked > 0 {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Blocked tasks in queue: %d", blocked),
+					})
+				}
+
+				if throttled > state.throttled {
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "WARN",
+						Msg:   fmt.Sprintf("Concurrency throttle events: %d", throttled),
+					})
+				}
+				state.throttled = throttled
+			}
+		} else {
+			s.logger.Warn("gateway metrics connection failed", slog.String("error", err.Error()))
+			events = append(events, TelemetryEvent{
+				ID:    randomHex(16),
+				Time:  nowStr,
+				Level: "WARN",
+				Msg:   "Gateway metrics unreachable",
+			})
+		}
+	}
+
+	// --- 2. Node mesh health from gateway ---
+	reqNodes, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/api/nodes", nil)
+	if err == nil {
+		respNodes, err := client.Do(reqNodes)
+		if err == nil {
+			defer respNodes.Body.Close()
+			if respNodes.StatusCode == 200 {
+				var nodesResp GatewayNodesResponse
+				if err := json.NewDecoder(respNodes.Body).Decode(&nodesResp); err == nil {
+					healthyCount := 0
+					for _, n := range nodesResp.Nodes {
+						if n.Health.Status == "healthy" {
+							healthyCount++
+						}
+					}
+					events = append(events, TelemetryEvent{
+						ID:    randomHex(16),
+						Time:  nowStr,
+						Level: "INFO",
+						Msg:   fmt.Sprintf("Node mesh: %d/%d healthy", healthyCount, len(nodesResp.Nodes)),
+					})
+					for _, n := range nodesResp.Nodes {
+						level := "INFO"
+						if n.Health.Status != "healthy" {
+							level = "WARN"
+						}
+						modelsStr := "none"
+						if len(n.Health.LoadedModels) > 0 {
+							modelsStr = strings.Join(n.Health.LoadedModels, ", ")
+						}
+						events = append(events, TelemetryEvent{
+							ID:    randomHex(16),
+							Time:  nowStr,
+							Level: level,
+							Msg:   fmt.Sprintf("  %s: %s | %dms | load %.2f | models [%s]", n.ID, n.Health.Status, n.Health.LatencyMS, n.Health.CurrentLoad, modelsStr),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// --- 3. Worker heartbeat summary ---
+	workers, err := s.loadWorkers(ctx)
+	if err == nil {
+		activeCount := 0
+		idleCount := 0
+		for _, w := range workers {
+			status, _ := w["status"].(string)
+			if status == "busy" || status == "running" || status == "claimed" || status == "active" {
+				activeCount++
+			} else if status == "idle" {
+				idleCount++
+			}
+		}
+		events = append(events, TelemetryEvent{
+			ID:    randomHex(16),
+			Time:  nowStr,
+			Level: "INFO",
+			Msg:   fmt.Sprintf("Workers: %d active, %d standby, %d total", activeCount, idleCount, len(workers)),
+		})
+		for _, w := range workers {
+			status, _ := w["status"].(string)
+			if status == "busy" || status == "running" || status == "claimed" || status == "active" {
+				taskTitle, _ := w["current_task_title"].(string)
+				if taskTitle == "" {
+					taskTitle, _ = w["current_task_id"].(string)
+				}
+				if taskTitle == "" {
+					taskTitle = "—"
+				}
+				name, _ := w["name"].(string)
+				model, _ := w["model"].(string)
+				events = append(events, TelemetryEvent{
+					ID:    randomHex(16),
+					Time:  nowStr,
+					Level: "INFO",
+					Msg:   fmt.Sprintf("  ▸ %s [%s] → %s", name, model, taskTitle),
+				})
+			}
+		}
+	}
+
+	return events
+}
+
+// handleWebSocketTelemetry upgrades connection and streams telemetry events.
+// Derived from Python: api/system.py websocket_telemetry().
+func (s *Server) handleWebSocketTelemetry(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Warn("websocket upgrade failed", slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	s.logger.Info("websocket client connected", slog.String("addr", r.RemoteAddr))
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	state := &connState{}
+	ctx := r.Context()
+
+	// Send initial event batch
+	events := s.gatherTelemetryEvents(ctx, state)
+	for _, ev := range events {
+		data, err := json.Marshal(map[string]interface{}{
+			"event": "telemetry",
+			"data":  ev,
+		})
+		if err != nil {
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-closed:
+			s.logger.Info("websocket client disconnected", slog.String("addr", r.RemoteAddr))
+			return
+		case <-ticker.C:
+			events := s.gatherTelemetryEvents(ctx, state)
+			for _, ev := range events {
+				data, err := json.Marshal(map[string]interface{}{
+					"event": "telemetry",
+					"data":  ev,
+				})
+				if err != nil {
+					continue
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					return
+				}
+			}
+		}
+	}
 }

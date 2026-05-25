@@ -188,7 +188,7 @@ func TestToolResultModifiedRepo(t *testing.T) {
 
 func TestNewClaimer_NormalizeTitle(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	c := NewClaimer(nil, logger, "test")
+	c := NewClaimer(nil, nil, logger, "test")
 
 	tests := map[string]string{
 		"Fix Login Bug!":        "fix login bug",

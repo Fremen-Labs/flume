@@ -29,6 +29,7 @@ import (
 
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -45,6 +46,7 @@ type Manager struct {
 	pollSecs  int
 	shutdown  atomic.Bool
 	healthSrv *http.Server
+	wakeChan  chan struct{}
 
 	// Node concurrency caps cache
 	// Derived from Python: _NODE_CAPS_CACHE (manager.py L62-63)
@@ -69,13 +71,42 @@ func NewManager(cfg *config.Config, esClient *es.Client, logger *slog.Logger) *M
 		nodeID:   nodeID,
 		pollSecs: cfg.WorkerManagerPollSeconds,
 		capsTTL:  15 * time.Second,
+		wakeChan: make(chan struct{}, 1),
 	}
 
-	m.claimer = NewClaimer(esClient, m.logger, nodeID)
+	llmClient := llm.New(m.logger)
+	m.claimer = NewClaimer(esClient, llmClient, m.logger, nodeID)
 	m.sweeper = NewSweeper(esClient, m.logger)
-	m.pool = NewPool(m.logger)
+	runner := NewRunner(esClient, m.logger)
+	m.pool = NewPool(runner, m.logger)
 
 	return m
+}
+
+// Wake triggers an immediate heartbeat loop cycle.
+func (m *Manager) Wake() {
+	select {
+	case m.wakeChan <- struct{}{}:
+	default:
+		// already has a pending wake signal
+	}
+}
+
+// TriggerSweep manually triggers a specific sweep synchronously.
+func (m *Manager) TriggerSweep(ctx context.Context, sweepName string) error {
+	m.logger.Info("manually triggering sweep", slog.String("sweep", sweepName))
+	switch sweepName {
+	case "stuck-worker", "stuck_worker_watchdog":
+		m.sweeper.requeueStuckImplementerTasks(ctx)
+		m.sweeper.requeueStuckReviewTasks(ctx)
+	case "parent-revival", "promote":
+		m.sweeper.promotePlannedTasks(ctx)
+	case "auto-unblock", "resume":
+		m.sweeper.ExecuteResumeSweep(ctx)
+	default:
+		return fmt.Errorf("sweep %q not implemented or supported for manual trigger", sweepName)
+	}
+	return nil
 }
 
 // Run starts the manager's main heartbeat loop.
@@ -106,6 +137,13 @@ func (m *Manager) Run(ctx context.Context) error {
 				return nil
 			}
 			m.cycle(ctx)
+		case <-m.wakeChan:
+			if m.shutdown.Load() {
+				m.pool.Shutdown(ctx)
+				return nil
+			}
+			m.logger.Info("worker manager cycle triggered by wake signal")
+			m.cycle(ctx)
 		}
 	}
 }
@@ -130,6 +168,9 @@ func (m *Manager) cycle(ctx context.Context) {
 	// 5. Build worker definitions
 	nodeCaps := m.fetchNodeCaps(ctx, false)
 	workers := BuildWorkers(m.cfg, m.nodeID, nodeCaps)
+	if modelsDoc, err := m.es.GetDoc(ctx, "flume-agent-models", "singleton"); err == nil && modelsDoc != nil {
+		ApplyAgentModelsOverrides(workers, modelsDoc, m.logger)
+	}
 
 	// 6. Calculate node loads
 	cloudProviders := map[string]bool{
@@ -311,7 +352,7 @@ func (m *Manager) isClusterPaused(ctx context.Context) bool {
 func (m *Manager) countAvailableByStatus(ctx context.Context) map[string]int {
 	counts := make(map[string]int)
 	for _, status := range []string{"ready", "planned", "review"} {
-		n, err := m.es.Count(ctx, "flume-tasks", map[string]interface{}{
+		n, err := m.es.Count(ctx, "agent-task-records", map[string]interface{}{
 			"term": map[string]string{"status": status},
 		})
 		if err != nil {
@@ -328,7 +369,7 @@ func (m *Manager) countAvailableByStatus(ctx context.Context) map[string]int {
 
 func (m *Manager) fetchBusyWorkers(ctx context.Context) map[string]BusyWorker {
 	busy := make(map[string]BusyWorker)
-	result, err := m.es.Search(ctx, "flume-tasks", map[string]interface{}{
+	result, err := m.es.Search(ctx, "agent-task-records", map[string]interface{}{
 		"match": map[string]string{"queue_state": "active"},
 	}, 500)
 	if err != nil {

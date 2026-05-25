@@ -15,27 +15,46 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/pkg/types"
 )
 
 // Server is the Dashboard API HTTP server.
 // Derived from Python: server.py (FastAPI app instance + lifespan).
 type Server struct {
-	mux            *http.ServeMux
-	httpServer     *http.Server
-	es             *es.Client
-	logger         *slog.Logger
-	cfg            *Config
-	logLevel       *slog.LevelVar
-	startTime      time.Time
-	autonomyStatus map[string]interface{}
-	workerStatus   map[string]interface{}
-	mu             sync.RWMutex
+	mux              *http.ServeMux
+	httpServer       *http.Server
+	es               *es.Client
+	llmClient        *llm.Client
+	logger           *slog.Logger
+	cfg              *Config
+	logLevel         *slog.LevelVar
+	startTime        time.Time
+	autonomyStatus   map[string]interface{}
+	workerStatus     map[string]interface{}
+	onSweepTrigger   func(sweepName string) error
+	onSettingsReload func()
+	mu               sync.RWMutex
+}
+
+// RegisterSweepTrigger registers a callback for manual sweep triggering.
+func (s *Server) RegisterSweepTrigger(cb func(sweepName string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSweepTrigger = cb
+}
+
+// RegisterSettingsReload registers a callback for reloading settings and environment variables.
+func (s *Server) RegisterSettingsReload(cb func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSettingsReload = cb
 }
 
 // Config holds dashboard server configuration.
@@ -79,7 +98,7 @@ func DefaultConfig() *Config {
 		ESUrl:          esURL,
 		ESApiKey:       envOr("ES_API_KEY", ""),
 		CORSOrigins:    cors,
-		StaticRoot:     "",
+		StaticRoot:     envOr("FLUME_STATIC_ROOT", ""),
 		NativeMode:     envOr("FLUME_NATIVE_MODE", "0") == "1",
 		RateLimitPerMin: envInt("FLUME_RATE_LIMIT", 2000),
 	}
@@ -94,6 +113,7 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 	s := &Server{
 		mux:       http.NewServeMux(),
 		es:        esClient,
+		llmClient: llm.New(logger),
 		logger:    logger,
 		cfg:       cfg,
 		startTime: time.Now(),
@@ -136,6 +156,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/system-state", s.handleSystemState)
 	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
 	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /ws/telemetry", s.handleWebSocketTelemetry)
 	s.mux.HandleFunc("GET /api/exo-status", s.handleExoStatus)
 	s.mux.HandleFunc("GET /api/autonomy/status", s.handleAutonomyStatus)
 	s.mux.HandleFunc("POST /api/autonomy/sweep/{sweep_name}", s.handleAutonomySweep)
@@ -209,6 +230,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/workflow/agents/status", s.handleWorkflowAgentsStatus)
 	s.mux.HandleFunc("POST /api/workflow/agents/start", s.handleWorkflowAgentsStart)
 	s.mux.HandleFunc("POST /api/workflow/agents/stop", s.handleWorkflowAgentsStop)
+
+	// ─── SPA Static File Serving ─────────────────────────────────────────
+	// In Docker mode, FLUME_STATIC_ROOT points to the pre-built Vue SPA.
+	// Serves static assets and falls back to index.html for client-side routing.
+	if s.cfg.StaticRoot != "" {
+		s.logger.Info("SPA static serving enabled", slog.String("root", s.cfg.StaticRoot))
+		s.mux.Handle("/", s.spaHandler(s.cfg.StaticRoot))
+	}
 }
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
@@ -239,6 +268,12 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 			reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
 		w.Header().Set("X-Request-ID", reqID)
+
+		// Bypass statusWriter wrapping for WebSockets to allow http.Hijacker
+		if r.Header.Get("Upgrade") == "websocket" || strings.HasPrefix(r.URL.Path, "/ws") {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		// Wrap response writer to capture status
 		rw := &statusWriter{ResponseWriter: w, status: 200}
@@ -328,6 +363,29 @@ func envInt(key string, fallback int) int {
 	}
 	return n
 }
+
+// ─── SPA Handler ────────────────────────────────────────────────────────────
+
+// spaHandler serves a Single-Page Application from the filesystem.
+// Static assets are served directly; all other paths receive index.html
+// so the client-side router (React Router) handles navigation.
+func (s *Server) spaHandler(root string) http.Handler {
+	fileServer := http.FileServer(http.Dir(root))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Attempt to serve the file directly (JS, CSS, images, fonts, etc.)
+		path := filepath.Join(root, filepath.Clean(r.URL.Path))
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		// For all other paths, serve index.html (SPA client-side routing)
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+	})
+}
+
 
 func timeNowUnixMilli() int64 {
 	return time.Now().UnixMilli()

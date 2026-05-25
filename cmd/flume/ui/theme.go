@@ -26,7 +26,7 @@ var (
 
 	styleSuccess  = lipgloss.NewStyle().Foreground(colorSciFiBlue).Bold(true)
 	styleWarning  = lipgloss.NewStyle().Foreground(colorHackerGold).Bold(true)
-	styleError    = lipgloss.NewStyle().Foreground(colorTerminalRed).Bold(true).Blink(true)
+	styleError    = lipgloss.NewStyle().Foreground(colorTerminalRed).Bold(true)
 	styleGradient = lipgloss.NewStyle().Foreground(colorNeonGreen).Background(lipgloss.Color("#000000"))
 
 	styleLogo = lipgloss.NewStyle().
@@ -72,6 +72,30 @@ func ErrorRed(str string) string {
 // Dim renders muted hint text (e.g. "(Tab to autocomplete)").
 func Dim(str string) string {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7A89")).Render(str)
+}
+
+// BootPhase renders a styled boot-sequence phase indicator.
+// Example output: "  ▸ Scanning system dependencies..."
+func BootPhase(msg string) string {
+	marker := lipgloss.NewStyle().Foreground(colorNeonGreen).Bold(true).Render("▸")
+	body := lipgloss.NewStyle().Foreground(colorGhostWhite).Render(msg)
+	return fmt.Sprintf("  %s %s", marker, body)
+}
+
+// ReconReport renders a compact dependency-check grid with ✔/✖ badges.
+func ReconReport(items map[string]bool) string {
+	var sb strings.Builder
+	ok := lipgloss.NewStyle().Foreground(colorNeonGreen).Bold(true)
+	fail := lipgloss.NewStyle().Foreground(colorTerminalRed).Bold(true)
+	label := lipgloss.NewStyle().Foreground(colorGhostWhite).Width(16)
+	for name, found := range items {
+		badge := ok.Render("✔")
+		if !found {
+			badge = fail.Render("✖")
+		}
+		sb.WriteString(fmt.Sprintf("  %s %s\n", badge, label.Render(name)))
+	}
+	return sb.String()
 }
 
 // StatusBadge returns a lipgloss-coloured badge for a task/worker/infra status string.

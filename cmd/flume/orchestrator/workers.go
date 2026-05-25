@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/log"
+	"log/slog"
 )
 
 const defaultWorkerCount = 2
@@ -36,16 +36,16 @@ func ResolveWorkerCount(flag string) int {
 		return defaultWorkerCount
 	case "auto":
 		count := autoWorkerCount()
-		log.Infof("Auto worker count resolved: %d", count)
+		slog.Debug("Auto worker count resolved", "count", count)
 		return count
 	default:
 		n, err := strconv.Atoi(flag)
 		if err != nil || n < minWorkerCount {
-			log.Warnf("Invalid --workers value %q, using default (%d)", flag, defaultWorkerCount)
+			slog.Warn("Invalid --workers value, using default", "value", flag, "default", defaultWorkerCount)
 			return defaultWorkerCount
 		}
 		if n > maxWorkerCount {
-			log.Warnf("--workers %d exceeds maximum (%d), clamping", n, maxWorkerCount)
+			slog.Warn("exceeds maximum workers, clamping", "requested", n, "max", maxWorkerCount)
 			return maxWorkerCount
 		}
 		return n
@@ -53,7 +53,7 @@ func ResolveWorkerCount(flag string) int {
 }
 
 // autoWorkerCount determines the optimal worker count from available hardware.
-// Strategy:
+// Heuristics:
 //
 //  1. CPU budget: NumCPU / 2  (leave half for system processes + LLM serve)
 //  2. RAM budget: totalRAM_GiB / ramPerWorkerGiB
@@ -70,8 +70,11 @@ func autoWorkerCount() int {
 		ramBudget = 1
 	}
 
-	log.Infof("Auto-detecting worker count — CPU cores: %d → budget: %d | RAM: %d GiB → budget: %d",
-		runtime.NumCPU(), cpuBudget, ramGiB, ramBudget)
+	slog.Debug("Auto-detecting worker count",
+		"cpu_cores", runtime.NumCPU(),
+		"cpu_budget", cpuBudget,
+		"ram_gib", ramGiB,
+		"ram_budget", ramBudget)
 
 	count := cpuBudget
 	if ramBudget < count {
@@ -86,14 +89,11 @@ func autoWorkerCount() int {
 	return count
 }
 
-// BuildWorkerServiceNames returns the docker compose service names for N workers.
-// e.g. N=3 → ["dashboard", "worker-1", "worker-2", "worker-3"]
+// BuildWorkerServiceNames returns the docker compose service names to start.
+// Workers use deploy.replicas for scaling — no per-worker service names needed.
+// The workerCount is set via FLUME_WORKER_COUNT env var for compose interpolation.
 func BuildWorkerServiceNames(workerCount int) []string {
-	services := []string{"dashboard"}
-	for i := 1; i <= workerCount; i++ {
-		services = append(services, fmt.Sprintf("worker-%d", i))
-	}
-	return services
+	return []string{"dashboard", "gateway", "worker"}
 }
 
 // WorkerCountDescription returns a human-readable description of the count source.

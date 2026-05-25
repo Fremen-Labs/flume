@@ -38,6 +38,15 @@ export function normalizeRoleSpec(
   raw: unknown,
   fallback: { credentialId: string; provider: string; model: string; host: string },
 ): RoleForm {
+  if (raw && typeof raw === 'object' && (raw as any).useGlobal === true) {
+    return {
+      useGlobal: true,
+      credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
+      provider: fallback.provider,
+      model: fallback.model,
+      executionHost: (raw as any).executionHost || fallback.host,
+    };
+  }
   if (typeof raw === 'string') {
     return { useGlobal: false, credentialId: fallback.credentialId, provider: fallback.provider, model: raw || fallback.model, executionHost: fallback.host };
   }

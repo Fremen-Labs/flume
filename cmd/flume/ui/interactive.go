@@ -362,7 +362,7 @@ func (m promptModel) View() string {
 
 	switch m.step {
 	case StepExoPrompt:
-		return NeonGreen("Exo Mac MLX Inference detected! Route workloads through Exo natively?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Exo MLX Inference detected! Route workloads through Exo?\n") + "\n1. Yes\n2. No\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepProvider:
 		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
@@ -387,23 +387,23 @@ func (m promptModel) View() string {
 		count := len(m.cfg.Nodes)
 		return NeonGreen(fmt.Sprintf("%d node(s) registered. Add another?\n", count)) + "\n1. Yes\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepAPIKey:
-		return NeonGreen("Enter " + pLabel + " API Secret (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter " + pLabel + " API key:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepCloudMore:
 		return NeonGreen("API Secret secured. Would you like to add another Cloud Provider to the Mesh?\n") + "\n1. Yes, add another Cloud endpoint\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticMenu:
 		return NeonGreen("Select Elasticsearch capability:\n") + "\n1. Use default Flume Docker instance\n2. Use an existing External Elastic instance\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepElasticURL:
-		return NeonGreen("Enter External Elasticsearch HTTP routing URL:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter Elasticsearch URL:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepRepoMenu:
-		return NeonGreen("Would you like to configure remote Version Control natively in the CLI?\n") + "\n1. Yes, add Repo Credentials via CLI\n2. No, I will configure via Local GUI later\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Configure version control?\n") + "\n1. Yes, add repo credentials now\n2. No, configure later\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepRepoType:
 		return NeonGreen("Select Source Control Provider:\n") + "\n1. GitHub\n2. Azure DevOps (ADO)\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepGithubToken:
-		return NeonGreen("Enter GitHub Personal Access Token (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter GitHub Personal Access Token:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOOrg:
 		return NeonGreen("Enter Azure DevOps Organization Name:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepADOToken:
-		return NeonGreen("Enter Azure DevOps Personal Access Token (Masked natively):\n") + "\n" + ti.View() + err + "\n(Press enter to submit)\n"
+		return NeonGreen("Enter Azure DevOps Personal Access Token:\n") + "\n" + ti.View() + err + "\n(Press enter to submit)\n"
 	}
 	return SuccessBlue("Credentials received securely.")
 }

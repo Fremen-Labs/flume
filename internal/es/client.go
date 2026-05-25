@@ -14,11 +14,13 @@ package es
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,20 +30,48 @@ import (
 type Client struct {
 	baseURL    string
 	apiKey     string
+	password   string
 	httpClient *http.Client
 	logger     *slog.Logger
 }
 
 // New creates a new Elasticsearch client.
+// When the baseURL uses HTTPS, TLS certificate verification is disabled
+// to support ES 8.x's auto-generated self-signed certificates inside Docker.
 func New(baseURL, apiKey string, logger *slog.Logger) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.HasPrefix(baseURL, "https://") {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		logger.Info("ES client: TLS skip-verify enabled for self-signed certs")
+	}
+
+	// Check for password-based Basic Auth (ES 8.x default when no API key exists).
+	password := ""
+	if apiKey == "" {
+		password = envOrBlank("FLUME_ELASTIC_PASSWORD")
+		if password != "" {
+			logger.Info("ES client: using Basic Auth (elastic:***) — no API key provided")
+		}
+	}
+
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		apiKey:   apiKey,
+		password: password,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		logger: logger,
 	}
+}
+
+func envOrBlank(key string) string {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return ""
+	}
+	return v
 }
 
 // do executes an HTTP request against Elasticsearch with auth headers.
@@ -54,6 +84,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+c.apiKey)
+	} else if c.password != "" {
+		req.SetBasicAuth("elastic", c.password)
 	}
 	return c.httpClient.Do(req)
 }
@@ -110,6 +142,9 @@ func (c *Client) IndexDoc(ctx context.Context, index, id string, body interface{
 	return nil
 }
 
+// ErrConflict is returned when a document update fails due to a version conflict.
+var ErrConflict = fmt.Errorf("es: version conflict")
+
 // DeleteDoc deletes a document by index and ID.
 func (c *Client) DeleteDoc(ctx context.Context, index, id string) error {
 	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/_doc/%s", index, id), nil)
@@ -124,12 +159,73 @@ func (c *Client) DeleteDoc(ctx context.Context, index, id string) error {
 	return nil
 }
 
+// UpdateDoc performs a partial update on a document by ID.
+func (c *Client) UpdateDoc(ctx context.Context, index, id string, body interface{}) error {
+	payload := map[string]interface{}{
+		"doc": body,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("es: marshal failed: %w", err)
+	}
+
+	path := fmt.Sprintf("%s/_update/%s", index, id)
+	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("es: update %s/%s failed: %w", index, id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("es: update %s/%s returned HTTP %d: %s", index, id, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// UpdateDocOCC performs a partial update on a document by ID with optimistic concurrency control.
+// Returns ErrConflict if the document was updated concurrently.
+func (c *Client) UpdateDocOCC(ctx context.Context, index, id string, body interface{}, seqNo, primaryTerm int64) error {
+	payload := map[string]interface{}{
+		"doc": body,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("es: marshal failed: %w", err)
+	}
+
+	path := fmt.Sprintf("%s/_update/%s?if_seq_no=%d&if_primary_term=%d", index, id, seqNo, primaryTerm)
+	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("es: update OCC %s/%s failed: %w", index, id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 409 {
+		return ErrConflict
+	}
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("es: update OCC %s/%s returned HTTP %d: %s", index, id, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 // ─── Search ─────────────────────────────────────────────────────────────────
+
+// SearchHit represents a raw Elasticsearch search hit with metadata.
+type SearchHit struct {
+	ID          string          `json:"_id"`
+	Source      json.RawMessage `json:"_source"`
+	SeqNo       *int64          `json:"_seq_no,omitempty"`
+	PrimaryTerm *int64          `json:"_primary_term,omitempty"`
+}
 
 // SearchResult is the parsed response from an ES _search query.
 type SearchResult struct {
-	Total int               `json:"total"`
-	Hits  []json.RawMessage `json:"hits"`
+	Total   int               `json:"total"`
+	Hits    []json.RawMessage `json:"hits"`
+	RawHits []SearchHit       `json:"-"`
 }
 
 // Search executes a search query and returns hits.
@@ -143,7 +239,7 @@ func (c *Client) Search(ctx context.Context, index string, query interface{}, si
 		return nil, fmt.Errorf("es: search marshal failed: %w", err)
 	}
 
-	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/_search", index), bytes.NewReader(data))
+	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/_search?seq_no_primary_term=true", index), bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("es: search %s failed: %w", index, err)
 	}
@@ -159,16 +255,17 @@ func (c *Client) Search(ctx context.Context, index string, query interface{}, si
 			Total struct {
 				Value int `json:"value"`
 			} `json:"total"`
-			Hits []struct {
-				Source json.RawMessage `json:"_source"`
-			} `json:"hits"`
+			Hits []SearchHit `json:"hits"`
 		} `json:"hits"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&esResp); err != nil {
 		return nil, fmt.Errorf("es: search decode failed: %w", err)
 	}
 
-	result := &SearchResult{Total: esResp.Hits.Total.Value}
+	result := &SearchResult{
+		Total:   esResp.Hits.Total.Value,
+		RawHits: esResp.Hits.Hits,
+	}
 	for _, h := range esResp.Hits.Hits {
 		result.Hits = append(result.Hits, h.Source)
 	}
@@ -386,7 +483,7 @@ func (c *Client) Post(ctx context.Context, path string, body interface{}) error 
 // (e.g., the Go gateway, Vault, Exo topology).
 
 // HTTPGet performs a GET request to an arbitrary URL and returns decoded JSON.
-func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{}, error) {
+func (c *Client) HTTPGet(ctx context.Context, url string) (interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http get: build failed: %w", err)
@@ -398,7 +495,7 @@ func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http get decode failed: %w", err)
 	}
@@ -406,7 +503,7 @@ func (c *Client) HTTPGet(ctx context.Context, url string) (map[string]interface{
 }
 
 // HTTPPost performs a POST request to an arbitrary URL with a JSON body.
-func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (interface{}, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -428,7 +525,7 @@ func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (ma
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http post decode failed: %w", err)
 	}
@@ -436,7 +533,7 @@ func (c *Client) HTTPPost(ctx context.Context, url string, body interface{}) (ma
 }
 
 // HTTPPut performs a PUT request to an arbitrary URL with a JSON body.
-func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map[string]interface{}, error) {
+func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (interface{}, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -458,7 +555,7 @@ func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http put decode failed: %w", err)
 	}
@@ -466,7 +563,7 @@ func (c *Client) HTTPPut(ctx context.Context, url string, body interface{}) (map
 }
 
 // HTTPDelete performs a DELETE request to an arbitrary URL.
-func (c *Client) HTTPDelete(ctx context.Context, url string) (map[string]interface{}, error) {
+func (c *Client) HTTPDelete(ctx context.Context, url string) (interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http delete: build failed: %w", err)
@@ -478,7 +575,7 @@ func (c *Client) HTTPDelete(ctx context.Context, url string) (map[string]interfa
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
+	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("http delete decode failed: %w", err)
 	}

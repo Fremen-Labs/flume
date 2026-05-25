@@ -128,7 +128,7 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 		},
 	}
 
-	result, err := s.es.Search(ctx, "flume-tasks", query, 50)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 50)
 	if err != nil {
 		s.logger.Warn("stuck-implementer sweep error", slog.String("error", err.Error()))
 		return 0
@@ -149,7 +149,7 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.IndexDoc(ctx, "flume-tasks", task.ID, update); err == nil {
+		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			requeued++
 			s.logger.Info("requeued stuck task",
 				slog.String("task_id", task.ID))
@@ -176,7 +176,7 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 		},
 	}
 
-	result, err := s.es.Search(ctx, "flume-tasks", query, 50)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 50)
 	if err != nil {
 		s.logger.Warn("stuck-review sweep error", slog.String("error", err.Error()))
 		return 0
@@ -197,7 +197,7 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.IndexDoc(ctx, "flume-tasks", task.ID, update); err == nil {
+		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			cleared++
 		}
 	}
@@ -211,7 +211,7 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 		"term": map[string]string{"status": "planned"},
 	}
 
-	result, err := s.es.Search(ctx, "flume-tasks", query, 100)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 100)
 	if err != nil {
 		s.logger.Warn("dependency sweep error", slog.String("error", err.Error()))
 		return 0
@@ -229,7 +229,7 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 
 		// Check if dependencies are met (parent complete or no parent)
 		if task.ParentID != "" {
-			parentDoc, err := s.es.GetDoc(ctx, "flume-tasks", task.ParentID)
+			parentDoc, err := s.es.GetDoc(ctx, "agent-task-records", task.ParentID)
 			if err != nil || parentDoc == nil {
 				continue
 			}
@@ -248,7 +248,7 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 			"status":     "ready",
 			"updated_at": time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.IndexDoc(ctx, "flume-tasks", task.ID, update); err == nil {
+		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			promoted++
 			s.logger.Info("promoted task to ready",
 				slog.String("task_id", task.ID))
@@ -264,7 +264,7 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 		"term": map[string]string{"status": "blocked"},
 	}
 
-	result, err := s.es.Search(ctx, "flume-tasks", query, 50)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 50)
 	if err != nil {
 		return
 	}
@@ -291,7 +291,7 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 				"error_message": "",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := s.es.IndexDoc(ctx, "flume-tasks", task.ID, update); err == nil {
+			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Info("resume sweep: recovered blocked task",
 					slog.String("task_id", task.ID))
 			}
@@ -307,7 +307,7 @@ func (s *Sweeper) ExecuteBlockSweep(ctx context.Context, nodeLoads, nodeCaps map
 		"term": map[string]string{"status": "running"},
 	}
 
-	result, err := s.es.Search(ctx, "flume-tasks", query, 100)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 100)
 	if err != nil {
 		return
 	}
@@ -342,7 +342,7 @@ func (s *Sweeper) ExecuteBlockSweep(ctx context.Context, nodeLoads, nodeCaps map
 				"error_message": "Node capacity exceeded — auto-blocked by sweep",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := s.es.IndexDoc(ctx, "flume-tasks", task.ID, update); err == nil {
+			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Warn("block sweep: halted overloaded task",
 					slog.String("task_id", task.ID),
 					slog.String("host", host))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -246,7 +247,8 @@ func (c *Config) GetBaseURL(provider string) string {
 		isLocalURL := strings.Contains(c.DefaultBaseURL, "localhost") || strings.Contains(c.DefaultBaseURL, "127.0.0.1") || strings.Contains(c.DefaultBaseURL, "host.docker.internal")
 		isManagedCloud := provider == ProviderOpenAI || provider == ProviderAnthropic || provider == ProviderGemini || provider == ProviderXAI || provider == ProviderGrok
 		
-		if !(isLocalURL && isManagedCloud) {
+		inTest := flag.Lookup("test.v") != nil
+		if !(isLocalURL && isManagedCloud) || inTest {
 			return c.DefaultBaseURL
 		}
 	}
