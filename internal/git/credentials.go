@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/Fremen-Labs/flume/internal/config"
+	"github.com/Fremen-Labs/flume/internal/logger"
 	"github.com/Fremen-Labs/flume/internal/secrets"
 )
 
@@ -66,7 +67,7 @@ func DetectRepoType(repoURL string) string {
 
 // EmbedCredentials rewrites an HTTPS remote URL to embed a PAT using x-access-token format.
 // Derived from Python: embed_credentials().
-func EmbedCredentials(repoURL string, repoType string) string {
+func EmbedCredentials(ctx context.Context, repoURL string, repoType string) string {
 	if repoType == "" {
 		repoType = DetectRepoType(repoURL)
 	}
@@ -75,7 +76,7 @@ func EmbedCredentials(repoURL string, repoType string) string {
 		return repoURL
 	}
 
-	token := resolveToken(repoType)
+	token := resolveToken(ctx, repoType)
 	if token == "" {
 		return repoURL
 	}
@@ -106,9 +107,8 @@ const delegatedSentinel = "OPENBAO_DELEGATED"
 // resolveToken resolves the PAT for a git provider.
 // Priority: OpenBao KV → environment variable fallback.
 // Derived from Python: _resolve_token().
-func resolveToken(repoType string) string {
-	ctx := context.Background()
-	logger := slog.Default()
+func resolveToken(ctx context.Context, repoType string) string {
+	log := logger.WithContext(ctx)
 
 	var cfg *config.Config
 	// Recover from panic if config.Get() hasn't been initialized (e.g. in tests)
@@ -126,15 +126,15 @@ func resolveToken(repoType string) string {
 		if cfg.ESAPIKey != "" {
 			os.Setenv("ES_API_KEY", cfg.ESAPIKey)
 		}
-		esStore = secrets.NewESStore(logger)
+		esStore = secrets.NewESStore(log)
 		if cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
-			baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, logger)
+			baoClient = secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, log)
 		}
 	}
 
 	if repoType == "ado" {
 		if esStore != nil {
-			store := secrets.NewADOTokenStore(esStore, baoClient, logger)
+			store := secrets.NewADOTokenStore(esStore, baoClient, log)
 			token := store.GetActiveTokenPlain(ctx)
 			if token != "" {
 				return token
@@ -149,7 +149,7 @@ func resolveToken(repoType string) string {
 
 	if repoType == "github" {
 		if esStore != nil {
-			store := secrets.NewGHTokenStore(esStore, baoClient, logger)
+			store := secrets.NewGHTokenStore(esStore, baoClient, log)
 			token := store.GetActiveTokenPlain(ctx)
 			if token != "" {
 				return token
@@ -188,7 +188,7 @@ func envOr(key, fallback string) string {
 // GetClient returns the appropriate HostClient for a project document.
 // proj must contain "repoUrl" or "repo_url".
 // Derived from Python: get_git_client().
-func GetClient(proj map[string]interface{}) (HostClient, error) {
+func GetClient(ctx context.Context, proj map[string]interface{}) (HostClient, error) {
 	repoURL := strVal(proj["repoUrl"])
 	if repoURL == "" {
 		repoURL = strVal(proj["repo_url"])
@@ -203,7 +203,7 @@ func GetClient(proj map[string]interface{}) (HostClient, error) {
 		if !ok {
 			return nil, &HostError{Message: fmt.Sprintf("cannot parse GitHub owner/repo from: %s", repoURL)}
 		}
-		token := resolveToken("github")
+		token := resolveToken(ctx, "github")
 		if token == "" {
 			return nil, &AuthError{HostError{Message: "no GitHub PAT configured — add a token in Settings → Repositories"}}
 		}
@@ -214,7 +214,7 @@ func GetClient(proj map[string]interface{}) (HostClient, error) {
 		if !ok {
 			return nil, &HostError{Message: fmt.Sprintf("cannot parse ADO org/project/repo from: %s", repoURL)}
 		}
-		token := resolveToken("ado")
+		token := resolveToken(ctx, "ado")
 		if token == "" {
 			return nil, &AuthError{HostError{Message: "no Azure DevOps PAT configured — add a token in Settings → Repositories"}}
 		}
@@ -229,21 +229,21 @@ func GetClient(proj map[string]interface{}) (HostClient, error) {
 
 // EnsureIntegrationBranchForProject is a convenience wrapper around GetClient + EnsureIntegrationBranch.
 // Derived from Python: ensure_integration_branch_for_project().
-func EnsureIntegrationBranchForProject(proj map[string]interface{}, branchName string) bool {
+func EnsureIntegrationBranchForProject(ctx context.Context, proj map[string]interface{}, branchName string) bool {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return false
 	}
-	client, err := GetClient(proj)
+	client, err := GetClient(ctx, proj)
 	if err != nil {
-		slog.Warn("ensure_integration_branch: no client",
+		logger.WithContext(ctx).Warn("ensure_integration_branch: no client",
 			slog.String("error", truncate(err.Error(), 200)),
 		)
 		return false
 	}
-	ok, err := client.EnsureIntegrationBranch(branchName)
+	ok, err := client.EnsureIntegrationBranch(ctx, branchName)
 	if err != nil {
-		slog.Warn("ensure_integration_branch failed",
+		logger.WithContext(ctx).Warn("ensure_integration_branch failed",
 			slog.String("branch", branchName),
 			slog.String("error", truncate(err.Error(), 200)),
 		)

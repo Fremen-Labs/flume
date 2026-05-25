@@ -227,7 +227,7 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 
 	// 3. Prep URL (embed credentials if possible)
 	repoType := git.DetectRepoType(repoURL)
-	cloneURL := git.EmbedCredentials(repoURL, repoType)
+	cloneURL := git.EmbedCredentials(ctx, repoURL, repoType)
 
 	// Clean up any stale directory before cloning
 	_ = os.RemoveAll(destPath)

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"testing"
 )
 
@@ -124,7 +125,7 @@ func TestStripCredentials(t *testing.T) {
 
 func TestEmbedCredentials_LocalPassthrough(t *testing.T) {
 	local := "/home/user/my-repo"
-	result := EmbedCredentials(local, "local")
+	result := EmbedCredentials(context.Background(), local, "local")
 	if result != local {
 		t.Errorf("EmbedCredentials should pass through local paths, got %q", result)
 	}
@@ -132,7 +133,7 @@ func TestEmbedCredentials_LocalPassthrough(t *testing.T) {
 
 func TestEmbedCredentials_SSHPassthrough(t *testing.T) {
 	ssh := "git@github.com:org/repo.git"
-	result := EmbedCredentials(ssh, "ssh")
+	result := EmbedCredentials(context.Background(), ssh, "ssh")
 	if result != ssh {
 		t.Errorf("EmbedCredentials should pass through SSH URLs, got %q", result)
 	}

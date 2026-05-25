@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/log"
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // VaultKeys represents the data structured natively during initialization securely.
@@ -25,7 +25,7 @@ type VaultKeys struct {
 
 // AwaitOpenBao gracefully awaits OpenBao cluster locks indefinitely.
 func AwaitOpenBao(ctx context.Context, vaultURL string) error {
-	log.Debug("Awaiting OpenBao KMS Cluster Generation Locks...", "url", vaultURL)
+	logger.WithContext(ctx).Debug("Awaiting OpenBao KMS Cluster Generation Locks...", "url", vaultURL)
 
 	for i := 0; i < 40; i++ {
 		select {
@@ -38,7 +38,7 @@ func AwaitOpenBao(ctx context.Context, vaultURL string) error {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 || resp.StatusCode == 429 || resp.StatusCode == 472 || resp.StatusCode == 473 || resp.StatusCode == 501 || resp.StatusCode == 503 {
-				log.Debug("OpenBao Boot Sequenced Successfully.")
+				logger.WithContext(ctx).Debug("OpenBao Boot Sequenced Successfully.")
 				return nil
 			}
 		}
@@ -70,7 +70,7 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 	var keys VaultKeys
 
 	if !initStatus.Initialized {
-		log.Debug("First true boot detected: Initializing OpenBao cluster securely.")
+		logger.WithContext(ctx).Debug("First true boot detected: Initializing OpenBao cluster securely.")
 		initPayload := map[string]interface{}{
 			"secret_shares":    1,
 			"secret_threshold": 1,
@@ -91,35 +91,35 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 
 		os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".flume"), 0700)
 		
-		log.Warn("==================================================================")
-		log.Warn("🔐 OPENBAO KMS DEPLOYED SUCCESSFULLY 🔐")
-		log.Warn("Please save these credentials to a secure password manager NOW.")
-		log.Warn(fmt.Sprintf("Root Token : %s", keys.RootToken))
+		logger.WithContext(ctx).Warn("==================================================================")
+		logger.WithContext(ctx).Warn("🔐 OPENBAO KMS DEPLOYED SUCCESSFULLY 🔐")
+		logger.WithContext(ctx).Warn("Please save these credentials to a secure password manager NOW.")
+		logger.WithContext(ctx).Warn(fmt.Sprintf("Root Token : %s", keys.RootToken))
 		if len(keys.KeysB64) > 0 {
-			log.Warn(fmt.Sprintf("Unseal Key : %s", keys.KeysB64[0]))
+			logger.WithContext(ctx).Warn(fmt.Sprintf("Unseal Key : %s", keys.KeysB64[0]))
 		}
-		log.Warn("==================================================================")
+		logger.WithContext(ctx).Warn("==================================================================")
 	} else {
-		log.Debug("Persistent OpenBao cluster detected.")
+		logger.WithContext(ctx).Debug("Persistent OpenBao cluster detected.")
 		// Vault is already initialized. If it is also already unsealed we need
 		// to mint a fresh root token via the generate-root workflow, because
 		// we have no persisted token from a previous run (orphaned volume).
 		// We check health first: 200 = unsealed, 503 = sealed.
 		healthResp, hErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/sys/health", vaultURL), "", nil)
 		if hErr != nil {
-			log.Warn("Vault health check failed during orphan recovery check — cannot determine sealed state", "error", hErr)
+			logger.WithContext(ctx).Warn("Vault health check failed during orphan recovery check — cannot determine sealed state", "error", hErr)
 		} else {
 			healthResp.Body.Close()
 			if healthResp.StatusCode == 200 {
 				// Already unsealed — generate a fresh root token.
-				log.Warn("Orphaned Vault detected (unsealed, no root token). Recovering via generate-root workflow.")
+				logger.WithContext(ctx).Warn("Orphaned Vault detected (unsealed, no root token). Recovering via generate-root workflow.")
 				recoveredToken, rErr := GenerateRootToken(ctx, vaultURL)
 				if rErr != nil {
-					log.Error("generate-root recovery failed. Run: flume destroy --purge && flume start", "error", rErr)
+					logger.WithContext(ctx).Error("generate-root recovery failed. Run: flume destroy --purge && flume start", "error", rErr)
 					return "", fmt.Errorf("vault root-token recovery failed: %w", rErr)
 				}
 				keys.RootToken = recoveredToken
-				log.Debug("Successfully recovered root token via generate-root workflow.")
+				logger.WithContext(ctx).Debug("Successfully recovered root token via generate-root workflow.")
 				return keys.RootToken, nil
 			}
 		}
@@ -133,7 +133,7 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 	defer respHealth.Body.Close()
 	
 	if respHealth.StatusCode == 503 { // Sealed
-		log.Warn("Your OpenBao cluster is sealed.")
+		logger.WithContext(ctx).Warn("Your OpenBao cluster is sealed.")
 		if len(keys.KeysB64) == 0 {
 			unsealKey := os.Getenv("FLUME_BAO_UNSEAL_KEY")
 			rootToken := os.Getenv("FLUME_BAO_ROOT_TOKEN")
@@ -166,9 +166,9 @@ func InitializeAndUnseal(ctx context.Context, vaultURL string) (string, error) {
 			return "", fmt.Errorf("failed to submit unseal KMS: %w", err)
 		}
 		unsealResp.Body.Close()
-		log.Debug("OpenBao KMS Unsealed Successfully.")
+		logger.WithContext(ctx).Debug("OpenBao KMS Unsealed Successfully.")
 	} else {
-		log.Debug("OpenBao KMS already unsealed. Continuing...")
+		logger.WithContext(ctx).Debug("OpenBao KMS already unsealed. Continuing...")
 	}
 
 	return keys.RootToken, nil
@@ -308,9 +308,9 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 					return fmt.Errorf("failed to enable secrets engine: %w", mErr)
 				}
 				mountResp.Body.Close()
-				log.Debug("Successfully enabled Vault secret engine at secret/.")
+				logger.WithContext(ctx).Debug("Successfully enabled Vault secret engine at secret/.")
 			} else {
-				log.Debug("Secret engine 'secret/' already exists. Skipping creation.")
+				logger.WithContext(ctx).Debug("Secret engine 'secret/' already exists. Skipping creation.")
 			}
 		}
 	} else if !exists {
@@ -329,7 +329,7 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 			return fmt.Errorf("failed to enable secrets engine: %w", mErr)
 		}
 		mountResp.Body.Close()
-		log.Debug("Successfully enabled Vault secret engine at secret/.")
+		logger.WithContext(ctx).Debug("Successfully enabled Vault secret engine at secret/.")
 	}
 
 	// 2. Resolve KV payload
@@ -337,7 +337,7 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 	if esURL != "" {
 		mintedKey, err := MintElasticsearchAPIKey(ctx, esURL)
 		if err != nil {
-			log.Warn("Failed to mint Elasticsearch API Key. Flume dashboard will rely on FLUME_ELASTIC_PASSWORD", "error", err)
+			logger.WithContext(ctx).Warn("Failed to mint Elasticsearch API Key. Flume dashboard will rely on FLUME_ELASTIC_PASSWORD", "error", err)
 		} else {
 			esKey = mintedKey
 		}
@@ -415,7 +415,7 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 	for k := range kvPayload {
 		keysWritten = append(keysWritten, k)
 	}
-	log.Debug("Injected Infrastructure Configuration + API keys into OpenBao KV.", "keys", strings.Join(keysWritten, ", "))
+	logger.WithContext(ctx).Debug("Injected Infrastructure Configuration + API keys into OpenBao KV.", "keys", strings.Join(keysWritten, ", "))
 
 	return nil
 }
@@ -445,13 +445,13 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 		authConf := map[string]interface{}{"type": "approle"}
 		enResp, enErr := doVaultRequest(ctx, "POST", fmt.Sprintf("%s/v1/sys/auth/approle", vaultURL), rootToken, authConf)
 		if enErr == nil && enResp.StatusCode == 204 {
-			log.Debug("Enabled AppRole authentication engine.")
+			logger.WithContext(ctx).Debug("Enabled AppRole authentication engine.")
 		}
 		if enResp != nil {
 			enResp.Body.Close()
 		}
 	} else {
-		log.Debug("AppRole authentication engine already enabled.")
+		logger.WithContext(ctx).Debug("AppRole authentication engine already enabled.")
 	}
 
 	// Policy configuration
@@ -498,7 +498,7 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 		return "", fmt.Errorf("failed to decode secret-id payload natively: %w", err)
 	}
 
-	log.Debug("Successfully provisioned dynamic AppRole flume-worker.")
+	logger.WithContext(ctx).Debug("Successfully provisioned dynamic AppRole flume-worker.")
 	return secData.Data.SecretId, nil
 }
 

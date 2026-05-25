@@ -6,12 +6,15 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // CloudFallbacks maps provider → [(prefix, fallback_model)].
@@ -49,10 +52,10 @@ var OllamaModelTiers = [][]string{
 
 // ResolveFallback returns an intelligent fallback model for any provider.
 // Derived from Python: llm_client_fallback.py resolve_fallback_model().
-func ResolveFallback(provider, failedModel, baseURL string) string {
+func ResolveFallback(ctx context.Context, provider, failedModel, baseURL string) string {
 	prov := strings.TrimSpace(strings.ToLower(provider))
 	if prov == "ollama" {
-		return resolveOllamaFallback(failedModel, baseURL)
+		return resolveOllamaFallback(ctx, failedModel, baseURL)
 	}
 	return resolveCloudFallback(prov, failedModel)
 }
@@ -80,8 +83,8 @@ func resolveCloudFallback(provider, failedModel string) string {
 // resolveOllamaFallback dynamically fetches available models from Ollama
 // and returns the best fallback based on the tiered ranking system.
 // Derived from Python: resolve_ollama_fallback().
-func resolveOllamaFallback(failedModel, baseURL string) string {
-	tags := fetchOllamaTags(baseURL)
+func resolveOllamaFallback(ctx context.Context, failedModel, baseURL string) string {
+	tags := fetchOllamaTags(ctx, baseURL)
 	if len(tags) == 0 {
 		return ""
 	}
@@ -115,13 +118,23 @@ func resolveOllamaFallback(failedModel, baseURL string) string {
 
 // fetchOllamaTags queries the Ollama API for available models.
 // Derived from Python: _fetch_ollama_tags().
-func fetchOllamaTags(baseURL string) []string {
+func fetchOllamaTags(ctx context.Context, baseURL string) []string {
+	log := logger.WithContext(ctx)
 	url := strings.TrimRight(baseURL, "/") + "/api/tags"
 
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		slog.Warn("failed to fetch Ollama tags",
+		log.Warn("failed to build Ollama tags request",
+			slog.String("url", url),
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Warn("failed to fetch Ollama tags",
 			slog.String("url", url),
 			slog.String("error", err.Error()),
 		)
@@ -135,7 +148,7 @@ func fetchOllamaTags(baseURL string) []string {
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		slog.Warn("failed to decode Ollama tags response",
+		log.Warn("failed to decode Ollama tags response",
 			slog.String("error", err.Error()),
 		)
 		return nil

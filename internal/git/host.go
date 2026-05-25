@@ -16,6 +16,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -27,6 +28,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -54,7 +57,15 @@ type TreeEntry struct {
 	Size string `json:"size"`
 }
 
-// DiffResult holds a diff comparison between two refs.
+// DiffFile represents changes in a single file in a diff.
+type DiffFile struct {
+	Path       string `json:"path"`
+	Insertions int    `json:"insertions"`
+	Deletions  int    `json:"deletions"`
+	Status     string `json:"status"` // e.g. "modified", "added", "deleted"
+}
+
+// DiffResult holds the files altered and the unified diff content.
 type DiffResult struct {
 	Base      string     `json:"base"`
 	Head      string     `json:"head"`
@@ -64,15 +75,7 @@ type DiffResult struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-// DiffFile represents a changed file in a diff.
-type DiffFile struct {
-	Path       string `json:"path"`
-	Insertions int    `json:"insertions"`
-	Deletions  int    `json:"deletions"`
-	Status     string `json:"status"`
-}
-
-// Commit represents a git commit.
+// Commit represents a remote commit.
 type Commit struct {
 	SHA     string `json:"sha"`
 	Author  string `json:"author"`
@@ -80,7 +83,7 @@ type Commit struct {
 	Message string `json:"message"`
 }
 
-// PRResult holds the result of a pull request creation.
+// PRResult holds the URL and PR ID from a pull request creation.
 type PRResult struct {
 	PRURL    string `json:"pr_url"`
 	PRNumber int    `json:"pr_number,omitempty"`
@@ -89,14 +92,14 @@ type PRResult struct {
 // HostClient is the abstract interface for a remote git host.
 // Derived from Python: GitHostClient(ABC).
 type HostClient interface {
-	GetBranches() ([]string, error)
-	GetDefaultBranch() (string, error)
-	GetTree(branch string) ([]TreeEntry, error)
-	GetFile(path, branch string) ([]byte, error)
-	GetDiff(base, head string) (*DiffResult, error)
-	GetCommits(branch, base string) ([]Commit, error)
-	EnsureIntegrationBranch(branchName string) (bool, error)
-	CreatePullRequest(title, body, head, base string) (*PRResult, error)
+	GetBranches(ctx context.Context) ([]string, error)
+	GetDefaultBranch(ctx context.Context) (string, error)
+	GetTree(ctx context.Context, branch string) ([]TreeEntry, error)
+	GetFile(ctx context.Context, path, branch string) ([]byte, error)
+	GetDiff(ctx context.Context, base, head string) (*DiffResult, error)
+	GetCommits(ctx context.Context, branch, base string) ([]Commit, error)
+	EnsureIntegrationBranch(ctx context.Context, branchName string) (bool, error)
+	CreatePullRequest(ctx context.Context, title, body, head, base string) (*PRResult, error)
 }
 
 // ─── Shared HTTP helpers ────────────────────────────────────────────────────
@@ -112,7 +115,8 @@ var httpClient = &http.Client{
 
 // httpJSON performs an authenticated JSON HTTP request.
 // Derived from Python: _http_json().
-func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[string]string) (interface{}, error) {
+func httpJSON(ctx context.Context, reqURL, method, token string, body interface{}, extraHeaders map[string]string) (interface{}, error) {
+	log := logger.WithContext(ctx)
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -122,7 +126,7 @@ func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[s
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(method, reqURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 	if err != nil {
 		return nil, &HostError{Message: fmt.Sprintf("request build failed for %s: %v", reqURL, err)}
 	}
@@ -138,7 +142,7 @@ func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[s
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Error("git API request failed", slog.String("url", reqURL), slog.String("error", err.Error()))
+		log.Error("git API request failed", slog.String("url", reqURL), slog.String("error", err.Error()))
 		return nil, &HostError{Message: fmt.Sprintf("request failed for %s: %v", reqURL, err)}
 	}
 	defer resp.Body.Close()
@@ -147,7 +151,7 @@ func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[s
 
 	switch {
 	case resp.StatusCode == 401 || resp.StatusCode == 403:
-		slog.Warn("git API auth failure", slog.String("url", reqURL), slog.Int("status", resp.StatusCode))
+		log.Warn("git API auth failure", slog.String("url", reqURL), slog.Int("status", resp.StatusCode))
 		return nil, &AuthError{HostError{
 			Message: fmt.Sprintf("authentication failed (%d) for %s: %s", resp.StatusCode, reqURL, truncate(string(respBody), 300)),
 			Code:    resp.StatusCode,
@@ -158,7 +162,7 @@ func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[s
 			Code:    resp.StatusCode,
 		}}
 	case resp.StatusCode >= 300:
-		slog.Error("git API HTTP error", slog.String("url", reqURL), slog.Int("status", resp.StatusCode))
+		log.Error("git API HTTP error", slog.String("url", reqURL), slog.Int("status", resp.StatusCode))
 		return nil, &HostError{
 			Message: fmt.Sprintf("HTTP %d for %s: %s", resp.StatusCode, reqURL, truncate(string(respBody), 300)),
 			Code:    resp.StatusCode,
@@ -178,8 +182,8 @@ func httpJSON(reqURL, method, token string, body interface{}, extraHeaders map[s
 
 // httpRaw returns raw bytes from a URL (for file content).
 // Derived from Python: _http_raw().
-func httpRaw(reqURL, token string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+func httpRaw(ctx context.Context, reqURL, token string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, &HostError{Message: fmt.Sprintf("request build failed: %v", err)}
 	}
@@ -232,7 +236,7 @@ func (g *GitHubClient) ghHeaders() map[string]string {
 	return map[string]string{"X-GitHub-Api-Version": "2022-11-28"}
 }
 
-func (g *GitHubClient) get(path string, params map[string]string) (interface{}, error) {
+func (g *GitHubClient) get(ctx context.Context, path string, params map[string]string) (interface{}, error) {
 	u := g.apiURL(path)
 	if len(params) > 0 {
 		v := url.Values{}
@@ -241,27 +245,23 @@ func (g *GitHubClient) get(path string, params map[string]string) (interface{}, 
 		}
 		u += "?" + v.Encode()
 	}
-	return httpJSON(u, http.MethodGet, g.Token, nil, g.ghHeaders())
+	return httpJSON(ctx, u, http.MethodGet, g.Token, nil, g.ghHeaders())
 }
 
-func (g *GitHubClient) post(path string, body interface{}) (interface{}, error) {
-	return httpJSON(g.apiURL(path), http.MethodPost, g.Token, body, g.ghHeaders())
+func (g *GitHubClient) post(ctx context.Context, path string, body interface{}) (interface{}, error) {
+	return httpJSON(ctx, g.apiURL(path), http.MethodPost, g.Token, body, g.ghHeaders())
 }
 
-func (g *GitHubClient) put(path string, body interface{}) (interface{}, error) {
-	return httpJSON(g.apiURL(path), http.MethodPut, g.Token, body, g.ghHeaders())
-}
-
-func (g *GitHubClient) delete(path string) (interface{}, error) {
-	return httpJSON(g.apiURL(path), http.MethodDelete, g.Token, nil, g.ghHeaders())
+func (g *GitHubClient) delete(ctx context.Context, path string) (interface{}, error) {
+	return httpJSON(ctx, g.apiURL(path), http.MethodDelete, g.Token, nil, g.ghHeaders())
 }
 
 // GetDefaultBranch returns the repository's default branch.
-func (g *GitHubClient) GetDefaultBranch() (string, error) {
+func (g *GitHubClient) GetDefaultBranch(ctx context.Context) (string, error) {
 	if g.defaultBranch != "" {
 		return g.defaultBranch, nil
 	}
-	data, err := g.get("", nil)
+	data, err := g.get(ctx, "", nil)
 	if err != nil {
 		return "main", err
 	}
@@ -275,10 +275,10 @@ func (g *GitHubClient) GetDefaultBranch() (string, error) {
 }
 
 // GetBranches returns all branch names (paginated, up to 500).
-func (g *GitHubClient) GetBranches() ([]string, error) {
+func (g *GitHubClient) GetBranches(ctx context.Context) ([]string, error) {
 	var branches []string
 	for page := 1; page <= 5; page++ {
-		data, err := g.get("branches", map[string]string{
+		data, err := g.get(ctx, "branches", map[string]string{
 			"per_page": "100",
 			"page":     fmt.Sprintf("%d", page),
 		})
@@ -303,15 +303,17 @@ func (g *GitHubClient) GetBranches() ([]string, error) {
 }
 
 // GetTree returns a flat list of all blob and tree entries.
-func (g *GitHubClient) GetTree(branch string) ([]TreeEntry, error) {
+func (g *GitHubClient) GetTree(ctx context.Context, branch string) ([]TreeEntry, error) {
+	log := logger.WithContext(ctx).With(slog.String("component", "github_client"))
 	if branch == "" {
 		var err error
-		branch, err = g.GetDefaultBranch()
+		branch, err = g.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	data, err := g.get(fmt.Sprintf("git/trees/%s", branch), map[string]string{"recursive": "1"})
+	log.Debug("fetching repo tree", slog.String("branch", branch))
+	data, err := g.get(ctx, fmt.Sprintf("git/trees/%s", branch), map[string]string{"recursive": "1"})
 	if err != nil {
 		return nil, err
 	}
@@ -334,16 +336,16 @@ func (g *GitHubClient) GetTree(branch string) ([]TreeEntry, error) {
 }
 
 // GetFile returns the raw bytes of a file at the given path and branch.
-func (g *GitHubClient) GetFile(path, branch string) ([]byte, error) {
+func (g *GitHubClient) GetFile(ctx context.Context, path, branch string) ([]byte, error) {
 	if branch == "" {
 		var err error
-		branch, err = g.GetDefaultBranch()
+		branch, err = g.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
 	clean := strings.TrimLeft(path, "/")
-	data, err := g.get(fmt.Sprintf("contents/%s", clean), map[string]string{"ref": branch})
+	data, err := g.get(ctx, fmt.Sprintf("contents/%s", clean), map[string]string{"ref": branch})
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +355,7 @@ func (g *GitHubClient) GetFile(path, branch string) ([]byte, error) {
 		// Large file: fall back to download_url
 		downloadURL, _ := m["download_url"].(string)
 		if downloadURL != "" {
-			return httpRaw(downloadURL, g.Token)
+			return httpRaw(ctx, downloadURL, g.Token)
 		}
 		return nil, &NotFoundError{HostError{Message: fmt.Sprintf("no content returned for %s", path)}}
 	}
@@ -363,12 +365,12 @@ func (g *GitHubClient) GetFile(path, branch string) ([]byte, error) {
 }
 
 // GetDiff returns a diff summary between two refs.
-func (g *GitHubClient) GetDiff(base, head string) (*DiffResult, error) {
+func (g *GitHubClient) GetDiff(ctx context.Context, base, head string) (*DiffResult, error) {
 	const maxDiff = 80_000
 	encodedBase := url.PathEscape(base)
 	encodedHead := url.PathEscape(head)
 
-	data, err := g.get(fmt.Sprintf("compare/%s...%s", encodedBase, encodedHead), nil)
+	data, err := g.get(ctx, fmt.Sprintf("compare/%s...%s", encodedBase, encodedHead), nil)
 	if err != nil {
 		if _, ok := err.(*NotFoundError); ok {
 			return &DiffResult{
@@ -417,15 +419,15 @@ func (g *GitHubClient) GetDiff(base, head string) (*DiffResult, error) {
 }
 
 // GetCommits returns commits on branch not in base.
-func (g *GitHubClient) GetCommits(branch, base string) ([]Commit, error) {
+func (g *GitHubClient) GetCommits(ctx context.Context, branch, base string) ([]Commit, error) {
 	if base == "" {
 		var err error
-		base, err = g.GetDefaultBranch()
+		base, err = g.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	data, err := g.get(
+	data, err := g.get(ctx,
 		fmt.Sprintf("compare/%s...%s", url.PathEscape(base), url.PathEscape(branch)),
 		nil,
 	)
@@ -469,25 +471,26 @@ func (g *GitHubClient) GetCommits(branch, base string) ([]Commit, error) {
 }
 
 // EnsureIntegrationBranch creates the branch at the default tip if absent.
-func (g *GitHubClient) EnsureIntegrationBranch(branchName string) (bool, error) {
+func (g *GitHubClient) EnsureIntegrationBranch(ctx context.Context, branchName string) (bool, error) {
+	log := logger.WithContext(ctx)
 	name := strings.TrimSpace(branchName)
 	if name == "" {
 		return false, nil
 	}
-	defaultBranch, _ := g.GetDefaultBranch()
+	defaultBranch, _ := g.GetDefaultBranch(ctx)
 	if name == defaultBranch {
 		return true, nil
 	}
 
 	// Check if branch exists
 	enc := url.PathEscape(name)
-	_, err := g.get(fmt.Sprintf("git/ref/heads/%s", enc), nil)
+	_, err := g.get(ctx, fmt.Sprintf("git/ref/heads/%s", enc), nil)
 	if err == nil {
 		return true, nil
 	}
 
 	// Get default branch SHA
-	refData, err := g.get(fmt.Sprintf("git/ref/heads/%s", url.PathEscape(defaultBranch)), nil)
+	refData, err := g.get(ctx, fmt.Sprintf("git/ref/heads/%s", url.PathEscape(defaultBranch)), nil)
 	if err != nil {
 		return false, err
 	}
@@ -498,7 +501,7 @@ func (g *GitHubClient) EnsureIntegrationBranch(branchName string) (bool, error) 
 		return false, nil
 	}
 
-	_, err = g.post("git/refs", map[string]interface{}{
+	_, err = g.post(ctx, "git/refs", map[string]interface{}{
 		"ref": fmt.Sprintf("refs/heads/%s", name),
 		"sha": sha,
 	})
@@ -507,14 +510,14 @@ func (g *GitHubClient) EnsureIntegrationBranch(branchName string) (bool, error) 
 		if strings.Contains(errStr, "already exists") || strings.Contains(errStr, "422") {
 			return true, nil
 		}
-		slog.Warn("ensure_integration_branch GitHub failed",
+		log.Warn("ensure_integration_branch GitHub failed",
 			slog.String("branch", name),
 			slog.String("error", truncate(err.Error(), 200)),
 		)
 		return false, err
 	}
 
-	slog.Info("created integration branch on GitHub",
+	log.Info("created integration branch on GitHub",
 		slog.String("branch", name),
 		slog.String("sha", sha[:7]),
 	)
@@ -522,8 +525,8 @@ func (g *GitHubClient) EnsureIntegrationBranch(branchName string) (bool, error) 
 }
 
 // CreatePullRequest creates a pull request on GitHub.
-func (g *GitHubClient) CreatePullRequest(title, body, head, base string) (*PRResult, error) {
-	data, err := g.post("pulls", map[string]interface{}{
+func (g *GitHubClient) CreatePullRequest(ctx context.Context, title, body, head, base string) (*PRResult, error) {
+	data, err := g.post(ctx, "pulls", map[string]interface{}{
 		"title": title,
 		"body":  body,
 		"head":  head,
@@ -540,12 +543,12 @@ func (g *GitHubClient) CreatePullRequest(title, body, head, base string) (*PRRes
 }
 
 // DeleteRemoteBranch deletes a branch on the remote.
-func (g *GitHubClient) DeleteRemoteBranch(branch string) error {
+func (g *GitHubClient) DeleteRemoteBranch(ctx context.Context, branch string) error {
 	b := url.PathEscape(strings.TrimSpace(branch))
 	if b == "" {
 		return &HostError{Message: "delete_remote_branch: empty branch name"}
 	}
-	_, err := g.delete(fmt.Sprintf("git/refs/heads/%s", b))
+	_, err := g.delete(ctx, fmt.Sprintf("git/refs/heads/%s", b))
 	return err
 }
 

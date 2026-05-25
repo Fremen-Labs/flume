@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/log"
+	"log/slog"
 )
 
 const defaultWorkerCount = 2
@@ -36,16 +36,16 @@ func ResolveWorkerCount(flag string) int {
 		return defaultWorkerCount
 	case "auto":
 		count := autoWorkerCount()
-		log.Debugf("Auto worker count resolved: %d", count)
+		slog.Debug("Auto worker count resolved", "count", count)
 		return count
 	default:
 		n, err := strconv.Atoi(flag)
 		if err != nil || n < minWorkerCount {
-			log.Warnf("Invalid --workers value %q, using default (%d)", flag, defaultWorkerCount)
+			slog.Warn("Invalid --workers value, using default", "value", flag, "default", defaultWorkerCount)
 			return defaultWorkerCount
 		}
 		if n > maxWorkerCount {
-			log.Warnf("--workers %d exceeds maximum (%d), clamping", n, maxWorkerCount)
+			slog.Warn("exceeds maximum workers, clamping", "requested", n, "max", maxWorkerCount)
 			return maxWorkerCount
 		}
 		return n
@@ -70,8 +70,11 @@ func autoWorkerCount() int {
 		ramBudget = 1
 	}
 
-	log.Debugf("Auto-detecting worker count — CPU cores: %d → budget: %d | RAM: %d GiB → budget: %d",
-		runtime.NumCPU(), cpuBudget, ramGiB, ramBudget)
+	slog.Debug("Auto-detecting worker count",
+		"cpu_cores", runtime.NumCPU(),
+		"cpu_budget", cpuBudget,
+		"ram_gib", ramGiB,
+		"ram_budget", ramBudget)
 
 	count := cpuBudget
 	if ramBudget < count {

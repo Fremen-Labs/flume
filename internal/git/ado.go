@@ -5,6 +5,7 @@
 package git
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // AzureDevOpsClient implements HostClient for Azure DevOps Git REST API 7.1.
@@ -43,7 +46,7 @@ func (a *AzureDevOpsClient) adoAuth() string {
 	return base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
-func (a *AzureDevOpsClient) get(path string, params map[string]string) (interface{}, error) {
+func (a *AzureDevOpsClient) get(ctx context.Context, path string, params map[string]string) (interface{}, error) {
 	p := map[string]string{"api-version": adoAPIVersion}
 	for k, v := range params {
 		p[k] = v
@@ -53,12 +56,12 @@ func (a *AzureDevOpsClient) get(path string, params map[string]string) (interfac
 		v.Set(k, val)
 	}
 	u := a.apiURL(path) + "?" + v.Encode()
-	return httpJSON(u, http.MethodGet, "", nil, map[string]string{
+	return httpJSON(ctx, u, http.MethodGet, "", nil, map[string]string{
 		"Authorization": "Basic " + a.adoAuth(),
 	})
 }
 
-func (a *AzureDevOpsClient) post(path string, body interface{}, params map[string]string) (interface{}, error) {
+func (a *AzureDevOpsClient) post(ctx context.Context, path string, body interface{}, params map[string]string) (interface{}, error) {
 	p := map[string]string{"api-version": adoAPIVersion}
 	for k, v := range params {
 		p[k] = v
@@ -68,17 +71,17 @@ func (a *AzureDevOpsClient) post(path string, body interface{}, params map[strin
 		v.Set(k, val)
 	}
 	u := a.apiURL(path) + "?" + v.Encode()
-	return httpJSON(u, http.MethodPost, "", body, map[string]string{
+	return httpJSON(ctx, u, http.MethodPost, "", body, map[string]string{
 		"Authorization": "Basic " + a.adoAuth(),
 	})
 }
 
 // GetDefaultBranch returns the repository's default branch.
-func (a *AzureDevOpsClient) GetDefaultBranch() (string, error) {
+func (a *AzureDevOpsClient) GetDefaultBranch(ctx context.Context) (string, error) {
 	if a.defaultBranch != "" {
 		return a.defaultBranch, nil
 	}
-	data, err := a.get("", nil)
+	data, err := a.get(ctx, "", nil)
 	if err != nil {
 		return "main", err
 	}
@@ -93,8 +96,8 @@ func (a *AzureDevOpsClient) GetDefaultBranch() (string, error) {
 }
 
 // GetBranches returns all branch names.
-func (a *AzureDevOpsClient) GetBranches() ([]string, error) {
-	data, err := a.get("refs", map[string]string{"filter": "heads"})
+func (a *AzureDevOpsClient) GetBranches(ctx context.Context) ([]string, error) {
+	data, err := a.get(ctx, "refs", map[string]string{"filter": "heads"})
 	if err != nil {
 		return nil, err
 	}
@@ -112,15 +115,15 @@ func (a *AzureDevOpsClient) GetBranches() ([]string, error) {
 }
 
 // GetTree returns a flat list of all entries for the given branch.
-func (a *AzureDevOpsClient) GetTree(branch string) ([]TreeEntry, error) {
+func (a *AzureDevOpsClient) GetTree(ctx context.Context, branch string) ([]TreeEntry, error) {
 	if branch == "" {
 		var err error
-		branch, err = a.GetDefaultBranch()
+		branch, err = a.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	data, err := a.get("items", map[string]string{
+	data, err := a.get(ctx, "items", map[string]string{
 		"scopePath":                       "/",
 		"recursionLevel":                  "full",
 		"versionDescriptor.version":       branch,
@@ -152,10 +155,10 @@ func (a *AzureDevOpsClient) GetTree(branch string) ([]TreeEntry, error) {
 }
 
 // GetFile returns the raw bytes of a file at the given path and branch.
-func (a *AzureDevOpsClient) GetFile(path, branch string) ([]byte, error) {
+func (a *AzureDevOpsClient) GetFile(ctx context.Context, path, branch string) ([]byte, error) {
 	if branch == "" {
 		var err error
-		branch, err = a.GetDefaultBranch()
+		branch, err = a.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -173,12 +176,12 @@ func (a *AzureDevOpsClient) GetFile(path, branch string) ([]byte, error) {
 		v.Set(k, val)
 	}
 	u := a.apiURL("items") + "?" + v.Encode()
-	return httpRaw(u, "Basic "+a.adoAuth())
+	return httpRaw(ctx, u, "Basic "+a.adoAuth())
 }
 
 // GetDiff returns a diff summary between two refs.
-func (a *AzureDevOpsClient) GetDiff(base, head string) (*DiffResult, error) {
-	data, err := a.get("diffs/commits", map[string]string{
+func (a *AzureDevOpsClient) GetDiff(ctx context.Context, base, head string) (*DiffResult, error) {
+	data, err := a.get(ctx, "diffs/commits", map[string]string{
 		"baseVersionDescriptor.version":     base,
 		"baseVersionDescriptor.versionType": "branch",
 		"targetVersionDescriptor.version":   head,
@@ -213,15 +216,15 @@ func (a *AzureDevOpsClient) GetDiff(base, head string) (*DiffResult, error) {
 }
 
 // GetCommits returns commits on branch not in base.
-func (a *AzureDevOpsClient) GetCommits(branch, base string) ([]Commit, error) {
+func (a *AzureDevOpsClient) GetCommits(ctx context.Context, branch, base string) ([]Commit, error) {
 	if base == "" {
 		var err error
-		base, err = a.GetDefaultBranch()
+		base, err = a.GetDefaultBranch(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	data, err := a.get("commits", map[string]string{
+	data, err := a.get(ctx, "commits", map[string]string{
 		"searchCriteria.itemVersion.version":       branch,
 		"searchCriteria.itemVersion.versionType":   "branch",
 		"searchCriteria.compareVersion.version":     base,
@@ -256,17 +259,18 @@ func (a *AzureDevOpsClient) GetCommits(branch, base string) ([]Commit, error) {
 }
 
 // EnsureIntegrationBranch creates the branch at the default tip if absent.
-func (a *AzureDevOpsClient) EnsureIntegrationBranch(branchName string) (bool, error) {
+func (a *AzureDevOpsClient) EnsureIntegrationBranch(ctx context.Context, branchName string) (bool, error) {
+	log := logger.WithContext(ctx)
 	name := strings.TrimSpace(branchName)
 	if name == "" {
 		return false, nil
 	}
-	defaultBranch, _ := a.GetDefaultBranch()
+	defaultBranch, _ := a.GetDefaultBranch(ctx)
 	if name == defaultBranch {
 		return true, nil
 	}
 
-	branches, _ := a.GetBranches()
+	branches, _ := a.GetBranches(ctx)
 	for _, b := range branches {
 		if b == name {
 			return true, nil
@@ -274,7 +278,7 @@ func (a *AzureDevOpsClient) EnsureIntegrationBranch(branchName string) (bool, er
 	}
 
 	// Get default branch SHA
-	refsData, err := a.get("refs", map[string]string{"filter": "heads/" + defaultBranch})
+	refsData, err := a.get(ctx, "refs", map[string]string{"filter": "heads/" + defaultBranch})
 	if err != nil {
 		return false, err
 	}
@@ -291,33 +295,33 @@ func (a *AzureDevOpsClient) EnsureIntegrationBranch(branchName string) (bool, er
 
 	body := []map[string]string{
 		{
-			"name":          fmt.Sprintf("refs/heads/%s", name),
-			"oldObjectId":   "0000000000000000000000000000000000000000",
-			"newObjectId":   newObjectID,
+			"name":        fmt.Sprintf("refs/heads/%s", name),
+			"oldObjectId": "0000000000000000000000000000000000000000",
+			"newObjectId": newObjectID,
 		},
 	}
-	_, err = a.post("refs", body, nil)
+	_, err = a.post(ctx, "refs", body, nil)
 	if err != nil {
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "already exists") || strings.Contains(errStr, "name already exists") {
 			return true, nil
 		}
-		slog.Warn("ensure_integration_branch ADO failed",
+		log.Warn("ensure_integration_branch ADO failed",
 			slog.String("branch", name),
 			slog.String("error", truncate(err.Error(), 200)),
 		)
 		return false, err
 	}
 
-	slog.Info("created integration branch on Azure DevOps",
+	log.Info("created integration branch on Azure DevOps",
 		slog.String("branch", name),
 	)
 	return true, nil
 }
 
 // CreatePullRequest creates a pull request on Azure DevOps.
-func (a *AzureDevOpsClient) CreatePullRequest(title, body, head, base string) (*PRResult, error) {
-	data, err := a.post("pullrequests", map[string]interface{}{
+func (a *AzureDevOpsClient) CreatePullRequest(ctx context.Context, title, body, head, base string) (*PRResult, error) {
+	data, err := a.post(ctx, "pullrequests", map[string]interface{}{
 		"title":         title,
 		"description":   body,
 		"sourceRefName": fmt.Sprintf("refs/heads/%s", head),

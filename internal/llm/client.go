@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // Client is the Flume LLM client.
@@ -133,7 +135,7 @@ type ToolMessage struct {
 // New creates a new LLM client.
 func New(logger *slog.Logger) *Client {
 	if logger == nil {
-		logger = slog.Default()
+		logger = flumelogger.Log()
 	}
 	gatewayURL := os.Getenv("FLUME_GATEWAY_URL")
 	if gatewayURL == "" {
@@ -186,36 +188,36 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 
 		resp, err := c.postGateway(ctx, "/v1/chat", payload, timeout)
 		if err != nil {
-			c.logger.Warn("gateway chat request failed, attempting fallback",
+			flumelogger.WithContext(ctx).Warn("gateway chat request failed, attempting fallback",
 				slog.String("error", err.Error()),
 				slog.String("model", req.Model),
 			)
 
 			// Attempt intelligent model fallback
-			fallback := ResolveFallback(req.Provider, req.Model, c.gatewayURL)
+			fallback := ResolveFallback(ctx, req.Provider, req.Model, c.gatewayURL)
 			if fallback != "" {
-				c.logger.Warn("intelligently downgrading model",
+				flumelogger.WithContext(ctx).Warn("intelligently downgrading model",
 					slog.String("from", req.Model),
 					slog.String("to", fallback),
 				)
 				payload["model"] = fallback
 				resp, err = c.postGateway(ctx, "/v1/chat", payload, timeout)
 				if err == nil {
-					return c.parseChatResponse(resp)
+					return c.parseChatResponse(ctx, resp)
 				}
-				c.logger.Warn("fallback model also failed",
+				flumelogger.WithContext(ctx).Warn("fallback model also failed",
 					slog.String("error", err.Error()),
 				)
 			}
 
 			// Fall through to legacy
 		} else {
-			return c.parseChatResponse(resp)
+			return c.parseChatResponse(ctx, resp)
 		}
 	}
 
 	// Legacy fallback: call the gateway directly but via legacy endpoints
-	c.logger.Debug("using legacy direct provider call")
+	flumelogger.WithContext(ctx).Debug("using legacy direct provider call")
 	return c.legacyChat(ctx, req)
 }
 
@@ -246,14 +248,14 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 
 		resp, err := c.postGateway(ctx, "/v1/chat/tools", payload, 180)
 		if err != nil {
-			c.logger.Warn("gateway chat_with_tools request failed, attempting fallback",
+			flumelogger.WithContext(ctx).Warn("gateway chat_with_tools request failed, attempting fallback",
 				slog.String("error", err.Error()),
 				slog.String("model", req.Model),
 			)
 
-			fallback := ResolveFallback(req.Provider, req.Model, c.gatewayURL)
+			fallback := ResolveFallback(ctx, req.Provider, req.Model, c.gatewayURL)
 			if fallback != "" {
-				c.logger.Warn("intelligently downgrading model for tool call",
+				flumelogger.WithContext(ctx).Warn("intelligently downgrading model for tool call",
 					slog.String("from", req.Model),
 					slog.String("to", fallback),
 				)
@@ -268,7 +270,8 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 		}
 	}
 
-	c.logger.Debug("using legacy direct provider call for tools")
+	// Legacy fallback: call the gateway directly but via legacy endpoints
+	flumelogger.WithContext(ctx).Debug("using legacy direct provider call for tools")
 	return c.legacyChatWithTools(ctx, req)
 }
 
@@ -348,7 +351,7 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 			}
 			if attempt < maxRetries {
 				sleep := c.jitteredBackoff(backoffs, attempt)
-				c.logger.Warn("gateway connection error, retrying",
+				flumelogger.WithContext(ctx).Warn("gateway connection error, retrying",
 					slog.Int("attempt", attempt+1),
 					slog.Int("max_retries", maxRetries+1),
 					slog.Float64("backoff_s", sleep.Seconds()),
@@ -371,7 +374,7 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 		if resp.StatusCode >= 500 {
 			if attempt < maxRetries {
 				sleep := c.jitteredBackoff(backoffs, attempt)
-				c.logger.Warn("gateway server error, retrying",
+				flumelogger.WithContext(ctx).Warn("gateway server error, retrying",
 					slog.Int("status", resp.StatusCode),
 					slog.Int("attempt", attempt+1),
 					slog.Float64("backoff_s", sleep.Seconds()),
@@ -412,13 +415,13 @@ func (c *Client) jitteredBackoff(backoffs []time.Duration, attempt int) time.Dur
 
 // ─── Response Parsing ───────────────────────────────────────────────────────
 
-func (c *Client) parseChatResponse(raw map[string]interface{}) (*ChatResponse, error) {
+func (c *Client) parseChatResponse(ctx context.Context, raw map[string]interface{}) (*ChatResponse, error) {
 	msg, _ := raw["message"].(map[string]interface{})
 	content, _ := msg["content"].(string)
 
 	telemetry, _ := raw["telemetry"].(map[string]interface{})
 	if telemetry != nil {
-		c.logger.Info("gateway telemetry retrieved",
+		flumelogger.WithContext(ctx).Info("gateway telemetry retrieved",
 			slog.String("node_id", strVal(telemetry["node_id"])),
 			slog.String("node_host", strVal(telemetry["node_host"])),
 		)

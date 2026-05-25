@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/log"
+	"log/slog"
+
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // NodeConfigEntry is a node collected during the CLI interactive wizard.
@@ -86,7 +88,7 @@ func RewriteLoopbackForDockerEnv(url string) string {
 
 // GenerateEnv dynamically builds the topology map consumed by docker-compose natively in-memory.
 func GenerateEnv(config EnvConfig) []string {
-	log.Debug("Constructing ecosystem telemetry environment purely via memory arrays natively...")
+	slog.Debug("Constructing ecosystem telemetry environment purely via memory arrays natively...")
 
 	var env []string
 
@@ -144,7 +146,7 @@ func GenerateEnv(config EnvConfig) []string {
 		}
 	}
 
-	log.Debug("Telemetry environment configuration compiled successfully.", "isolation", "Memory-only variables injected into subprocess securely")
+	slog.Debug("Telemetry environment configuration compiled successfully.", "isolation", "Memory-only variables injected into subprocess securely")
 	return env
 }
 
@@ -167,28 +169,28 @@ func SeedNodes(ctx context.Context, gatewayURL string, nodes []NodeSeedEntry) er
 	for _, node := range nodes {
 		body, err := json.Marshal(node)
 		if err != nil {
-			log.Warn("node_seed: failed to marshal node", "node_id", node.ID, "error", err)
+			logger.WithContext(ctx).Warn("node_seed: failed to marshal node", "node_id", node.ID, "error", err)
 			continue
 		}
 		url := fmt.Sprintf("%s/api/nodes", strings.TrimRight(gatewayURL, "/"))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
-			log.Warn("node_seed: failed to build request", "node_id", node.ID, "error", err)
+			logger.WithContext(ctx).Warn("node_seed: failed to build request", "node_id", node.ID, "error", err)
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Warn("node_seed: gateway unreachable", "node_id", node.ID, "error", err)
+			logger.WithContext(ctx).Warn("node_seed: gateway unreachable", "node_id", node.ID, "error", err)
 			continue
 		}
 		resp.Body.Close()
 
 		if resp.StatusCode >= 400 {
-			log.Warn("node_seed: gateway rejected node", "node_id", node.ID, "status", resp.StatusCode)
+			logger.WithContext(ctx).Warn("node_seed: gateway rejected node", "node_id", node.ID, "status", resp.StatusCode)
 		} else {
-			log.Debug("node_seed: registered node", "node_id", node.ID, "host", node.Host, "model", node.ModelTag)
+			logger.WithContext(ctx).Debug("node_seed: registered node", "node_id", node.ID, "host", node.Host, "model", node.ModelTag)
 		}
 	}
 	return nil

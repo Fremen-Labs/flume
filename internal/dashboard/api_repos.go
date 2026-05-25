@@ -77,7 +77,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
 
 	if !hasLocalClone && (cs == "indexed" || cs == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(ctx, proj)
 		if err != nil {
 			if _, ok := err.(*git.AuthError); ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
@@ -91,13 +91,13 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		branches, err := client.GetBranches()
+		branches, err := client.GetBranches(ctx)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		defaultBranch, err := client.GetDefaultBranch()
+		defaultBranch, err := client.GetDefaultBranch(ctx)
 		if err != nil {
 			defaultBranch = "main"
 		}
@@ -240,7 +240,7 @@ func (s *Server) handleRepoTree(w http.ResponseWriter, r *http.Request) {
 	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
 
 	if !hasLocalClone && (cs == "indexed" || cs == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(ctx, proj)
 		if err != nil {
 			if _, ok := err.(*git.AuthError); ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
@@ -254,13 +254,13 @@ func (s *Server) handleRepoTree(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if branch == "" {
-			branch, err = client.GetDefaultBranch()
+			branch, err = client.GetDefaultBranch(ctx)
 			if err != nil {
 				branch = "main"
 			}
 		}
 
-		entries, err := client.GetTree(branch)
+		entries, err := client.GetTree(ctx, branch)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -436,7 +436,7 @@ func (s *Server) handleRepoFile(w http.ResponseWriter, r *http.Request) {
 	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
 
 	if !hasLocalClone && (cs == "indexed" || cs == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(ctx, proj)
 		if err != nil {
 			if _, ok := err.(*git.AuthError); ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
@@ -450,13 +450,13 @@ func (s *Server) handleRepoFile(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if branch == "" {
-			branch, err = client.GetDefaultBranch()
+			branch, err = client.GetDefaultBranch(ctx)
 			if err != nil {
 				branch = "main"
 			}
 		}
 
-		contentBytes, err := client.GetFile(cleanPath, branch)
+		contentBytes, err := client.GetFile(ctx, cleanPath, branch)
 		if err != nil {
 			if _, ok := err.(*git.NotFoundError); ok {
 				writeJSON(w, http.StatusNotFound, map[string]interface{}{
@@ -584,13 +584,13 @@ func (s *Server) handleRepoDiff(w http.ResponseWriter, r *http.Request) {
 	isRemote := repoURL != "" && (strings.Contains(repoURL, "github.com") || strings.Contains(repoURL, "dev.azure.com") || strings.Contains(repoURL, "visualstudio.com") || strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://"))
 
 	if !hasLocalClone && (cs == "indexed" || cs == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(ctx, proj)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		result, err := client.GetDiff(base, head)
+		result, err := client.GetDiff(ctx, base, head)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

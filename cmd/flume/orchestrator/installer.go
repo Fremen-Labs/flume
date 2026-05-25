@@ -6,7 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
-	"github.com/charmbracelet/log"
+	"log/slog"
 )
 
 // EvaluateAndInstall checks the structural ecology and dynamically pulls missing artifacts natively via OS pipelines.
@@ -54,7 +54,7 @@ func EvaluateAndInstall(eco SystemEcology) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			log.Error("Failed to permanently bind telemetry package into the OS.", "package", dep, "error", err)
+			slog.Error("Failed to permanently bind telemetry package into the OS.", "package", dep, "error", err)
 			return err
 		}
 		fmt.Println(ui.SuccessBlue(fmt.Sprintf("✅ SUCCESS: %s has been strictly synthesized into the kernel.", dep)))

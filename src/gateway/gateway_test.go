@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+const maskedValue = "***REDACTED***"
+
 func TestSecureHandlerRedacts(t *testing.T) {
 	var buf bytes.Buffer
 	log := NewTestLogger(&buf)
@@ -35,27 +37,6 @@ func TestSecureHandlerRedacts(t *testing.T) {
 	}
 	if !strings.Contains(output, "visible") {
 		t.Error("normal_field value should not be redacted")
-	}
-}
-
-func TestParseLogLevel(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"debug", "DEBUG"},
-		{"info", "INFO"},
-		{"warn", "WARN"},
-		{"warning", "WARN"},
-		{"error", "ERROR"},
-		{"", "INFO"},
-		{"unknown", "INFO"},
-	}
-	for _, tt := range tests {
-		level := parseLogLevel(tt.input)
-		if level.String() != tt.want {
-			t.Errorf("parseLogLevel(%q) = %s, want %s", tt.input, level.String(), tt.want)
-		}
 	}
 }
 

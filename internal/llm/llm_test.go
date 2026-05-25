@@ -205,7 +205,7 @@ func TestResolveFallbackCloud(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := ResolveFallback(tt.provider, tt.model, "")
+		result := ResolveFallback(context.Background(), tt.provider, tt.model, "")
 		if result != tt.expected {
 			t.Errorf("ResolveFallback(%s, %s) = %s, want %s",
 				tt.provider, tt.model, result, tt.expected)

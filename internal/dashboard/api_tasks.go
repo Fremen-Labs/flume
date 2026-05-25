@@ -294,7 +294,7 @@ func (s *Server) handleTaskDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !hasLocalClone && (cloneStatus == "indexed" || cloneStatus == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(r.Context(), proj)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]interface{}{"diff": "", "error": err.Error()})
 			return
@@ -307,12 +307,12 @@ func (s *Server) handleTaskDiff(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if base == "main" {
-			if df, err := client.GetDefaultBranch(); err == nil {
+			if df, err := client.GetDefaultBranch(r.Context()); err == nil {
 				base = df
 			}
 		}
 
-		result, err := client.GetDiff(base, branch)
+		result, err := client.GetDiff(r.Context(), base, branch)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]interface{}{"diff": "", "error": err.Error()})
 			return
@@ -412,7 +412,7 @@ func (s *Server) handleTaskCommits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !hasLocalClone && (cloneStatus == "indexed" || cloneStatus == "cloned") && isRemote {
-		client, err := git.GetClient(proj)
+		client, err := git.GetClient(r.Context(), proj)
 		if err != nil {
 			writeJSON(w, http.StatusOK, []interface{}{})
 			return
@@ -425,12 +425,12 @@ func (s *Server) handleTaskCommits(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if base == "main" {
-			if df, err := client.GetDefaultBranch(); err == nil {
+			if df, err := client.GetDefaultBranch(r.Context()); err == nil {
 				base = df
 			}
 		}
 
-		commits, err := client.GetCommits(branch, base)
+		commits, err := client.GetCommits(r.Context(), branch, base)
 		if err != nil {
 			writeJSON(w, http.StatusOK, []interface{}{})
 			return

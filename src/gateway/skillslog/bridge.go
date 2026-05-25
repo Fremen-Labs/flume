@@ -9,6 +9,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+
+	"github.com/Fremen-Labs/flume/internal/logger"
 )
 
 var defaultLogger *slog.Logger
@@ -32,16 +34,10 @@ func Log() *slog.Logger {
 
 // WithContext returns a logger from context, or falls back to the default.
 func WithContext(ctx context.Context) *slog.Logger {
-	// Check for the gateway's context logger key
-	if l, ok := ctx.Value(contextKey("gateway_logger")).(*slog.Logger); ok {
-		return l
-	}
-	return defaultLogger
+	return logger.WithContext(ctx)
 }
 
 // ContextWithLogger stores a logger in context.
 func ContextWithLogger(ctx context.Context, l *slog.Logger) context.Context {
-	return context.WithValue(ctx, contextKey("gateway_logger"), l)
+	return logger.ContextWithLogger(ctx, l)
 }
-
-type contextKey string
