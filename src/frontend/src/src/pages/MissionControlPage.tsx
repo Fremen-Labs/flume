@@ -35,8 +35,8 @@ export default function MissionControlPage() {
     const defM = cfg.defaultLlmModel;
     const defH = cfg.defaultExecutionHost;
     for (const id of cfg.roleIds) {
-      const effective = cfg.effective[id];
-      const row = normalizeRoleSpec(effective, {
+      const override = cfg.roles?.[id];
+      const row = normalizeRoleSpec(override, {
         credentialId: SETTINGS_DEFAULT_CREDENTIAL_ID,
         provider: defP,
         model: defM,

@@ -415,9 +415,16 @@ func (s *Server) handleSettingsAgentModelsGet(w http.ResponseWriter, r *http.Req
 	src, err := s.es.GetDoc(ctx, agentModelsIndex, "singleton")
 
 	defaultRoleIds := []string{"pm", "implementer", "reviewer", "tester"}
-	defaultLlmModel := "llama3.2"
+	cfg := config.Get()
+	defaultLlmModel := cfg.LLMModel
+	if defaultLlmModel == "" {
+		defaultLlmModel = "llama3.2"
+	}
 	defaultExecutionHost := "localhost"
-	settingsProvider := "ollama"
+	settingsProvider := cfg.LLMProvider
+	if settingsProvider == "" {
+		settingsProvider = "ollama"
+	}
 
 	availableProviders := []interface{}{
 		map[string]interface{}{
@@ -455,10 +462,10 @@ func (s *Server) handleSettingsAgentModelsGet(w http.ResponseWriter, r *http.Req
 			"credentialId": "__settings_default__",
 			"label":        "Global Settings Default",
 			"shortLabel":   "Global Default",
-			"providerId":   "ollama",
+			"providerId":   settingsProvider,
 			"configured":   true,
 			"models": []interface{}{
-				map[string]interface{}{"id": "llama3.2", "name": "Llama 3.2"},
+				map[string]interface{}{"id": defaultLlmModel, "name": defaultLlmModel},
 			},
 			"allowCustomModelId": true,
 		},

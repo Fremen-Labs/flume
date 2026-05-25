@@ -517,6 +517,13 @@ export default function NodesOverview() {
     debouncedSave(updated);
   };
 
+  const handleCredentialChange = (idx: number, credentialId: string) => {
+    const mix = [...currentPolicy.frontier_mix];
+    mix[idx] = { ...mix[idx], credential_id: credentialId };
+    const updated = { ...currentPolicy, frontier_mix: mix };
+    debouncedSave(updated);
+  };
+
   const handleRemoveModel = (idx: number) => {
     if (!window.confirm(`Remove ${currentPolicy.frontier_mix[idx]?.model} from the frontier mix?`)) return;
     const mix = currentPolicy.frontier_mix.filter((_, i) => i !== idx);
@@ -677,15 +684,20 @@ export default function NodesOverview() {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 <AnimatePresence>
-                  {currentPolicy.frontier_mix.map((model, idx) => (
-                    <FrontierModelCard
-                      key={`${model.provider}-${model.model}`}
-                      model={model}
-                      onWeightChange={(w) => handleWeightChange(idx, w)}
-                      onBudgetChange={(b) => handleBudgetChange(idx, b)}
-                      onRemove={() => handleRemoveModel(idx)}
-                    />
-                  ))}
+                  {currentPolicy.frontier_mix.map((model, idx) => {
+                    const providerCatalog = frontierCatalog?.providers.find(p => p.id === model.provider);
+                    return (
+                      <FrontierModelCard
+                        key={`${model.provider}-${model.model}`}
+                        model={model}
+                        credentials={providerCatalog?.credentials ?? []}
+                        onWeightChange={(w) => handleWeightChange(idx, w)}
+                        onBudgetChange={(b) => handleBudgetChange(idx, b)}
+                        onCredentialChange={(credId) => handleCredentialChange(idx, credId)}
+                        onRemove={() => handleRemoveModel(idx)}
+                      />
+                    );
+                  })}
                 </AnimatePresence>
               </div>
             )}
