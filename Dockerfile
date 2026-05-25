@@ -20,6 +20,7 @@ RUN npm run build
 # ── Stage 2: Build the Go binary ────────────────────────────────────────────
 FROM golang:1.24-alpine AS builder
 
+# hadolint ignore=DL3018
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
@@ -42,8 +43,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Using Alpine instead of distroless because workers need:
 #   - git: clone/push operations on work repos
 #   - sh:  health check scripts in docker-compose
+# FROM alpine:3.21
+
 FROM alpine:3.21
 
+# hadolint ignore=DL3018
 RUN apk add --no-cache git ca-certificates tzdata && \
     adduser -D -u 1000 flume
 

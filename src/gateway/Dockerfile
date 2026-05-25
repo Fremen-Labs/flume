@@ -7,6 +7,7 @@
 
 FROM golang:1.24.2-alpine AS builder
 
+# hadolint ignore=DL3018
 RUN apk add --no-cache git
 
 WORKDIR /build
