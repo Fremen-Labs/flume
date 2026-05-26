@@ -1,4 +1,6 @@
-// Package worker implements the Flume worker-manager in Go.
+// Package worker implements
+//
+// PR 2: status mutations centralized in TaskStateMachine; manager delegates to claimer/sweeper which now call Enforce. the Flume worker-manager in Go.
 //
 // This is the core orchestration engine that manages the lifecycle of AI
 // agent workers across the Flume node mesh. It replaces the Python

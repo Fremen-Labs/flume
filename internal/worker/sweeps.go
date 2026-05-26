@@ -1,5 +1,9 @@
 package worker
 
+// PR 2 NOTE: Every "status" update in this file now routes through
+// pkg/types DefaultTaskStateMachine.EnforceTransition (shadow mode).
+// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, parentCompletionSweep.
+
 import (
 	"context"
 	"encoding/json"
@@ -178,7 +182,8 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			requeued++
 			s.logger.Info("requeued stuck task",
 				slog.String("task_id", task.ID))
@@ -226,7 +231,8 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			cleared++
 		}
 	}
@@ -306,7 +312,8 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
 			"status":     "ready",
 			"updated_at": time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			promoted++
 			s.logger.Info("promoted task to ready",
 				slog.String("task_id", task.ID))
@@ -349,7 +356,8 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 				"error_message": "",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+			_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Info("resume sweep: recovered blocked task",
 					slog.String("task_id", task.ID))
 			}

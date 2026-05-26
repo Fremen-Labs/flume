@@ -273,6 +273,8 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 		"updated_at":     now,
 	}
 
+	// PR 2: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(""), "running", c.logger.Warn)
 	err := c.es.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seqNo, primaryTerm)
 	if err != nil {
 		if err == es.ErrConflict {
