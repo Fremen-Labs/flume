@@ -224,10 +224,14 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	model, provider, credID := s.config.ResolveModel(dummyChatReq)
 
+	if req.Model == "" {
+		model = ""
+	}
+
 	embedding, err := s.router.Embed(ctx, req.Input, provider, model, credID)
 	if err != nil {
 		log.Error("embeddings routing failed", slog.String("error", err.Error()))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

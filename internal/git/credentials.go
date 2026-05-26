@@ -140,6 +140,16 @@ func resolveToken(ctx context.Context, repoType string) string {
 				return token
 			}
 		}
+		if baoClient != nil {
+			if data, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && data != nil {
+				if t, ok := data["ADO_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
+				if t, ok := data["ADO_PERSONAL_ACCESS_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
+			}
+		}
 		token := envOr("ADO_TOKEN", envOr("ADO_PERSONAL_ACCESS_TOKEN", ""))
 		if strings.Contains(token, delegatedSentinel) {
 			return ""
@@ -153,6 +163,16 @@ func resolveToken(ctx context.Context, repoType string) string {
 			token := store.GetActiveTokenPlain(ctx)
 			if token != "" {
 				return token
+			}
+		}
+		if baoClient != nil {
+			if data, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && data != nil {
+				if t, ok := data["GITHUB_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
+				if t, ok := data["GH_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
 			}
 		}
 		token := envOr("GH_TOKEN", envOr("GITHUB_TOKEN", ""))

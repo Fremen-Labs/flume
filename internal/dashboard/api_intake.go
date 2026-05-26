@@ -177,6 +177,9 @@ type AgentTaskRecord struct {
 	ID                    string   `json:"id"`
 	Title                 string   `json:"title"`
 	Objective             string   `json:"objective"`
+	// Repo is the project identifier for this task record.
+	// Serialized as "repo" in ES (matches ftypes.Task.ProjectID json tag).
+	// Queries on agent-task-records must use "repo", never "project_id".
 	Repo                  string   `json:"repo"`
 	Worktree              string   `json:"worktree,omitempty"`
 	ItemType              string   `json:"item_type"` // epic, feature, story, task
@@ -1127,7 +1130,9 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 		return nil, errBuild
 	}
 
-	// 3. Index to Elasticsearch
+	// 3. Index to Elasticsearch.
+	// AgentTaskRecord uses json:"repo" (via .Repo), matching ftypes.Task.
+	// This guarantees the project identifier is always stored under "repo".
 	for _, doc := range docs {
 		if err := s.es.IndexDoc(ctx, "agent-task-records", doc.ID, doc); err != nil {
 			s.logger.Error("commitPlan: failed to index doc", slog.String("id", doc.ID), slog.String("error", err.Error()))
