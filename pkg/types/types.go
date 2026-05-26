@@ -55,8 +55,15 @@ type Task struct {
 	Description     string     `json:"objective,omitempty"`
 	Status          TaskStatus `json:"status"`
 	Priority        string     `json:"priority,omitempty"`
+	// ProjectID holds the logical project/repo identifier for this task.
+	// It serializes to the "repo" field in Elasticsearch (agent-task-records index)
+	// and in JSON. This mapping was a common source of query bugs during the
+	// Python-to-Go port (queries must use "repo", not "project_id").
+	// See also: internal/worker/runner.go (ComputeReadyForRepo fix), claim.go patterns,
+	// and api_intake.go AgentTaskRecord.
 	ProjectID       string     `json:"repo,omitempty"`
 	ParentID        string     `json:"parent_id,omitempty"`
+	ItemType        string     `json:"item_type,omitempty"`
 	AssignedWorker  string     `json:"assigned_worker,omitempty"`
 	WorkerRole      string     `json:"worker_role,omitempty"`
 	Model           string     `json:"model,omitempty"`
@@ -113,14 +120,14 @@ type Worker struct {
 // Project represents a code project managed by Flume.
 // Derived from Python: dashboard/core/projects_store.py (8 nodes).
 type Project struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	RepoURL     string   `json:"repo_url,omitempty"`
-	Branch      string   `json:"branch,omitempty"`
-	LocalPath   string   `json:"local_path,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	TaskCount   int      `json:"task_count,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	RepoURL     string    `json:"repoUrl,omitempty"`
+	Branch      string    `json:"branch,omitempty"`
+	LocalPath   string    `json:"path,omitempty"`
+	Description string    `json:"description,omitempty"`
+	Tags        []string  `json:"tags,omitempty"`
+	TaskCount   int       `json:"task_count,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }

@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
+	"github.com/Fremen-Labs/flume/internal/git"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
@@ -199,6 +201,13 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 			var proj ftypes.Project
 			if json.Unmarshal(projDoc, &proj) == nil {
 				repoPath = proj.LocalPath
+				if repoPath == "" {
+					workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
+					if workspace == "" {
+						workspace = "/app/workspace"
+					}
+					repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", proj.ID))
+				}
 			}
 		}
 	}
@@ -418,7 +427,7 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 // Derived from Python: ensure_task_branch() (L568-772, 11 parents, 14 children)
 func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string, string, error) {
 	if task.ProjectID == "" {
-		return "", "", fmt.Errorf("task %s has no project_id", task.ID)
+		return "", "", fmt.Errorf("task %s has no project/repo (ProjectID empty)", task.ID)
 	}
 
 	// Load project to get repo info
@@ -432,9 +441,51 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 		return "", "", fmt.Errorf("unmarshal project: %w", err)
 	}
 
+	workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
+	if workspace == "" {
+		workspace = "/app/workspace"
+	}
 	repoPath := project.LocalPath
 	if repoPath == "" {
-		return "", "", fmt.Errorf("project %s has no local_path", task.ProjectID)
+		repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", project.ID))
+	}
+
+	// Check if local clone exists. If not, clone it dynamically.
+	if _, err := os.Stat(filepath.Join(repoPath, ".git")); os.IsNotExist(err) {
+		if project.RepoURL == "" {
+			return "", "", fmt.Errorf("project %s has no local path and no remote repo_url", task.ProjectID)
+		}
+
+		// Ensure parent directory exists
+		if err := os.MkdirAll(filepath.Dir(repoPath), 0755); err != nil {
+			return "", "", fmt.Errorf("create workspace directory: %w", err)
+		}
+
+		r.logger.Info("EnsureTaskBranch: cloning repository dynamically",
+			slog.String("project_id", project.ID),
+			slog.String("repo_url", project.RepoURL),
+			slog.String("dest", repoPath))
+
+		cloneURL := project.RepoURL
+
+		// Resolve credentials if it's a remote URL
+		isRemote := strings.Contains(project.RepoURL, "github.com") ||
+			strings.Contains(project.RepoURL, "dev.azure.com") ||
+			strings.Contains(project.RepoURL, "visualstudio.com") ||
+			strings.HasPrefix(project.RepoURL, "http://") ||
+			strings.HasPrefix(project.RepoURL, "https://")
+
+		if isRemote {
+			cloneURL = git.EmbedCredentials(ctx, project.RepoURL, "")
+		}
+
+		// Execute git clone
+		cmd := exec.CommandContext(ctx, "git", "clone", "--", cloneURL, repoPath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			_ = os.RemoveAll(repoPath)
+			return "", "", fmt.Errorf("git clone failed: %s: %w", string(output), err)
+		}
+		r.logger.Info("EnsureTaskBranch: cloned successfully", slog.String("project_id", project.ID))
 	}
 
 	// Determine branch name
@@ -529,12 +580,17 @@ func TaskRequiresCode(task ftypes.Task) bool {
 
 // ComputeReadyForRepo scans a repo's tasks and promotes eligible ones.
 // Derived from Python: compute_ready_for_repo() (L1636-1864, 25 parents, 4 children)
+//
+// NOTE: Tasks are stored in "agent-task-records" with the project/repo identifier
+// under the JSON field "repo" (see pkg/types.Task.ProjectID with json:"repo").
+// Always query using "repo", never "project_id" (common porting pitfall).
 func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
-	// Fetch all tasks for this repo
+	// Fetch all tasks for this repo. Use the correct "repo" field for task records
+	// (ProjectID field on Task marshals to "repo" in ES).
 	query := map[string]interface{}{
 		"bool": map[string]interface{}{
 			"must": []interface{}{
-				map[string]interface{}{"term": map[string]string{"project_id": repoID}},
+				map[string]interface{}{"term": map[string]string{"repo": repoID}},
 			},
 		},
 	}
@@ -663,11 +719,12 @@ func gitCmd(repoPath string, args ...string) (string, error) {
 
 func gitCheckoutBranch(repoPath, branch string) error {
 	// Try checkout existing branch
-	if _, err := gitCmd(repoPath, "checkout", branch); err != nil {
+	if out, err := gitCmd(repoPath, "checkout", branch); err != nil {
 		// Create new branch from default
 		defaultBranch, _ := resolveDefaultBranch(repoPath)
-		if _, err := gitCmd(repoPath, "checkout", "-b", branch, defaultBranch); err != nil {
-			return err
+		if out2, err2 := gitCmd(repoPath, "checkout", "-b", branch, defaultBranch); err2 != nil {
+			return fmt.Errorf("git checkout branch %s failed. Checkout existing: %s (%v). Create new branch: %s (%v)",
+				branch, strings.TrimSpace(out), err, strings.TrimSpace(out2), err2)
 		}
 	}
 	return nil

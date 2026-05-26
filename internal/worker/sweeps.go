@@ -522,7 +522,9 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 						if clientErr == nil {
 							branch := resolveBranchName(task)
 							defaultBranch := "main"
-							if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
+							if proj.Branch != "" {
+								defaultBranch = proj.Branch
+							} else if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
 								defaultBranch = override
 							}
 							prTitle := fmt.Sprintf("[Flume PR] %s", task.Title)
