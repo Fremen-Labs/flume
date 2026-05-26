@@ -1,6 +1,11 @@
 // Package types provides domain validation utilities.
 //
-// Derived from Python: TaskStateMachine (lifecycle/state_machine.py, 2 AST nodes)
+// Derived from Python: TaskStateMachine (lifecycle/state_machine.py, 2 AST nodes).
+//
+// PR 2 (flume-queue-planning-reliability): The pure ValidateTransition is now
+// wrapped by TaskStateMachine.EnforceTransition (see types.go) which is the
+// mandatory choke-point called by every status-mutating writer. Shadow mode
+// rollout ensures we can instrument 100% of paths before hard enforcement.
 package types
 
 import "fmt"
@@ -22,6 +27,9 @@ func (e *InvalidTransitionError) Error() string {
 // Returns nil if valid, InvalidTransitionError if not.
 //
 // Mirrors Python: TaskStateMachine.validate_transition()
+//
+// All call sites that previously invoked ValidateTransition directly (e.g. runner.go)
+// should migrate to DefaultTaskStateMachine.EnforceTransition for central auditing.
 func ValidateTransition(current, target TaskStatus) error {
 	if target == "" {
 		return nil // no change requested

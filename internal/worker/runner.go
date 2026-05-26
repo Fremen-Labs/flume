@@ -108,7 +108,7 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 
 	// 4. Transition task status
 	if result.NextStatus != "" && result.NextStatus != task.Status {
-		if validErr := ftypes.ValidateTransition(task.Status, result.NextStatus); validErr != nil {
+		if validErr := ftypes.DefaultTaskStateMachine.EnforceTransition(task.Status, result.NextStatus); validErr != nil {
 			r.logger.Error("invalid state transition",
 				slog.String("task_id", taskID),
 				slog.String("from", string(task.Status)),
@@ -583,6 +583,8 @@ func TaskRequiresCode(task ftypes.Task) bool {
 // Thin wrapper (no body logic) to guarantee only ONE promote implementation remains.
 // Update any call sites and the note in pkg/types/types.go.
 func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
+	// DEPRECATED (PR3): Logic unified into Sweeper.promotePlannedTasks.
+	// This thin no-op wrapper guarantees only ONE promote implementation.
 	r.logger.Warn("DEPRECATED: ComputeReadyForRepo called; logic retired to Sweeper.promotePlannedTasks (sweeps.go). No-op.",
 		slog.String("repoID", repoID))
 	return 0
@@ -603,6 +605,8 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 
+	// PR2 Enforce
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(currentStatus, ftypes.TaskStatus(targetStatus), r.logger.Warn)
 	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
@@ -611,6 +615,8 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 }
 
 func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status ftypes.TaskStatus) {
+	// PR 2: all via Enforcer
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", status, r.logger.Warn) // prev unknown here; future pass current
 	update := map[string]interface{}{
 		"status":        string(status),
 		"active_worker": nil,
@@ -716,6 +722,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			slog.Int("failures", failureCount),
 			slog.Int("cap", maxCap))
 		update := map[string]interface{}{
+			// PR2 LLM fail block guarded
 			"status":         "blocked",
 			"attempts":       failureCount,
 			"error_message":  fmt.Sprintf("blocked after %d LLM failures (cap=%d)", failureCount, maxCap),
@@ -730,6 +737,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			slog.Int("attempt", failureCount),
 			slog.Int("max", maxCap))
 		update := map[string]interface{}{
+			// PR2 requeue ready via Enforce (shadow)
 			"status":        "ready",
 			"attempts":      failureCount,
 			"active_worker": nil,

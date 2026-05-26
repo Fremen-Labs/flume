@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+
+	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -190,6 +192,8 @@ func processDAG(tasks []ESTask) []ESTask {
 
 // dispatchReadyTasks executes ES state mutations locking dependencies
 func dispatchReadyTasks(ctx context.Context, client *http.Client, esURL string, tasks []ESTask) {
+	// PR 2: dispatch also uses central FSM (even though standalone tool)
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransition("", "ready") // shadow allow
 	updatePayload := []byte(`{"doc": {"status": "ready"}}`)
 
 	for _, t := range tasks {

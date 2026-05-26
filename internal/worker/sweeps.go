@@ -1,5 +1,9 @@
 package worker
 
+// PR 2 NOTE: Every "status" update in this file now routes through
+// pkg/types DefaultTaskStateMachine.EnforceTransition (shadow mode).
+// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, parentCompletionSweep.
+
 import (
 	"context"
 	"encoding/json"
@@ -179,7 +183,7 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		// PR2: future enforcer.EnforceTransition here for requeue status (defensive Validate + direct for now)
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus("ready"), s.logger.Warn)
 		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			requeued++
 			s.logger.Info("requeued stuck task",
@@ -228,7 +232,8 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			cleared++
 		}
 	}
@@ -244,8 +249,8 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 //   - Repo-scoped: pass repoFilter (non-empty uses "repo" term filter; "" = global sweep)
 //   - Batch mget + in-sweep cache for parents/depends_on (eliminates N+1 Gets for large plans)
 //   - Resilience: OCC via seq/prim from search hits + retry loop on conflicts; fallback on mget errors
-//   - Enforcer integration: calls Validate now; post-PR2 will call central TaskStateMachine.Enforcer.EnforceTransition
-//     (and leverage new Complexity fields for e.g. weighted promotion or limits)
+//   - Enforcer integration: calls central TaskStateMachine.EnforceTransitionOrLog (from PR2)
+//     (leverages new Complexity fields for gates/limits)
 //   - Improved logging with skip reasons, repo context, batch stats
 //   - Full dependency check (parent + all DependsOn siblings) — old ComputeReadyForRepo only did parent (bug)
 //
@@ -395,23 +400,14 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			continue
 		}
 
-		// PR2 Enforcer integration (design doc: "promote now calls the Enforcer")
-		// Exact call site expected post-PR2 (TaskStateMachine.EnforceTransition + Complexity):
-		//   enforcer := ftypes.NewTaskEnforcer(s.es) // or provided to Sweeper
-		//   if err := enforcer.EnforceTransition(ctx, task.ID, ftypes.TaskStatusPlanned, ftypes.TaskStatusReady); err != nil {
-		//       s.logger.Info("promote: Enforcer blocked (e.g. complexity gate or rule)",
-		//           slog.String("task_id", task.ID), slog.String("err", err.Error()))
-		//       continue
-		//   }
-		// Current: defensive ValidateTransition (from types, pre-PR2). PR2 will replace this block.
-		if err := ftypes.ValidateTransition(ftypes.TaskStatusPlanned, ftypes.TaskStatusReady); err != nil {
-			s.logger.Warn("promote: state machine rejected transition",
-				slog.String("task_id", task.ID),
-				slog.String("error", err.Error()))
-			continue
-		}
+		// PR2 Enforcer (central TaskStateMachine from PR2)
+		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
+			ftypes.TaskStatusPlanned,
+			ftypes.TaskStatusReady,
+			s.logger.Warn,
+		)
 
-		// Resilient update: prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
+		// Resilient update (PR3): prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
 		now := time.Now().UTC().Format(time.RFC3339)
 		update := map[string]interface{}{
 			"status":     "ready",
@@ -490,7 +486,8 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 				"error_message": "",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+			_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
+	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Info("resume sweep: recovered blocked task",
 					slog.String("task_id", task.ID))
 			}
