@@ -102,7 +102,7 @@ func (m *Manager) TriggerSweep(ctx context.Context, sweepName string) error {
 		m.sweeper.requeueStuckImplementerTasks(ctx)
 		m.sweeper.requeueStuckReviewTasks(ctx)
 	case "parent-revival", "promote":
-		m.sweeper.promotePlannedTasks(ctx)
+		m.sweeper.promotePlannedTasks(ctx, "")  // repoFilter empty = global (unified promote)
 	case "auto-unblock", "resume":
 		m.sweeper.ExecuteResumeSweep(ctx)
 	default:
