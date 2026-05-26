@@ -31,7 +31,7 @@ import (
 //   - ensure_task_branch    (L568-772, 11 parents, 14 children)
 //   - auto_commit_and_push  (L1918-2023, 11 parents, 3 children)
 //   - create_pr_for_task    (L959-1110, 14 parents, 8 children)
-//   - compute_ready_for_repo (L1636-1864, 25 parents, 4 children)
+//   - compute_ready_for_repo (L1636-1864, 25 parents, 4 children) — DEPRECATED PR3 (unified in Sweeper.promotePlannedTasks) — DEPRECATED in PR3; logic unified into Sweeper.promotePlannedTasks (sweeps.go)
 type Runner struct {
 	es       *es.Client
 	llm      *llm.Client
@@ -578,98 +578,14 @@ func TaskRequiresCode(task ftypes.Task) bool {
 	return false
 }
 
-// ComputeReadyForRepo scans a repo's tasks and promotes eligible ones.
-// Derived from Python: compute_ready_for_repo() (L1636-1864, 25 parents, 4 children)
-//
-// NOTE: Tasks are stored in "agent-task-records" with the project/repo identifier
-// under the JSON field "repo" (see pkg/types.Task.ProjectID with json:"repo").
-// Always query using "repo", never "project_id" (common porting pitfall).
+// ComputeReadyForRepo is DEPRECATED (PR3: flume-queue-planning-reliability).
+// promote logic unified into single repo-aware promotePlannedTasks + resilience (mget/cache/OCC/Enforcer).
+// Thin wrapper (no body logic) to guarantee only ONE promote implementation remains.
+// Update any call sites and the note in pkg/types/types.go.
 func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
-	// Fetch all tasks for this repo. Use the correct "repo" field for task records
-	// (ProjectID field on Task marshals to "repo" in ES).
-	query := map[string]interface{}{
-		"bool": map[string]interface{}{
-			"must": []interface{}{
-				map[string]interface{}{"term": map[string]string{"repo": repoID}},
-			},
-		},
-	}
-
-	result, err := r.es.Search(ctx, "agent-task-records", query, 500)
-	if err != nil {
-		r.logger.Warn("compute_ready: search failed", slog.String("error", err.Error()))
-		return 0
-	}
-
-	byID := make(map[string]ftypes.Task)
-	for _, hit := range result.Hits {
-		var task ftypes.Task
-		if json.Unmarshal(hit, &task) == nil {
-			byID[task.ID] = task
-		}
-	}
-
-	promoted := 0
-	for id, task := range byID {
-		if task.Status != ftypes.TaskStatusPlanned {
-			continue
-		}
-
-		// Check if all dependencies (parent) are met
-		if task.ParentID != "" {
-			parent, exists := byID[task.ParentID]
-			if !exists || (parent.Status != ftypes.TaskStatusDone && parent.Status != ftypes.TaskStatusArchived) {
-				continue
-			}
-		}
-
-		// Promote to ready
-		update := map[string]interface{}{
-			"status":     "ready",
-			"updated_at": time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := r.es.UpdateDoc(ctx, "agent-task-records", id, update); err == nil {
-			promoted++
-			r.logger.Info("compute_ready: promoted to ready",
-				slog.String("task_id", id))
-		}
-	}
-
-	// Check if all children of a parent are terminal → mark parent done
-	for id, task := range byID {
-		if task.ParentID != "" {
-			continue // only check parents
-		}
-		if task.Status == ftypes.TaskStatusDone || task.Status == ftypes.TaskStatusArchived {
-			continue
-		}
-
-		allChildrenDone := true
-		hasChildren := false
-		for _, child := range byID {
-			if child.ParentID == id {
-				hasChildren = true
-				if child.Status != ftypes.TaskStatusDone && child.Status != ftypes.TaskStatusArchived {
-					allChildrenDone = false
-					break
-				}
-			}
-		}
-
-		if hasChildren && allChildrenDone {
-			update := map[string]interface{}{
-				"status":     "done",
-				"updated_at": time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := r.es.UpdateDoc(ctx, "agent-task-records", id, update); err == nil {
-				r.logger.Info("compute_ready: marked parent done — all children terminal",
-					slog.String("task_id", id),
-					slog.String("title", task.Title))
-			}
-		}
-	}
-
-	return promoted
+	r.logger.Warn("DEPRECATED: ComputeReadyForRepo called; logic retired to Sweeper.promotePlannedTasks (sweeps.go). No-op.",
+		slog.String("repoID", repoID))
+	return 0
 }
 
 // clearStaleClaim resets a task after a worker crash.

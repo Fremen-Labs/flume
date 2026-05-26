@@ -117,6 +117,58 @@ func (c *Client) GetDoc(ctx context.Context, index, id string) (json.RawMessage,
 	return doc.Source, nil
 }
 
+// MGetDocs batches document retrieval using the _mget API.
+// Returns map[id] -> _source (entry is nil for missing docs).
+// Critical for PR3 resilience: used by promotePlannedTasks for O(1) batch parent/depends lookups + cache
+// instead of N+1 serial GetDoc calls on large plans.
+// Falls back gracefully in caller if mget errors.
+func (c *Client) MGetDocs(ctx context.Context, index string, ids []string) (map[string]json.RawMessage, error) {
+	if len(ids) == 0 {
+		return make(map[string]json.RawMessage), nil
+	}
+
+	payload := map[string]interface{}{
+		"ids": ids,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("es: mget marshal failed: %w", err)
+	}
+
+	// _mget supports GET with body
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/_mget", index), bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("es: mget %s failed: %w", index, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("es: mget %s returned HTTP %d: %s", index, resp.StatusCode, string(respBody))
+	}
+
+	var mgetResp struct {
+		Docs []struct {
+			ID     string          `json:"_id"`
+			Found  bool            `json:"found"`
+			Source json.RawMessage `json:"_source"`
+		} `json:"docs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&mgetResp); err != nil {
+		return nil, fmt.Errorf("es: mget decode failed: %w", err)
+	}
+
+	results := make(map[string]json.RawMessage, len(ids))
+	for _, d := range mgetResp.Docs {
+		if d.Found && len(d.Source) > 0 {
+			results[d.ID] = d.Source
+		} else {
+			results[d.ID] = nil
+		}
+	}
+	return results, nil
+}
+
 // IndexDoc indexes a document (create or overwrite).
 func (c *Client) IndexDoc(ctx context.Context, index, id string, body interface{}) error {
 	data, err := json.Marshal(body)

@@ -59,7 +59,7 @@ type Task struct {
 	// It serializes to the "repo" field in Elasticsearch (agent-task-records index)
 	// and in JSON. This mapping was a common source of query bugs during the
 	// Python-to-Go port (queries must use "repo", not "project_id").
-	// See also: internal/worker/runner.go (ComputeReadyForRepo fix), claim.go patterns,
+	// See also: internal/worker/sweeps.go (unified promotePlannedTasks PR3), claim.go OCC, runner.go (deprecated ComputeReadyForRepo),
 	// and api_intake.go AgentTaskRecord.
 	ProjectID       string     `json:"repo,omitempty"`
 	ParentID        string     `json:"parent_id,omitempty"`

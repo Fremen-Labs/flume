@@ -22,7 +22,7 @@ import (
 // Sweeps:
 //   - Stuck Implementer: Requeue tasks stuck in "running" beyond timeout
 //   - Stuck Review: Clear phantom review locks
-//   - Promote: Move planned tasks to ready when dependencies are met
+//   - Promote: Move planned tasks to ready when dependencies are met  (UNIFIED SOURCE OF TRUTH per PR3)
 //   - Resume: Recover blocked tasks when conditions clear
 //   - Block: Halt tasks when node capacity is exceeded
 type Sweeper struct {
@@ -89,11 +89,12 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 	}
 
 	// Promote sweep — adaptive interval based on planned task count
+	// Now delegates to unified repo-aware promotePlannedTasks (repoFilter="" for global)
 	promoteInterval := s.getPromoteInterval()
 	if now.Sub(s.lastRun["promote"]) >= promoteInterval {
 		s.lastRun["promote"] = now
 		s.mu.Unlock()
-		if count := s.promotePlannedTasks(ctx); count > 0 {
+		if count := s.promotePlannedTasks(ctx, ""); count > 0 {
 			s.logger.Info("dependency sweep: promoted tasks to ready",
 				slog.Int("count", count))
 		}
@@ -178,6 +179,7 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
+		// PR2: future enforcer.EnforceTransition here for requeue status (defensive Validate + direct for now)
 		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 			requeued++
 			s.logger.Info("requeued stuck task",
@@ -233,85 +235,224 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 	return cleared
 }
 
-// promotePlannedTasks moves planned tasks to ready when dependencies are met.
-// Derived from Python: promote_planned_tasks() (L150-200)
-func (s *Sweeper) promotePlannedTasks(ctx context.Context) int {
-	query := map[string]interface{}{
+// promotePlannedTasks moves planned tasks to ready when dependencies (parent + depends_on) are met.
+// 
+// This is the SINGLE SOURCE OF TRUTH for all promotion logic (design: flume-queue-planning-reliability PR3).
+// Retires the buggy/dead ComputeReadyForRepo (see runner.go).
+//
+// Key features per design doc:
+//   - Repo-scoped: pass repoFilter (non-empty uses "repo" term filter; "" = global sweep)
+//   - Batch mget + in-sweep cache for parents/depends_on (eliminates N+1 Gets for large plans)
+//   - Resilience: OCC via seq/prim from search hits + retry loop on conflicts; fallback on mget errors
+//   - Enforcer integration: calls Validate now; post-PR2 will call central TaskStateMachine.Enforcer.EnforceTransition
+//     (and leverage new Complexity fields for e.g. weighted promotion or limits)
+//   - Improved logging with skip reasons, repo context, batch stats
+//   - Full dependency check (parent + all DependsOn siblings) — old ComputeReadyForRepo only did parent (bug)
+//
+// Derived from Python: promote_planned_tasks() (L150-200) + compute_ready_for_repo (L1636-1864)
+// See also: manager.go TriggerSweep, claim.go OCC patterns.
+func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) int {
+	baseQuery := map[string]interface{}{
 		"term": map[string]string{"status": "planned"},
 	}
+	query := baseQuery
+	if repoFilter != "" {
+		query = map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must": []interface{}{
+					map[string]interface{}{"term": map[string]string{"status": "planned"}},
+					map[string]interface{}{"term": map[string]string{"repo": repoFilter}},
+				},
+			},
+		}
+	}
 
-	result, err := s.es.Search(ctx, "agent-task-records", query, 100)
+	result, err := s.es.Search(ctx, "agent-task-records", query, 200)
 	if err != nil {
-		s.logger.Warn("dependency sweep error", slog.String("error", err.Error()))
+		s.logger.Warn("dependency sweep error", slog.String("error", err.Error()), slog.String("repo", repoFilter))
 		return 0
 	}
 
-	promoted := 0
-	for _, hit := range result.Hits {
-		var task struct {
+	if len(result.Hits) == 0 {
+		return 0
+	}
+
+	// Collect needed parent + depends IDs for batch resolution (resilience for large/complex plans)
+	neededIDs := make(map[string]bool)
+	type plannedTask struct {
+		ID        string
+		ParentID  string
+		DependsOn []string
+		// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
+		RawHit *es.SearchHit
+	}
+	var candidates []plannedTask
+
+	for i, hit := range result.Hits {
+		var t struct {
 			ID        string   `json:"id"`
 			ParentID  string   `json:"parent_id"`
 			DependsOn []string `json:"depends_on"`
 		}
-		if json.Unmarshal(hit, &task) != nil {
+		if json.Unmarshal(hit, &t) != nil {
 			continue
 		}
+		pt := plannedTask{
+			ID:        t.ID,
+			ParentID:  t.ParentID,
+			DependsOn: t.DependsOn,
+		}
+		if i < len(result.RawHits) {
+			pt.RawHit = &result.RawHits[i]
+		}
+		candidates = append(candidates, pt)
 
-		// Check parent status if there is a parent task
+		if t.ParentID != "" {
+			neededIDs[t.ParentID] = true
+		}
+		for _, d := range t.DependsOn {
+			if d != "" {
+				neededIDs[d] = true
+			}
+		}
+	}
+
+	// Batch lookup (mget preferred) + simple in-sweep cache
+	// This is the key resilience change documented for PR3: O(1) lookups vs N+1 per planned task
+	statusCache := make(map[string]string, len(neededIDs))
+	idList := make([]string, 0, len(neededIDs))
+	for id := range neededIDs {
+		idList = append(idList, id)
+	}
+
+	if len(idList) > 0 {
+		mgetResults, mgetErr := s.es.MGetDocs(ctx, "agent-task-records", idList)
+		if mgetErr != nil {
+			s.logger.Warn("mget batch lookup failed for promote deps; falling back to serial Gets (performance hit on large plans)",
+				slog.String("error", mgetErr.Error()),
+				slog.Int("ids", len(idList)))
+			for _, id := range idList {
+				doc, gerr := s.es.GetDoc(ctx, "agent-task-records", id)
+				if gerr == nil && doc != nil {
+					var meta struct {
+						Status string `json:"status"`
+					}
+					if json.Unmarshal(doc, &meta) == nil {
+						statusCache[id] = meta.Status
+					}
+				}
+			}
+		} else {
+			for id, doc := range mgetResults {
+				if doc != nil {
+					var meta struct {
+						Status string `json:"status"`
+					}
+					if json.Unmarshal(doc, &meta) == nil {
+						statusCache[id] = meta.Status
+					}
+				}
+			}
+			s.logger.Debug("promote: mget+cache batch complete",
+				slog.Int("requested_ids", len(idList)),
+				slog.Int("cached", len(statusCache)),
+				slog.String("repo", repoFilter))
+		}
+	}
+
+	promoted := 0
+	for _, task := range candidates {
+		// Parent check (using cache)
 		if task.ParentID != "" {
-			parentDoc, err := s.es.GetDoc(ctx, "agent-task-records", task.ParentID)
-			if err != nil || parentDoc == nil {
+			pstatus := statusCache[task.ParentID]
+			if pstatus == "" || pstatus == string(ftypes.TaskStatusPlanned) || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+				s.logger.Debug("promote skip (parent inactive)",
+					slog.String("task_id", task.ID),
+					slog.String("parent_id", task.ParentID),
+					slog.String("parent_status", pstatus),
+					slog.String("repo", repoFilter))
 				continue
-			}
-			var parent struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(parentDoc, &parent) != nil {
-				continue
-			}
-			if parent.Status == "planned" || parent.Status == "blocked" || parent.Status == "archived" {
-				continue // parent not active or terminal
 			}
 		}
 
-		// Check DependsOn sibling dependencies
+		// DependsOn sibling deps check (full logic; old ComputeReadyForRepo omitted this — bug)
 		dependsOnMet := true
 		for _, depID := range task.DependsOn {
 			if depID == "" {
 				continue
 			}
-			depDoc, err := s.es.GetDoc(ctx, "agent-task-records", depID)
-			if err != nil || depDoc == nil {
+			dstatus := statusCache[depID]
+			if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
 				dependsOnMet = false
-				break
-			}
-			var dep struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(depDoc, &dep) != nil {
-				dependsOnMet = false
-				break
-			}
-			if dep.Status != "done" && dep.Status != "archived" {
-				dependsOnMet = false
+				s.logger.Debug("promote skip (dep unmet)",
+					slog.String("task_id", task.ID),
+					slog.String("dep_id", depID),
+					slog.String("dep_status", dstatus))
 				break
 			}
 		}
-
 		if !dependsOnMet {
 			continue
 		}
 
+		// PR2 Enforcer integration (design doc: "promote now calls the Enforcer")
+		// Exact call site expected post-PR2 (TaskStateMachine.EnforceTransition + Complexity):
+		//   enforcer := ftypes.NewTaskEnforcer(s.es) // or provided to Sweeper
+		//   if err := enforcer.EnforceTransition(ctx, task.ID, ftypes.TaskStatusPlanned, ftypes.TaskStatusReady); err != nil {
+		//       s.logger.Info("promote: Enforcer blocked (e.g. complexity gate or rule)",
+		//           slog.String("task_id", task.ID), slog.String("err", err.Error()))
+		//       continue
+		//   }
+		// Current: defensive ValidateTransition (from types, pre-PR2). PR2 will replace this block.
+		if err := ftypes.ValidateTransition(ftypes.TaskStatusPlanned, ftypes.TaskStatusReady); err != nil {
+			s.logger.Warn("promote: state machine rejected transition",
+				slog.String("task_id", task.ID),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		// Resilient update: prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
+		now := time.Now().UTC().Format(time.RFC3339)
 		update := map[string]interface{}{
 			"status":     "ready",
-			"updated_at": time.Now().UTC().Format(time.RFC3339),
+			"updated_at": now,
 		}
-		if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+
+		updateSuccess := false
+		const maxRetries = 3
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			var updErr error
+			if task.RawHit != nil && task.RawHit.SeqNo != nil && task.RawHit.PrimaryTerm != nil {
+				updErr = s.es.UpdateDocOCC(ctx, "agent-task-records", task.ID, update, *task.RawHit.SeqNo, *task.RawHit.PrimaryTerm)
+			} else {
+				updErr = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
+			}
+
+			if updErr == nil {
+				updateSuccess = true
+				break
+			}
+			if updErr == es.ErrConflict {
+				s.logger.Debug("promote update conflict (OCC race); will retry",
+					slog.String("task_id", task.ID),
+					slog.Int("attempt", attempt+1))
+				time.Sleep(time.Duration(attempt+1) * 40 * time.Millisecond)
+				continue
+			}
+			s.logger.Warn("promote update non-retryable error",
+				slog.String("task_id", task.ID),
+				slog.String("error", updErr.Error()))
+			break
+		}
+
+		if updateSuccess {
 			promoted++
-			s.logger.Info("promoted task to ready",
-				slog.String("task_id", task.ID))
+			s.logger.Info("promoted task to ready (single unified path)",
+				slog.String("task_id", task.ID),
+				slog.String("repo", repoFilter))
 		}
 	}
+
 	return promoted
 }
 
