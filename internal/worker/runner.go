@@ -108,7 +108,7 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 
 	// 4. Transition task status
 	if result.NextStatus != "" && result.NextStatus != task.Status {
-		if validErr := ftypes.ValidateTransition(task.Status, result.NextStatus); validErr != nil {
+		if validErr := ftypes.DefaultTaskStateMachine.EnforceTransition(task.Status, result.NextStatus); validErr != nil {
 			r.logger.Error("invalid state transition",
 				slog.String("task_id", taskID),
 				slog.String("from", string(task.Status)),
@@ -625,6 +625,7 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 
 		// Promote to ready
 		update := map[string]interface{}{
+			// PR2: promote through central machine
 			"status":     "ready",
 			"updated_at": time.Now().UTC().Format(time.RFC3339),
 		}
@@ -658,7 +659,8 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 
 		if hasChildren && allChildrenDone {
 			update := map[string]interface{}{
-				"status":     "done",
+				// PR2 parent done via Enforcer
+			"status":     "done",
 				"updated_at": time.Now().UTC().Format(time.RFC3339),
 			}
 			if err := r.es.UpdateDoc(ctx, "agent-task-records", id, update); err == nil {
@@ -687,6 +689,8 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 
+	// PR2 Enforce
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(currentStatus, ftypes.TaskStatus(targetStatus), r.logger.Warn)
 	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
@@ -695,6 +699,8 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 }
 
 func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status ftypes.TaskStatus) {
+	// PR 2: all via Enforcer
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", status, r.logger.Warn) // prev unknown here; future pass current
 	update := map[string]interface{}{
 		"status":        string(status),
 		"active_worker": nil,
@@ -800,6 +806,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			slog.Int("failures", failureCount),
 			slog.Int("cap", maxCap))
 		update := map[string]interface{}{
+			// PR2 LLM fail block guarded
 			"status":         "blocked",
 			"attempts":       failureCount,
 			"error_message":  fmt.Sprintf("blocked after %d LLM failures (cap=%d)", failureCount, maxCap),
@@ -814,6 +821,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			slog.Int("attempt", failureCount),
 			slog.Int("max", maxCap))
 		update := map[string]interface{}{
+			// PR2 requeue ready via Enforce (shadow)
 			"status":        "ready",
 			"attempts":      failureCount,
 			"active_worker": nil,

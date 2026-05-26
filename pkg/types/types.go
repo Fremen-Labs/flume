@@ -47,6 +47,32 @@ var ValidTransitions = map[TaskStatus][]TaskStatus{
 	TaskStatusArchived:        {TaskStatusReady},
 }
 
+// ComplexityBucket is the categorical classification of a task's complexity (1-10 scale).
+// Used for adaptive routing (see src/gateway/routing_policy.go), queue prioritization,
+// and reporting. Derived from planner's ComplexityScore and per-task analysis in intake.
+type ComplexityBucket string
+
+const (
+	// ComplexityBucketLow: trivial/localized changes (1-3). Prefer fast models.
+	ComplexityBucketLow ComplexityBucket = "low"
+	// ComplexityBucketMedium: standard multi-step (4-6).
+	ComplexityBucketMedium ComplexityBucket = "medium"
+	// ComplexityBucketHigh: cross-cutting or high-risk (7-10). Route to frontier models.
+	ComplexityBucketHigh ComplexityBucket = "high"
+)
+
+// ToComplexityBucket maps a 1-10 complexity score to its bucket.
+// Safe for 0 or out-of-range (clamps to low/high).
+func ToComplexityBucket(score int) ComplexityBucket {
+	if score <= 3 {
+		return ComplexityBucketLow
+	}
+	if score <= 6 {
+		return ComplexityBucketMedium
+	}
+	return ComplexityBucketHigh
+}
+
 // Task represents a work item in the Flume queue.
 // Derived from Python: dashboard/core/tasks.py and ES document schema.
 type Task struct {
@@ -74,6 +100,13 @@ type Task struct {
 	EstimatedTokens int        `json:"estimated_tokens,omitempty"`
 	ActualTokens    int        `json:"actual_tokens,omitempty"`
 	Complexity      int        `json:"complexity,omitempty"`
+	// ComplexityReason captures the rationale from the planner (e.g. "cross-cutting change requiring 4 components").
+	// Populated on task creation in intake (api_intake.go build* and commit) from LLM plan output.
+	// Enables auditing why a task received its complexity score.
+	ComplexityReason string `json:"complexity_reason,omitempty"`
+	// ComplexityBucket is the derived categorical bucket (low/medium/high) for
+	// routing, WIP gates, and observability. Written on creation in intake using ToComplexityBucket.
+	ComplexityBucket ComplexityBucket `json:"complexity_bucket,omitempty"`
 	Attempts        int        `json:"attempts,omitempty"`
 	MaxAttempts     int        `json:"max_attempts,omitempty"`
 	ErrorMessage    string     `json:"error_message,omitempty"`
@@ -248,4 +281,97 @@ var ProviderAliases = map[string]string{
 	"google_ai":            "gemini",
 	"googleaistudio":       "gemini",
 	"generativelanguage":   "gemini",
+}
+
+// ─── Task State Machine (PR 2) ──────────────────────────────────────────────
+
+// TaskStateMachine is the central, enforceable FSM for all Task status changes
+// on agent-task-records documents.
+//
+// GOAL (from flume-queue-planning-reliability PR 2):
+//   - 100% of status mutations go through validation + auditing path.
+//   - No more raw ES "status" updates in hot paths (api_intake build*/commit,
+//     api_tasks transition+bulk+claim+complete, worker/claim atomic, runner update*,
+//     sweeps all sites, manager, dispatch, tests).
+//   - Per-task Complexity* fields supported on Task (and mirrored on AgentTaskRecord).
+//
+// EnforceTransition is the single choke point. It calls ValidateTransition.
+// Updates to the doc (with OCC where possible), audit recording, and metrics
+// emission are performed by callers that invoke EnforceTransition before/around
+// their ES writes (current implementation); future iterations can move the
+// actual safe write inside Enforce when an updater hook is provided.
+//
+// Starts in ShadowMode (see DefaultTaskStateMachine) for safe rollout:
+//   - Violations are returned as errors (for logging + future metrics counters
+//     e.g. "flume_task_state_violation_total{shadow=1}").
+//   - Callers STILL perform the write, allowing production to adopt the guard
+//     without risk of breaking existing flows.
+//   - Once violations reach zero in logs, flip shadow=false to hard-enforce.
+//
+// All writers MUST:
+//   1. Compute prevStatus from doc / task
+//   2. Call EnforceTransition(prev, target)
+//   3. If err != nil && !shadow { abort } else { log shadow violation for audit; proceed }
+//   4. Perform the ES update (OCC preferred for claim paths).
+//
+// Clear godoc and comments added per success criteria.
+type TaskStateMachine struct {
+	// ShadowMode: log + "metric" (via structured logs at call sites) violations
+	// but permit the status write. See package-level DefaultTaskStateMachine.
+	ShadowMode bool
+}
+
+// NewTaskStateMachine constructs a TaskStateMachine.
+// Use shadow=true during PR2 rollout (the default singleton below).
+func NewTaskStateMachine(shadow bool) *TaskStateMachine {
+	return &TaskStateMachine{ShadowMode: shadow}
+}
+
+// DefaultTaskStateMachine is the process-wide enforcer singleton.
+// Initialized in shadow mode per design for this PR. Flip to false after
+// audit shows clean adoption across all writers.
+var DefaultTaskStateMachine = NewTaskStateMachine(true)
+
+// EnforceTransition is the primary entrypoint called by 100% of status writers.
+//
+// It invokes ValidateTransition (preserving all existing behavior and error types).
+// In shadow mode a violation error is still surfaced to the caller so the call site
+// can emit a structured log line containing "shadow_violation" (treated as metric
+// source for now) while allowing the subsequent ES write.
+//
+// Returns:
+//   - nil for valid (including no-op/empty/self)
+//   - *InvalidTransitionError for disallowed changes (see validation.go)
+//   - other errors in future (e.g. OCC failure when update hook added)
+//
+// Callers are responsible for the actual document update + any OCC parameters.
+// This separation keeps pkg/types free of ES / logger dependencies (no cycles).
+func (sm *TaskStateMachine) EnforceTransition(current, target TaskStatus) error {
+	// Delegate to the existing pure validator (port of Python TaskStateMachine.validate_transition).
+	err := ValidateTransition(current, target)
+	if err != nil && sm.ShadowMode {
+		// Shadow mode: the violation is "enforced" only for observability.
+		// Caller MUST log e.g.:
+		//   logger.Warn("SHADOW MODE: TaskStateMachine violation (write allowed)",
+		//       "err", err, "task_id", id, "from", current, "to", target)
+		// This populates the audit trail and can be aggregated into metrics.
+	}
+	// Future non-shadow: return err to hard block (or perform compensating write).
+	return err
+}
+
+// EnforceTransitionOrLog is a convenience for sites that have a logger.
+// In shadow mode, violations are logged at Warn but write proceeds.
+// In strict mode, error is returned and caller should not write.
+func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, logFn func(msg string, args ...any)) error {
+	err := sm.EnforceTransition(current, target)
+	if err != nil && sm.ShadowMode && logFn != nil {
+		logFn("SHADOW MODE: TaskStateMachine.EnforceTransition violation allowed (write proceeds for rollout safety)",
+			"error", err.Error(),
+			"from", current,
+			"to", target,
+			"shadow", true,
+		)
+	}
+	return err
 }

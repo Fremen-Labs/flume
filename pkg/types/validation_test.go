@@ -97,3 +97,50 @@ func TestNormalizeProvider(t *testing.T) {
 		})
 	}
 }
+
+
+
+func TestTaskStateMachine_EnforceTransition_Shadow(t *testing.T) {
+	sm := NewTaskStateMachine(true) // shadow
+	err := sm.EnforceTransition(TaskStatusInbox, TaskStatusDone)
+	if err == nil {
+		t.Error("expected violation error even in shadow")
+	}
+}
+
+func TestTaskStateMachine_EnforceTransition_Valid(t *testing.T) {
+	sm := DefaultTaskStateMachine
+	if err := sm.EnforceTransition(TaskStatusReady, TaskStatusRunning); err != nil {
+		t.Errorf("valid transition should pass enforce: %v", err)
+	}
+}
+
+func TestToComplexityBucket(t *testing.T) {
+	tests := map[int]ComplexityBucket{
+		1:  ComplexityBucketLow,
+		3:  ComplexityBucketLow,
+		4:  ComplexityBucketMedium,
+		6:  ComplexityBucketMedium,
+		7:  ComplexityBucketHigh,
+		10: ComplexityBucketHigh,
+		0:  ComplexityBucketLow,
+	}
+	for score, want := range tests {
+		if got := ToComplexityBucket(score); got != want {
+			t.Errorf("ToComplexityBucket(%d)=%s want %s", score, got, want)
+		}
+	}
+}
+
+func TestTask_ComplexityFields(t *testing.T) {
+	task := Task{
+		ID:               "t1",
+		Status:           TaskStatusPlanned,
+		Complexity:       8,
+		ComplexityReason: "cross cutting api+ui+db",
+		ComplexityBucket: ComplexityBucketHigh,
+	}
+	if task.Complexity != 8 || task.ComplexityBucket != ComplexityBucketHigh {
+		t.Error("complexity fields not set on Task")
+	}
+}

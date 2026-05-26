@@ -15,6 +15,7 @@ import (
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/internal/secrets"
+	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
 const (
@@ -199,6 +200,10 @@ type AgentTaskRecord struct {
 	PreferredModel        string   `json:"preferred_model,omitempty"`
 	PreferredLLMProvider  string   `json:"preferred_llm_provider,omitempty"`
 	PreferredCredentialID string   `json:"preferred_llm_credential_id,omitempty"`
+	// Complexity* fields (PR 2)
+	Complexity       int    `json:"complexity,omitempty"`
+	ComplexityReason string `json:"complexity_reason,omitempty"`
+	ComplexityBucket string `json:"complexity_bucket,omitempty"`
 }
 
 func randomHex(n int) string {
@@ -954,6 +959,9 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			LastUpdate: now,
 			CreatedAt:  now,
 			UpdatedAt:  now,
+			Complexity:       plan.ComplexityScore,
+			ComplexityReason: "planner ComplexityScore (PR2 creation)",
+			ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			DependsOn:  []string{},
 		})
 
@@ -975,6 +983,9 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				LastUpdate: now,
 				CreatedAt:  now,
 				UpdatedAt:  now,
+				Complexity:       plan.ComplexityScore,
+				ComplexityReason: "planner ComplexityScore (feature PR2)",
+				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			})
 
 			for _, story := range feat.Stories {
@@ -994,6 +1005,9 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					DependsOn:          []string{featID},
 					AcceptanceCriteria: story.AcceptanceCriteria,
 					LastUpdate:         now,
+					Complexity:       plan.ComplexityScore,
+					ComplexityReason: "planner ComplexityScore (story PR2)",
+					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 					CreatedAt:          now,
 					UpdatedAt:          now,
 				})
@@ -1029,6 +1043,9 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 						AcceptanceCriteria: story.AcceptanceCriteria,
 						PreferredModel:     routingModel,
 						LastUpdate:         now,
+					Complexity:       plan.ComplexityScore,
+					ComplexityReason: "planner ComplexityScore (task PR2)",
+					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 						CreatedAt:          now,
 						UpdatedAt:          now,
 					})
@@ -1084,6 +1101,9 @@ func (s *Server) buildFastPathTasks(ctx context.Context, plan PlanResponse, repo
 						AcceptanceCriteria: story.AcceptanceCriteria,
 						PreferredModel:     routingModel,
 						LastUpdate:         now,
+					Complexity:       plan.ComplexityScore,
+					ComplexityReason: "planner ComplexityScore (fastpath PR2)",
+					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 						CreatedAt:          now,
 						UpdatedAt:          now,
 					})
