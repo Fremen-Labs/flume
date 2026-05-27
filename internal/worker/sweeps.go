@@ -368,9 +368,19 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 	promoted := 0
 	for _, task := range candidates {
 		// Parent check (using cache)
+		//
+		// FIX for Hierarchy promotion deadlock (P0 from flume-queue-planning-reliability):
+		// Intake (buildTaskHierarchy) creates stories/feats/epics with status="planned".
+		// Previously we skipped *any* child whose parent was still "planned".
+		// This meant that in any story with 2+ tasks, only the first sibling (pre-created "ready")
+		// would ever run. All subsequent siblings stayed "planned" forever even after depends_on met.
+		//
+		// We now only block promotion when the parent is in a definitively bad terminal state.
+		// "planned" parents are normal for organizational hierarchy items created by Plan New Work.
+		// The depends_on check (below) is the primary ordering mechanism for siblings.
 		if task.ParentID != "" {
 			pstatus := statusCache[task.ParentID]
-			if pstatus == "" || pstatus == string(ftypes.TaskStatusPlanned) || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+			if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
 				s.logger.Debug("promote skip (parent inactive)",
 					slog.String("task_id", task.ID),
 					slog.String("parent_id", task.ParentID),
@@ -728,63 +738,117 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 }
 
 func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
-	query := map[string]interface{}{
-		"bool": map[string]interface{}{
-			"must": []interface{}{
-				map[string]interface{}{"terms": map[string]interface{}{"status": []string{"running", "ready", "review-consensus"}}},
+	// FIX for Hierarchy promotion deadlock (P0):
+	// Previously this only considered top-level items (no parent_id) that were *already*
+	// in active states (running/ready/review-consensus). Intake-created epics/feats/stories
+	// start as "planned" and have parent_id (except epics), so they were never swept.
+	//
+	// We now do two passes:
+	// 1. Original top-level active parents (kept for compatibility).
+	// 2. General pass: any item that has children where *all* direct children are terminal
+	//    (done or archived) gets marked done. This walks the full epic→feat→story→task tree.
+
+	// Pass 1: Original top-level logic (items with no parent_id already in active states)
+	{
+		query := map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must": []interface{}{
+					map[string]interface{}{"terms": map[string]interface{}{"status": []string{"running", "ready", "review-consensus"}}},
+				},
+				"must_not": []interface{}{
+					map[string]interface{}{"exists": map[string]string{"field": "parent_id"}},
+				},
 			},
-			"must_not": []interface{}{
-				map[string]interface{}{"exists": map[string]string{"field": "parent_id"}},
-			},
-		},
+		}
+
+		result, err := s.es.Search(ctx, "agent-task-records", query, 100)
+		if err == nil {
+			for _, hit := range result.Hits {
+				var parent ftypes.Task
+				if json.Unmarshal(hit, &parent) != nil {
+					continue
+				}
+				s.tryMarkParentDoneIfAllChildrenTerminal(ctx, parent)
+			}
+		}
 	}
 
-	result, err := s.es.Search(ctx, "agent-task-records", query, 100)
+	// Pass 2: General hierarchy completion — any parent whose direct children are all terminal
+	// This catches epics (no parent_id but start "planned"), feats, and stories created by intake.
+	{
+		// Find candidates that have at least one child (we'll check their status inside the helper)
+		// To keep it simple and correct we scan a broader set of non-terminal parents.
+		query := map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must_not": []interface{}{
+					map[string]interface{}{"terms": map[string]interface{}{
+						"status": []string{"done", "archived"},
+					}},
+				},
+			},
+		}
+
+		result, err := s.es.Search(ctx, "agent-task-records", query, 200)
+		if err != nil {
+			return
+		}
+
+		for _, hit := range result.Hits {
+			var potentialParent ftypes.Task
+			if json.Unmarshal(hit, &potentialParent) != nil {
+				continue
+			}
+
+			// Only consider items that actually have children
+			childQuery := map[string]interface{}{
+				"term": map[string]string{"parent_id": potentialParent.ID},
+			}
+			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQuery, 1)
+			if cerr != nil || len(childRes.Hits) == 0 {
+				continue
+			}
+
+			s.tryMarkParentDoneIfAllChildrenTerminal(ctx, potentialParent)
+		}
+	}
+}
+
+// tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by parentCompletionSweep.
+func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, parent ftypes.Task) {
+	childQuery := map[string]interface{}{
+		"term": map[string]string{"parent_id": parent.ID},
+	}
+
+	childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 100)
 	if err != nil {
 		return
 	}
 
-	for _, hit := range result.Hits {
-		var parent ftypes.Task
-		if json.Unmarshal(hit, &parent) != nil {
-			continue
-		}
+	allChildrenDone := true
+	hasChildren := false
 
-		// Find all child tasks
-		childQuery := map[string]interface{}{
-			"term": map[string]string{"parent_id": parent.ID},
-		}
-
-		childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 100)
-		if err != nil {
-			continue
-		}
-
-		allChildrenDone := true
-		hasChildren := false
-
-		for _, chHit := range childRes.Hits {
-			var child ftypes.Task
-			if json.Unmarshal(chHit, &child) == nil {
-				hasChildren = true
-				if child.Status != ftypes.TaskStatusDone && child.Status != ftypes.TaskStatusArchived {
-					allChildrenDone = false
-					break
-				}
+	for _, chHit := range childRes.Hits {
+		var child ftypes.Task
+		if json.Unmarshal(chHit, &child) == nil {
+			hasChildren = true
+			if child.Status != ftypes.TaskStatusDone && child.Status != ftypes.TaskStatusArchived {
+				allChildrenDone = false
+				break
 			}
 		}
+	}
 
-		if hasChildren && allChildrenDone {
-			s.logger.Info("parentCompletionSweep: marking parent done — all children terminal",
-				slog.String("parent_id", parent.ID),
-				slog.String("title", parent.Title))
+	if hasChildren && allChildrenDone {
+		s.logger.Info("parentCompletionSweep: marking parent done — all children terminal",
+			slog.String("parent_id", parent.ID),
+			slog.String("title", parent.Title),
+			slog.String("item_type", parent.ItemType))
 
-			update := map[string]interface{}{
-				"status":       string(ftypes.TaskStatusDone),
-				"completed_at": time.Now().UTC().Format(time.RFC3339),
-				"updated_at":   time.Now().UTC().Format(time.RFC3339),
-			}
-			_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
+		update := map[string]interface{}{
+			"status":       string(ftypes.TaskStatusDone),
+			"completed_at": time.Now().UTC().Format(time.RFC3339),
+			"updated_at":   time.Now().UTC().Format(time.RFC3339),
 		}
+		_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
 	}
 }

@@ -204,6 +204,11 @@ type AgentTaskRecord struct {
 	Complexity       int    `json:"complexity,omitempty"`
 	ComplexityReason string `json:"complexity_reason,omitempty"`
 	ComplexityBucket string `json:"complexity_bucket,omitempty"`
+
+	// Denormalized fields for cheap anti-explosion guards (mirrors pkg/types.Task).
+	// ChildCount = number of direct children (by parent_id). DecomposedAt set on first decomposition.
+	DecomposedAt string `json:"decomposed_at,omitempty"`
+	ChildCount   int    `json:"child_count,omitempty"`
 }
 
 func randomHex(n int) string {
@@ -760,6 +765,23 @@ func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lightweight early-out guard (symmetric to the anti-explosion guard in Runner.handlePM).
+	// Prevents re-committing the same Plan New Work session and re-seeding hundreds of
+	// "planned" items that then get exploded by PM decomposition.
+	if session.Status == "committed" || len(session.CommittedDocs) > 0 {
+		s.logger.Info("intake commit: session already committed, skipping duplicate creation",
+			slog.String("session_id", sessionID),
+			slog.Int("existing_committed_count", len(session.CommittedDocs)))
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":      true,
+			"count":   len(session.CommittedDocs),
+			"created": 0,
+			"taskIds": session.CommittedDocs,
+			"already_committed": true,
+		})
+		return
+	}
+
 	finalPlan := req.Plan
 	if finalPlan == nil {
 		if draft, ok := session.DraftPlan.(map[string]interface{}); ok {
@@ -963,6 +985,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			ComplexityReason: "planner ComplexityScore (PR2 creation)",
 			ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			DependsOn:  []string{},
+			ChildCount: 0,
+			DecomposedAt: "",
 		})
 
 		for _, feat := range epic.Features {
@@ -986,11 +1010,18 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				Complexity:       plan.ComplexityScore,
 				ComplexityReason: "planner ComplexityScore (feature PR2)",
 				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
+				ChildCount: 0,
+				DecomposedAt: "",
 			})
 
 			for _, story := range feat.Stories {
 				storyID := fmt.Sprintf("story-%d", storySeq)
 				storySeq++
+				// Stories are the direct organizational parents of executable implementer tasks.
+				// We create them as "ready" (instead of "planned") so that:
+				//   - Their child tasks can be promoted by promotePlannedTasks (parent check passes)
+				//   - They are immediately visible/actionable in the work queue
+				// Higher-level epics/feats remain "planned" as pure PM containers.
 				docs = append(docs, AgentTaskRecord{
 					ID:                 storyID,
 					Title:              story.Title,
@@ -998,7 +1029,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					Repo:               repo,
 					ItemType:           "story",
 					Owner:              "pm",
-					Status:             "planned",
+					Status:             "ready",
 					Priority:           "medium",
 					Risk:               "medium",
 					ParentID:           featID,
@@ -1010,6 +1041,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 					CreatedAt:          now,
 					UpdatedAt:          now,
+					ChildCount: 0,
+					DecomposedAt: "",
 				})
 
 				prevTaskID := ""
@@ -1048,6 +1081,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 						CreatedAt:          now,
 						UpdatedAt:          now,
+						ChildCount: 0,
+						DecomposedAt: "",
 					})
 					prevTaskID = taskID
 				}
@@ -1106,6 +1141,8 @@ func (s *Server) buildFastPathTasks(ctx context.Context, plan PlanResponse, repo
 					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 						CreatedAt:          now,
 						UpdatedAt:          now,
+						ChildCount: 0,
+						DecomposedAt: "",
 					})
 					prevTaskID = taskID
 				}

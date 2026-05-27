@@ -117,6 +117,12 @@ type Task struct {
 	DependsOn       []string   `json:"depends_on,omitempty"`
 	ReviewVerdict   string     `json:"review_verdict,omitempty"`
 	Feedback        string     `json:"feedback,omitempty"`
+
+	// DecomposedAt and ChildCount are denormalized fields for cheap guards against
+	// re-decomposition explosions (see Runner.handlePM and intake commit paths).
+	// Updated by the PM/implementer after creating children.
+	DecomposedAt *time.Time `json:"decomposed_at,omitempty"`
+	ChildCount   int        `json:"child_count,omitempty"`
 }
 
 // ─── Worker ─────────────────────────────────────────────────────────────────

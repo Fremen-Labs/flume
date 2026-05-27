@@ -343,8 +343,52 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 }
 
 // handlePM runs the PM agent for task decomposition.
+//
+// Anti-explosion guard (added 2026-05):
+//   If this PM task already has any direct children in agent-task-records,
+//   we skip the LLM call + subtask creation entirely. This prevents the
+//   runaway decomposition loop observed when small Plan New Work outputs
+//   (even 2-4 leaf tasks) triggered repeated PM claims on the same parents,
+//   creating hundreds of near-duplicate planned items.
+//
+// The guard is cheap (single small search) and reuses the exact child
+// query pattern already present in parentCompletionSweep.
 func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("pm: decomposing", slog.String("task_id", task.ID))
+
+	// === Anti-re-decomposition guard (core fix for workitem explosion) ===
+	// Prefer the cheap denormalized ChildCount / DecomposedAt (populated by previous decompositions
+	// and by intake creation). Fall back to a small child search if the denorm fields are not yet set.
+	if task.ChildCount > 0 || task.DecomposedAt != nil {
+		r.logger.Info("pm: skipping re-decomposition — denorm fields indicate children exist (cheap guard)",
+			slog.String("task_id", task.ID),
+			slog.Int("child_count", task.ChildCount),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
+	}
+
+	childQuery := map[string]interface{}{
+		"term": map[string]string{"parent_id": task.ID},
+	}
+	childRes, cerr := r.es.Search(ctx, "agent-task-records", childQuery, 1)
+	if cerr == nil && len(childRes.Hits) > 0 {
+		r.logger.Info("pm: skipping re-decomposition — task already has children (anti-explosion guard)",
+			slog.String("task_id", task.ID),
+			slog.Int("existing_child_count", len(childRes.Hits)),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
+	}
+	if cerr != nil {
+		r.logger.Warn("pm: child-existence check failed (proceeding conservatively)",
+			slog.String("task_id", task.ID),
+			slog.String("error", cerr.Error()))
+	}
 
 	pmSystemPrompt := readSystemPrompt("pm")
 	req := llm.ChatRequest{
@@ -414,6 +458,16 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 	}
 
 	r.logger.Info("pm: task decomposed successfully", slog.Int("subtasks", len(plan.Tasks)))
+
+	// Maintain denormalized fields on the parent for cheap future guards (see top of this function).
+	// Best-effort update — races are acceptable for this observability/guard field.
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	update := map[string]interface{}{
+		"child_count":   len(plan.Tasks), // set (or could script-increment for concurrent safety)
+		"decomposed_at": nowISO,
+		"updated_at":    nowISO,
+	}
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
 
 	return ftypes.AgentResult{
 		Success:    true,
@@ -804,6 +858,15 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		slog.String("parent_id", parent.ID),
 		slog.String("rev_task_id", revTask.ID),
 		slog.String("test_task_id", testTask.ID))
+
+	// Maintain denorm fields on parent for cheap guards (best-effort).
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	update := map[string]interface{}{
+		"child_count":   2, // reviewer + tester
+		"decomposed_at": nowISO,
+		"updated_at":    nowISO,
+	}
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
 
 	return nil
 }

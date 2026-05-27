@@ -270,6 +270,9 @@ var allIndices = []indexDef{
 				"created_at":                  map[string]interface{}{"type": "date"},
 				"updated_at":                  map[string]interface{}{"type": "date"},
 				"last_update":                 map[string]interface{}{"type": "date"},
+				// New denormalized fields for cheap anti-explosion guards (Plan New Work + PM decomposition)
+				"decomposed_at":               map[string]interface{}{"type": "date"},
+				"child_count":                 map[string]interface{}{"type": "integer"},
 			},
 		},
 	}},
@@ -740,6 +743,9 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 					"owner":               map[string]interface{}{"type": "keyword"},
 					"updated_at":          map[string]interface{}{"type": "date"},
 					"last_update":         map[string]interface{}{"type": "date"},
+					// New denormalized fields for cheap anti-explosion guards (Plan New Work + PM decomposition)
+					"decomposed_at":       map[string]interface{}{"type": "date"},
+					"child_count":         map[string]interface{}{"type": "integer"},
 					"execution_thoughts":  map[string]interface{}{"type": "object", "enabled": false},
 					"agent_log":           map[string]interface{}{"type": "object", "enabled": false},
 					"doc":                 map[string]interface{}{"type": "object", "enabled": false},
