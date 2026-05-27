@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/config"
@@ -875,9 +876,20 @@ func (s *Server) esCounterSetHWM(ctx context.Context, prefix string, value int) 
 }
 
 func (s *Server) getNextIDSequence(ctx context.Context, prefix string) int {
+	idSequenceCacheMu.Lock()
+	defer idSequenceCacheMu.Unlock()
+
+	if cached, ok := idSequenceCache[prefix]; ok {
+		// Fast path: in-memory allocation after initial seed.
+		// This is the key performance fix for Plan New Work commits.
+		idSequenceCache[prefix] = cached + 1
+		return cached + 1
+	}
+
+	// Slow path (only on first use per prefix per process lifetime, or after restart):
+	// Seed from the persisted HWM + defensive full scan (original behavior).
 	maxN := s.esCounterHWM(ctx, prefix)
 
-	// Query ES to find the highest sequence number in active task records
 	query := map[string]interface{}{
 		"regexp": map[string]interface{}{
 			"id": prefix + "-[0-9]+",
@@ -904,14 +916,29 @@ func (s *Server) getNextIDSequence(ctx context.Context, prefix string) int {
 		}
 	} else {
 		if maxN == 0 {
-			return int(timeNowUnixMilli()%1000000) + 1
+			// Fallback for brand new installations
+			fallback := int(timeNowUnixMilli()%1000000) + 1
+			idSequenceCache[prefix] = fallback
+			return fallback
 		}
 	}
 
-	return maxN + 1
+	next := maxN + 1
+	idSequenceCache[prefix] = next
+	return next
 }
 
 var filenameRegexp = regexp.MustCompile(`(?i)\b([\w\.\-]+\.(?:tsx|ts|js|jsx|py|go|html|css|md|json|yml|yaml))\b`)
+
+// idSequenceCache provides fast in-memory allocation of human-readable IDs
+// (epic-N, feat-N, story-N, task-N) after an initial seed from ES.
+//
+// This eliminates the previous performance problem where every Plan New Work
+// commit performed 4 expensive regexp scans (size 10k) against agent-task-records.
+var (
+	idSequenceCache   = make(map[string]int)
+	idSequenceCacheMu sync.Mutex
+)
 
 func extractTargetFile(title string) string {
 	match := filenameRegexp.FindStringSubmatch(title)
