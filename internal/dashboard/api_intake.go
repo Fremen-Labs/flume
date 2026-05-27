@@ -500,6 +500,7 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		Temperature: 0.3,
 		MaxTokens:   8192,
 		AgentRole:   "intake",
+		TaskType:    "planning", // Use lower complexity routing for the planner itself (improves Plan New Work UX)
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -688,6 +689,7 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		Temperature: 0.3,
 		MaxTokens:   8192,
 		AgentRole:   "intake",
+		TaskType:    "planning", // Use lower complexity routing for the planner itself (improves Plan New Work UX)
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -825,6 +827,16 @@ func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 	session.UpdatedAt = now
 
 	_ = s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
+
+	// Immediately nudge the worker sweeper for this specific repo.
+	// This gives much better "Plan New Work → tasks appear in Ready" UX
+	// instead of waiting for the next global 2-5s promote cycle.
+	if s.onSweepTrigger != nil {
+		go func(r string) {
+			time.Sleep(150 * time.Millisecond) // tiny delay for ES visibility
+			_ = s.onSweepTrigger("promote:" + r)
+		}(repo)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,

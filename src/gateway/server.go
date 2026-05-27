@@ -321,7 +321,10 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	var resp *ChatResponse
 	var err error
 
-	taskType := agentRoleToTaskType(req.AgentRole)
+	taskType := req.TaskType
+	if taskType == "" {
+		taskType = agentRoleToTaskType(req.AgentRole)
+	}
 	isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
 
 	if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {

@@ -57,6 +57,7 @@ type ChatRequest struct {
 	MaxTokens        int       `json:"max_tokens"`
 	Think            bool      `json:"think,omitempty"`
 	AgentRole        string    `json:"agent_role,omitempty"`
+	TaskType         string    `json:"task_type,omitempty"` // "planning", "code", "reasoning", etc. — overrides AgentRole-derived type for routing
 	TaskID           string    `json:"task_id,omitempty"`
 	TimeoutSeconds   int       `json:"-"` // client-side timeout, not sent to gateway
 	ReturnUsage      bool      `json:"-"`

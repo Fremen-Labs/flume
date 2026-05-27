@@ -19,6 +19,7 @@ type ChatRequest struct {
 	Think        bool      `json:"think,omitempty"`
 	CredentialID string    `json:"credential_id,omitempty"`
 	AgentRole    string    `json:"agent_role,omitempty"`
+	TaskType     string    `json:"task_type,omitempty"` // explicit override (e.g. "planning" for intake planner itself)
 	Stream       bool      `json:"stream,omitempty"`
 	TaskID       string    `json:"task_id,omitempty"`
 }

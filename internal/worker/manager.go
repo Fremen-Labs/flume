@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -95,14 +96,23 @@ func (m *Manager) Wake() {
 }
 
 // TriggerSweep manually triggers a specific sweep synchronously.
+// Supports "promote:<repo>" for targeted post-commit promotion.
 func (m *Manager) TriggerSweep(ctx context.Context, sweepName string) error {
 	m.logger.Info("manually triggering sweep", slog.String("sweep", sweepName))
+
+	// Support targeted repo promote: "promote:rflow"
+	if strings.HasPrefix(sweepName, "promote:") {
+		repo := strings.TrimPrefix(sweepName, "promote:")
+		m.sweeper.promotePlannedTasks(ctx, repo)
+		return nil
+	}
+
 	switch sweepName {
 	case "stuck-worker", "stuck_worker_watchdog":
 		m.sweeper.requeueStuckImplementerTasks(ctx)
 		m.sweeper.requeueStuckReviewTasks(ctx)
 	case "parent-revival", "promote":
-		m.sweeper.promotePlannedTasks(ctx, "")  // repoFilter empty = global (unified promote)
+		m.sweeper.promotePlannedTasks(ctx, "") // global
 	case "auto-unblock", "resume":
 		m.sweeper.ExecuteResumeSweep(ctx)
 	default:

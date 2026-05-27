@@ -466,7 +466,7 @@ func (p *RoutingPolicy) PersistSpendIfDue(ctx context.Context, esURL string, htt
 // complexity score for hybrid routing decisions.
 var taskTypeComplexity = map[string]int{
 	"reasoning":  8,
-	"planning":   8,
+	"planning":   5,  // Planning the work (intake) should be cheaper/faster than executing high-complexity work
 	"code":       6,
 	"generic":    4,
 	"evaluation": 3,
