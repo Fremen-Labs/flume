@@ -13,7 +13,10 @@
 //   - dashboard/agent_models_settings.py                 — AgentRoleSpec, AgentModelsDoc
 package types
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // ─── Task Lifecycle ─────────────────────────────────────────────────────────
 
@@ -334,9 +337,25 @@ func NewTaskStateMachine(shadow bool) *TaskStateMachine {
 }
 
 // DefaultTaskStateMachine is the process-wide enforcer singleton.
-// Initialized in shadow mode per design for this PR. Flip to false after
-// audit shows clean adoption across all writers.
-var DefaultTaskStateMachine = NewTaskStateMachine(true)
+//
+// Shadow mode (default) logs violations for audit but allows the write to proceed.
+// This was the safe rollout strategy for PR2 (flume-queue-planning-reliability).
+//
+// The mode can be controlled at startup via the environment variable:
+//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=false   → hard enforcement (strict mode)
+//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=true    → shadow mode (default)
+//
+// After an audit period with zero violations in production logs, operators
+// should flip to strict mode in non-critical environments first.
+var DefaultTaskStateMachine = NewTaskStateMachine(defaultShadowMode())
+
+func defaultShadowMode() bool {
+	v := os.Getenv("FLUME_TASK_STATE_MACHINE_SHADOW_MODE")
+	if v == "" {
+		return true // safe default for rollout
+	}
+	return v != "false" && v != "0" && v != "off"
+}
 
 // EnforceTransition is the primary entrypoint called by 100% of status writers.
 //
@@ -357,18 +376,20 @@ func (sm *TaskStateMachine) EnforceTransition(current, target TaskStatus) error 
 	err := ValidateTransition(current, target)
 	if err != nil && sm.ShadowMode {
 		// Shadow mode: the violation is "enforced" only for observability.
-		// Caller MUST log e.g.:
-		//   logger.Warn("SHADOW MODE: TaskStateMachine violation (write allowed)",
-		//       "err", err, "task_id", id, "from", current, "to", target)
-		// This populates the audit trail and can be aggregated into metrics.
+		// Callers are expected to log using EnforceTransitionOrLog (preferred) or
+		// manually log with rich context so that LogLoom + ES can aggregate violations.
 	}
-	// Future non-shadow: return err to hard block (or perform compensating write).
+	// In non-shadow (strict) mode, the caller is responsible for respecting the returned error
+	// and aborting the write (see current behavior in runner.go:111 and similar sites).
 	return err
 }
 
 // EnforceTransitionOrLog is a convenience for sites that have a logger.
 // In shadow mode, violations are logged at Warn but write proceeds.
 // In strict mode, error is returned and caller should not write.
+//
+// All violation logs include consistent fields for easy aggregation
+// via LogLoom / Elasticsearch (search for "TaskStateMachine" + "shadow").
 func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransition(current, target)
 	if err != nil && sm.ShadowMode && logFn != nil {
@@ -377,7 +398,15 @@ func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, l
 			"from", current,
 			"to", target,
 			"shadow", true,
+			"violation", true, // easy filter for dashboards / alerts
 		)
 	}
 	return err
+}
+
+// SetDefaultShadowMode allows runtime control of the global DefaultTaskStateMachine
+// (primarily for tests or operator-driven flips after an audit period).
+// It is not recommended for normal production use — prefer the env var at startup.
+func SetDefaultShadowMode(shadow bool) {
+	DefaultTaskStateMachine = NewTaskStateMachine(shadow)
 }

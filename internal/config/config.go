@@ -54,6 +54,13 @@ type Config struct {
 
 	// ── Runtime Flags ────────────────────────────────────────
 	NativeMode bool `json:"native_mode"` // FLUME_NATIVE_MODE=1
+
+	// TaskStateMachineShadowMode controls whether the central TaskStateMachine
+	// (used by all status writers) runs in shadow mode.
+	// In shadow mode (default=true for safe rollout), violations are logged
+	// but writes proceed. Set FLUME_TASK_STATE_MACHINE_SHADOW_MODE=false to
+	// enable hard enforcement (recommended after audit shows zero violations).
+	TaskStateMachineShadowMode bool `json:"task_state_machine_shadow_mode"`
 }
 
 // DefaultConfig returns a Config with compiled defaults matching
@@ -167,6 +174,14 @@ func (c *Config) OverlayFromEnv() {
 		}
 	}
 	c.NativeMode = os.Getenv("FLUME_NATIVE_MODE") == "1"
+
+	// Default to shadow mode (true) for safe rollout per PR2 design.
+	shadowEnv := os.Getenv("FLUME_TASK_STATE_MACHINE_SHADOW_MODE")
+	if shadowEnv == "" {
+		c.TaskStateMachineShadowMode = true
+	} else {
+		c.TaskStateMachineShadowMode = shadowEnv != "false" && shadowEnv != "0"
+	}
 }
 
 // OverlayFromES attempts to read configuration from Elasticsearch.
