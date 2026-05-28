@@ -230,3 +230,64 @@ func NewTestLogger(w io.Writer) *slog.Logger {
 	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
 	return slog.New(&secureHandler{inner: h})
 }
+
+// TaskLogger returns a logger pre-enriched with task context.
+// It attempts to attach Logloom node information when available.
+func TaskLogger(ctx context.Context, taskID string, extra ...any) *slog.Logger {
+	attrs := []any{
+		slog.String("task_id", taskID),
+	}
+	attrs = append(attrs, extra...)
+
+	l := WithContext(ctx).With(attrs...)
+
+	// If the current task has an associated ll_node (from Logloom graph),
+	// it can be injected here in the future via task metadata.
+	return l
+}
+
+// LogStateTransition is a convenience helper for the work queue state machine.
+// It ensures consistent structured logging for all planned → ready → in_progress etc. transitions.
+func LogStateTransition(ctx context.Context, taskID, fromStatus, toStatus string, reason string, extra ...any) {
+	attrs := []any{
+		slog.String("task_id", taskID),
+		slog.String("from_status", fromStatus),
+		slog.String("to_status", toStatus),
+		slog.String("reason", reason),
+	}
+	attrs = append(attrs, extra...)
+	TaskLogger(ctx, taskID).Info("task state transition", attrs...)
+}
+
+// LogAgentReasoning captures the agent's internal reasoning / thoughts.
+// This is what should feed the "agent reasoning popout" in the work queue UI.
+func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string, metadata ...any) {
+	attrs := []any{
+		slog.String("task_id", taskID),
+		slog.String("agent_role", agentRole),
+		slog.String("reasoning", reasoning),
+	}
+	attrs = append(attrs, metadata...)
+	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
+}
+
+// LogLLMCall logs details of an LLM invocation with proper structure.
+func LogLLMCall(ctx context.Context, taskID, provider, model string, promptTokens, completionTokens int, durationMs float64, err error, extra ...any) {
+	attrs := []any{
+		slog.String("task_id", taskID),
+		slog.String("provider", provider),
+		slog.String("model", model),
+		slog.Int("prompt_tokens", promptTokens),
+		slog.Int("completion_tokens", completionTokens),
+		slog.Float64("duration_ms", durationMs),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("error", err.Error()))
+	}
+	attrs = append(attrs, extra...)
+	level := slog.LevelInfo
+	if err != nil {
+		level = slog.LevelError
+	}
+	TaskLogger(ctx, taskID).Log(ctx, level, "llm call", attrs...)
+}

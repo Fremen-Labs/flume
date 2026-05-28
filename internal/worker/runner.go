@@ -471,7 +471,7 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 
 	return ftypes.AgentResult{
 		Success:    true,
-		NextStatus: ftypes.TaskStatusRunning, // PM task is running while subtasks execute
+		NextStatus: ftypes.TaskStatusDone, // Decomposition complete; subtasks + sweep drive completion. Prevents lingering PM org items.
 	}, nil
 }
 
