@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 type LastCommit struct {
@@ -1093,4 +1095,64 @@ func (s *Server) handleWebSocketTelemetry(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
+}
+
+// handleStructuredLog ingests POST /api/logs/structured from the new frontend
+// centralized logger (src/frontend/src/lib/logger.ts). Entries are re-emitted
+// via the package logger so they gain redaction, Logloom AST node enrichment
+// (when the logloom handler is active), and consistent backend structure.
+// Future: load a cached Logloom graph JSON at Server init and enrich context
+// with call-graph neighbors / coverage gaps for the provided llNode or task.
+func (s *Server) handleStructuredLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var entry struct {
+		Timestamp string                 `json:"timestamp"`
+		Level     string                 `json:"level"`
+		Message   string                 `json:"message"`
+		Context   map[string]interface{} `json:"context"`
+		Error     *struct {
+			Message string `json:"message"`
+			Stack   string `json:"stack,omitempty"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	attrs := []any{
+		slog.String("source", "frontend-structured"),
+		slog.String("frontend_ts", entry.Timestamp),
+		slog.String("ll_node", fmt.Sprintf("%v", entry.Context["llNode"])),
+	}
+	for k, v := range entry.Context {
+		if k != "llNode" {
+			attrs = append(attrs, slog.Any(k, v))
+		}
+	}
+	if entry.Error != nil {
+		attrs = append(attrs, slog.String("error", entry.Error.Message))
+		if entry.Error.Stack != "" {
+			attrs = append(attrs, slog.String("stack", entry.Error.Stack))
+		}
+	}
+
+	lvl := slog.LevelInfo
+	switch strings.ToLower(entry.Level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn", "warning":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	}
+
+	flumelogger.Log().Log(r.Context(), lvl, entry.Message, attrs...)
+
+	// Ack (no content). In prod this could also fan-out to ES/OTEL with the enriched attrs.
+	w.WriteHeader(http.StatusNoContent)
 }

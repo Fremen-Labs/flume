@@ -156,6 +156,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/system-state", s.handleSystemState)
 	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
 	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
+	s.mux.HandleFunc("POST /api/logs/structured", s.handleStructuredLog) // wired for new frontend @/lib/logger transport + Logloom enrichment
 	s.mux.HandleFunc("GET /ws/telemetry", s.handleWebSocketTelemetry)
 	s.mux.HandleFunc("GET /api/exo-status", s.handleExoStatus)
 	s.mux.HandleFunc("GET /api/autonomy/status", s.handleAutonomyStatus)

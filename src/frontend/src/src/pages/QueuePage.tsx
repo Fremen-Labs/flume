@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApiTask } from '@/types';
 import { createLogger } from '@/utils/logger';
+import { logger } from '@/lib/logger';
 
 const log = createLogger('pages.QueuePage');
 
@@ -85,6 +86,12 @@ export default function QueuePage() {
       toast({
         title: 'Task unblocked',
         description: ins ? 'Guidance saved; task re-queued.' : 'Recovery hint added; task re-queued.',
+      });
+      // Demonstrate new logger + agent reasoning for state transition from UI (feeds Logloom + backend)
+      logger.agentReasoning(unblockTarget.id, ins ? 'User provided recovery guidance and re-queued task' : 'User re-queued blocked task (no custom note)', {
+        component: 'QueuePage.unblock',
+        previousStatus: 'blocked',
+        newStatus: 'ready',
       });
       setUnblockTarget(null);
       setUnblockQueueNote('');
@@ -278,6 +285,11 @@ export default function QueuePage() {
                         setThoughtTaskTitle(item.title);
                         setThoughtTaskStatus(item.status);
                         setDrawerOpen(true);
+                        // Use the new centralized logger's agentReasoning helper (step 2 of logger uplift)
+                        logger.agentReasoning(item.id, 'User opened agent reasoning drawer', {
+                          component: 'QueuePage',
+                          status: item.status,
+                        });
                       };
                       const cardInner = (
                         <>

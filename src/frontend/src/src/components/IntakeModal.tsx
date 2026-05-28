@@ -9,6 +9,7 @@ import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { safeFetchJson } from '@/utils/safeFetch';
 import { createLogger } from '@/utils/logger';
+import { logger } from '@/lib/logger';
 
 const log = createLogger('components.IntakeModal');
 
@@ -425,6 +426,12 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setCommitted(true);
       setPhase('committed');
       log.info('commitWork', 'Work committed to queue', { sessionId, taskCount: data.count ?? 0 });
+      // New centralized logger: record the intake commit as agent-visible reasoning (ties UI action to Logloom graph)
+      logger.agentReasoning('intake', `Committed plan with ${data.count ?? 0} tasks via IntakeModal`, {
+        component: 'IntakeModal',
+        sessionId,
+        projectId,
+      });
       qc.invalidateQueries({ queryKey: ['snapshot'] });
       qc.invalidateQueries({ queryKey: ['project-tasks', projectId] });
     } catch (e: unknown) {

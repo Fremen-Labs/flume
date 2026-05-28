@@ -19,6 +19,7 @@ import (
 	"github.com/Fremen-Labs/flume/internal/es"
 	"github.com/Fremen-Labs/flume/internal/git"
 	"github.com/Fremen-Labs/flume/internal/llm"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -766,11 +767,20 @@ func BranchHasNewCommits(repoPath, branch string) bool {
 
 // ImplementerHandleLLMFailure handles LLM errors with retry/block logic.
 // Derived from Python: _implementer_handle_llm_failure() (L2129-2183)
+// Now uses centralized LogStateTransition + LogAgentReasoning so failures and
+// retry decisions are visible in the agent reasoning popout + Logloom graphs.
 func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string, task ftypes.Task) {
 	failureCount := task.Attempts + 1
 	maxCap := implementerMaxLLMFailuresCap()
 
 	if failureCount >= maxCap {
+		reason := fmt.Sprintf("blocked after %d LLM failures (cap=%d)", failureCount, maxCap)
+		flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "blocked", reason)
+		flumelogger.LogAgentReasoning(ctx, taskID, "implementer", reason, map[string]any{
+			"failures": failureCount,
+			"cap":      maxCap,
+			"action":   "block",
+		})
 		r.logger.Error("implementer: task blocked after LLM failures",
 			slog.String("task_id", taskID),
 			slog.Int("failures", failureCount),
@@ -779,13 +789,20 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			// PR2 LLM fail block guarded
 			"status":         "blocked",
 			"attempts":       failureCount,
-			"error_message":  fmt.Sprintf("blocked after %d LLM failures (cap=%d)", failureCount, maxCap),
+			"error_message":  reason,
 			"active_worker":  nil,
 			"queue_state":    "available",
 			"updated_at":     time.Now().UTC().Format(time.RFC3339),
 		}
 		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
 	} else {
+		reason := fmt.Sprintf("LLM failure #%d < cap=%d; re-queued for retry", failureCount, maxCap)
+		flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "ready", reason)
+		flumelogger.LogAgentReasoning(ctx, taskID, "implementer", reason, map[string]any{
+			"attempt": failureCount,
+			"max":     maxCap,
+			"action":  "requeue",
+		})
 		r.logger.Warn("implementer: task re-queued for retry",
 			slog.String("task_id", taskID),
 			slog.Int("attempt", failureCount),

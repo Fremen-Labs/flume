@@ -213,7 +213,20 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 
 			// Fall through to legacy
 		} else {
-			return c.parseChatResponse(ctx, resp)
+			respParsed, perr := c.parseChatResponse(ctx, resp)
+			if perr == nil && req.TaskID != "" {
+				usage := respParsed.Usage
+				pt := 0
+				ct := 0
+				if u, ok := usage["prompt_tokens"].(float64); ok {
+					pt = int(u)
+				}
+				if u, ok := usage["completion_tokens"].(float64); ok {
+					ct = int(u)
+				}
+				flumelogger.LogLLMCall(ctx, req.TaskID, req.Provider, req.Model, pt, ct, 0, nil)
+			}
+			return respParsed, perr
 		}
 	}
 
@@ -267,7 +280,21 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 				}
 			}
 		} else {
-			return c.parseToolsResponse(resp)
+			respParsed, perr := c.parseToolsResponse(resp)
+			if perr == nil && req.TaskID != "" {
+				usage := respParsed.Usage
+				pt := 0
+				ct := 0
+				if u, ok := usage["prompt_tokens"].(float64); ok {
+					pt = int(u)
+				}
+				if u, ok := usage["completion_tokens"].(float64); ok {
+					ct = int(u)
+				}
+				flumelogger.LogLLMCall(ctx, req.TaskID, req.Provider, req.Model, pt, ct, 0, nil,
+					"tool_calls", len(respParsed.Message.ToolCalls))
+			}
+			return respParsed, perr
 		}
 	}
 

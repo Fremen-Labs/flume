@@ -16,6 +16,7 @@ import (
 
 	"github.com/Fremen-Labs/flume/internal/es"
 	"github.com/Fremen-Labs/flume/internal/llm"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -488,13 +489,13 @@ func (c *Claimer) DeleteRemoteBranchForTask(ctx context.Context, branch, repoID 
 // ─── Telemetry ──────────────────────────────────────────────────────────────
 
 // LogTaskStateTransition records a task lifecycle event.
-// Derived from Python: es/telemetry.log_task_state_transition() (L61)
+// Now delegates to the centralized structured helper (Logloom-friendly) while
+// preserving the legacy telemetry ES index write for backward compat.
 func (c *Claimer) LogTaskStateTransition(ctx context.Context, taskID, from, to string) {
-	c.logger.Info("Lifecycle Event: task state transition",
-		slog.String("task_id", taskID),
-		slog.String("from", from),
-		slog.String("to", to))
+	// Use the new FAANG-grade helper — this ensures consistent attrs + Logloom correlation
+	flumelogger.LogStateTransition(ctx, taskID, from, to, "lifecycle event via claimer", slog.String("node_id", c.nodeID))
 
+	// Legacy telemetry (kept for existing dashboards / Python consumers)
 	event := map[string]interface{}{
 		"@timestamp": time.Now().UTC().Format(time.RFC3339),
 		"event":      "TASK_STATE_TRANSITION",
