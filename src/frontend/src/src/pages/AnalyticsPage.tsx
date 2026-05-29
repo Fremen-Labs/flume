@@ -78,6 +78,9 @@ export default function AnalyticsPage() {
   const estimatedCost = tm?.estimated_cost_usd ?? 0;
   const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
   const historicalBurn = tm?.historical_burn ?? [];
+  // Local mesh / hybrid (Recommendation 1): data-driven est + note when no Elastro savings docs
+  const localMeshEst = tm?.local_mesh_estimated_savings ?? 0;
+  const meshEfficiencyNote = tm?.mesh_efficiency_note ?? (tm as any)?.local_mesh_efficiency_note;
   
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
@@ -167,23 +170,28 @@ export default function AnalyticsPage() {
             />
             <GlassMetricCard
               title="System Memory"
-              value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'}
+              value={telemetry && typeof telemetry.go_memstats_sys_bytes === 'number' && !isNaN(telemetry.go_memstats_sys_bytes)
+                ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB`
+                : '—'}
               icon={Cpu}
-              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process."
+              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process. Falls back to local runtime when gateway live metrics unavailable."
               loading={telLoading}
               error={telErrMsg}
-              secondary={telemetry ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
+              secondary={telemetry && typeof telemetry.go_goroutines === 'number' ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
             />
             <GlassMetricCard
               title="AST Savings"
-              value={fmtTokens(realSavings)}
+              value={realSavings > 0 ? fmtTokens(realSavings) : (localMeshEst ? fmtTokens(localMeshEst) + " (mesh est.)" : fmtTokens(0))}
               icon={TrendingUp}
-              trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }}
-              helpText="Elastro context compression savings (tokens) vs naive full baseline prompts. Savings aggregated from agent-token-telemetry ES index (baseline_tokens - actual). Powers cheaper, smarter long-context code gen."
+              trend={{ value: savingsPercent, label: realSavings > 0 ? `$${dollarsSaved.toFixed(2)} saved vs base cost` : "Local mesh efficiency", suffix: '%' }}
+              helpText="Hybrid model: Elastro (when present) delivers precise AST-aware compression savings vs naive full-context baseline (sourced from agent-token-telemetry 'savings' docs). In local-only / mesh mode (no Elastro data): data-driven estimate of tokens avoided via intelligent multi-node routing + LogLoom-path structural awareness, computed live from Telemetry Bridge (flume_worker_tokens_total + routing decisions + node loads). See mesh_efficiency_note for derivation details."
               loading={snapLoading}
               error={snapErrMsg}
               partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
-              secondary={{ label: 'baseline', value: fmtTokens(baselineTokens) }}
+              secondary={realSavings > 0 
+                ? { label: 'Elastro', value: `${fmtTokens(baselineTokens)} baseline` } 
+                : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined)
+              }
             />
             <GlassMetricCard
               title="VRAM Pressure"

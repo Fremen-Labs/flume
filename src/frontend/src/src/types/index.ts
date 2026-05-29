@@ -126,6 +126,12 @@ export interface Snapshot {
       output_tokens: number;
       role: string;
     }>;
+    // Recommendation 1: local mesh / hybrid AST Savings (populated server-side when Elastro savings==0)
+    // Derived data-driven from Telemetry Bridge (flume_worker_tokens_total + routing decisions + node loads).
+    // local_mesh_estimated_savings: estimated tokens avoided in pure local mesh via intelligent routing + structural (LogLoom-path) awareness.
+    // mesh_efficiency_note: explains the hybrid model and derivation factors (observable via LogAgentReasoning on backend).
+    local_mesh_estimated_savings?: number;
+    mesh_efficiency_note?: string;
   };
 
   // Grok uplift (Total Tasks card): efficient authoritative count + breakdown

@@ -77,6 +77,9 @@ describe('Type Contracts', () => {
           historical_burn: [
             { worker_name: 'impl-1', input_tokens: 2000, output_tokens: 500, role: 'implementer' },
           ],
+          // Recommendation 1 hybrid fields (local-only/mesh mode when no Elastro)
+          local_mesh_estimated_savings: 1840,
+          mesh_efficiency_note: "Data-driven ... 28% mesh-local ... Hybrid model: Elastro=precise...; mesh=structural...",
         },
         elastro_savings: 1234,
       };
@@ -91,6 +94,9 @@ describe('Type Contracts', () => {
         expect(entry).toHaveProperty('output_tokens');
         expect(entry).toHaveProperty('role');
       }
+      // Recommendation 1: assert hybrid local mesh fields are accepted in contract (when Elastro savings absent)
+      expect(sample.token_metrics?.local_mesh_estimated_savings).toBeTypeOf('number');
+      expect(typeof sample.token_metrics?.mesh_efficiency_note === 'string' || sample.token_metrics?.mesh_efficiency_note === undefined).toBe(true);
       expect(mod).toBeDefined();
     });
   });
