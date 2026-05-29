@@ -590,6 +590,11 @@ func StartGateway(addr string) error {
 	server.mux.HandleFunc("POST /api/nodes/{id}/test", server.handleTestNode)
 	server.mux.HandleFunc("DELETE /api/nodes/{id}", server.handleDeleteNode)
 
+	// Live gateway metrics JSON endpoint for dashboard telemetry (restores flume_*
+	// live gauges to Analytics VRAM Pressure / Node Mesh cards etc).
+	// See metrics.go:BuildLiveGatewayMetrics and LiveGatewayMetrics.
+	server.mux.HandleFunc("GET /api/gateway-metrics", server.handleGatewayMetrics)
+
 	// Routing Policy API endpoints.
 	server.mux.HandleFunc("GET /api/routing-policy", server.handleGetRoutingPolicy)
 	server.mux.HandleFunc("PUT /api/routing-policy", server.handlePutRoutingPolicy)
@@ -672,6 +677,20 @@ func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
 		"nodes": nodes,
 		"count": len(nodes),
 	})
+}
+
+// handleGatewayMetrics serves the clean structured live metrics JSON.
+// Populated from Metrics registry + NodeRegistry.CurrentLoad etc.
+// Used exclusively by dashboard handleTelemetry (via GATEWAY_URL) to repair
+// the post-migration data path for flume_vram_pressure_events_total,
+// flume_node_load, flume_active_models and sibling gauges.
+// Prometheus /metrics remains untouched and is the external contract.
+func (s *Server) handleGatewayMetrics(w http.ResponseWriter, r *http.Request) {
+	log := WithContext(r.Context())
+	log.Debug("handling GET /api/gateway-metrics (live telemetry for dashboard)")
+
+	live := BuildLiveGatewayMetrics(s.nodeRegistry)
+	s.writeJSON(w, http.StatusOK, live)
 }
 
 // handleAddNode registers a new Ollama node in the mesh.

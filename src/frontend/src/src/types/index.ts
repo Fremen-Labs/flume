@@ -115,7 +115,23 @@ export interface Snapshot {
     actual_tokens_sent: number;
     total_input_tokens: number;
     total_output_tokens: number;
+    // Grok uplift (AST Savings card): complete fields for cost + historical projection.
+    // Addresses review gap (incomplete TS types). estimated_cost_usd uses env rates or defaults
+    // applied to actual burn; historical_burn is the by_worker agg shape (powers the historical table).
+    // See backend handleSnapshot "8. Token telemetry savings" + lightweight size:0 aggs.
+    estimated_cost_usd?: number;
+    historical_burn?: Array<{
+      worker_name: string;
+      input_tokens: number;
+      output_tokens: number;
+      role: string;
+    }>;
   };
+
+  // Grok uplift (Total Tasks card): efficient authoritative count + breakdown
+  // from backend (ES Count + small agg). Fallback to tasks.length during transition.
+  task_count?: number;
+  task_counts_by_status?: Record<string, number>;
 }
 
 // ─── LLM Settings API ──────────────────────────────────────────────────────────

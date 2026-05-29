@@ -1179,17 +1179,36 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		}
 	}
 
-	// Quick hardening against concurrent implementer success races (observed in 74-task explosion):
-	// If any Review/Test children already exist for this parent, refuse. The first caller that
-	// passed the check gets to create the pair; subsequent concurrent callers will see them.
+	// Hardened guard (post live test 17-task dup explosion): Re-check right before creation to close race window.
+	// Under LLM failure + reset loops, multiple implementer completions can race. Stricter: refuse if *any* exist.
 	if existingReviewOrTest > 0 {
-		r.logger.Info("spawnReviewTasks skipped — review/test children already exist for parent (race protection)",
+		r.logger.Info("spawnReviewTasks skipped — review/test children already exist for parent (race protection + recheck)",
 			slog.String("parent_id", parent.ID),
 			slog.Int("existing", existingReviewOrTest))
 		flumelogger.LogAgentReasoning(ctx, parent.ID, "system",
-			"Refused additional review/test spawn — children already present (concurrent caller race avoided).",
+			"Refused additional review/test spawn — children already present (concurrent reset/spawn race closed).",
 			map[string]any{"parent_id": parent.ID, "existing": existingReviewOrTest})
 		return nil
+	}
+
+	// Final atomic-ish recheck using fresh search before any Index to minimize dup window under high churn.
+	recheckRes, recheckErr := r.es.Search(ctx, "agent-task-records", childQuery, 10)
+	if recheckErr == nil {
+		recheckCount := 0
+		for _, h := range recheckRes.RawHits {
+			var c ftypes.Task
+			if json.Unmarshal(h.Source, &c) == nil {
+				if c.WorkerRole == "reviewer" || c.WorkerRole == "tester" || strings.HasPrefix(c.Title, "Review:") || strings.HasPrefix(c.Title, "Test:") {
+					recheckCount++
+				}
+			}
+		}
+		if recheckCount > 0 {
+			r.logger.Info("spawnReviewTasks skipped on final recheck — race detected and prevented",
+				slog.String("parent_id", parent.ID), slog.Int("recheck_count", recheckCount))
+			flumelogger.LogAgentReasoning(ctx, parent.ID, "system", "Final recheck prevented duplicate review/test spawn under failure loop.", map[string]any{"parent_id": parent.ID, "recheck": recheckCount})
+			return nil
+		}
 	}
 
 	// Extra safety: never spawn reviewer/tester for a task whose own title already indicates it is a review or test item
@@ -1214,6 +1233,9 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		LastUpdate:     now,
+		// Phase 2: non-commit creation path wiring
+		PlanSessionID:  parent.PlanSessionID,
+		HierarchyDepth: parent.HierarchyDepth + 1,
 	}
 
 	// Tester task
@@ -1228,15 +1250,27 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		LastUpdate:     now,
+		// Phase 2: non-commit creation path wiring
+		PlanSessionID:  parent.PlanSessionID,
+		HierarchyDepth: parent.HierarchyDepth + 1,
 	}
 
 	if err := r.es.IndexDoc(ctx, "agent-task-records", revTask.ID, revTask); err != nil {
 		return fmt.Errorf("index reviewer task: %w", err)
 	}
+	// Give the reviewer child its own initial reasoning/evidence at birth (fixes "0 thoughts on spawned review/test" from live rflow test).
+	// This ensures every review-consensus child starts with audit trail for Evidence gates + UI.
+	flumelogger.LogAgentReasoning(ctx, revTask.ID, "reviewer",
+		"Reviewer task spawned for parent review-consensus. Awaiting analysis of implementer output against acceptance criteria.",
+		map[string]any{"parent_id": parent.ID, "role": "reviewer", "spawn_reason": "review-consensus"})
 
 	if err := r.es.IndexDoc(ctx, "agent-task-records", testTask.ID, testTask); err != nil {
 		return fmt.Errorf("index tester task: %w", err)
 	}
+	// Symmetric for tester child (ensures full metadata + thoughts on all children from creation).
+	flumelogger.LogAgentReasoning(ctx, testTask.ID, "tester",
+		"Tester task spawned for parent review-consensus. Will execute tests and evaluate outcomes after reviewer pass.",
+		map[string]any{"parent_id": parent.ID, "role": "tester", "spawn_reason": "review-consensus"})
 
 	r.logger.Info("spawned reviewer and tester subtasks",
 		slog.String("parent_id", parent.ID),

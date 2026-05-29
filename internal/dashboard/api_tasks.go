@@ -563,11 +563,14 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowedStatuses := map[string]bool{"ready": true, "planned": true, "inbox": true}
+	allowedStatuses := map[string]bool{
+		"ready": true, "planned": true, "inbox": true,
+		"blocked": true, "review": true, "review-consensus": true, "done": true, // Expanded for recovery from stuck review states under failure (high leverage for seamless queue)
+	}
 	status := strings.TrimSpace(strings.ToLower(req.Status))
 	if !allowedStatuses[status] {
 		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("status must be one of [inbox, planned, ready], got %q", status))
+			fmt.Sprintf("status must be one of [inbox, planned, ready, blocked, review, review-consensus, done], got %q", status))
 		return
 	}
 
@@ -589,11 +592,38 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prevStatus := strings.TrimSpace(strings.ToLower(str(src["status"])))
+	owner := orStr(str(src["owner"]), str(src["assigned_agent_role"]))
 	autoRecovery := true
-	// PR 2 central Enforcer (shadow)
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(prevStatus), ftypes.TaskStatus(status), s.logger.Warn)
 	if req.AutoRecoveryPrompt != nil {
 		autoRecovery = *req.AutoRecoveryPrompt
+	}
+
+	// Phase 1+ recovery + evidence path (highest-leverage for seamless queue under failure).
+	// Support ForceAudit/AuditReason for common recovery transitions (e.g. review -> blocked when LLM outage causes stuck review).
+	// Always emit rich LogAgentReasoning (populates execution_thoughts via bridge) + pause guard.
+	// Uses EnforceWithEvidenceOrLog (extends PR2 Enforce) for auditability; actual guardedTaskMutator mutation
+	// wiring is skeleton for follow-up refactor (see design doc residual risk table).
+	ev := ftypes.Evidence{
+		ForceAudit:  req.ForceAudit,
+		AuditReason: strings.TrimSpace(req.AuditReason),
+	}
+	_ = ftypes.DefaultTaskStateMachine.EnforceWithEvidenceOrLog(ftypes.TaskStatus(prevStatus), ftypes.TaskStatus(status), ev, s.logger.Warn)
+
+	// Pause guard (defense-in-depth; matches guardedTaskMutator + runner paths). Fail closed for recovery safety.
+	projectID := str(src["repo"])
+	if projectID == "" {
+		projectID = str(src["project_id"])
+	}
+	if projectID != "" {
+		if projDoc, _ := s.es.GetDoc(ctx, "flume-projects", projectID); projDoc != nil {
+			var proj ftypes.Project
+			if json.Unmarshal(projDoc, &proj) == nil && proj.WorkPaused {
+				reason := fmt.Sprintf("transition %s -> %s refused: project %s is paused (emergency stop)", prevStatus, status, projectID)
+				flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, map[string]any{"project": projectID, "force_audit": req.ForceAudit})
+				writeError(w, http.StatusConflict, "project paused; transitions blocked")
+				return
+			}
+		}
 	}
 
 	if instruction != "" {
@@ -604,8 +634,30 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 				"fix the root cause, run or add tests, and iterate until acceptance criteria are met.")
 	}
 
+	// Record audit/recovery reason explicitly (visible in history + thoughts via bridge).
+	if req.ForceAudit && req.AuditReason != "" {
+		auditNote := fmt.Sprintf("[Audit/Recovery by %s] %s (force_audit=true)", orStr(owner, "operator"), req.AuditReason)
+		_ = s.appendTaskAgentLogNote(ctx, esID, auditNote)
+	}
+
 	now := nowISO()
-	owner := orStr(str(src["owner"]), str(src["assigned_agent_role"]))
+
+	// Rich reasoning for every transition (fixes silent recovery paths observed in live rflow test).
+	// This ensures the task (incl. review/test children) has execution_thoughts for Evidence gates and UI popout.
+	reason := fmt.Sprintf("Task transitioned %s -> %s", prevStatus, status)
+	meta := map[string]any{
+		"prev_status": prevStatus,
+		"new_status":  status,
+		"owner":       owner,
+	}
+	if req.ForceAudit {
+		meta["force_audit"] = true
+		meta["audit_reason"] = req.AuditReason
+	}
+	if instruction != "" {
+		meta["instruction"] = instruction
+	}
+	flumelogger.LogAgentReasoning(ctx, taskID, orStr(owner, "system"), reason, meta)
 
 	doc := map[string]interface{}{
 		"status":       status,
@@ -621,9 +673,7 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 		doc["assigned_agent_role"] = owner
 	}
 
-	// PR 2: 100% of status changes use central TaskStateMachine.EnforceTransition (shadow mode: violation logged for audit/metrics, write proceeds).
-	// PR2 Enforce (scope-adjusted; see design - call sites use local prev/target)
-
+	// PR 2 + Phase 1: Enforce already called above; write proceeds (shadow allows all audited cases).
 	if err := s.es.Post(ctx, fmt.Sprintf("agent-task-records/_update/%s", esID), map[string]interface{}{"doc": doc}); err != nil {
 		s.logger.Error("task transition: ES update failed", slog.String("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "failed to update task")
@@ -634,6 +684,7 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 		slog.String("task_id", taskID),
 		slog.String("status", status),
 		slog.String("owner", owner),
+		slog.Bool("force_audit", req.ForceAudit),
 	)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

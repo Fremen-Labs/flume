@@ -405,6 +405,10 @@ type TaskTransitionRequest struct {
 	Status              string `json:"status"`
 	Instruction         string `json:"instruction,omitempty"`
 	AutoRecoveryPrompt  *bool  `json:"auto_recovery_prompt,omitempty"`
+	// Phase 1+ recovery support: allow ops/manual transitions (e.g. review -> blocked under LLM outage)
+	// without requiring full terminal evidence. When set, AuditReason is recorded in agent_log + execution_thoughts.
+	ForceAudit  bool   `json:"force_audit,omitempty"`
+	AuditReason string `json:"audit_reason,omitempty"`
 }
 
 // BulkRequeueRequest is the request body for POST /api/tasks/bulk-requeue.

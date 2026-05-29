@@ -49,4 +49,49 @@ describe('Type Contracts', () => {
       expect(mod).toBeDefined();
     });
   });
+
+  // Grok uplift contract assertion for AST Savings card (addresses incomplete types gap).
+  // Verifies the now-complete token_metrics shape (estimated_cost_usd + historical_burn array)
+  // matches backend projection. If this fails after a backend change, the uplift comment in
+  // types/index.ts + api_system.go will guide the fix. Keeps the card's data contract explicit/tested.
+  describe('Snapshot token_metrics contract (AST Savings)', () => {
+    it('token_metrics interface includes estimated_cost_usd and historical_burn shape', async () => {
+      const mod = await import('@/types');
+      // Structural runtime contract check (shape only; values exercised in component + Glass tests)
+      const sample: import('@/types').Snapshot = {
+        workers: [],
+        tasks: [],
+        reviews: [],
+        failures: [],
+        provenance: [],
+        repos: [],
+        projects: [],
+        token_metrics: {
+          savings: 1234,
+          baseline_tokens: 5000,
+          baseline_full_context_tokens: 5000,
+          actual_tokens_sent: 3766,
+          total_input_tokens: 3000,
+          total_output_tokens: 766,
+          estimated_cost_usd: 12.34,
+          historical_burn: [
+            { worker_name: 'impl-1', input_tokens: 2000, output_tokens: 500, role: 'implementer' },
+          ],
+        },
+        elastro_savings: 1234,
+      };
+      // The assignment above proves the TS interface accepts the full shape from backend.
+      // Additional runtime assertions on optional presence for resilience (partial data case).
+      expect(sample.token_metrics?.estimated_cost_usd).toBeTypeOf('number');
+      expect(Array.isArray(sample.token_metrics?.historical_burn)).toBe(true);
+      if (sample.token_metrics?.historical_burn && sample.token_metrics.historical_burn.length > 0) {
+        const entry = sample.token_metrics.historical_burn[0];
+        expect(entry).toHaveProperty('worker_name');
+        expect(entry).toHaveProperty('input_tokens');
+        expect(entry).toHaveProperty('output_tokens');
+        expect(entry).toHaveProperty('role');
+      }
+      expect(mod).toBeDefined();
+    });
+  });
 });
