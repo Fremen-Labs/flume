@@ -758,6 +758,18 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 		logloomAstCount = 0
 	}
 
+	// Log the count queries (was missing LogAgentReasoning unlike other system-state derivations and snapshot path).
+	// 0 is valid & meaningful: signals no projects have undergone AST graph ingestion yet (via clone or intake).
+	flumelogger.LogAgentReasoning(ctx, "_code_intel_counts", "dashboard",
+		"Queried Elastro + LogLoom AST structural node counts for Code Intelligence Backend card (rec 3). 0/0 means no AST indexes yet — valid empty state, not a bug.",
+		map[string]any{
+			"elastic_ast_count": elasticAstCount,
+			"logloom_ast_count": logloomAstCount,
+			"elastro_index":     "flume-elastro-graph",
+			"logloom_index":     "flume-logloom-ast",
+			"note":              "unscoped global count; project-scoped filtering is future work",
+		})
+
 	// 5. Fetch Vault status
 	vaultSealed := true
 	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))

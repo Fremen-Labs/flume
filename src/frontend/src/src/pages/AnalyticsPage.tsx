@@ -103,15 +103,16 @@ export default function AnalyticsPage() {
   const meshHasData = meshNodeCount > 0;
 
   // Code Intelligence Backend (Rec 3): visibility into Elastro vs LogLoom AST structural indexing.
-  // Uses /api/system-state (which already exposes elasticAstCount; now also logloomAstCount via ES Count on the indices).
+  // Data now read via normalized flat fields from useSystemState hook (promoted from telemetry in wire response).
   // Hook poll is slower (15s) since structural node counts change infrequently (on project ingest / logloom graph).
+  // 0 is *valid complete information*, never treated as partial/empty.
   const systemState = useSystemState(15000);
   const codeIntelLoading = !systemState;
-  const elasticAstCount: number = (systemState?.telemetry as any)?.elasticAstCount ?? 0;
-  const logloomAstCount: number = (systemState?.telemetry as any)?.logloomAstCount ?? 0;
+  const elasticAstCount: number = systemState?.elasticAstCount ?? 0;
+  const logloomAstCount: number = systemState?.logloomAstCount ?? 0;
   const hasCodeIntel = elasticAstCount > 0 || logloomAstCount > 0;
   const structuralNodes = Math.max(elasticAstCount, logloomAstCount);
-  const codeIntelStatus = elasticAstCount > 0 && logloomAstCount > 0 ? 'Hybrid' : elasticAstCount > 0 ? 'Elastro' : logloomAstCount > 0 ? 'LogLoom' : '—';
+  const codeIntelStatus = elasticAstCount > 0 && logloomAstCount > 0 ? 'Hybrid' : elasticAstCount > 0 ? 'Elastro' : logloomAstCount > 0 ? 'LogLoom' : 'No AST indexes yet';
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
@@ -205,15 +206,14 @@ export default function AnalyticsPage() {
                 : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined)
               }
             />
-            {/* New: Code Intelligence Backend card (Recommendation 3). Minimal addition using existing Glass resilience + system-state ES counts. */}
+            {/* New: Code Intelligence Backend card (Recommendation 3). Fixed empty/partial-at-0 rendering + normalized data path. */}
             <GlassMetricCard
               title="Code Intelligence Backend"
               value={codeIntelStatus}
               icon={Braces}
-              helpText="Hybrid code-understanding visibility for agents. Elastro (flume-elastro-graph): semantic vector RAG over rich AST graphs for meaning-aware retrieval. LogLoom AST (flume-logloom-ast): precise structural nodes/call-graphs for exact 'walk the code' dependency traversal (avoids hallucinated boundaries). Structural nodes = max indexed across backends. Future hybrid (LogLoom surgical structure + Elastro semantic) will unlock superior AST Savings + context fidelity. 0 means no project AST ingest yet."
+              helpText="Hybrid code-understanding visibility for agents. Elastro (flume-elastro-graph): semantic vector RAG over rich AST graphs for meaning-aware retrieval. LogLoom AST (flume-logloom-ast): precise structural nodes/call-graphs for exact 'walk the code' dependency traversal (avoids hallucinated boundaries). Structural nodes = max indexed across backends. Future hybrid (LogLoom surgical structure + Elastro semantic) will unlock superior AST Savings + context fidelity. Ingest of AST indexes happens automatically on `flume project clone` (or intake) for any repo. 0/0 is valid & complete: no projects have had AST graph ingested yet."
               loading={codeIntelLoading}
               error={null}
-              partial={!hasCodeIntel && !codeIntelLoading}
               secondary={{ label: 'Elastro / LogLoom nodes', value: `${elasticAstCount} / ${logloomAstCount}` }}
             />
             <GlassMetricCard
