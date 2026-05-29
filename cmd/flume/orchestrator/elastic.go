@@ -327,6 +327,51 @@ var allIndices = []indexDef{
 
 	// ── AST / knowledge / memory ─────────────────────────────────────────
 	{Name: "flume-elastro-graph", Mapping: nil},
+	// flume-logloom-ast: rich structural AST (nodes, call edges, semantic tags, signatures, complexity)
+	// from LogLoom during project clone/local ingest. Augments (does not replace) elastro-graph.
+	// Uses ECS-style logloom.* namespace for consistency with core flume-logloom-enrichment.
+	// Added for Recommendation 2 (LogLoom AST generation + indexing in project lifecycle).
+	{Name: "flume-logloom-ast", Mapping: map[string]interface{}{
+		"settings": map[string]interface{}{
+			"number_of_shards":   1,
+			"number_of_replicas": 0,
+		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"logloom": map[string]interface{}{
+					"properties": map[string]interface{}{
+						"node_id":          map[string]interface{}{"type": "keyword", "ignore_above": 64},
+						"traversal":        map[string]interface{}{"type": "keyword"},
+						"module":           map[string]interface{}{"type": "keyword"},
+						"function":         map[string]interface{}{"type": "keyword"},
+						"file":             map[string]interface{}{"type": "keyword"},
+						"line":             map[string]interface{}{"type": "integer"},
+						"tags":             map[string]interface{}{"type": "keyword"},
+						"level":            map[string]interface{}{"type": "keyword"},
+						"message_template": map[string]interface{}{"type": "keyword", "fields": map[string]interface{}{"text": map[string]interface{}{"type": "text", "analyzer": "standard"}}},
+						"call_parents":     map[string]interface{}{"type": "keyword"},
+						"call_children":    map[string]interface{}{"type": "keyword"},
+						"call_parent_names": map[string]interface{}{"type": "keyword"},
+						"call_child_names":  map[string]interface{}{"type": "keyword"},
+						"signature": map[string]interface{}{
+							"properties": map[string]interface{}{
+								"parameters": map[string]interface{}{"type": "nested", "properties": map[string]interface{}{"name": map[string]interface{}{"type": "keyword"}, "type_hint": map[string]interface{}{"type": "keyword"}, "default": map[string]interface{}{"type": "keyword"}}},
+								"return_type": map[string]interface{}{"type": "keyword"},
+								"is_async":    map[string]interface{}{"type": "boolean"},
+								"decorators":  map[string]interface{}{"type": "keyword"},
+							},
+						},
+						"graph_version": map[string]interface{}{"type": "keyword"},
+						"commit_sha":    map[string]interface{}{"type": "keyword"},
+						"branch":        map[string]interface{}{"type": "keyword"},
+					},
+				},
+				// Allow root-level project correlation if future shippers or post-processors add it (non-breaking)
+				"project_id": map[string]interface{}{"type": "keyword"},
+				"repo":       map[string]interface{}{"type": "keyword"},
+			},
+		},
+	}},
 	{Name: "agent_semantic_memory", Mapping: nil},
 	{Name: "flow_tools", Mapping: nil},
 	{Name: "agent_knowledge", Mapping: nil},

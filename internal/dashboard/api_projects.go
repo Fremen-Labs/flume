@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/git"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 const projectsIndex = "flume-projects"
@@ -278,6 +279,10 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 		s.logger.Warn("elastro ingestion failed (non-fatal — project remains browseable)",
 			slog.String("id", id), slog.String("error", err.Error()),
 			slog.String("output", string(output)))
+
+		// Best-effort LogLoom AST (even on elastro failure) — before cleanup
+		_ = s.runLogloomGraphIngest(id, name, destPath, "flume-logloom-ast")
+
 		// Clean up the ephemeral clone since we'll fall back to remote API
 		_ = os.RemoveAll(destPath)
 		// Keep status 'cloned' but clear the now-deleted local path
@@ -286,11 +291,16 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 		return
 	}
 
-	// 7. Delete ephemeral clone post-ingest — remote API is sufficient
+	// 7. LogLoom AST generation + indexing (augments elastro structural data in separate index)
+	//    Runs while ephemeral clone still exists. Non-fatal.
+	s.logger.Info("Running LogLoom AST graph generation+index (augmenting elastro)", slog.String("id", id))
+	_ = s.runLogloomGraphIngest(id, name, destPath, "flume-logloom-ast")
+
+	// 8. Delete ephemeral clone post-ingest — remote API is sufficient
 	s.logger.Info("Deleting ephemeral clone post-ingest", slog.String("id", id))
 	_ = os.RemoveAll(destPath)
 
-	// 8. Update status to indexed (path cleared since clone is deleted)
+	// 9. Update status to indexed (path cleared since clone is deleted)
 	s.updateProjectStatus(id, "indexed", nil, nil)
 	s.logger.Info("Project cloned and indexed successfully", slog.String("id", id))
 }
@@ -331,6 +341,10 @@ func (s *Server) runLocalASTIngest(id string, name string, localPath string) {
 		s.updateProjectStatus(id, "local", nil, &localPath)
 		s.logger.Info("Local project indexed successfully", slog.String("id", id))
 	}
+
+	// Also run LogLoom AST generation + indexing for this local path (best-effort, augments elastro).
+	// Does not affect clone_status (elastro result is authoritative for local path).
+	_ = s.runLogloomGraphIngest(id, name, localPath, "flume-logloom-ast")
 }
 
 // updateProjectStatus updates a project's clone_status, clone_error, and path in ES.
@@ -367,5 +381,117 @@ func (s *Server) updateProjectStatus(id string, status string, errStr *string, p
 	if err := s.es.IndexDoc(ctx, projectsIndex, id, proj); err != nil {
 		s.logger.Error("failed to update project status in ES", slog.String("id", id), slog.String("error", err.Error()))
 	}
+}
+
+// runLogloomGraphIngest runs LogLoom graph *build* (rich AST: nodes, edges, semantic tags,
+// call graph, signatures, coverage/complexity metrics, models/imports) followed by
+// *es ship* to index the resulting enrichment documents into `flume-logloom-ast`.
+//
+// Uses the exact logloomBin discovery pattern from doctor.go (LOGLOOM_BIN or $HOME/.local/bin/logloom).
+// Best-effort and non-fatal (like elastro). Emits s.logger + LogAgentReasoning with
+// "logloom" + "ast-ingest" semantic tags for full observability in agent reasoning popout + LogLoom graphs.
+//
+// This augments (does not replace) the structural part of elastro for user projects during
+// clone/local lifecycle, enabling future "LogLoom Structural Savings" calculations.
+func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIndex string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	logloomBin := os.Getenv("LOGLOOM_BIN")
+	if logloomBin == "" {
+		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
+	}
+
+	// Verify binary (LookPath first for PATH, then exact fallback; no venv for logloom)
+	if resolved, err := exec.LookPath(logloomBin); err == nil {
+		logloomBin = resolved
+	} else if _, statErr := os.Stat(logloomBin); statErr != nil {
+		s.logger.Info("logloom binary not found — skipping LogLoom AST ingest (best-effort)",
+			slog.String("id", projectID), slog.String("tried", logloomBin))
+		return false
+	}
+
+	// Temporary graph artifact (cleaned after ship or on error)
+	graphPath := filepath.Join(os.TempDir(), fmt.Sprintf("flume-logloom-ast-%s-%d.json", projectID, time.Now().UnixNano()))
+
+	// 1. Build rich AST graph (auto language detection, full features enabled for maximum structural value)
+	buildArgs := []string{
+		"build",
+		"--source", srcPath,
+		"--output", graphPath,
+		"--name", projectName,
+		"--git", "--tags", "--call-graph", "--coverage", "--models", "--imports",
+	}
+	buildCmd := exec.CommandContext(ctx, logloomBin, buildArgs...)
+	buildCmd.Env = os.Environ()
+
+	s.logger.Info("Executing logloom build for project AST graph",
+		slog.String("id", projectID), slog.String("bin", logloomBin),
+		slog.String("source", srcPath), slog.String("graph", graphPath))
+
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		s.logger.Warn("logloom build failed (non-fatal; elastro structural data unaffected if present)",
+			slog.String("id", projectID), slog.String("error", err.Error()),
+			slog.String("output", truncateForLog(output)))
+		_ = os.Remove(graphPath)
+		flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
+			"LogLoom AST graph build failed for project (non-fatal)",
+			"semantic_tags", []interface{}{"logloom", "ast-ingest", "build-failed"},
+			"project", projectID, "index", targetIndex, "error", err.Error())
+		return false
+	}
+
+	// 2. Ship directly to ES (uses CLI flags for URL/key/verify to avoid env side-effects)
+	esURL := s.cfg.ESUrl
+	if esURL == "" {
+		esURL = "http://localhost:9200"
+	}
+	shipArgs := []string{
+		"es", "ship",
+		"--graph-path", graphPath,
+		"--index", targetIndex,
+		"--es-url", esURL,
+		"--no-verify",
+	}
+	if s.cfg.ESApiKey != "" {
+		shipArgs = append(shipArgs, "--api-key", s.cfg.ESApiKey)
+	}
+	shipCmd := exec.CommandContext(ctx, logloomBin, shipArgs...)
+	shipCmd.Env = os.Environ()
+
+	s.logger.Info("Executing logloom es ship for AST indexing into flume-logloom-ast",
+		slog.String("id", projectID), slog.String("index", targetIndex))
+
+	if output, err := shipCmd.CombinedOutput(); err != nil {
+		s.logger.Warn("logloom es ship failed (non-fatal)",
+			slog.String("id", projectID), slog.String("error", err.Error()),
+			slog.String("output", truncateForLog(output)))
+		_ = os.Remove(graphPath)
+		flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
+			"LogLoom AST graph ship to ES failed (non-fatal)",
+			"semantic_tags", []interface{}{"logloom", "ast-ingest", "ship-failed"},
+			"project", projectID, "index", targetIndex, "error", err.Error())
+		return false
+	}
+
+	_ = os.Remove(graphPath)
+
+	s.logger.Info("LogLoom AST graph generated + indexed successfully (rich structural data now queryable)",
+		slog.String("id", projectID), slog.String("index", targetIndex))
+	flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
+		"LogLoom AST generation + indexing complete: nodes/edges/references/complexity/semantic-tags/call-graph/signatures now available in flume-logloom-ast (augments elastro)",
+		"semantic_tags", []interface{}{"logloom", "ast-ingest", "success"},
+		"project", projectID, "index", targetIndex, "source_path", srcPath)
+
+	return true
+}
+
+// truncateForLog returns a safe prefix of command output for logging (prevents huge logs on failure).
+func truncateForLog(b []byte) string {
+	const max = 800
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "…[truncated]"
 }
 
