@@ -815,6 +815,13 @@ type LiveGatewayMetrics struct {
 	FlumeWorkerTokensTotal         []LabeledValue    `json:"flume_worker_tokens_total"`
 	FlumeEnsembleRequestsTotal     []LabeledValue    `json:"flume_ensemble_requests_total"`
 	UpdatedAt                      string            `json:"updated_at"`
+
+	// Go runtime basics (cheap; same as the existing /metrics emission).
+	// Allows the dashboard "System Memory" card to show accurate gateway process memory
+	// even without falling back to its own runtime.
+	GoMemstatsSysBytes  uint64 `json:"go_memstats_sys_bytes"`
+	GoMemstatsAllocBytes uint64 `json:"go_memstats_alloc_bytes"`
+	GoGoroutines        int    `json:"go_goroutines"`
 }
 
 // NodeLoadPoint is the gateway-native simple shape (per implementation spec).
@@ -912,6 +919,13 @@ func BuildLiveGatewayMetrics(nodeReg *NodeRegistry) LiveGatewayMetrics {
 	for labels, c := range Metrics.EnsembleRequests.snapshot() {
 		lm.FlumeEnsembleRequestsTotal = append(lm.FlumeEnsembleRequestsTotal, LabeledValue{Tags: parseLabelsToMap(labels), Count: c})
 	}
+
+	// Go runtime (same stats the /metrics handler already emits).
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	lm.GoMemstatsSysBytes = ms.Sys
+	lm.GoMemstatsAllocBytes = ms.Alloc
+	lm.GoGoroutines = runtime.NumGoroutine()
 
 	return lm
 }

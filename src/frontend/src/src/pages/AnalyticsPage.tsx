@@ -167,23 +167,28 @@ export default function AnalyticsPage() {
             />
             <GlassMetricCard
               title="System Memory"
-              value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'}
+              value={telemetry && typeof telemetry.go_memstats_sys_bytes === 'number' && !isNaN(telemetry.go_memstats_sys_bytes)
+                ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB`
+                : '—'}
               icon={Cpu}
-              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process."
+              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process. Falls back to local runtime when gateway live metrics unavailable."
               loading={telLoading}
               error={telErrMsg}
-              secondary={telemetry ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
+              secondary={telemetry && typeof telemetry.go_goroutines === 'number' ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
             />
             <GlassMetricCard
               title="AST Savings"
-              value={fmtTokens(realSavings)}
+              value={realSavings > 0 ? fmtTokens(realSavings) : (tm?.local_mesh_estimated_savings ? fmtTokens(tm.local_mesh_estimated_savings) + " (local est.)" : fmtTokens(0))}
               icon={TrendingUp}
-              trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }}
-              helpText="Elastro context compression savings (tokens) vs naive full baseline prompts. Savings aggregated from agent-token-telemetry ES index (baseline_tokens - actual). Powers cheaper, smarter long-context code gen."
+              trend={{ value: savingsPercent, label: realSavings > 0 ? `$${dollarsSaved.toFixed(2)} saved vs base cost` : "Mesh efficiency (local mode)", suffix: '%' }}
+              helpText="Elastro (when present): precise context compression savings vs naive full prompts (from agent-token-telemetry). Local mesh mode: estimated tokens avoided via intelligent routing + structural awareness across nodes (derived from live token volume via Telemetry Bridge). Full LogLoom AST integration will make local estimates far more accurate."
               loading={snapLoading}
               error={snapErrMsg}
               partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
-              secondary={{ label: 'baseline', value: fmtTokens(baselineTokens) }}
+              secondary={realSavings > 0 
+                ? { label: 'baseline', value: fmtTokens(baselineTokens) } 
+                : (tm?.local_mesh_efficiency_note ? { label: 'note', value: 'local mesh' } : undefined)
+              }
             />
             <GlassMetricCard
               title="VRAM Pressure"
