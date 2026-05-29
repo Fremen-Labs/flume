@@ -1106,7 +1106,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			Objective:  epic.Description,
 			Repo:       repo,
 			ItemType:   "epic",
-			Owner:      "pm",
+			Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
+			AssignedAgentRole: "system",
 			Status:     "planned",
 			Priority:   "high",
 			Risk:       "medium",
@@ -1117,8 +1118,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			ComplexityReason: "planner ComplexityScore (PR2 creation)",
 			ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			DependsOn:  []string{},
-			ChildCount: 0,
-			DecomposedAt: "",
+			ChildCount: len(epic.Features),  // Accurate: epic already has features as children
+			DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 			HierarchyDepth: 0, // Epic root
 		})
 
@@ -1131,7 +1132,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				Objective:  fmt.Sprintf("Feature of %s", epic.Title),
 				Repo:       repo,
 				ItemType:   "feature",
-				Owner:      "pm",
+				Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
+				AssignedAgentRole: "system",
 				Status:     "planned",
 				Priority:   "medium",
 				Risk:       "medium",
@@ -1143,8 +1145,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				Complexity:       plan.ComplexityScore,
 				ComplexityReason: "planner ComplexityScore (feature PR2)",
 				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
-				ChildCount: 0,
-				DecomposedAt: "",
+				ChildCount: len(feat.Stories),   // Accurate: feature already has stories as children
+				DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 				HierarchyDepth: 1, // Feature under epic
 			})
 
@@ -1156,13 +1158,15 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				//   - Their child tasks can be promoted by promotePlannedTasks (parent check passes)
 				//   - They are immediately visible/actionable in the work queue
 				// Higher-level epics/feats remain "planned" as pure PM containers.
+				storyTaskCount := len(coalesceStoryTasks(story.Tasks))
 				docs = append(docs, AgentTaskRecord{
 					ID:                 storyID,
 					Title:              story.Title,
 					Objective:          fmt.Sprintf("Story for %s", feat.Title),
 					Repo:               repo,
 					ItemType:           "story",
-					Owner:              "pm",
+					Owner:              "system",            // Not "pm" — organizational container, never a decomposition target
+					AssignedAgentRole:  "system",
 					Status:             "ready",
 					Priority:           "medium",
 					Risk:               "medium",
@@ -1175,8 +1179,8 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 					CreatedAt:          now,
 					UpdatedAt:          now,
-					ChildCount: 0,
-					DecomposedAt: "",
+					ChildCount: storyTaskCount,      // Accurate: story already has tasks as children
+					DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 					HierarchyDepth: 2, // Story under feature
 				})
 
@@ -1428,7 +1432,7 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 		return nil, fmt.Errorf("%s\n\nRepo: %s\nRecommended action: Hit 'refine' and ask the planner for a much smaller scope (target 1-3 leaf tasks for documentation-style work).", reason, repo)
 	}
 
-	if totalTasks > 0 && totalTasks <= 3 {
+	if totalTasks > 0 && totalTasks <= 6 {
 		docs, errBuild = s.buildFastPathTasks(ctx, plan, repo, routingModel, now)
 	} else {
 		docs, errBuild = s.buildTaskHierarchy(ctx, plan, repo, routingModel, now)

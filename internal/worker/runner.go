@@ -374,6 +374,19 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("pm: decomposing", slog.String("task_id", task.ID))
 
+	// === Anti-explosion guard: skip decomposition for intake-created hierarchy nodes ===
+	// Epics, features, and stories are organizational containers created by buildTaskHierarchy().
+	// They already have children and should NEVER be sent to the LLM for decomposition.
+	// Only items with ItemType "task" (or empty, for legacy compatibility) are valid PM targets.
+	if task.ItemType == "epic" || task.ItemType == "feature" || task.ItemType == "story" {
+		reason := fmt.Sprintf("PM decomposition skipped: %q is an intake-created hierarchy node (item_type=%s), not a decomposition target", task.Title, task.ItemType)
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"item_type": task.ItemType})
+		r.logger.Info("pm: skipping decomposition — intake-created hierarchy node",
+			slog.String("task_id", task.ID),
+			slog.String("item_type", task.ItemType),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusDone}, nil
+	}
 	// === HARD emergency stop guard (the missing piece when user hit "halt the swarm") ===
 	if r.isWorkPaused(ctx, task.ProjectID) {
 		reason := "PM decomposition blocked: project work is paused (emergency halt)"

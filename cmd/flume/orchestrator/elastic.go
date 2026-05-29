@@ -791,7 +791,13 @@ func BootstrapElasticsearch(ctx context.Context, esURL, apiKey string) error {
 					// New denormalized fields for cheap anti-explosion guards (Plan New Work + PM decomposition)
 					"decomposed_at":       map[string]interface{}{"type": "date"},
 					"child_count":         map[string]interface{}{"type": "integer"},
-					"execution_thoughts":  map[string]interface{}{"type": "object", "enabled": false},
+					"execution_thoughts":  map[string]interface{}{
+						"type": "nested",
+						"properties": map[string]interface{}{
+							"ts":      map[string]interface{}{"type": "date"},
+							"thought": map[string]interface{}{"type": "text"},
+						},
+					},
 					"agent_log":           map[string]interface{}{"type": "object", "enabled": false},
 					"doc":                 map[string]interface{}{"type": "object", "enabled": false},
 				},

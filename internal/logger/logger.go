@@ -283,7 +283,7 @@ func appendExecutionThoughtNonBlocking(ctx context.Context, taskID, agentRole, t
 		entry := map[string]interface{}{
 			"ts":         time.Now().UTC().Format(time.RFC3339),
 			"agent_role": agentRole,
-			"reasoning":  text,
+			"thought":    text,  // Must be "thought" — frontend ThoughtEntry interface expects this key
 			"meta":       meta,
 		}
 		params := map[string]interface{}{
@@ -371,10 +371,16 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
 
 	// Convert variadic metadata to map for the ES entry (best-effort).
+	// Callers pass either map[string]any (preferred) or key/value pairs.
 	meta := map[string]any{}
-	for i := 0; i+1 < len(metadata); i += 2 {
-		if key, ok := metadata[i].(string); ok {
-			meta[key] = metadata[i+1]
+	for _, m := range metadata {
+		switch v := m.(type) {
+		case map[string]any:
+			for k, val := range v {
+				meta[k] = val
+			}
+		default:
+			// Skip non-map entries (e.g. slog.Attr from legacy callers)
 		}
 	}
 	appendExecutionThoughtNonBlocking(ctx, taskID, agentRole, reasoning, meta)
