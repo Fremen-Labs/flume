@@ -785,3 +785,133 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 
 	return buf
 }
+
+// ─── Live JSON metrics for dashboard telemetry (highest-leverage severed path fix) ───
+
+// LiveGatewayMetrics is the clean, typed JSON response for GET /api/gateway-metrics.
+// It exposes live flume_* counters/gauges from the in-memory registry + NodeRegistry
+// health (CurrentLoad etc) without touching the Prometheus text exposition.
+//
+// Minimum fields per spec:
+//   - flume_vram_pressure_events_total (number)
+//   - flume_node_load ([]{node_id, load})
+//   - flume_active_models (string[])
+//
+// Plus other easy flume_* for Analytics cards (throttled, blocked, escalation, and
+// the labeled vecs normalized so useTelemetry.ts shapes are populated).
+//
+// This endpoint is internal to the Flume control plane (dashboard). External
+// consumers continue to use the unchanged GET /metrics Prometheus format.
+// Efficient (pure in-memory snapshots under mutex), suitable for 5s polling.
+type LiveGatewayMetrics struct {
+	FlumeVramPressureEventsTotal   uint64            `json:"flume_vram_pressure_events_total"`
+	FlumeEscalationTotal           uint64            `json:"flume_escalation_total"`
+	FlumeConcurrencyThrottledTotal uint64            `json:"flume_concurrency_throttled_total"`
+	FlumeTasksBlockedTotal         uint64            `json:"flume_tasks_blocked_total"`
+	FlumeActiveModels              []string          `json:"flume_active_models"`
+	FlumeNodeLoad                  []NodeLoadPoint   `json:"flume_node_load"`
+	FlumeNodeRequestsTotal         []LabeledValue    `json:"flume_node_requests_total"`
+	FlumeRoutingDecision           []LabeledValue    `json:"flume_routing_decision"`
+	FlumeWorkerTokensTotal         []LabeledValue    `json:"flume_worker_tokens_total"`
+	FlumeEnsembleRequestsTotal     []LabeledValue    `json:"flume_ensemble_requests_total"`
+	UpdatedAt                      string            `json:"updated_at"`
+}
+
+// NodeLoadPoint is the gateway-native simple shape (per implementation spec).
+// Dashboard normalizes to the {tags: {node_id:...}, value: ...} shape that
+// useTelemetry.ts / AnalyticsPage expect for Node Mesh Distribution chart.
+type NodeLoadPoint struct {
+	NodeID string  `json:"node_id"`
+	Load   float64 `json:"load"`
+}
+
+// LabeledValue normalizes counterVec / gaugeVec snapshots into the tagged array
+// shape consumed by TelemetryData (flume_*_total arrays with .tags + .count).
+// (Node load uses dedicated NodeLoadPoint for clarity.)
+type LabeledValue struct {
+	Tags  map[string]string `json:"tags"`
+	Count uint64            `json:"count"`
+}
+
+// parseLabelsToMap reverses formatLabels() output ("k=\"v\",k2=\"v2\"") into a
+// clean map for JSON. Tolerates our exact format; production-grade enough for
+// the controlled label sets we emit.
+func parseLabelsToMap(s string) map[string]string {
+	m := make(map[string]string)
+	if s == "" {
+		return m
+	}
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if idx := strings.Index(p, `="`); idx > 0 {
+			k := p[:idx]
+			v := p[idx+2:]
+			if strings.HasSuffix(v, `"`) {
+				v = strings.TrimSuffix(v, `"`)
+			}
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// BuildLiveGatewayMetrics snapshots the global Metrics registry + NodeRegistry
+// health into a stable JSON struct. Called by the /api/gateway-metrics handler.
+// All operations are fast in-memory copies; no network or blocking calls.
+func BuildLiveGatewayMetrics(nodeReg *NodeRegistry) LiveGatewayMetrics {
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	lm := LiveGatewayMetrics{
+		FlumeVramPressureEventsTotal:   Metrics.VRAMPressureEvents.get(),
+		FlumeEscalationTotal:           Metrics.EscalationTotal.get(),
+		FlumeConcurrencyThrottledTotal: Metrics.ConcurrencyThrottledTotal.get(),
+		FlumeTasksBlockedTotal:         Metrics.TasksBlockedTotal.get(),
+		UpdatedAt:                      now,
+	}
+
+	// Active models (from the gauge we maintain on dispatch)
+	for labels := range Metrics.ActiveModels.snapshot() {
+		tags := parseLabelsToMap(labels)
+		if model, ok := tags["model"]; ok && model != "" {
+			lm.FlumeActiveModels = append(lm.FlumeActiveModels, model)
+		}
+	}
+
+	// Node load: authoritative source is NodeRegistry.Health.CurrentLoad (updated
+	// by health checker + used by router). Fall back to metrics gauge if no reg.
+	if nodeReg != nil {
+		for _, n := range nodeReg.AllNodes() {
+			lm.FlumeNodeLoad = append(lm.FlumeNodeLoad, NodeLoadPoint{
+				NodeID: n.ID,
+				Load:   n.Health.CurrentLoad,
+			})
+		}
+	} else {
+		for labels, val := range Metrics.NodeLoad.snapshot() {
+			tags := parseLabelsToMap(labels)
+			if id, ok := tags["node_id"]; ok {
+				lm.FlumeNodeLoad = append(lm.FlumeNodeLoad, NodeLoadPoint{NodeID: id, Load: val})
+			}
+		}
+	}
+
+	// Labeled vecs (for the other cards that consume flume_* arrays)
+	for labels, c := range Metrics.NodeRequests.snapshot() {
+		lm.FlumeNodeRequestsTotal = append(lm.FlumeNodeRequestsTotal, LabeledValue{
+			Tags:  parseLabelsToMap(labels),
+			Count: c,
+		})
+	}
+	for labels, c := range Metrics.RoutingDecisions.snapshot() {
+		lm.FlumeRoutingDecision = append(lm.FlumeRoutingDecision, LabeledValue{Tags: parseLabelsToMap(labels), Count: c})
+	}
+	for labels, c := range Metrics.WorkerTokens.snapshot() {
+		lm.FlumeWorkerTokensTotal = append(lm.FlumeWorkerTokensTotal, LabeledValue{Tags: parseLabelsToMap(labels), Count: c})
+	}
+	for labels, c := range Metrics.EnsembleRequests.snapshot() {
+		lm.FlumeEnsembleRequestsTotal = append(lm.FlumeEnsembleRequestsTotal, LabeledValue{Tags: parseLabelsToMap(labels), Count: c})
+	}
+
+	return lm
+}
