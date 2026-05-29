@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 import { Activity } from 'lucide-react';
+import { TooltipProvider } from '@/components/ui/tooltip';
 
 describe('GlassMetricCard', () => {
   describe('required props', () => {
@@ -108,6 +109,62 @@ describe('GlassMetricCard', () => {
       );
       const card = container.firstChild as HTMLElement;
       expect(card.className).toContain('glass-card');
+    });
+  });
+
+  describe('resilience props (Grok uplift activation)', () => {
+    it('renders loading skeleton and spinner row', () => {
+      const { container } = render(<GlassMetricCard title="Metric" value={100} loading />);
+      expect(container.querySelector('.animate-pulse')).toBeTruthy(); // Skeleton
+      expect(screen.getByText('Loading…')).toBeDefined();
+    });
+
+    it('renders error banner with icon and em-dash value', () => {
+      render(
+        <GlassMetricCard title="Metric" value={100} error="Backend timeout" />
+      );
+      expect(screen.getByText('—')).toBeDefined();
+      expect(screen.getByText('Backend timeout')).toBeDefined();
+    });
+
+    it('renders partial data warning indicator', () => {
+      render(<GlassMetricCard title="Metric" value={42} partial />);
+      expect(screen.getByText('PARTIAL DATA')).toBeDefined();
+    });
+
+    it('renders helpText as native title and info icon (wrapped in provider)', () => {
+      const { container } = render(
+        <TooltipProvider>
+          <GlassMetricCard
+            title="VRAM Pressure"
+            value={7}
+            helpText="Cumulative VRAM pressure events from Ollama probes."
+          />
+        </TooltipProvider>
+      );
+      const titleEl = screen.getByText('VRAM Pressure');
+      expect(titleEl.getAttribute('title')).toContain('Cumulative VRAM');
+      // Info icon SVG present
+      const svgs = container.querySelectorAll('svg');
+      expect(svgs.length).toBeGreaterThanOrEqual(2); // icon + info
+    });
+
+    it('renders secondary non-delta row consistently', () => {
+      render(
+        <GlassMetricCard
+          title="System Memory"
+          value="512MB"
+          secondary={{ label: 'goroutines', value: 128 }}
+        />
+      );
+      expect(screen.getByText('goroutines')).toBeDefined();
+      expect(screen.getByText('128')).toBeDefined();
+    });
+
+    it('prioritizes loading over error/partial', () => {
+      render(<GlassMetricCard title="X" value={1} loading error="boom" partial />);
+      expect(screen.getByText('Loading…')).toBeDefined();
+      expect(screen.queryByText('boom')).toBeNull();
     });
   });
 });

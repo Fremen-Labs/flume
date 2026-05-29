@@ -3,14 +3,27 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pi
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useTelemetry } from '@/hooks/useTelemetry';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
-import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network } from 'lucide-react';
+import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Gauge, Info } from 'lucide-react';
+import { createLogger } from '@/utils/logger';
+
+const log = createLogger('pages.AnalyticsPage');
 
 const COLORS = ['hsl(160,84%,39%)', 'hsl(38,92%,50%)', 'hsl(0,84%,60%)', 'hsl(239,84%,67%)'];
 
 export default function AnalyticsPage() {
-  const { data: snapshot, isLoading: isSnapLoading } = useSnapshot();
-  const { data: telemetry, isLoading: isTelLoading } = useTelemetry();
-  const isLoading = isSnapLoading || isTelLoading;
+  const { data: snapshot, isLoading: isSnapLoading, error: snapError } = useSnapshot();
+  const { data: telemetry, isLoading: isTelLoading, error: telError } = useTelemetry();
+
+  // Refined loading for resilience: cards always render; use per-card loading/error/partial
+  const snapLoading = isSnapLoading && !snapshot;
+  const telLoading = isTelLoading && !telemetry;
+  const isInitialLoading = snapLoading && telLoading;
+
+  const snapErrMsg = snapError ? (snapError instanceof Error ? snapError.message : String(snapError)) : null;
+  const telErrMsg = telError ? (telError instanceof Error ? telError.message : String(telError)) : null;
+
+  if (snapErrMsg) log.warn('snapshot error surfaced to Analytics cards', { error: snapErrMsg });
+  if (telErrMsg) log.warn('telemetry error surfaced to Analytics cards (partial data possible)', { error: telErrMsg });
 
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
@@ -23,7 +36,9 @@ export default function AnalyticsPage() {
   const planned = tasks.filter(t => t.status === 'planned' || t.status === 'ready').length;
   const blocked = tasks.filter(t => t.status === 'blocked').length;
   const totalFailuresAndBlocked = failures.length + blocked;
-  const total = tasks.length;
+
+  // Prefer backend task_count when present (cross-cutting uplift)
+  const total = (snapshot as any)?.task_count ?? tasks.length;
 
   const getTokens = (wName: string, dir: 'input' | 'output') => {
     if (!telemetry?.flume_worker_tokens_total) return 0;
@@ -77,6 +92,12 @@ export default function AnalyticsPage() {
     return acc;
   }, {})).map(([name, value]) => ({ name, value }));
 
+  // Derived for Node Mesh card + partial detection (cross-cutting)
+  const meshNodeCount = nodeLoads.length;
+  const avgMeshLoad = meshNodeCount > 0 ? Math.round(nodeLoads.reduce((s, n) => s + n.load, 0) / meshNodeCount) : 0;
+  const maxMeshLoad = meshNodeCount > 0 ? Math.max(...nodeLoads.map(n => n.load)) : 0;
+  const meshHasData = meshNodeCount > 0;
+
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
@@ -84,30 +105,118 @@ export default function AnalyticsPage() {
         <p className="text-sm text-muted-foreground mt-1">Performance metrics and intelligent swarm observability</p>
       </motion.div>
 
-      {isLoading && (
+      {isInitialLoading && (
         <div className="flex items-center gap-2 text-muted-foreground py-10">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading Live Analytics…
         </div>
       )}
 
-      {!isLoading && (
+      {!isInitialLoading && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-4 relative z-10">
-            <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
-            <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
-            <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
-            <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
-            
-            {/* Live Telemetry Migrated from Telemetry Page */}
-            <GlassMetricCard title="Gateway Engines" value={String(telemetry?.flume_active_models?.length ?? 0)} icon={Activity} trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(", ") || 'No models loaded' }} />
-            <GlassMetricCard title="System Memory" value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'} icon={Cpu} />
-            <GlassMetricCard title="AST Savings" value={fmtTokens(realSavings)} icon={TrendingUp} trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }} />
-            <GlassMetricCard title="VRAM Pressure" value={String(telemetry?.flume_vram_pressure_events_total ?? 0)} icon={ServerCrash} trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }} />
+            <GlassMetricCard
+              title="Total Tasks"
+              value={String(total)}
+              icon={Target}
+              trend={{ value: done, label: `${done} done` }}
+              helpText="Aggregate count of all tasks (epics / features / stories / tasks) tracked by the orchestrator snapshot. Prefers backend task_count for efficiency with legacy array fallback."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={!snapshot && !snapLoading}
+            />
+            <GlassMetricCard
+              title="Review Pass Rate"
+              value={`${passRate}%`}
+              icon={TrendingUp}
+              trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }}
+              helpText="Automated review approval rate from the meta-critic pipeline. (approved verdicts / total reviews in snapshot). Indicates code quality signal before human handoff."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={reviews.length === 0 && !snapLoading}
+            />
+            <GlassMetricCard
+              title="Active Workers"
+              value={String(workers.length)}
+              icon={Zap}
+              trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }}
+              helpText="Total connected workers in the swarm from snapshot. Trend shows currently busy (non-idle) executors handling tasks."
+              loading={snapLoading}
+              error={snapErrMsg}
+            />
+            <GlassMetricCard
+              title="Failure & Blocked"
+              value={String(totalFailuresAndBlocked)}
+              icon={Clock}
+              trend={{ value: failures.length, label: `${failures.length} hard failures` }}
+              helpText="Combined count of hard failures + currently blocked tasks requiring human intervention (e.g. AST structural issues)."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={failures.length === 0 && blocked === 0 && !snapLoading}
+            />
+
+            {/* Live Telemetry cards — now with full resilience + explanatory helpText (per Grok reviews) */}
+            <GlassMetricCard
+              title="Gateway Engines"
+              value={String(telemetry?.flume_active_models?.length ?? 0)}
+              icon={Activity}
+              trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(', ') || 'No models loaded' }}
+              helpText="Currently loaded LLM models (active gauges) reported by the gateway from Ollama /api/ps probes + node registry. Drives ensemble routing."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={(telemetry && !telemetry.flume_active_models?.length) || false}
+            />
+            <GlassMetricCard
+              title="System Memory"
+              value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'}
+              icon={Cpu}
+              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process."
+              loading={telLoading}
+              error={telErrMsg}
+              secondary={telemetry ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
+            />
+            <GlassMetricCard
+              title="AST Savings"
+              value={fmtTokens(realSavings)}
+              icon={TrendingUp}
+              trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }}
+              helpText="Elastro context compression savings (tokens) vs naive full baseline prompts. Savings aggregated from agent-token-telemetry ES index (baseline_tokens - actual). Powers cheaper, smarter long-context code gen."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
+              secondary={{ label: 'baseline', value: fmtTokens(baselineTokens) }}
+            />
+            <GlassMetricCard
+              title="VRAM Pressure"
+              value={String(telemetry?.flume_vram_pressure_events_total ?? 0)}
+              icon={ServerCrash}
+              trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }}
+              helpText="Cumulative times complex ensemble requests were degraded due to live VRAM headroom from Ollama /api/ps + FLUME_SYSTEM_MEMORY_GB. See gateway/health_checker.go:probeLoad (sum size_vram / MemoryGB)."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={telemetry && telemetry.flume_vram_pressure_events_total === 0}
+            />
+            {/* Node Mesh summary card (covers "Node Mesh Distribution section" resilience + helpText) */}
+            <GlassMetricCard
+              title="Mesh Load (Avg/Max)"
+              value={`${avgMeshLoad}%`}
+              icon={Gauge}
+              helpText="VRAM memory pressure = sum(loaded model size_vram from Ollama /api/ps) / node declared MemoryGB (auto-discovered via health probes in node_registry + health_checker). Per-node gauges exposed as flume_node_load."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={!meshHasData && !telLoading}
+              secondary={{ label: 'nodes / max', value: `${meshNodeCount} / ${maxMeshLoad}%` }}
+            />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 relative z-10">
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="glass-card p-5">
-              <h3 className="text-sm font-semibold text-foreground mb-4">Node Mesh Distribution</h3>
+              <h3
+                className="text-sm font-semibold text-foreground mb-4 flex items-center gap-1.5"
+                title="Per-node VRAM memory pressure = sum loaded model size_vram / node declared MemoryGB. See the 'Mesh Load (Avg/Max)' card above for live values and full explanation."
+              >
+                Node Mesh Distribution
+                <Info className="w-3.5 h-3.5 text-muted-foreground/60" aria-label="Mesh load formula help" />
+              </h3>
               {nodeLoads.length === 0 ? (
                 <div className="text-xs text-muted-foreground text-center py-8">No mesh data</div>
               ) : (
