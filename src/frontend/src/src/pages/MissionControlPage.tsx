@@ -232,7 +232,7 @@ export default function MissionControlPage() {
               Worktree Status (ES)
             </div>
             <div className="text-2xl font-bold font-mono text-white flex items-baseline gap-1">
-              {telemetry.elasticAstCount || 0} <span className="text-xs font-sans text-muted-foreground font-normal">nodes</span>
+              {(systemState?.elasticAstCount ?? telemetry?.elasticAstCount ?? 0)} <span className="text-xs font-sans text-muted-foreground font-normal">nodes</span>
             </div>
           </div>
           <div className="glass-card p-4 flex flex-col gap-1">
