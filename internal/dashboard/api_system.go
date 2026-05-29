@@ -664,6 +664,14 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 		elasticAstCount = 0
 	}
 
+	// 4b. Fetch LogLoom AST structural nodes (new code-intel index for hybrid Elastro+LogLoom visibility per analytics rec 3).
+	// Uses same unscoped Count pattern as elasticAstCount (global nodes across projects; scoping by project/repo field is future).
+	// Falls back gracefully to 0 if index not yet created by LogLoom ingestion.
+	logloomAstCount, err := s.es.Count(ctx, "flume-logloom-ast", map[string]interface{}{})
+	if err != nil {
+		logloomAstCount = 0
+	}
+
 	// 5. Fetch Vault status
 	vaultSealed := true
 	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
@@ -723,6 +731,7 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 		"tasksWithReasoning": tasksWithReasoning,
 		"llmLatency":         llmLatency,
 		"elasticAstCount":    elasticAstCount,
+		"logloomAstCount":    logloomAstCount,
 		"vaultSealed":        vaultSealed,
 	}
 
