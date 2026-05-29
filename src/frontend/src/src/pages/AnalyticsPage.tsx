@@ -8,7 +8,7 @@ import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Ne
 const COLORS = ['hsl(160,84%,39%)', 'hsl(38,92%,50%)', 'hsl(0,84%,60%)', 'hsl(239,84%,67%)'];
 
 export default function AnalyticsPage() {
-  const { data: snapshot, isLoading: isSnapLoading } = useSnapshot();
+  const { data: snapshot, isLoading: isSnapLoading, error: snapError } = useSnapshot();
   const { data: telemetry, isLoading: isTelLoading } = useTelemetry();
   const isLoading = isSnapLoading || isTelLoading;
 
@@ -66,6 +66,12 @@ export default function AnalyticsPage() {
   const estimatedCost = tm?.estimated_cost_usd ?? 0;
   const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
   const historicalBurn = tm?.historical_burn ?? [];
+
+  // Resilience for AST Savings card (Grok Glass uplift): treat complete absence of Elastro telemetry
+  // (both savings + baseline zero) as "partial" so UI can surface the state instead of mysterious 0.
+  // This + backend logging closes the "silent zeros" review gap.
+  const astSavingsPartial = !tm || (realSavings === 0 && baselineTokens === 0);
+  const astSavingsError = snapError ? (snapError instanceof Error ? snapError.message : String(snapError)) : undefined;
   
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
@@ -104,7 +110,18 @@ export default function AnalyticsPage() {
             {/* Live Telemetry Migrated from Telemetry Page */}
             <GlassMetricCard title="Gateway Engines" value={String(telemetry?.flume_active_models?.length ?? 0)} icon={Activity} trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(", ") || 'No models loaded' }} />
             <GlassMetricCard title="System Memory" value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'} icon={Cpu} />
-            <GlassMetricCard title="AST Savings" value={fmtTokens(realSavings)} icon={TrendingUp} trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }} />
+            <GlassMetricCard
+              title="AST Savings"
+              value={fmtTokens(realSavings)}
+              icon={TrendingUp}
+              trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }}
+              // Rich explanation + resilience wiring (addresses review: no helpText/explanation, silent zeros, incomplete types).
+              // helpText surfaces via Glass uplift (ⓘ tooltip + subtle line). partial/error make zero-data trustworthy.
+              helpText="Tokens saved by Elastro AST-aware context compression vs. naive full-file baseline. Computed from agent-token-telemetry 'savings' field (Elastro instrumentation only). Dollar value uses effective rate from actual burn."
+              partial={astSavingsPartial}
+              error={astSavingsError}
+              loading={isLoading}
+            />
             <GlassMetricCard title="VRAM Pressure" value={String(telemetry?.flume_vram_pressure_events_total ?? 0)} icon={ServerCrash} trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }} />
           </div>
 
