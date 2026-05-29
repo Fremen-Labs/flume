@@ -1108,7 +1108,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			ItemType:   "epic",
 			Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
 			AssignedAgentRole: "system",
-			Status:     "planned",
+			Status:     "done",              // Already fully decomposed at intake — never enters work queue
 			Priority:   "high",
 			Risk:       "medium",
 			LastUpdate: now,
@@ -1134,11 +1134,11 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				ItemType:   "feature",
 				Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
 				AssignedAgentRole: "system",
-				Status:     "planned",
+				Status:     "done",              // Already fully decomposed at intake — never enters work queue
 				Priority:   "medium",
 				Risk:       "medium",
 				ParentID:   epicID,
-				DependsOn:  []string{epicID},
+				DependsOn:  []string{},          // No deps — organizational container, parent link via ParentID
 				LastUpdate: now,
 				CreatedAt:  now,
 				UpdatedAt:  now,
@@ -1167,11 +1167,11 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					ItemType:           "story",
 					Owner:              "system",            // Not "pm" — organizational container, never a decomposition target
 					AssignedAgentRole:  "system",
-					Status:             "ready",
+					Status:             "done",              // Already fully decomposed at intake — never enters work queue
 					Priority:           "medium",
 					Risk:               "medium",
 					ParentID:           featID,
-					DependsOn:          []string{featID},
+					DependsOn:          []string{},          // No deps — organizational container, parent link via ParentID
 					AcceptanceCriteria: story.AcceptanceCriteria,
 					LastUpdate:         now,
 					Complexity:       plan.ComplexityScore,

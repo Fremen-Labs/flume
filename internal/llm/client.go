@@ -507,19 +507,216 @@ func (c *Client) parseToolsResponse(raw map[string]interface{}) (*ChatToolsRespo
 
 // ─── Legacy Direct Provider Fallback ────────────────────────────────────────
 
-// legacyChat falls back to direct LLM calls when the gateway is unavailable.
-// In the Go binary, this posts to the gateway anyway since the gateway IS the
-// provider router. If the gateway is truly down, we return an error.
+// legacyChat falls back to direct Ollama calls when the gateway is unavailable.
+// Mirrors the Python worker's direct-provider fallback path.
 func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	// In Go, the gateway IS the provider router. There's no separate "legacy"
-	// module to import. If the gateway is down, we return an error.
-	return nil, fmt.Errorf("llm: gateway is unreachable and no legacy fallback is available in Go binary; " +
-		"ensure the gateway is running: docker compose up gateway")
+	baseURL := c.resolveOllamaBaseURL()
+	if baseURL == "" {
+		return nil, fmt.Errorf("llm: gateway is unreachable and no Ollama base URL is configured; " +
+			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway")
+	}
+
+	model := req.Model
+	if model == "" {
+		model = os.Getenv("LLM_MODEL")
+	}
+	if model == "" {
+		model = "qwen3.5:35b-a3b" // deployment default from flume start banner
+	}
+
+	c.logger.Warn("legacy fallback: direct Ollama call (gateway unavailable)",
+		slog.String("base_url", baseURL),
+		slog.String("model", model),
+	)
+
+	// Build Ollama-native payload (same format as gateway/providers.go ollamaNonStream)
+	payload := map[string]interface{}{
+		"model":    model,
+		"messages": req.Messages,
+		"stream":   false,
+		"options": map[string]interface{}{
+			"temperature": req.Temperature,
+			"num_predict": req.MaxTokens,
+			"num_ctx":     8192,
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy marshal failed: %w", err)
+	}
+
+	url := strings.TrimRight(baseURL, "/") + "/api/chat"
+	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy request build failed: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy direct Ollama call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("llm: legacy Ollama HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("llm: legacy response decode failed: %w", err)
+	}
+
+	// Parse Ollama response (same structure as gateway's ollamaNonStream)
+	content := ""
+	if msg, ok := result["message"].(map[string]interface{}); ok {
+		content, _ = msg["content"].(string)
+	}
+
+	// Strip <think> blocks if present
+	content = stripThinkBlocks(content)
+
+	return &ChatResponse{
+		Content: strings.TrimSpace(content),
+	}, nil
 }
 
 func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) (*ChatToolsResponse, error) {
-	return nil, fmt.Errorf("llm: gateway is unreachable and no legacy fallback is available in Go binary; " +
-		"ensure the gateway is running: docker compose up gateway")
+	baseURL := c.resolveOllamaBaseURL()
+	if baseURL == "" {
+		return nil, fmt.Errorf("llm: gateway is unreachable and no Ollama base URL is configured; " +
+			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway")
+	}
+
+	model := req.Model
+	if model == "" {
+		model = os.Getenv("LLM_MODEL")
+	}
+	if model == "" {
+		model = "qwen3.5:35b-a3b"
+	}
+
+	c.logger.Warn("legacy fallback: direct Ollama tool call (gateway unavailable)",
+		slog.String("base_url", baseURL),
+		slog.String("model", model),
+	)
+
+	// Build Ollama-native payload with tools
+	payload := map[string]interface{}{
+		"model":    model,
+		"messages": req.Messages,
+		"tools":    req.Tools,
+		"stream":   false,
+		"options": map[string]interface{}{
+			"temperature": req.Temperature,
+			"num_predict": req.MaxTokens,
+			"num_ctx":     8192,
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy marshal failed: %w", err)
+	}
+
+	url := strings.TrimRight(baseURL, "/") + "/api/chat"
+	reqCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy request build failed: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("llm: legacy direct Ollama tool call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("llm: legacy Ollama HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("llm: legacy response decode failed: %w", err)
+	}
+
+	// Parse Ollama response
+	content := ""
+	var toolCalls []ToolCall
+	if msg, ok := result["message"].(map[string]interface{}); ok {
+		content, _ = msg["content"].(string)
+		if tcs, ok := msg["tool_calls"].([]interface{}); ok {
+			for _, tc := range tcs {
+				tcMap, _ := tc.(map[string]interface{})
+				fn, _ := tcMap["function"].(map[string]interface{})
+				toolCalls = append(toolCalls, ToolCall{
+					Function: ToolCallFunction{
+						Name:      strVal(fn["name"]),
+						Arguments: fn["arguments"],
+					},
+				})
+			}
+		}
+	}
+
+	content = stripThinkBlocks(content)
+
+	return &ChatToolsResponse{
+		Message: ToolMessage{
+			Role:      "assistant",
+			Content:   strings.TrimSpace(content),
+			ToolCalls: toolCalls,
+		},
+	}, nil
+}
+
+// resolveOllamaBaseURL returns the direct Ollama URL for the legacy fallback path.
+// Checks LOCAL_OLLAMA_BASE_URL first (set by flume start for Docker envs),
+// then LLM_BASE_URL, then LLM_HOST with default port.
+func (c *Client) resolveOllamaBaseURL() string {
+	if v := os.Getenv("LOCAL_OLLAMA_BASE_URL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("LLM_BASE_URL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("LLM_HOST"); v != "" {
+		if !strings.HasPrefix(v, "http") {
+			v = "http://" + v
+		}
+		if !strings.Contains(v[8:], ":") { // no port after http://
+			v += ":11434"
+		}
+		return v
+	}
+	return ""
+}
+
+// stripThinkBlocks removes <think>...</think> blocks from Ollama responses.
+// This is the simplified version of the gateway's ThinkMill for the fallback path.
+func stripThinkBlocks(s string) string {
+	for {
+		start := strings.Index(s, "<think>")
+		if start == -1 {
+			return s
+		}
+		end := strings.Index(s[start:], "</think>")
+		if end == -1 {
+			// Unterminated <think> block — strip from <think> to end
+			return s[:start]
+		}
+		s = s[:start] + s[start+end+len("</think>"):]
+	}
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -983,12 +983,16 @@ func gitCmd(repoPath string, args ...string) (string, error) {
 }
 
 func gitCheckoutBranch(repoPath, branch string) error {
+	// Clean stale git locks from crashed processes before any operation.
+	// This prevents the "Unable to create index.lock: File exists" error.
+	cleanStaleLocks(repoPath)
+
 	// Always try to refresh refs first — this prevents the "main is not a commit" and similar races
 	// after crashes, resets, or dynamic clones that left the local state inconsistent.
 	_, _ = gitCmd(repoPath, "fetch", "--all", "--prune", "--quiet")
 
 	// Try checkout existing branch (fast path)
-	if out, err := gitCmd(repoPath, "checkout", branch); err == nil {
+	if _, err := gitCmd(repoPath, "checkout", branch); err == nil {
 		return nil
 	} else {
 		// Existing branch checkout failed — try to recover the default branch state
@@ -999,16 +1003,38 @@ func gitCheckoutBranch(repoPath, branch string) error {
 		_, _ = gitCmd(repoPath, "reset", "--hard", "origin/"+defaultBranch)
 		_, _ = gitCmd(repoPath, "clean", "-fd")
 
-		// Now attempt the feature branch creation from a known-good base
-		if out2, err2 := gitCmd(repoPath, "checkout", "-b", branch, "origin/"+defaultBranch); err2 != nil {
+		// Now attempt the feature branch creation from a known-good base.
+		// Use -B (force-create) so an existing branch from a prior failed attempt
+		// is reset to the clean base instead of causing "branch already exists" errors.
+		if out2, err2 := gitCmd(repoPath, "checkout", "-B", branch, "origin/"+defaultBranch); err2 != nil {
 			// Last resort: try creating from local HEAD if origin ref was also bad
-			if out3, err3 := gitCmd(repoPath, "checkout", "-b", branch); err3 != nil {
+			if out3, err3 := gitCmd(repoPath, "checkout", "-B", branch); err3 != nil {
 				return fmt.Errorf("git checkout branch %s failed after recovery. Existing: %s (%v). From origin/%s: %s (%v). Last resort: %s (%v)",
-					branch, strings.TrimSpace(out), err, defaultBranch, strings.TrimSpace(out2), err2, strings.TrimSpace(out3), err3)
+					branch, strings.TrimSpace(string(err.Error())), err, defaultBranch, strings.TrimSpace(out2), err2, strings.TrimSpace(out3), err3)
 			}
 		}
 	}
 	return nil
+}
+
+// cleanStaleLocks removes stale .git/index.lock files left by crashed git processes.
+// Only removes locks older than 30 seconds to avoid interfering with active operations.
+func cleanStaleLocks(repoPath string) {
+	lockFile := fmt.Sprintf("%s/.git/index.lock", strings.TrimRight(repoPath, "/"))
+	info, err := os.Stat(lockFile)
+	if err != nil {
+		return // No lock file — nothing to clean
+	}
+
+	// Only remove if the lock is stale (older than 30 seconds)
+	if time.Since(info.ModTime()) > 30*time.Second {
+		if removeErr := os.Remove(lockFile); removeErr == nil {
+			slog.Warn("git: removed stale index.lock",
+				slog.String("repo", repoPath),
+				slog.Duration("age", time.Since(info.ModTime())),
+			)
+		}
+	}
 }
 
 // resolveDefaultBranch determines the repo's default branch.
