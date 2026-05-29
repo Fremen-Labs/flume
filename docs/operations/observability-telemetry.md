@@ -32,3 +32,4 @@ Mounted explicitly as an integrated pane natively on the Flume Dashboard, the **
 
 - Live visualizations mapping `flume_active_models` parallel loads locally.
 - Dynamic bounding box analytics surfacing explicitly when and why the Native Gateway forces escalations natively due to local bounds throttling securely.
+- Node Mesh Distribution (Analytics) now sources authoritative VRAM pressure (CurrentLoad from health_checker + NodeRegistry via `GET /api/nodes`) — the legacy `flume_node_load` telemetry series is deprecated for this view (still emitted in /metrics for Prometheus users).
