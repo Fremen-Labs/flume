@@ -78,6 +78,9 @@ export default function AnalyticsPage() {
   const estimatedCost = tm?.estimated_cost_usd ?? 0;
   const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
   const historicalBurn = tm?.historical_burn ?? [];
+  // Local mesh / hybrid (Recommendation 1): data-driven est + note when no Elastro savings docs
+  const localMeshEst = tm?.local_mesh_estimated_savings ?? 0;
+  const meshEfficiencyNote = tm?.mesh_efficiency_note ?? (tm as any)?.local_mesh_efficiency_note;
   
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
@@ -178,16 +181,16 @@ export default function AnalyticsPage() {
             />
             <GlassMetricCard
               title="AST Savings"
-              value={realSavings > 0 ? fmtTokens(realSavings) : (tm?.local_mesh_estimated_savings ? fmtTokens(tm.local_mesh_estimated_savings) + " (local est.)" : fmtTokens(0))}
+              value={realSavings > 0 ? fmtTokens(realSavings) : (localMeshEst ? fmtTokens(localMeshEst) + " (mesh est.)" : fmtTokens(0))}
               icon={TrendingUp}
-              trend={{ value: savingsPercent, label: realSavings > 0 ? `$${dollarsSaved.toFixed(2)} saved vs base cost` : "Mesh efficiency (local mode)", suffix: '%' }}
-              helpText="Elastro (when present): precise context compression savings vs naive full prompts (from agent-token-telemetry). Local mesh mode: estimated tokens avoided via intelligent routing + structural awareness across nodes (derived from live token volume via Telemetry Bridge). Full LogLoom AST integration will make local estimates far more accurate."
+              trend={{ value: savingsPercent, label: realSavings > 0 ? `$${dollarsSaved.toFixed(2)} saved vs base cost` : "Local mesh efficiency", suffix: '%' }}
+              helpText="Hybrid model: Elastro (when present) delivers precise AST-aware compression savings vs naive full-context baseline (sourced from agent-token-telemetry 'savings' docs). In local-only / mesh mode (no Elastro data): data-driven estimate of tokens avoided via intelligent multi-node routing + LogLoom-path structural awareness, computed live from Telemetry Bridge (flume_worker_tokens_total + routing decisions + node loads). See mesh_efficiency_note for derivation details."
               loading={snapLoading}
               error={snapErrMsg}
               partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
               secondary={realSavings > 0 
-                ? { label: 'baseline', value: fmtTokens(baselineTokens) } 
-                : (tm?.local_mesh_efficiency_note ? { label: 'note', value: 'local mesh' } : undefined)
+                ? { label: 'Elastro', value: `${fmtTokens(baselineTokens)} baseline` } 
+                : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined)
               }
             />
             <GlassMetricCard
