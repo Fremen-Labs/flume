@@ -2,8 +2,9 @@ import { motion } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useTelemetry } from '@/hooks/useTelemetry';
+import { useSystemState } from '@/hooks/useSystemState';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
-import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Gauge, Info } from 'lucide-react';
+import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Gauge, Info, Braces } from 'lucide-react';
 import { createLogger } from '@/utils/logger';
 
 const log = createLogger('pages.AnalyticsPage');
@@ -101,6 +102,17 @@ export default function AnalyticsPage() {
   const maxMeshLoad = meshNodeCount > 0 ? Math.max(...nodeLoads.map(n => n.load)) : 0;
   const meshHasData = meshNodeCount > 0;
 
+  // Code Intelligence Backend (Rec 3): visibility into Elastro vs LogLoom AST structural indexing.
+  // Uses /api/system-state (which already exposes elasticAstCount; now also logloomAstCount via ES Count on the indices).
+  // Hook poll is slower (15s) since structural node counts change infrequently (on project ingest / logloom graph).
+  const systemState = useSystemState(15000);
+  const codeIntelLoading = !systemState;
+  const elasticAstCount: number = (systemState?.telemetry as any)?.elasticAstCount ?? 0;
+  const logloomAstCount: number = (systemState?.telemetry as any)?.logloomAstCount ?? 0;
+  const hasCodeIntel = elasticAstCount > 0 || logloomAstCount > 0;
+  const structuralNodes = Math.max(elasticAstCount, logloomAstCount);
+  const codeIntelStatus = elasticAstCount > 0 && logloomAstCount > 0 ? 'Hybrid' : elasticAstCount > 0 ? 'Elastro' : logloomAstCount > 0 ? 'LogLoom' : '—';
+
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="relative z-10">
@@ -192,6 +204,17 @@ export default function AnalyticsPage() {
                 ? { label: 'Elastro', value: `${fmtTokens(baselineTokens)} baseline` } 
                 : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined)
               }
+            />
+            {/* New: Code Intelligence Backend card (Recommendation 3). Minimal addition using existing Glass resilience + system-state ES counts. */}
+            <GlassMetricCard
+              title="Code Intelligence Backend"
+              value={codeIntelStatus}
+              icon={Braces}
+              helpText="Hybrid code-understanding visibility for agents. Elastro (flume-elastro-graph): semantic vector RAG over rich AST graphs for meaning-aware retrieval. LogLoom AST (flume-logloom-ast): precise structural nodes/call-graphs for exact 'walk the code' dependency traversal (avoids hallucinated boundaries). Structural nodes = max indexed across backends. Future hybrid (LogLoom surgical structure + Elastro semantic) will unlock superior AST Savings + context fidelity. 0 means no project AST ingest yet."
+              loading={codeIntelLoading}
+              error={null}
+              partial={!hasCodeIntel && !codeIntelLoading}
+              secondary={{ label: 'Elastro / LogLoom nodes', value: `${elasticAstCount} / ${logloomAstCount}` }}
             />
             <GlassMetricCard
               title="VRAM Pressure"
