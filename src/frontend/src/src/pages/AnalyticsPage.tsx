@@ -2,82 +2,28 @@ import { motion } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useTelemetry } from '@/hooks/useTelemetry';
-import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
-import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Server, AlertTriangle, HelpCircle } from 'lucide-react';
+import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Gauge, Info } from 'lucide-react';
 import { createLogger } from '@/utils/logger';
+
+const log = createLogger('pages.AnalyticsPage');
 
 const COLORS = ['hsl(160,84%,39%)', 'hsl(38,92%,50%)', 'hsl(0,84%,60%)', 'hsl(239,84%,67%)'];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Logger (LogLoom structured) + local types for unified /api/nodes source
-// Authoritative loads come from gateway health_checker + node_registry (CurrentLoad
-// derived from sum(size_vram) / MemoryGB). Telemetry flume_node_load path is dead.
-// ─────────────────────────────────────────────────────────────────────────────
-const log = createLogger('pages.AnalyticsPage');
-
-// Minimal shapes matching Node + Health + Capabilities from /api/nodes (via dashboard proxy)
-interface NodeHealth {
-  current_load?: number;
-  status?: string;
-  loaded_models?: string[];
-  last_seen?: string;
-  latency_ms?: number;
-}
-interface NodeCapabilities {
-  memory_gb?: number;
-  reasoning_score?: number;
-  max_context?: number;
-  quantization?: string;
-  estimated_tps?: number;
-}
-interface ApiNode {
-  id: string;
-  host?: string;
-  model_tag?: string;
-  capabilities?: NodeCapabilities;
-  health?: NodeHealth;
-}
-interface NodesApiResponse {
-  nodes?: ApiNode[];
-  count?: number;
-  error?: string; // set by dashboard when gateway unreachable (partial resilience)
-}
-
-interface NodeChartDatum {
-  name: string;
-  load: number;
-  loadRaw: number;
-  memoryGB: number;
-  usedGB: number;
-  modelCount: number;
-  status: string;
-}
-
-// Stable custom tooltip renderer (hoisted to avoid per-render recreation for Recharts)
-function NodeLoadTooltip({ active, payload }: { active?: boolean; payload?: { payload?: NodeChartDatum }[] }) {
-  if (!active || !payload?.length) return null;
-  const d = (payload[0].payload || {}) as NodeChartDatum;
-  const used = typeof d.usedGB === 'number' ? d.usedGB.toFixed(1) : '?';
-  const total = typeof d.memoryGB === 'number' && d.memoryGB > 0 ? d.memoryGB : '?';
-  return (
-    <div className="rounded-lg border border-[hsl(215,28%,17%)] bg-[hsl(222,47%,8%)] p-3 text-xs shadow-xl">
-      <div className="font-semibold text-foreground mb-1">{d.name || 'node'}</div>
-      <div className="text-muted-foreground">
-        Load: <span className="font-mono text-foreground">{d.load ?? 0}%</span> ({used} / {total} GB VRAM)
-      </div>
-      <div className="text-muted-foreground">Models loaded: <span className="font-mono text-foreground">{d.modelCount ?? 0}</span></div>
-      <div className="text-muted-foreground">Status: <span className="font-mono text-foreground capitalize">{d.status || 'unknown'}</span></div>
-      <div className="mt-1 text-[10px] text-muted-foreground/70">Lower load preferred for routing</div>
-    </div>
-  );
-}
-
 export default function AnalyticsPage() {
   const { data: snapshot, isLoading: isSnapLoading, error: snapError } = useSnapshot();
-  const { data: telemetry, isLoading: isTelLoading } = useTelemetry();
-  const isLoading = isSnapLoading || isTelLoading;
+  const { data: telemetry, isLoading: isTelLoading, error: telError } = useTelemetry();
+
+  // Refined loading for resilience: cards always render; use per-card loading/error/partial
+  const snapLoading = isSnapLoading && !snapshot;
+  const telLoading = isTelLoading && !telemetry;
+  const isInitialLoading = snapLoading && telLoading;
+
+  const snapErrMsg = snapError ? (snapError instanceof Error ? snapError.message : String(snapError)) : null;
+  const telErrMsg = telError ? (telError instanceof Error ? telError.message : String(telError)) : null;
+
+  if (snapErrMsg) log.warn('snapshot error surfaced to Analytics cards', { error: snapErrMsg });
+  if (telErrMsg) log.warn('telemetry error surfaced to Analytics cards (partial data possible)', { error: telErrMsg });
 
   const tasks = snapshot?.tasks ?? [];
   const workers = snapshot?.workers ?? [];
@@ -91,9 +37,8 @@ export default function AnalyticsPage() {
   const blocked = tasks.filter(t => t.status === 'blocked').length;
   const totalFailuresAndBlocked = failures.length + blocked;
 
-  // Grok uplift: prefer efficient backend task_count (Total Tasks card).
-  // Falls back to tasks.length for backward compat during rollout.
-  const total = snapshot?.task_count ?? tasks.length;
+  // Prefer backend task_count when present (cross-cutting uplift)
+  const total = (snapshot as any)?.task_count ?? tasks.length;
 
   const getTokens = (wName: string, dir: 'input' | 'output') => {
     if (!telemetry?.flume_worker_tokens_total) return 0;
@@ -133,67 +78,25 @@ export default function AnalyticsPage() {
   const estimatedCost = tm?.estimated_cost_usd ?? 0;
   const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
   const historicalBurn = tm?.historical_burn ?? [];
-
-  // Resilience for AST Savings card (Grok Glass uplift): treat complete absence of Elastro telemetry
-  // (both savings + baseline zero) as "partial" so UI can surface the state instead of mysterious 0.
-  // This + backend logging closes the "silent zeros" review gap.
-  const astSavingsPartial = !tm || (realSavings === 0 && baselineTokens === 0);
-  const astSavingsError = snapError ? (snapError instanceof Error ? snapError.message : String(snapError)) : undefined;
   
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
-  // ── Unified real data source: /api/nodes (NodeRegistry + HealthChecker) ──
-  // Replaces dead telemetry?.flume_node_load. Shares react-query cache with NodesOverview.
-  const { data: nodesData, isLoading: isNodesLoading, isError: isNodesError, error: nodesQueryError } = useQuery<NodesApiResponse>({
-    queryKey: ['nodes'],
-    queryFn: async () => {
-      log.debug('fetchNodes', 'Fetching fresh /api/nodes for Node Mesh Distribution chart');
-      try {
-        const res = await fetch('/api/nodes');
-        if (!res.ok) {
-          log.warn('fetchNodes', `Non-OK response from /api/nodes`, { status: res.status });
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const json = await res.json();
-        log.info('fetchNodes', 'Node mesh data arrived for Analytics', {
-          nodeCount: json?.nodes?.length ?? 0,
-          gatewayError: json?.error || null,
-        });
-        return json as NodesApiResponse;
-      } catch (e) {
-        log.error('fetchNodes', 'Failed to fetch /api/nodes for chart (will show resilient state)', { error: String(e) });
-        throw e;
-      }
-    },
-    refetchInterval: 15_000,
-    staleTime: 10_000,
-    retry: 1,
-  });
-
-  const gatewayError = nodesData?.error;
-  const rawNodes: ApiNode[] = nodesData?.nodes ?? [];
-  const nodeChartData = rawNodes
-    .map((n) => {
-      const load = n.health?.current_load ?? 0; // 0.0–1.0 authoritative from health_checker
-      const memGB = n.capabilities?.memory_gb ?? 0;
-      const usedGB = load * memGB;
-      return {
-        name: n.id || 'unknown',
-        load: Math.round(load * 100),
-        loadRaw: load,
-        memoryGB: memGB,
-        usedGB: usedGB,
-        modelCount: n.health?.loaded_models?.length ?? 0,
-        status: n.health?.status || 'unknown',
-      };
-    })
-    .sort((a, b) => b.load - a.load); // sort desc by load (actionable: highest pressure first)
-
+  const nodeLoads = (telemetry?.flume_node_load ?? []).map(l => ({
+    name: l.tags['node_id'] || 'unknown',
+    load: Math.round(l.value * 100)
+  }));
+  
   const routingDecisions = Object.entries((telemetry?.flume_routing_decision ?? []).reduce<Record<string, number>>((acc, d) => {
     const strategy = d.tags['strategy'] || 'unknown';
     acc[strategy] = (acc[strategy] || 0) + d.count;
     return acc;
   }, {})).map(([name, value]) => ({ name, value }));
+
+  // Derived for Node Mesh card + partial detection (cross-cutting)
+  const meshNodeCount = nodeLoads.length;
+  const avgMeshLoad = meshNodeCount > 0 ? Math.round(nodeLoads.reduce((s, n) => s + n.load, 0) / meshNodeCount) : 0;
+  const maxMeshLoad = meshNodeCount > 0 ? Math.max(...nodeLoads.map(n => n.load)) : 0;
+  const meshHasData = meshNodeCount > 0;
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6 relative">
@@ -202,113 +105,129 @@ export default function AnalyticsPage() {
         <p className="text-sm text-muted-foreground mt-1">Performance metrics and intelligent swarm observability</p>
       </motion.div>
 
-      {isLoading && (
+      {isInitialLoading && (
         <div className="flex items-center gap-2 text-muted-foreground py-10">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading Live Analytics…
         </div>
       )}
 
-      {!isLoading && (
+      {!isInitialLoading && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-4 relative z-10">
-            <GlassMetricCard title="Total Tasks" value={String(total)} icon={Target} trend={{ value: done, label: `${done} done` }} />
-            <GlassMetricCard title="Review Pass Rate" value={`${passRate}%`} icon={TrendingUp} trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }} />
-            <GlassMetricCard title="Active Workers" value={String(workers.length)} icon={Zap} trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }} />
-            <GlassMetricCard title="Failure & Blocked" value={String(totalFailuresAndBlocked)} icon={Clock} trend={{ value: failures.length, label: `${failures.length} hard failures` }} />
-            
-            {/* Live Telemetry Migrated from Telemetry Page */}
-            <GlassMetricCard title="Gateway Engines" value={String(telemetry?.flume_active_models?.length ?? 0)} icon={Activity} trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(", ") || 'No models loaded' }} />
-            <GlassMetricCard title="System Memory" value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'} icon={Cpu} />
+            <GlassMetricCard
+              title="Total Tasks"
+              value={String(total)}
+              icon={Target}
+              trend={{ value: done, label: `${done} done` }}
+              helpText="Aggregate count of all tasks (epics / features / stories / tasks) tracked by the orchestrator snapshot. Prefers backend task_count for efficiency with legacy array fallback."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={!snapshot && !snapLoading}
+            />
+            <GlassMetricCard
+              title="Review Pass Rate"
+              value={`${passRate}%`}
+              icon={TrendingUp}
+              trend={{ value: passRate, label: `${approvedReviews}/${reviews.length} reviews` }}
+              helpText="Automated review approval rate from the meta-critic pipeline. (approved verdicts / total reviews in snapshot). Indicates code quality signal before human handoff."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={reviews.length === 0 && !snapLoading}
+            />
+            <GlassMetricCard
+              title="Active Workers"
+              value={String(workers.length)}
+              icon={Zap}
+              trend={{ value: 0, label: `${workers.filter(w => w.status !== 'idle').length} busy` }}
+              helpText="Total connected workers in the swarm from snapshot. Trend shows currently busy (non-idle) executors handling tasks."
+              loading={snapLoading}
+              error={snapErrMsg}
+            />
+            <GlassMetricCard
+              title="Failure & Blocked"
+              value={String(totalFailuresAndBlocked)}
+              icon={Clock}
+              trend={{ value: failures.length, label: `${failures.length} hard failures` }}
+              helpText="Combined count of hard failures + currently blocked tasks requiring human intervention (e.g. AST structural issues)."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={failures.length === 0 && blocked === 0 && !snapLoading}
+            />
+
+            {/* Live Telemetry cards — now with full resilience + explanatory helpText (per Grok reviews) */}
+            <GlassMetricCard
+              title="Gateway Engines"
+              value={String(telemetry?.flume_active_models?.length ?? 0)}
+              icon={Activity}
+              trend={{ value: telemetry?.flume_active_models?.length ?? 0, label: telemetry?.flume_active_models?.join(', ') || 'No models loaded' }}
+              helpText="Currently loaded LLM models (active gauges) reported by the gateway from Ollama /api/ps probes + node registry. Drives ensemble routing."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={(telemetry && !telemetry.flume_active_models?.length) || false}
+            />
+            <GlassMetricCard
+              title="System Memory"
+              value={telemetry ? `${Math.round(telemetry.go_memstats_sys_bytes / 1024 / 1024)}MB` : '0MB'}
+              icon={Cpu}
+              helpText="Go runtime total memory obtained from the OS (go_memstats_sys_bytes). Includes heap, stacks, and caches for the gateway + dashboard process."
+              loading={telLoading}
+              error={telErrMsg}
+              secondary={telemetry ? { label: 'goroutines', value: telemetry.go_goroutines } : undefined}
+            />
             <GlassMetricCard
               title="AST Savings"
               value={fmtTokens(realSavings)}
               icon={TrendingUp}
               trend={{ value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' }}
-              // Rich explanation + resilience wiring (addresses review: no helpText/explanation, silent zeros, incomplete types).
-              // helpText surfaces via Glass uplift (ⓘ tooltip + subtle line). partial/error make zero-data trustworthy.
-              helpText="Tokens saved by Elastro AST-aware context compression vs. naive full-file baseline. Computed from agent-token-telemetry 'savings' field (Elastro instrumentation only). Dollar value uses effective rate from actual burn."
-              partial={astSavingsPartial}
-              error={astSavingsError}
-              loading={isLoading}
+              helpText="Elastro context compression savings (tokens) vs naive full baseline prompts. Savings aggregated from agent-token-telemetry ES index (baseline_tokens - actual). Powers cheaper, smarter long-context code gen."
+              loading={snapLoading}
+              error={snapErrMsg}
+              partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
+              secondary={{ label: 'baseline', value: fmtTokens(baselineTokens) }}
             />
-            <GlassMetricCard title="VRAM Pressure" value={String(telemetry?.flume_vram_pressure_events_total ?? 0)} icon={ServerCrash} trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }} />
+            <GlassMetricCard
+              title="VRAM Pressure"
+              value={String(telemetry?.flume_vram_pressure_events_total ?? 0)}
+              icon={ServerCrash}
+              trend={{ value: telemetry?.flume_vram_pressure_events_total ?? 0, label: 'Ensemble clamps' }}
+              helpText="Cumulative times complex ensemble requests were degraded due to live VRAM headroom from Ollama /api/ps + FLUME_SYSTEM_MEMORY_GB. See gateway/health_checker.go:probeLoad (sum size_vram / MemoryGB)."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={telemetry && telemetry.flume_vram_pressure_events_total === 0}
+            />
+            {/* Node Mesh summary card (covers "Node Mesh Distribution section" resilience + helpText) */}
+            <GlassMetricCard
+              title="Mesh Load (Avg/Max)"
+              value={`${avgMeshLoad}%`}
+              icon={Gauge}
+              helpText="VRAM memory pressure = sum(loaded model size_vram from Ollama /api/ps) / node declared MemoryGB (auto-discovered via health probes in node_registry + health_checker). Per-node gauges exposed as flume_node_load."
+              loading={telLoading}
+              error={telErrMsg}
+              partial={!meshHasData && !telLoading}
+              secondary={{ label: 'nodes / max', value: `${meshNodeCount} / ${maxMeshLoad}%` }}
+            />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 relative z-10">
-            {/* Node Mesh Distribution — now unified on real /api/nodes (health.current_load) */}
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="glass-card p-5">
-              <div className="mb-3">
-                <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                  Node Mesh Distribution
-                  <span title="VRAM memory pressure (sum of loaded models' size_vram ÷ node's declared MemoryGB). Lower is preferred for routing. Data from health_checker probes.">
-                    <HelpCircle className="w-3.5 h-3.5 text-muted-foreground/60 hover:text-muted-foreground transition-colors" />
-                  </span>
-                </h3>
-                <p className="text-[10px] leading-snug text-muted-foreground mt-0.5">
-                  VRAM memory pressure (sum of loaded models' size_vram ÷ node's declared MemoryGB). Lower is preferred for routing.
-                </p>
-              </div>
-
-              {isNodesLoading ? (
-                <div className="flex h-[170px] items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Loading node loads from registry…
-                </div>
-              ) : (isNodesError || gatewayError) && nodeChartData.length === 0 ? (
-                <div className="flex h-[170px] flex-col items-center justify-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-4 text-center text-xs">
-                  <AlertTriangle className="h-6 w-6 text-amber-400" />
-                  <div className="font-medium text-amber-300">Gateway unreachable</div>
-                  <div className="text-amber-400/80">Last known loads unavailable. Check Node Mesh or gateway health.</div>
-                </div>
-              ) : nodeChartData.length === 0 ? (
-                <div className="flex h-[170px] flex-col items-center justify-center gap-2 text-center">
-                  <Server className="h-8 w-8 text-muted-foreground/40" />
-                  <p className="text-xs text-muted-foreground">No nodes registered in the mesh</p>
-                  <Link
-                    to="/nodes"
-                    className="inline-flex items-center gap-1 rounded-md border border-border/30 px-2.5 py-1 text-[10px] text-primary hover:bg-white/5 hover:text-primary/90 transition-colors"
-                  >
-                    Go to Node Mesh → Register nodes
-                  </Link>
-                </div>
+              <h3
+                className="text-sm font-semibold text-foreground mb-4 flex items-center gap-1.5"
+                title="Per-node VRAM memory pressure = sum loaded model size_vram / node declared MemoryGB. See the 'Mesh Load (Avg/Max)' card above for live values and full explanation."
+              >
+                Node Mesh Distribution
+                <Info className="w-3.5 h-3.5 text-muted-foreground/60" aria-label="Mesh load formula help" />
+              </h3>
+              {nodeLoads.length === 0 ? (
+                <div className="text-xs text-muted-foreground text-center py-8">No mesh data</div>
               ) : (
-                <ResponsiveContainer width="100%" height={170}>
-                  <BarChart data={nodeChartData} margin={{ top: 4, right: 4, left: -4, bottom: 0 }}>
-                    <XAxis
-                      dataKey="name"
-                      tick={{ fill: 'hsl(215,20%,65%)', fontSize: 9 }}
-                      tickLine={{ stroke: 'hsl(215,28%,17%)' }}
-                    />
-                    <YAxis
-                      unit="%"
-                      domain={[0, 100]}
-                      tick={{ fill: 'hsl(215,20%,65%)', fontSize: 9 }}
-                      tickLine={{ stroke: 'hsl(215,28%,17%)' }}
-                    />
-                    <Tooltip content={<NodeLoadTooltip />} cursor={{ fill: 'hsl(215,20%,65%,0.08)' }} />
-                    <Bar dataKey="load" radius={[4, 4, 0, 0]}>
-                      {nodeChartData.map((entry, index) => {
-                        const fill = entry.load >= 80
-                          ? 'hsl(0,84%,60%)'   // high pressure — red
-                          : entry.load >= 55
-                          ? 'hsl(38,92%,50%)'  // medium — amber
-                          : 'hsl(160,84%,39%)'; // healthy — emerald
-                        return <Cell key={`cell-${index}`} fill={fill} />;
-                      })}
-                    </Bar>
+                <ResponsiveContainer width="100%" height={180}>
+                   <BarChart data={nodeLoads}>
+                    <XAxis dataKey="name" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
+                    <YAxis unit="%" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
+                    <Tooltip contentStyle={{ background: 'hsl(222,47%,8%)', border: '1px solid hsl(215,28%,17%)', borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="load" fill="hsl(160,84%,39%)" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
-              )}
-
-              {/* Partial / resilience footer */}
-              {gatewayError && nodeChartData.length > 0 && (
-                <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px] text-amber-400">
-                  Partial data — gateway unreachable (showing last cached loads)
-                </div>
-              )}
-              {nodeChartData.length > 0 && (
-                <div className="mt-1.5 text-right text-[9px] text-muted-foreground/60">
-                  {nodeChartData.length} node{nodeChartData.length === 1 ? '' : 's'} • sorted by load desc
-                </div>
               )}
             </motion.div>
 
