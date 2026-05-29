@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,4 +123,62 @@ func logFrontierAcquire(ctx context.Context, model string, q *FrontierQueue) fun
 			slog.Int("active", q.Active()),
 		)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-Plan PM Rate Limiter (Phase 2 task 4 skeleton)
+// Simple fixed-window in-memory limiter keyed by (plan_session_id + ":pm").
+// Default: 3 decomposition attempts per plan per 60s.
+// Prevents one plan from flooding the mesh with PM decomp calls during gateway
+// blips or LLM slowness (key anti-explosion control point at the gateway edge).
+// Interface is clean for future swap to distributed (Redis/Zookeeper token bucket).
+// ─────────────────────────────────────────────────────────────────────────────
+
+type PlanPMRateLimiter struct {
+	mu        sync.Mutex
+	windows   map[string]struct{ start time.Time; count int } // key="planID:pm"
+	maxPerWin int
+	window    time.Duration
+}
+
+func NewPlanPMRateLimiter(maxPerMinute int) *PlanPMRateLimiter {
+	if maxPerMinute <= 0 {
+		maxPerMinute = 3
+	}
+	return &PlanPMRateLimiter{
+		windows:   make(map[string]struct{ start time.Time; count int }),
+		maxPerWin: maxPerMinute,
+		window:    time.Minute,
+	}
+}
+
+// Allow returns (allowed, reasonIfDenied). Thread-safe. Logs hit at caller.
+func (l *PlanPMRateLimiter) Allow(planSessionID, role string) (bool, string) {
+	if planSessionID == "" || role != "pm" {
+		return true, "" // only gate PM decomp paths
+	}
+	key := planSessionID + ":pm"
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	w, ok := l.windows[key]
+	if !ok || now.Sub(w.start) >= l.window {
+		l.windows[key] = struct{ start time.Time; count int }{start: now, count: 1}
+		return true, ""
+	}
+	if w.count >= l.maxPerWin {
+		reason := fmt.Sprintf("per-plan-pm rate limit hit: %d attempts in last minute for plan %s (cap=%d)", w.count, planSessionID, l.maxPerWin)
+		return false, reason
+	}
+	w.count++
+	l.windows[key] = w
+	return true, ""
+}
+
+// For tests / future: Reset clears state (not for prod hot path).
+func (l *PlanPMRateLimiter) Reset() {
+	l.mu.Lock()
+	l.windows = make(map[string]struct{ start time.Time; count int })
+	l.mu.Unlock()
 }

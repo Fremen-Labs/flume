@@ -59,6 +59,7 @@ type ChatRequest struct {
 	AgentRole        string    `json:"agent_role,omitempty"`
 	TaskType         string    `json:"task_type,omitempty"` // "planning", "code", "reasoning", etc. — overrides AgentRole-derived type for routing
 	TaskID           string    `json:"task_id,omitempty"`
+	PlanSessionID    string    `json:"plan_session_id,omitempty"` // Phase 2: for per-plan budget + gateway PM rate limiter (keyed by (plan,role=pm))
 	TimeoutSeconds   int       `json:"-"` // client-side timeout, not sent to gateway
 	ReturnUsage      bool      `json:"-"`
 	ReturnTelemetry  bool      `json:"-"`
@@ -75,6 +76,7 @@ type ChatToolsRequest struct {
 	Think            bool           `json:"think,omitempty"`
 	AgentRole        string         `json:"agent_role,omitempty"`
 	TaskID           string         `json:"task_id,omitempty"`
+	PlanSessionID    string         `json:"plan_session_id,omitempty"` // Phase 2: for per-plan budget + gateway PM rate limiter
 	ReturnTelemetry  bool           `json:"-"`
 }
 
@@ -186,6 +188,9 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 		if req.TaskID != "" {
 			payload["task_id"] = req.TaskID
 		}
+		if req.PlanSessionID != "" {
+			payload["plan_session_id"] = req.PlanSessionID
+		}
 
 		resp, err := c.postGateway(ctx, "/v1/chat", payload, timeout)
 		if err != nil {
@@ -258,6 +263,9 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 		}
 		if req.TaskID != "" {
 			payload["task_id"] = req.TaskID
+		}
+		if req.PlanSessionID != "" {
+			payload["plan_session_id"] = req.PlanSessionID
 		}
 
 		resp, err := c.postGateway(ctx, "/v1/chat/tools", payload, 180)

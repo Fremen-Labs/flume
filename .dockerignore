@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore for Flume (multi-stage Go + embedded frontend)
+# Reduces context size and prevents host node_modules / build artifacts from
+# leaking into the frontend build stage (which does COPY src/frontend/src/ ./).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git / VCS
+.git
+.gitignore
+
+# Python / Logloom (not needed in Docker images)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.log
+
+# Node / Frontend (critical — do not ship host node_modules or prior builds)
+**/node_modules/
+**/dist/
+**/.vite/
+**/playwright-report/
+**/test-results/
+**/*.tsbuildinfo
+
+# Local dev / secrets
+.env
+.env.*
+*.local
+.DS_Store
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker (prevent recursion)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Large or unnecessary for the runtime binary
+elastro.log
+out*.txt
+test_*.py
+*.md
+docs/
+scripts/          # (our new check-direct-logs.sh is source-only)
+vendor-local/logloom-go/   # only the Go side needs certain vendor bits; the root COPY will still pick what go build needs
+
+# OS / temp
+tmp/
+temp/
+*.tmp

@@ -49,6 +49,9 @@ type Server struct {
 	skills *skills.SkillRegistry
 	// nodeRegistry manages the distributed Ollama node mesh.
 	nodeRegistry *NodeRegistry
+	// planPMRateLimiter (Phase 2 task 4): basic in-memory fixed-window guard (3/min per plan for role=pm).
+	// Integrated early in dispatch before expensive work. Clean for Redis upgrade later.
+	planPMRateLimiter *PlanPMRateLimiter
 	// healthChecker probes node health in the background.
 	healthChecker *HealthChecker
 	// frontierProber periodically polls active cloud models for token limits.
@@ -87,7 +90,8 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		mux:       http.NewServeMux(),
 		ollamaSem: NewOllamaSemaphore(maxConcurrent),
 		globalSem: make(chan struct{}, globalMaxConcurrent()),
-		frontierQ: NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
+		frontierQ:           NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
+		planPMRateLimiter:   NewPlanPMRateLimiter(3), // 3 PM decomp attempts per plan per minute (tunable)
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -275,6 +279,23 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
+
+	// === Phase 2 per-plan-pm rate limiter (early, before any frontier or mesh calls) ===
+	// Keyed on plan_session_id + role=="pm". 3 attempts/min default. Rich log on hit.
+	// Returns 429 for callers (worker LLM path treats as transient failure + backoff).
+	if s.planPMRateLimiter != nil {
+		if allowed, reason := s.planPMRateLimiter.Allow(req.PlanSessionID, req.AgentRole); !allowed {
+			log.Warn("per-plan-pm rate limit hit",
+				slog.String("plan_session_id", req.PlanSessionID),
+				slog.String("agent_role", req.AgentRole),
+				slog.String("reason", reason),
+				slog.String("request_id", requestID),
+			)
+			// Graceful degradation: 429 tells worker to back off (existing decomp failure path handles it)
+			s.writeError(w, http.StatusTooManyRequests, "rate limit: too many PM decompositions for this plan; backing off", requestID)
+			return
+		}
+	}
 
 	// Apply request-level timeout if provided by the client
 	if timeoutStr := r.Header.Get("X-Timeout-Seconds"); timeoutStr != "" {

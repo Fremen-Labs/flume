@@ -305,6 +305,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   const [committed, setCommitted] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
+  // Live clock for client-side elapsed time during long planning requests (so progress numbers/bar update live even if backend only snapshots elapsed at end)
+  const [liveNow, setLiveNow] = useState(() => Date.now());
+
   // Reset when opened
   useEffect(() => {
     if (open) {
@@ -319,6 +322,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setError('');
       setCommitCount(0);
       setCommitted(false);
+      setLiveNow(Date.now());
     }
   }, [open]);
 
@@ -352,6 +356,19 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setPhase('prompt');
     }
   }, [pollError, phase]);
+
+  // Live ticking timer: only active during the requesting_plan stage so elapsed seconds and progress bar update smoothly in the UI
+  useEffect(() => {
+    const isActivelyPlanning =
+      phase === 'planning' &&
+      planningStatus?.stage === 'requesting_plan' &&
+      !!planningStatus?.requestStartedAt;
+    if (!isActivelyPlanning) {
+      return;
+    }
+    const id = setInterval(() => setLiveNow(Date.now()), 200);
+    return () => clearInterval(id);
+  }, [phase, planningStatus?.stage, planningStatus?.requestStartedAt]);
 
 
   async function startSession() {
@@ -442,9 +459,6 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   }
 
 
-  const requestElapsed = planningStatus?.requestElapsedSeconds != null
-    ? `${planningStatus.requestElapsedSeconds.toFixed(1)}s`
-    : null;
   const connectionElapsed = planningStatus?.connectionTestDurationMs != null
     ? `${planningStatus.connectionTestDurationMs.toFixed(0)} ms`
     : null;
@@ -455,6 +469,40 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       : planningStatus?.stage === 'failed'
         ? 'Planner request failed'
         : 'Preparing planner…';
+
+  // Compute live elapsed seconds for UI: during active requesting_plan, derive from requestStartedAt + wall clock for live-updating numbers and bar.
+  // Falls back to server-provided value (post-completion) otherwise. This fixes the "stuck at 0" symptom.
+  const liveElapsedSeconds = (() => {
+    const serverVal = planningStatus?.requestElapsedSeconds ?? 0;
+    if (!planningStatus?.requestStartedAt || planningStatus.stage !== 'requesting_plan') {
+      return serverVal;
+    }
+    try {
+      const startMs = new Date(planningStatus.requestStartedAt).getTime();
+      if (isNaN(startMs)) return serverVal;
+      const live = Math.max(0, (liveNow - startMs) / 1000);
+      // Never show less than what server last reported
+      return Math.max(live, serverVal);
+    } catch {
+      return serverVal;
+    }
+  })();
+
+  // Robust host display: prefer explicit host (now populated by backend), else derive hostname from baseUrl, else dash.
+  const displayHost = (() => {
+    const h = planningStatus?.host;
+    if (h && h.trim()) return h.trim();
+    const b = planningStatus?.baseUrl;
+    if (b && b.trim()) {
+      try {
+        const u = new URL(b.trim());
+        return u.hostname + (u.port ? `:${u.port}` : '');
+      } catch {
+        return b.trim();
+      }
+    }
+    return '—';
+  })();
 
   const epicCount = plan.epics?.length ?? 0;
   const taskCount = plan.epics?.reduce((a, ep) =>
@@ -548,20 +596,20 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
                         <div><span className="text-foreground/80">Provider:</span> {planningStatus.provider ?? '—'} {planningStatus.model ? `· ${planningStatus.model}` : ''}</div>
-                        <div><span className="text-foreground/80">Host:</span> {planningStatus.host ?? planningStatus.baseUrl ?? '—'}</div>
+                        <div><span className="text-foreground/80">Host:</span> {displayHost}</div>
                         <div><span className="text-foreground/80">Connection test:</span> {planningStatus.connectionTestOk == null ? 'pending' : planningStatus.connectionTestOk ? 'ok' : 'failed'}{connectionElapsed ? ` · ${connectionElapsed}` : ''}</div>
                       </div>
                       <div className="pt-1">
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-foreground/80">Planning Progress</span>
                           <span className="text-muted-foreground">
-                            {planningStatus.requestElapsedSeconds?.toFixed(0) ?? 0}s / {planningStatus.timeoutSeconds ?? 300}s
+                            {Math.floor(liveElapsedSeconds)}s / {planningStatus.timeoutSeconds ?? 120}s
                           </span>
                         </div>
                         <div className="h-1.5 w-full bg-black/40 rounded-full overflow-hidden border border-white/5">
                           <div 
-                            className={cn("h-full transition-all duration-1000", planningStatus.stage === 'failed' ? "bg-destructive" : "bg-primary")} 
-                            style={{ width: `${Math.min(((planningStatus.requestElapsedSeconds ?? 0) / (planningStatus.timeoutSeconds ?? 300)) * 100, 100)}%` }} 
+                            className={cn("h-full transition-all duration-300", planningStatus.stage === 'failed' ? "bg-destructive" : "bg-primary")} 
+                            style={{ width: `${Math.min((liveElapsedSeconds / (planningStatus.timeoutSeconds ?? 120)) * 100, 100)}%` }} 
                           />
                         </div>
                       </div>
@@ -570,8 +618,8 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                       )}
                       {planningStatus.failureText && (
                         <div className="text-[11px] text-destructive break-all bg-destructive/10 p-2 rounded border border-destructive/20 mt-2">
-                          {planningStatus.failureText.includes('timeout') || ((planningStatus.requestElapsedSeconds ?? 0) >= (planningStatus.timeoutSeconds ?? 300))
-                            ? `Planning timed out after ${planningStatus.timeoutSeconds ?? 300} seconds. The model took too long to respond.`
+                          {planningStatus.failureText.includes('timeout') || (liveElapsedSeconds >= (planningStatus.timeoutSeconds ?? 120))
+                            ? `Planning timed out after ${planningStatus.timeoutSeconds ?? 120} seconds. The model took too long to respond.`
                             : planningStatus.failureText}
                         </div>
                       )}

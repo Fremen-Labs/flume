@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -145,6 +146,15 @@ type SessionDoc struct {
 	UpdatedAt       string           `json:"updated_at"`
 	CommittedAt     string           `json:"committed_at,omitempty"`
 	CommittedDocs   []string         `json:"committedDocs,omitempty"`
+
+	// Phase 2 budget enforcement (Enforcement Mechanics): per-plan hard limits + live counters.
+	// Populated at session creation with sane defaults; atomically updated via ES scripts on task creation,
+	// promotion, and PM decomp paths. Exceed → block with LogAgentReasoning + audit event.
+	ItemBudget    int    `json:"item_budget,omitempty"`    // total workitems (incl. hierarchy) allowed for this plan session
+	TokenBudget   int    `json:"token_budget,omitempty"`   // cumulative LLM tokens allowed (soft; advisory)
+	CurrentItems  int    `json:"current_items,omitempty"`  // authoritative via script increments
+	CurrentTokens int    `json:"current_tokens,omitempty"`
+	BudgetStatus  string `json:"budget_status,omitempty"`  // "", "exceeded", "warning"
 }
 
 func prepareSessionResponse(session SessionDoc) map[string]interface{} {
@@ -210,6 +220,10 @@ type AgentTaskRecord struct {
 	// ChildCount = number of direct children (by parent_id). DecomposedAt set on first decomposition.
 	DecomposedAt string `json:"decomposed_at,omitempty"`
 	ChildCount   int    `json:"child_count,omitempty"`
+
+	// Phase 2 correlation + depth (enforcement mechanics)
+	PlanSessionID  string `json:"plan_session_id,omitempty"`
+	HierarchyDepth int    `json:"hierarchy_depth,omitempty"`
 }
 
 func randomHex(n int) string {
@@ -305,6 +319,8 @@ func placeholderPlan(repo, prompt string) map[string]interface{} {
 	if title == "" {
 		title = "New request"
 	}
+	// Grok-grade minimal placeholder: clean, professional, no confusing "Rename this" or meta language.
+	// This is only shown when the LLM planner completely fails; it should still be usable as a starting point.
 	return map[string]interface{}{
 		"repo":            repo,
 		"complexityScore": 1,
@@ -316,19 +332,19 @@ func placeholderPlan(repo, prompt string) map[string]interface{} {
 				"features": []interface{}{
 					map[string]interface{}{
 						"id":    "feat-1",
-						"title": "[Placeholder] Rename this feature",
+						"title": "Documentation Update",
 						"stories": []interface{}{
 							map[string]interface{}{
 								"id": "story-1",
-								"title": "[Placeholder] Rename this story",
+								"title": "Add missing documentation",
 								"acceptanceCriteria": []interface{}{
-									"[Placeholder] Add acceptance criteria",
+									"Relevant documentation file(s) updated",
 								},
 								"tasks": []interface{}{
 									map[string]interface{}{
 										"id":        "task-1",
-										"title":     "[Placeholder] Add a concrete task",
-										"objective": prompt,
+										"title":     "Update documentation for the request",
+										"objective": "Edit the appropriate existing documentation file(s) to cover the user's objective. Keep changes minimal and accurate.",
 									},
 								},
 							},
@@ -377,6 +393,17 @@ func buildLLMMessages(session SessionDoc) []llm.Message {
 	return msgs
 }
 
+// hostFromBaseURL extracts a human-readable host for display in planning status UI.
+func hostFromBaseURL(baseURL string) string {
+	if baseURL == "" {
+		return ""
+	}
+	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return baseURL
+}
+
 // ─── POST /api/intake/session ───────────────────────────────────────────────
 
 func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +431,7 @@ func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request
 		Provider:       cfg.LLMProvider,
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
+		Host:           hostFromBaseURL(cfg.LLMBaseURL),
 		TimeoutSeconds: 120,
 		LastUpdatedAt:  now,
 	}
@@ -417,6 +445,9 @@ func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request
 		PlanningStatus:  status,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		// Phase 2 defaults (tunable via future settings; these prevent 74-task class explosions while allowing real work)
+		ItemBudget:  40,   // total hierarchy + leaf items for the plan
+		TokenBudget: 80000, // cumulative LLM spend budget (prompt+completion) advisory
 	}
 
 	if err := s.es.IndexDoc(ctx, planSessionsIndex, sessionID, sessionDoc); err != nil {
@@ -446,6 +477,7 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		Provider:       cfg.LLMProvider,
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
+		Host:           hostFromBaseURL(cfg.LLMBaseURL),
 		TimeoutSeconds: 120,
 		LastUpdatedAt:  now,
 	}
@@ -500,7 +532,7 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		Temperature: 0.3,
 		MaxTokens:   8192,
 		AgentRole:   "intake",
-		TaskType:    "planning", // Use lower complexity routing for the planner itself (improves Plan New Work UX)
+		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -689,7 +721,7 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		Temperature: 0.3,
 		MaxTokens:   8192,
 		AgentRole:   "intake",
-		TaskType:    "planning", // Use lower complexity routing for the planner itself (improves Plan New Work UX)
+		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -807,7 +839,7 @@ func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	docs, err := s.commitPlan(ctx, repo, finalPlan)
+	docs, err := s.commitPlan(ctx, repo, finalPlan, sessionID)
 	if err != nil {
 		s.logger.Error("intake commit failed", slog.String("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("commit failed: %v", err))
@@ -994,6 +1026,51 @@ func countPlanTasks(plan PlanResponse) int {
 		}
 	}
 	return total
+}
+
+// getSmartMaxLeafTasks implements research-backed tiered caps for intake (see the
+// big implementation report for full Devin/Cursor/LangGraph/Aider/OpenHands/CrewAI sources).
+// Uses the planner's own ComplexityScore (already 1-10 with existing Low/Med/High buckets)
+// plus a light structural bushiness signal to catch LLM over-decomposition on "simple" tasks.
+func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
+	base := 6
+	switch {
+	case complexity <= 3:
+		base = 6 // Simple: align with prompt ("trivial 1-2", "single-component 3-5")
+	case complexity <= 6:
+		base = 12 // Medium
+	default:
+		base = 25 // Complex / high-risk
+	}
+
+	// Structural over-decomposition detector (common failure mode in the 258-item incident)
+	structural := 0
+	for _, e := range plan.Epics {
+		structural += len(e.Features)
+		for _, f := range e.Features {
+			structural += len(f.Stories)
+		}
+	}
+	if complexity <= 3 && structural > 4 {
+		base = 4 // LLM claimed "simple" but produced a bushy tree → tighten aggressively
+	}
+	if complexity <= 6 && structural > 12 {
+		if base > 8 {
+			base = 8
+		}
+	}
+
+	// Allow env override for the complex tier in legitimate large projects
+	if complexity > 6 {
+		if v := os.Getenv("FLUME_MAX_LEAVES_COMPLEX"); v != "" {
+			var envBase int
+			if n, err := fmt.Sscanf(v, "%d", &envBase); err == nil && n == 1 && envBase > 0 {
+				base = envBase
+			}
+		}
+	}
+
+	return base
 }
 
 func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo, routingModel, now string) ([]AgentTaskRecord, error) {
@@ -1193,7 +1270,75 @@ func (s *Server) buildFastPathTasks(ctx context.Context, plan PlanResponse, repo
 	return docs, nil
 }
 
-func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[string]interface{}) ([]AgentTaskRecord, error) {
+// ─── Phase 2 Plan Session Budget Enforcement Helpers (task 1) ─────────────────
+
+// loadPlanSession retrieves the agent-plan-sessions doc (or returns zero with defaults).
+// Used at every enforcement point (intake commit, handlePM, promote, claim).
+func (s *Server) loadPlanSession(ctx context.Context, sessionID string) (SessionDoc, error) {
+	var sess SessionDoc
+	if sessionID == "" {
+		return sess, fmt.Errorf("empty plan session id")
+	}
+	bytes, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
+	if err != nil || bytes == nil {
+		return sess, fmt.Errorf("plan session %s not found: %w", sessionID, err)
+	}
+	if uerr := json.Unmarshal(bytes, &sess); uerr != nil {
+		return sess, uerr
+	}
+	// Apply defaults if not present (legacy sessions)
+	if sess.ItemBudget == 0 {
+		sess.ItemBudget = 40
+	}
+	if sess.TokenBudget == 0 {
+		sess.TokenBudget = 80000
+	}
+	return sess, nil
+}
+
+// checkPlanBudget returns (allowed, reason). proposedDelta is the #items this action would add.
+// "fail closed": any load error or exceed blocks the action with rich context for LogAgentReasoning.
+func checkPlanBudget(sess SessionDoc, proposedDelta int) (bool, string) {
+	if sess.BudgetStatus == "exceeded" {
+		return false, fmt.Sprintf("plan session %s already budget_exceeded (current_items=%d >= item_budget=%d)", sess.ID, sess.CurrentItems, sess.ItemBudget)
+	}
+	if sess.ItemBudget > 0 && sess.CurrentItems+proposedDelta > sess.ItemBudget {
+		return false, fmt.Sprintf("plan budget exceeded: adding %d would reach %d (cap %d) for session %s", proposedDelta, sess.CurrentItems+proposedDelta, sess.ItemBudget, sess.ID)
+	}
+	return true, ""
+}
+
+// atomicIncrementPlanCounters uses inline ES script for race-free update of current_items (and optionally tokens).
+// Called on successful task creation at intake, on promote success, and on claim success for the plan.
+func (s *Server) atomicIncrementPlanCounters(ctx context.Context, sessionID string, itemDelta, tokenDelta int) error {
+	if sessionID == "" {
+		return nil
+	}
+	script := `
+		if (ctx._source.current_items == null) { ctx._source.current_items = 0; }
+		ctx._source.current_items += params.item_delta;
+		if (params.token_delta > 0) {
+			if (ctx._source.current_tokens == null) { ctx._source.current_tokens = 0; }
+			ctx._source.current_tokens += params.token_delta;
+		}
+		if (ctx._source.item_budget != null && ctx._source.item_budget > 0 && ctx._source.current_items > ctx._source.item_budget) {
+			ctx._source.budget_status = "exceeded";
+		}
+		ctx._source.updated_at = params.now;
+	`
+	params := map[string]interface{}{
+		"item_delta":  itemDelta,
+		"token_delta": tokenDelta,
+		"now":         nowISO(),
+	}
+	if err := s.es.UpdateDocWithInlineScript(ctx, planSessionsIndex, sessionID, script, params); err != nil {
+		s.logger.Warn("plan budget atomic increment failed (best effort)", slog.String("session", sessionID), slog.String("err", err.Error()))
+		return err
+	}
+	return nil
+}
+
+func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[string]interface{}, planSessionID string) ([]AgentTaskRecord, error) {
 	var plan PlanResponse
 	planBytes, err := json.Marshal(planDict)
 	if err == nil {
@@ -1213,10 +1358,55 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 		routingModel = fastModel
 	}
 
-	// 2. Build records
+	// 2. Build records — SMART tiered intake cap (research-backed dynamic sizing)
+	// Replaces the previous blunt max=12. Now uses the planner's own ComplexityScore (1-10)
+	// with the existing bucket logic (low 1-3, med 4-6, high 7-10) plus structural awareness.
+	//
+	// Research synthesis (Devin confidence+interactive planning, Cursor dynamic effort calibration
+	// + RL thinking allocation, LangGraph explicit ComplexityScorer + orchestrator-worker depth,
+	// Aider Architect/Editor + explicit "do not over-decompose" guidance, OpenHands Planning Agent,
+	// CrewAI complexity/precision matrix):
+	//   - Low complexity (1-3): very tight cap, force minimal decomposition.
+	//   - Medium (4-6): moderate.
+	//   - High (7-10): allow more but still bounded + encourage refine for very bushy plans.
+	// Secondary signal: if the plan is structurally bushy (many epics/stories) relative to
+	// declared complexity, we treat it as over-decomposition risk and tighten.
+	//
+	// Phase 2 addition (starter): depth enforcement will be added when PlanResponse carries
+	// depth or we compute it from the hierarchy shape. For now the constant is defined in types.
+	_ = ftypes.MAX_HIERARCHY_DEPTH // Phase 2 constant available for future use
+
 	var docs []AgentTaskRecord
 	var errBuild error
 	totalTasks := countPlanTasks(plan)
+	complexityScore = plan.ComplexityScore // already declared earlier for routing
+
+	maxAllowed := getSmartMaxLeafTasks(complexityScore, plan)
+
+	if totalTasks > maxAllowed {
+		reason := fmt.Sprintf("Intake cap hit: planner produced %d leaf tasks for complexityScore=%d (allowed max=%d for this tier). This matches the exact over-decomposition pattern that previously exploded simple docs tasks to 258+ items. Use 'refine' in the planner or narrow the objective.", totalTasks, complexityScore, maxAllowed)
+
+		s.logger.Warn("intake smart cap refused plan",
+			slog.String("repo", repo),
+			slog.Int("complexityScore", complexityScore),
+			slog.Int("leaf_tasks", totalTasks),
+			slog.Int("max_allowed", maxAllowed))
+
+		// Rich signal for the agent reasoning popout / Logloom (even at intake time)
+		// Best-effort; the main path for execution reasoning is the worker LogAgentReasoning.
+		_ = s.es.IndexDoc(ctx, "agent-task-records", "intake-cap-"+fmt.Sprintf("%d", time.Now().UnixNano()), map[string]interface{}{
+			"event":           "intake_cap_refused",
+			"repo":            repo,
+			"complexityScore": complexityScore,
+			"leaf_tasks":      totalTasks,
+			"max_allowed":     maxAllowed,
+			"reason":          reason,
+			"timestamp":       now,
+		})
+
+		return nil, fmt.Errorf("%s\n\nRepo: %s\nRecommended action: Hit 'refine' and ask the planner for a much smaller scope (target 1-3 leaf tasks for documentation-style work).", reason, repo)
+	}
+
 	if totalTasks > 0 && totalTasks <= 3 {
 		docs, errBuild = s.buildFastPathTasks(ctx, plan, repo, routingModel, now)
 	} else {
@@ -1224,6 +1414,46 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 	}
 	if errBuild != nil {
 		return nil, errBuild
+	}
+
+	// === Phase 2 FULL BUDGET ENFORCEMENT AT INTAKE (commitPlan) ===
+	// Load plan session (creates correlation), check proposed total items against per-plan budget.
+	// On pass: atomically increment via ES script (fail-closed). Rich audit event on block.
+	// Also inject PlanSessionID + HierarchyDepth=0 (roots) for downstream enforcement (handlePM, promote, claim).
+	if planSessionID != "" {
+		sess, loadErr := s.loadPlanSession(ctx, planSessionID)
+		if loadErr != nil {
+			s.logger.Warn("commitPlan: could not load plan session for budget check (proceeding with correlation only)", slog.String("session", planSessionID), slog.String("err", loadErr.Error()))
+		} else {
+			proposed := len(docs)
+			if allowed, reason := checkPlanBudget(sess, proposed); !allowed {
+				// Rich LogAgentReasoning-equivalent audit at intake (feeds UI + Logloom)
+				audit := map[string]interface{}{
+					"event":            "plan_budget_refused_at_intake",
+					"plan_session_id":  planSessionID,
+					"repo":             repo,
+					"proposed_items":   proposed,
+					"current_items":    sess.CurrentItems,
+					"item_budget":      sess.ItemBudget,
+					"reason":           reason,
+					"timestamp":        now,
+				}
+				_ = s.es.IndexDoc(ctx, "agent-task-records", "plan-budget-block-"+fmt.Sprintf("%d", time.Now().UnixNano()), audit)
+
+				s.logger.Error("commitPlan: plan budget exceeded — refusing creation (fail closed)",
+					slog.String("session", planSessionID), slog.String("reason", reason))
+				return nil, fmt.Errorf("PLAN_BUDGET_EXCEEDED: %s. Refine your request or increase scope limits.", reason)
+			}
+			// Will increment after successful indexing below
+		}
+
+		// Propagate correlation for budget/depth enforcement downstream.
+		// Depth: intake roots start at 0; hierarchy children in buildTaskHierarchy get incremental (epic=0,feat=1,story=2,task=3);
+		// PM-created children get parent.depth+1 (enforced <= MAX in handlePM/promote).
+		for i := range docs {
+			docs[i].PlanSessionID = planSessionID
+			// Do not force depth here; build* and PM creation paths set appropriate values (default 0 for flat/fastpath roots)
+		}
 	}
 
 	// 3. Index to Elasticsearch.
@@ -1234,6 +1464,11 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 			s.logger.Error("commitPlan: failed to index doc", slog.String("id", doc.ID), slog.String("error", err.Error()))
 			return nil, fmt.Errorf("failed to index task %s: %w", doc.ID, err)
 		}
+	}
+
+	// Atomic budget counter update (post-index success) using script for safety.
+	if planSessionID != "" && len(docs) > 0 {
+		_ = s.atomicIncrementPlanCounters(ctx, planSessionID, len(docs), 0)
 	}
 
 	return docs, nil

@@ -240,10 +240,20 @@ func validateForStep(step int, val string) string {
 		if val == "" || val == "1" || val == "2" {
 			return ""
 		}
-		return "Please enter 1 (Local) or 2 (Remote)"
+		return "Please enter 1 (Local) or 2 (Remote) for your primary Ollama instance"
 
 	case StepOllamaIP:
 		return validateHost(val)
+
+	case StepPrimaryOllamaID:
+		if val == "" {
+			return "Node ID / name is required for the primary Ollama instance"
+		}
+		nodeIDRe := regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,62}[a-z0-9]$|^[a-z0-9]$`)
+		if !nodeIDRe.MatchString(val) {
+			return "Node ID must be lowercase letters, numbers, and hyphens (1-64 chars)"
+		}
+		return ""
 
 	case StepNodeMesh, StepNodeMore:
 		if val == "" || val == "1" || val == "2" || val == "y" || val == "Y" || val == "n" || val == "N" {

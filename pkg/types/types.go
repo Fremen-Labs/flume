@@ -39,7 +39,11 @@ const (
 // ValidTransitions defines the FSM for task state changes.
 // Direct port from Python: TaskStateMachine.TRANSITIONS.
 var ValidTransitions = map[TaskStatus][]TaskStatus{
-	TaskStatusInbox:           {TaskStatusPlanned, TaskStatusReady, TaskStatusArchived},
+	// Expanded inbox transitions to match real claimer/reset flows observed in production
+	// (inbox → running on direct claim after reset-to-ready or intake; also review-* states
+	// during certain recovery paths). This eliminates the most common shadow violations
+	// while keeping the rest of the DAG strict.
+	TaskStatusInbox:           {TaskStatusPlanned, TaskStatusReady, TaskStatusRunning, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusArchived},
 	TaskStatusPlanned:         {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusReady:           {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusRunning:         {TaskStatusReview, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
@@ -126,7 +130,27 @@ type Task struct {
 	// Updated by the PM/implementer after creating children.
 	DecomposedAt *time.Time `json:"decomposed_at,omitempty"`
 	ChildCount   int        `json:"child_count,omitempty"`
+
+	// DecompLastAttemptAt + DecompFailures added for failure-path backoff (post 74-task incident).
+	// Set on every early exit from handlePM (even when LLM call fails before children are created).
+	// Allows the anti-re-decomp guard to see "recent failure, back off" instead of infinite retry.
+	DecompLastAttemptAt *time.Time `json:"decomp_last_attempt_at,omitempty"`
+	DecompFailures      int        `json:"decomp_failures,omitempty"`
+
+	// PlanSessionID (Phase 1): correlates all workitems back to the original Plan New Work / intake session.
+	// Enables per-plan budgets, auditing, and "abort entire plan" operations.
+	PlanSessionID string `json:"plan_session_id,omitempty"`
+
+	// HierarchyDepth (Phase 2 enforcement mechanics): root intake-created items are depth 0.
+	// Each level of PM decomposition increments by 1. Enforced at creation (intake + handlePM)
+	// and at promote/claim time against MAX_HIERARCHY_DEPTH to eliminate nesting explosions.
+	HierarchyDepth int `json:"hierarchy_depth,omitempty"`
 }
+
+// Phase 2 constants (enforcement mechanics)
+const (
+	MAX_HIERARCHY_DEPTH = 6 // prevents pathological nesting from repeated PM decomp
+)
 
 // ─── Worker ─────────────────────────────────────────────────────────────────
 
@@ -172,6 +196,14 @@ type Project struct {
 	TaskCount   int       `json:"task_count,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+
+	// WorkPaused + PauseReason allow emergency halting of all new task generation
+	// and decomposition for a specific project (or globally). This is the
+	// production-grade "halt the swarm" control that actually stops explosion.
+	// Set via POST /api/workflow/agents/stop?repo=... or the emergency APIs.
+	WorkPaused  bool   `json:"work_paused,omitempty"`
+	PauseReason string `json:"pause_reason,omitempty"`
+	PausedAt    string `json:"paused_at,omitempty"`
 }
 
 // ─── LLM Provider ───────────────────────────────────────────────────────────
@@ -385,11 +417,6 @@ func (sm *TaskStateMachine) EnforceTransition(current, target TaskStatus) error 
 }
 
 // EnforceTransitionOrLog is a convenience for sites that have a logger.
-// In shadow mode, violations are logged at Warn but write proceeds.
-// In strict mode, error is returned and caller should not write.
-//
-// All violation logs include consistent fields for easy aggregation
-// via LogLoom / Elasticsearch (search for "TaskStateMachine" + "shadow").
 func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransition(current, target)
 	if err != nil && sm.ShadowMode && logFn != nil {
@@ -398,8 +425,18 @@ func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, l
 			"from", current,
 			"to", target,
 			"shadow", true,
-			"violation", true, // easy filter for dashboards / alerts
+			"violation", true,
 		)
+	}
+	return err
+}
+
+// EnforceWithEvidenceOrLog is the Phase 1+ convenience with evidence.
+func (sm *TaskStateMachine) EnforceWithEvidenceOrLog(current, target TaskStatus, ev Evidence, logFn func(msg string, args ...any)) error {
+	err := sm.EnforceTransitionWithEvidence(current, target, ev)
+	if err != nil && sm.ShadowMode && logFn != nil {
+		logFn("SHADOW MODE: evidence gate violation (write proceeds)",
+			"error", err.Error(), "from", current, "to", target, "evidence", ev, "shadow", true)
 	}
 	return err
 }
@@ -409,4 +446,42 @@ func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, l
 // It is not recommended for normal production use — prefer the env var at startup.
 func SetDefaultShadowMode(shadow bool) {
 	DefaultTaskStateMachine = NewTaskStateMachine(shadow)
+}
+
+// Evidence carries completion / reasoning proof for state transitions (Phase 1).
+// Used to gate Done / terminal states and recovery paths.
+type Evidence struct {
+	ThoughtsCount      int    `json:"thoughts_count"`
+	HasGitCommit       bool   `json:"has_git_commit"`
+	HasReviewConsensus bool   `json:"has_review_consensus"`
+	ForceAudit         bool   `json:"force_audit"`
+	AuditReason        string `json:"audit_reason,omitempty"`
+}
+
+// EnforceTransitionWithEvidence is the Phase 1+ entrypoint.
+// For target == Done (or equivalent terminal), requires evidence unless ForceAudit.
+func (sm *TaskStateMachine) EnforceTransitionWithEvidence(current, target TaskStatus, ev Evidence) error {
+	baseErr := sm.EnforceTransition(current, target)
+	if baseErr != nil {
+		return baseErr
+	}
+
+	if target == TaskStatusDone || target == TaskStatusReviewConsensus {
+		if !ev.ForceAudit && !hasTerminalEvidence(ev) {
+			if sm.ShadowMode {
+				// In shadow we still allow but the caller should log
+				return nil
+			}
+			return &InvalidTransitionError{
+				Current: current,
+				Target:  target,
+				Allowed: []TaskStatus{}, // signal evidence required
+			}
+		}
+	}
+	return nil
+}
+
+func hasTerminalEvidence(ev Evidence) bool {
+	return ev.ThoughtsCount > 0 || ev.HasGitCommit || ev.HasReviewConsensus
 }

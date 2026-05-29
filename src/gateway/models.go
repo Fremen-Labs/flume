@@ -22,6 +22,7 @@ type ChatRequest struct {
 	TaskType     string    `json:"task_type,omitempty"` // explicit override (e.g. "planning" for intake planner itself)
 	Stream       bool      `json:"stream,omitempty"`
 	TaskID       string    `json:"task_id,omitempty"`
+	PlanSessionID string   `json:"plan_session_id,omitempty"` // Phase 2: threaded from workers for (plan,pm) rate limiter + budget enforcement at gateway
 }
 
 // Message represents a single chat message.

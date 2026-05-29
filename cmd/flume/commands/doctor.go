@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -421,6 +423,72 @@ func renderDiagnosticReport(report *DiagnosticsReport, jsonOutput bool) {
 	fmt.Println()
 }
 
+// runLogloomDiagnostics executes the Phase 0 Logloom baseline gate.
+// It is intentionally simple and side-effect free for the doctor command.
+// In CI the same commands + assertions will be promoted to hard gates.
+func runLogloomDiagnostics(jsonOutput bool, report *DiagnosticsReport) {
+	logloomBin := os.Getenv("LOGLOOM_BIN")
+	if logloomBin == "" {
+		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
+	}
+	graphPath := "flume-robust-ast-graph.json"
+
+	if !jsonOutput {
+		fmt.Println("\n" + ui.CyberGradient(":: LOGLOOM GRAPH BASELINE (Phase 0) ::"))
+		fmt.Printf("  binary: %s\n  graph:  %s\n\n", logloomBin, graphPath)
+	}
+
+	// 1. Stats (key numbers)
+	statsCmd := exec.Command(logloomBin, "graph", "stats", "--graph-path", graphPath)
+	statsOut, err := statsCmd.CombinedOutput()
+	if err != nil {
+		if !jsonOutput {
+			fmt.Println(errStyle.Render("  [logloom] stats failed: ") + err.Error())
+		}
+		report.Suggestions = append(report.Suggestions, "Logloom graph stats failed — is the binary present and graph committed?")
+		return
+	}
+
+	if !jsonOutput {
+		// Print a compact, useful subset (first ~25 lines are the good summary)
+		lines := strings.Split(string(statsOut), "\n")
+		for i, l := range lines {
+			if i > 30 {
+				break
+			}
+			fmt.Println("  " + l)
+		}
+		fmt.Println()
+	}
+
+	// 2. Targeted find for the exact terms that were missing in the May 27 snapshot
+	// (the ones the anti-explosion work added). 0 nodes today = expected pre-Phase 0.
+	findTerms := []string{"agent reasoning", "LogAgentReasoning", "reasoning_bridge", "WorkPaused", "maxChildrenPerParent", "spawnReviewTasks"}
+	missing := 0
+	for _, term := range findTerms {
+		findCmd := exec.Command(logloomBin, "graph", "find", term, "--graph-path", graphPath)
+		out, _ := findCmd.CombinedOutput()
+		if strings.Contains(string(out), "No nodes matching") {
+			missing++
+		}
+	}
+
+	if !jsonOutput {
+		if missing == len(findTerms) {
+			fmt.Println(warnStyle.Render("  [logloom] 0 nodes for post-May-28 guard/reasoning terms (expected on current graph)."))
+			fmt.Println("  After Phase 0+ changes, re-run `logloom graph` and re-commit the artifact.")
+		} else {
+			fmt.Println(valueStyle.Render("  [logloom] New guard/reasoning nodes detected — graph is fresh."))
+		}
+		fmt.Println()
+	}
+
+	// Very light "assertion" for the doctor output / CI seed
+	if missing == len(findTerms) {
+		report.Suggestions = append(report.Suggestions, "Logloom baseline: no anti-explosion/reasoning nodes yet (run logloom graph after code changes).")
+	}
+}
+
 var DoctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Diagnose Flume internal components & swarm health natively",
@@ -438,6 +506,7 @@ the planner timeout before users hit "Plan New Work".`,
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		deepProbe, _ := cmd.Flags().GetBool("deep")
 		gatewayURL, _ := cmd.Flags().GetString("gateway-url")
+		logloomMode, _ := cmd.Flags().GetBool("logloom")
 
 		client := &http.Client{Timeout: 3 * time.Second}
 		report := &DiagnosticsReport{}
@@ -469,6 +538,13 @@ the planner timeout before users hit "Plan New Work".`,
 
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
+		// Phase 0: Logloom graph baseline (when --logloom flag is passed).
+		// This is the start of the living CI gate. It runs logloom graph stats + targeted
+		// finds on the worker/dashboard packages and prints coverage + "guard" term status.
+		if logloomMode {
+			runLogloomDiagnostics(jsonOutput, report)
+		}
+
 		// Dispatch Rendering
 		renderDiagnosticReport(report, jsonOutput)
 	},
@@ -482,4 +558,5 @@ func init() {
 	DoctorCmd.Flags().StringP("gateway-url", "g", "http://localhost:8090", "Flume Gateway Endpoint (used by --deep)")
 	DoctorCmd.Flags().BoolP("json", "j", false, "Output explicit raw JSON payload without any rendering")
 	DoctorCmd.Flags().Bool("deep", false, "Run a timed LLM inference probe to measure model speed")
+	DoctorCmd.Flags().Bool("logloom", false, "Run Logloom graph diagnostics on worker/dashboard packages (Phase 0 baseline + coverage gate)")
 }

@@ -92,6 +92,20 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 			continue
 		}
 
+		// === Emergency work pause guard (prevents claiming anything for a halted project) ===
+		// This is what makes "POST /api/workflow/agents/stop?repo=xxx" actually stop the bleeding.
+		if task.ProjectID != "" {
+			projDoc, _ := c.es.GetDoc(ctx, "flume-projects", task.ProjectID)
+			if projDoc != nil {
+				var proj ftypes.Project
+				if json.Unmarshal(projDoc, &proj) == nil && proj.WorkPaused {
+					c.logger.Warn("claim: skipping — project is emergency-paused (WorkPaused)",
+						slog.String("task_id", task.ID), slog.String("repo", task.ProjectID))
+					continue
+				}
+			}
+		}
+
 		// Dedup check
 		if c.isDuplicateTask(ctx, task.Title, task.ID) {
 			c.logger.Info("dedup: skipping duplicate task",

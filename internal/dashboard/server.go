@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 	"github.com/Fremen-Labs/flume/internal/es"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/pkg/types"
 )
@@ -118,6 +119,10 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 		cfg:       cfg,
 		startTime: time.Now(),
 	}
+	// Phase 0: Wire reasoning bridge for any Go-side Log* calls that reach the dashboard
+	// (primarily benefits future admin/recovery paths and consistency with worker).
+	flumelogger.SetESBridge(esClient)
+
 	s.registerRoutes()
 	return s
 }

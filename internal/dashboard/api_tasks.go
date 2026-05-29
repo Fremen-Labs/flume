@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/git"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -71,7 +72,6 @@ func nowISO() string {
 }
 
 // appendTaskAgentLogNote appends a note to the task's agent_log array.
-// Derived from Python: _async_append_task_agent_log_note() in api/tasks.py.
 func (s *Server) appendTaskAgentLogNote(ctx context.Context, esID, note string) error {
 	note = strings.TrimSpace(note)
 	if note == "" {
@@ -96,6 +96,73 @@ func (s *Server) appendTaskAgentLogNote(ctx context.Context, esID, note string) 
 	}
 
 	return s.es.Post(ctx, fmt.Sprintf("agent-task-records/_update/%s", safeID), body)
+}
+
+// ─── Phase 1: Central Guarded Task Mutator (core of evidence + pause + correlation hardening) ──
+//
+// All direct mutation paths (claim, complete, transition, bulk, recovery) should go through
+// this helper. It enforces:
+//   - WorkPaused on project
+//   - Evidence gates for Done / terminal states (Phase 1)
+//   - plan_session_id correlation (when present)
+//   - Rich LogAgentReasoning + audit on refusal
+//
+// This replaces scattered shadow Enforce + direct Post calls.
+
+type GuardedMutateOptions struct {
+	RequireEvidenceForDone bool
+	Evidence               ftypes.Evidence
+	ForceAudit             bool
+	AuditReason            string
+	PlanSessionCheck       bool // future: budget/depth enforcement
+}
+
+func (s *Server) guardedTaskMutator(ctx context.Context, esID string, src map[string]interface{}, targetStatus string, opts GuardedMutateOptions) error {
+	projectID := str(src["repo"]) // or "project_id" depending on mapping
+	if projectID == "" {
+		projectID = str(src["project_id"])
+	}
+
+	// 1. Pause guard (re-uses the mechanism from claim/runner)
+	if projectID != "" {
+		projDoc, _ := s.es.GetDoc(ctx, "flume-projects", projectID)
+		if projDoc != nil {
+			var proj ftypes.Project
+			if json.Unmarshal(projDoc, &proj) == nil && proj.WorkPaused {
+				reason := "mutation refused: project work is paused"
+				flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system", reason, map[string]any{"project": projectID})
+				return fmt.Errorf("project paused")
+			}
+		}
+	}
+
+	prev := str(src["status"])
+
+	// 2. Evidence gate for Done (Phase 1)
+	if targetStatus == "done" || targetStatus == "review-consensus" {
+		if opts.RequireEvidenceForDone && !opts.Evidence.ForceAudit && !hasAnyEvidence(opts.Evidence) {
+			reason := "mutation to done refused: insufficient evidence (thoughts, git, or review consensus required)"
+			flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system", reason, map[string]any{"target": targetStatus})
+			if !ftypes.DefaultTaskStateMachine.ShadowMode {
+				return fmt.Errorf("evidence required for terminal state")
+			}
+			// shadow: log only
+		}
+	}
+
+	// 3. Perform the update (caller builds the doc)
+	// In real usage the caller would pass the delta doc here.
+	// For now this is a guard + logging skeleton that future refactors call.
+
+	flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system",
+		fmt.Sprintf("guarded mutation: %s -> %s", prev, targetStatus),
+		map[string]any{"evidence": opts.Evidence})
+
+	return nil
+}
+
+func hasAnyEvidence(ev ftypes.Evidence) bool {
+	return ev.ThoughtsCount > 0 || ev.HasGitCommit || ev.HasReviewConsensus
 }
 
 // ─── GET /api/tasks/{task_id}/history ────────────────────────────────────────

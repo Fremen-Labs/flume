@@ -487,12 +487,21 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 6. Fetch Completed Tasks Count
+	// 6. Fetch Completed Tasks Count (raw)
 	completedWork, err := s.es.Count(ctx, "agent-task-records", map[string]interface{}{
 		"term": map[string]interface{}{"status": "done"},
 	})
 	if err != nil {
 		completedWork = 0
+	}
+
+	// Phase 0 minor surfacing: tasks that have received at least one agent reasoning entry
+	// via the new logger bridge. This is the seed for evidence-aware analytics.
+	tasksWithReasoning, err := s.es.Count(ctx, "agent-task-records", map[string]interface{}{
+		"exists": map[string]interface{}{"field": "execution_thoughts"},
+	})
+	if err != nil {
+		tasksWithReasoning = 0
 	}
 
 	// 7. Gateway LLM latency check
@@ -516,10 +525,11 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 
 	// 8. Build telemetry
 	telemetry := map[string]interface{}{
-		"completedWork":   completedWork,
-		"llmLatency":      llmLatency,
-		"elasticAstCount": elasticAstCount,
-		"vaultSealed":     vaultSealed,
+		"completedWork":      completedWork,
+		"tasksWithReasoning": tasksWithReasoning,
+		"llmLatency":         llmLatency,
+		"elasticAstCount":    elasticAstCount,
+		"vaultSealed":        vaultSealed,
 	}
 
 	var memStats runtime.MemStats
@@ -1098,7 +1108,8 @@ func (s *Server) handleWebSocketTelemetry(w http.ResponseWriter, r *http.Request
 }
 
 // handleStructuredLog ingests POST /api/logs/structured from the new frontend
-// centralized logger (src/frontend/src/lib/logger.ts). Entries are re-emitted
+// centralized logger (src/frontend/src/src/lib/logger.ts, exposed as @/lib/logger).
+// Entries are re-emitted
 // via the package logger so they gain redaction, Logloom AST node enrichment
 // (when the logloom handler is active), and consistent backend structure.
 // Future: load a cached Logloom graph JSON at Server init and enrich context

@@ -32,6 +32,7 @@ import (
 
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/es"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
@@ -82,6 +83,10 @@ func NewManager(cfg *config.Config, esClient *es.Client, logger *slog.Logger) *M
 	m.sweeper = NewSweeper(esClient, llmClient, m.logger)
 	runner := NewRunner(esClient, llmClient, m.logger)
 	m.pool = NewPool(runner, m.logger)
+
+	// Phase 0: Wire the reasoning persistence bridge so LogAgentReasoning /
+	// LogStateTransition calls (20+ sites in runner) also append to task docs.
+	flumelogger.SetESBridge(esClient)
 
 	return m
 }

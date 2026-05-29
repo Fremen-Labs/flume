@@ -143,12 +143,36 @@ var StartCmd = &cobra.Command{
 				envCfg.ADOToken = promptCfg.ADOToken
 
 				if promptCfg.Provider == "ollama" {
-					if promptCfg.Host == "" {
-						promptCfg.Host = "127.0.0.1"
+					// With the simplified flow, primary Ollama configuration now comes from the
+					// node mesh wizard. Fall back gracefully if the user skipped adding nodes.
+					if len(promptCfg.Nodes) > 0 {
+						first := promptCfg.Nodes[0]
+						port := first.Port
+						if port == "" {
+							port = "11434"
+						}
+						hostWithPort := first.Host
+						if hostWithPort != "" {
+							hostWithPort += ":" + port
+						} else {
+							hostWithPort = "127.0.0.1:11434"
+						}
+
+						envCfg.Host = first.Host
+						envCfg.BaseURL = "http://" + hostWithPort
+						envCfg.LocalOllamaBaseURL = "http://" + hostWithPort + "/v1"
+
+						// Use the model from the first node if the top-level model wasn't set
+						// (which is now common because we skip the generic model prompt for ollama)
+						if promptCfg.Model == "" && first.ModelTag != "" {
+							envCfg.Model = first.ModelTag
+						}
+					} else {
+						// Fallback if user somehow skipped the node mesh entirely
+						envCfg.Host = "127.0.0.1"
+						envCfg.BaseURL = "http://127.0.0.1:11434"
+						envCfg.LocalOllamaBaseURL = "http://127.0.0.1:11434/v1"
 					}
-					envCfg.Host = promptCfg.Host
-					envCfg.BaseURL = fmt.Sprintf("http://%s:11434", promptCfg.Host)
-					envCfg.LocalOllamaBaseURL = fmt.Sprintf("http://%s:11434/v1", promptCfg.Host)
 					envCfg.APIKey = ""
 				}
 
@@ -387,58 +411,54 @@ var StartCmd = &cobra.Command{
 			return err
 		}
 
-		// ── Seed node mesh from primary Ollama host + wizard entries ────────
+		// ── Seed node mesh from wizard-collected nodes (preferred) or legacy primary config ────────
 		gatewayPort := "8090" // default gateway port
 		gatewayURL := fmt.Sprintf("http://localhost:%s", gatewayPort)
 
 		var seedEntries []orchestrator.NodeSeedEntry
 
-		// Only seed the primary host if they actually configured one, which is indicated by Host != "" or model != ""
-		// Wait, if it's external, Host might be "" but we don't want to seed an empty host. 
-		if (envCfg.Provider == "ollama" || envCfg.Provider == "exo") || (envCfg.Host != "") {
-			// Always register the primary Ollama host so it appears on the Node Mesh page.
+		// Preferred path: Use nodes explicitly collected from the interactive node mesh wizard.
+		// This includes the simplified Ollama flow where the user adds their primary (and any additional)
+		// Ollama nodes via the consistent wizard. This avoids creating duplicate "primary" entries.
+		if len(envCfg.Nodes) > 0 {
+			for _, n := range envCfg.Nodes {
+				entry := orchestrator.NodeSeedEntry{
+					ID:       n.ID,
+					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
+					ModelTag: n.ModelTag,
+				}
+				if n.MemoryGB > 0 {
+					entry.Capabilities.MemoryGB = n.MemoryGB
+				}
+				seedEntries = append(seedEntries, entry)
+			}
+		} else if (envCfg.Provider == "ollama" || envCfg.Provider == "exo") && envCfg.Host != "" {
+			// Legacy / non-interactive / flag-based path: synthesize a primary entry
+			// from the old-style Host / LocalOllamaBaseURL configuration.
 			primaryHost := envCfg.Host
 			if primaryHost == "" {
 				primaryHost = "127.0.0.1"
 			}
-			// In Docker mode, the HealthChecker runs inside the gateway container
-			// where 127.0.0.1 is the container's own loopback — not the host.
-			// Rewrite local addresses to host.docker.internal so probes reach
-			// the host machine's Ollama instance.
 			if !envCfg.IsNative && (primaryHost == "127.0.0.1" || primaryHost == "localhost") {
 				primaryHost = "host.docker.internal"
 			}
-			
-			// Extract port if provided, otherwise default to 11434
+
 			hostPort := "11434"
 			if strings.Contains(primaryHost, ":") {
 				parts := strings.Split(primaryHost, ":")
 				primaryHost = parts[0]
 				hostPort = parts[1]
 			}
-			
+
 			primaryEntry := orchestrator.NodeSeedEntry{
 				ID:       "primary",
 				Host:     fmt.Sprintf("%s:%s", primaryHost, hostPort),
 				ModelTag: envCfg.Model,
 			}
-			// ReasoningScore and MaxContext are left at zero — the health checker
-			// dynamically derives them from POST /api/show within 15 seconds.
 			seedEntries = append(seedEntries, primaryEntry)
 		}
 
-		// Append any additional nodes collected during the interactive wizard.
-		for _, n := range envCfg.Nodes {
-			entry := orchestrator.NodeSeedEntry{
-				ID:       n.ID,
-				Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
-				ModelTag: n.ModelTag,
-			}
-			if n.MemoryGB > 0 {
-				entry.Capabilities.MemoryGB = n.MemoryGB
-			}
-			seedEntries = append(seedEntries, entry)
-		}
+		// If no nodes were collected via the wizard (legacy path), we synthesized a primary entry above.
 
 		if len(seedEntries) > 0 {
 			if err := orchestrator.SeedNodes(ctx, gatewayURL, seedEntries); err != nil {

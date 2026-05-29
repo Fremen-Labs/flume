@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Fremen-Labs/flume/internal/es"
 	"github.com/Fremen-Labs/logloom-go/logloom"
 )
 
@@ -246,6 +247,96 @@ func TaskLogger(ctx context.Context, taskID string, extra ...any) *slog.Logger {
 	return l
 }
 
+// ─── Execution Thought Bridge (Phase 0 Reasoning Persistence) ─────────────────
+//
+// Best-effort, non-blocking append of agent reasoning / state transitions into
+// the task document via the existing "flume-append-execution-thought" Painless
+// script (seeded at bootstrap in orchestrator/elastic.go).
+//
+// Design requirements (from grok-design-doc):
+//   - 2s context timeout, never blocks the calling worker goroutine.
+//   - On failure/timeout: emit structured "reasoning_bridge_failure" log (rich
+//     attrs for Logloom) + increment conceptual metric. **Never silent** — the
+//     reasoning text is already captured by the preceding slog + Logloom handler.
+//   - Wire both LogAgentReasoning and LogStateTransition (the primary sources
+//     of 20+ call sites in runner.go).
+
+var bridgeES *es.Client
+
+// SetESBridge wires the Elasticsearch client for the reasoning persistence bridge.
+// Called once at worker/dashboard startup (e.g. in manager or server init).
+// Safe to call with nil (bridge becomes a no-op).
+func SetESBridge(c *es.Client) {
+	bridgeES = c
+}
+
+func appendExecutionThoughtNonBlocking(ctx context.Context, taskID, agentRole, text string, meta map[string]any) {
+	if bridgeES == nil || taskID == "" {
+		return
+	}
+
+	// Launch in goroutine so the worker is never blocked (design: non-blocking).
+	go func() {
+		bctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		entry := map[string]interface{}{
+			"ts":         time.Now().UTC().Format(time.RFC3339),
+			"agent_role": agentRole,
+			"reasoning":  text,
+			"meta":       meta,
+		}
+		params := map[string]interface{}{
+			"entry": entry,
+			"touch": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		// Quick hardening (Phase 0+): client-side retry on conflict + server-side
+		// retry_on_conflict (via the ES client helper). This dramatically increases
+		// the chance that thoughts land even under heavy concurrent updates
+		// (sweeper + multiple workers + status transitions).
+		var lastErr error
+		const maxAttempts = 4
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			err := bridgeES.UpdateDocByScript(bctx, "agent-task-records", taskID, "flume-append-execution-thought", params)
+			if err == nil {
+				return // success
+			}
+			lastErr = err
+
+			// Only retry on version conflicts (the dominant case we saw in practice)
+			if strings.Contains(err.Error(), "version_conflict") || strings.Contains(err.Error(), "409") {
+				backoff := time.Duration(30*(attempt+1)) * time.Millisecond
+				time.Sleep(backoff)
+				continue
+			}
+			// Non-conflict errors (network, 404, etc.) — no point retrying hard
+			break
+		}
+
+		if lastErr != nil {
+			// Mandatory: never silent. Rich structured log feeds Logloom + dashboards.
+			Log().Warn("reasoning_bridge_failure",
+				slog.String("task_id", taskID),
+				slog.String("agent_role", agentRole),
+				slog.String("error", lastErr.Error()),
+				slog.String("script", "flume-append-execution-thought"),
+				slog.String("reasoning_preview", firstNChars(text, 120)),
+				slog.Int("attempts", maxAttempts),
+			)
+			// The original reasoning text is already present in the preceding
+			// slog.Info("agent reasoning"...) line (captured by Logloom handler).
+		}
+	}()
+}
+
+func firstNChars(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
 // LogStateTransition is a convenience helper for the work queue state machine.
 // It ensures consistent structured logging for all planned → ready → in_progress etc. transitions.
 func LogStateTransition(ctx context.Context, taskID, fromStatus, toStatus string, reason string, extra ...any) {
@@ -257,10 +348,19 @@ func LogStateTransition(ctx context.Context, taskID, fromStatus, toStatus string
 	}
 	attrs = append(attrs, extra...)
 	TaskLogger(ctx, taskID).Info("task state transition", attrs...)
+
+	// Phase 0 bridge: best-effort persistence so UI drawers are populated.
+	meta := map[string]any{"from": fromStatus, "to": toStatus}
+	appendExecutionThoughtNonBlocking(ctx, taskID, "system", reason, meta)
 }
 
 // LogAgentReasoning captures the agent's internal reasoning / thoughts.
 // This is what should feed the "agent reasoning popout" in the work queue UI.
+//
+// Phase 0 change: after emitting the Logloom-enriched slog line, we also
+// fire a best-effort non-blocking append to the task's execution_thoughts[]
+// via the stored Painless script. This fixes the "empty reasoning in UI"
+// symptom reported in the 258-item explosion post-mortem.
 func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string, metadata ...any) {
 	attrs := []any{
 		slog.String("task_id", taskID),
@@ -269,6 +369,15 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 	}
 	attrs = append(attrs, metadata...)
 	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
+
+	// Convert variadic metadata to map for the ES entry (best-effort).
+	meta := map[string]any{}
+	for i := 0; i+1 < len(metadata); i += 2 {
+		if key, ok := metadata[i].(string); ok {
+			meta[key] = metadata[i+1]
+		}
+	}
+	appendExecutionThoughtNonBlocking(ctx, taskID, agentRole, reasoning, meta)
 }
 
 // LogLLMCall logs details of an LLM invocation with proper structure.

@@ -34,7 +34,7 @@ interface LogEntry {
 class FrontendLogger {
   private context: LogContext = {};
   private buffer: LogEntry[] = [];
-  private flushTimer: NodeJS.Timeout | null = null;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly flushInterval = 2000; // 2s batching in prod
 
   constructor() {

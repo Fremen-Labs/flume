@@ -17,6 +17,7 @@ import (
 	"github.com/Fremen-Labs/flume/internal/es"
 	"github.com/Fremen-Labs/flume/internal/git"
 	"github.com/Fremen-Labs/flume/internal/llm"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -48,18 +49,20 @@ func NewSweeper(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger)
 		llm:    llmClient,
 		logger: logger.With(slog.String("component", "orchestration.sweeps")),
 		lastRun: map[string]time.Time{
-			"stuck_impl":   {},
-			"stuck_review": {},
-			"promote":      {},
-			"consensus":    {},
-			"parent_comp":  {},
+			"stuck_impl":       {},
+			"stuck_review":     {},
+			"promote":          {},
+			"consensus":        {},
+			"parent_comp":      {},
+			"child_count_recon": {},
 		},
 		intervals: map[string]time.Duration{
-			"stuck_impl":   30 * time.Second,
-			"stuck_review": 30 * time.Second,
-			"promote":      5 * time.Second,
-			"consensus":    5 * time.Second,
-			"parent_comp":  5 * time.Second,
+			"stuck_impl":        30 * time.Second,
+			"stuck_review":      30 * time.Second,
+			"promote":           5 * time.Second,
+			"consensus":         5 * time.Second,
+			"parent_comp":       5 * time.Second,
+			"child_count_recon": 45 * time.Second, // periodic authoritative recompute + lag detection
 		},
 	}
 }
@@ -118,6 +121,14 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 		s.lastRun["parent_comp"] = now
 		s.mu.Unlock()
 		s.parentCompletionSweep(ctx)
+		s.mu.Lock()
+	}
+
+	// Child count authoritative reconciliation + lag detection (task 3)
+	if now.Sub(s.lastRun["child_count_recon"]) >= s.intervals["child_count_recon"] {
+		s.lastRun["child_count_recon"] = now
+		s.mu.Unlock()
+		s.childCountReconciliationSweep(ctx)
 		s.mu.Lock()
 	}
 
@@ -285,9 +296,11 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 	// Collect needed parent + depends IDs for batch resolution (resilience for large/complex plans)
 	neededIDs := make(map[string]bool)
 	type plannedTask struct {
-		ID        string
-		ParentID  string
-		DependsOn []string
+		ID             string
+		ParentID       string
+		DependsOn      []string
+		HierarchyDepth int
+		PlanSessionID  string
 		// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
 		RawHit *es.SearchHit
 	}
@@ -295,17 +308,21 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	for i, hit := range result.Hits {
 		var t struct {
-			ID        string   `json:"id"`
-			ParentID  string   `json:"parent_id"`
-			DependsOn []string `json:"depends_on"`
+			ID             string   `json:"id"`
+			ParentID       string   `json:"parent_id"`
+			DependsOn      []string `json:"depends_on"`
+			HierarchyDepth int      `json:"hierarchy_depth"`
+			PlanSessionID  string   `json:"plan_session_id"`
 		}
 		if json.Unmarshal(hit, &t) != nil {
 			continue
 		}
 		pt := plannedTask{
-			ID:        t.ID,
-			ParentID:  t.ParentID,
-			DependsOn: t.DependsOn,
+			ID:             t.ID,
+			ParentID:       t.ParentID,
+			DependsOn:      t.DependsOn,
+			HierarchyDepth: t.HierarchyDepth,
+			PlanSessionID:  t.PlanSessionID,
 		}
 		if i < len(result.RawHits) {
 			pt.RawHit = &result.RawHits[i]
@@ -367,6 +384,23 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	promoted := 0
 	for _, task := range candidates {
+		// === Phase 2 DEPTH ENFORCEMENT in promotePlannedTasks ===
+		// Skip (with rich LogAgentReasoning for UI/Logloom) any task whose depth already exceeds MAX.
+		// This prevents promotion of deeply nested items created by runaway PM decomp.
+		if task.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
+			reason := fmt.Sprintf("promote blocked: hierarchy_depth=%d exceeds MAX_HIERARCHY_DEPTH=%d (anti-nesting explosion guard)", task.HierarchyDepth, ftypes.MAX_HIERARCHY_DEPTH)
+			flumelogger.LogAgentReasoning(ctx, task.ID, "system", reason, map[string]any{
+				"depth": task.HierarchyDepth,
+				"max":   ftypes.MAX_HIERARCHY_DEPTH,
+				"plan_session_id": task.PlanSessionID,
+			})
+			s.logger.Warn("promote skip (depth exceeded)",
+				slog.String("task_id", task.ID),
+				slog.Int("depth", task.HierarchyDepth),
+				slog.Int("max", ftypes.MAX_HIERARCHY_DEPTH))
+			continue
+		}
+
 		// Parent check (using cache)
 		//
 		// FIX for Hierarchy promotion deadlock (P0 from flume-queue-planning-reliability):
@@ -850,5 +884,75 @@ func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, pa
 			"updated_at":   time.Now().UTC().Format(time.RFC3339),
 		}
 		_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
+	}
+}
+
+// childCountReconciliationSweep (Phase 2 task 3): periodically recomputes true child_count
+// from live children search for a sample of parents and corrects drift via atomic script.
+// Emits structured "child_count_lag" logs (observable as metric in Logloom / dashboards).
+// Keeps denorm authoritative even if prior increments missed under failure/retry storms.
+func (s *Sweeper) childCountReconciliationSweep(ctx context.Context) {
+	// Sample parents that have a non-zero child_count denorm or are known PM/structural items.
+	// Lightweight: limit to 50 candidates to avoid heavy load.
+	query := map[string]interface{}{
+		"bool": map[string]interface{}{
+			"must": []interface{}{
+				map[string]interface{}{"exists": map[string]string{"field": "parent_id"}},
+			},
+			"should": []interface{}{
+				map[string]interface{}{"range": map[string]interface{}{"child_count": map[string]interface{}{"gt": 0}}},
+				map[string]interface{}{"terms": map[string]interface{}{"item_type": []string{"epic", "feature", "story", "pm"}}},
+			},
+			"minimum_should_match": 1,
+		},
+	}
+	res, err := s.es.Search(ctx, "agent-task-records", query, 50)
+	if err != nil {
+		s.logger.Debug("childCountReconciliationSweep: search failed", slog.String("err", err.Error()))
+		return
+	}
+
+	lagDetected := 0
+	for _, hit := range res.Hits {
+		var parent struct {
+			ID          string `json:"id"`
+			ChildCount  int    `json:"child_count"`
+			Title       string `json:"title"`
+		}
+		if json.Unmarshal(hit, &parent) == nil && parent.ID != "" {
+			// Compute authoritative live count
+			childQ := map[string]interface{}{"term": map[string]string{"parent_id": parent.ID}}
+			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQ, 1000)
+			if cerr != nil {
+				continue
+			}
+			trueCount := len(childRes.Hits)
+			diff := trueCount - parent.ChildCount
+			if diff != 0 {
+				lagDetected++
+				s.logger.Info("child_count_lag_detected",
+					slog.String("parent_id", parent.ID),
+					slog.String("title", parent.Title),
+					slog.Int("stored_child_count", parent.ChildCount),
+					slog.Int("true_child_count", trueCount),
+					slog.Int("lag", diff),
+				)
+				// Emit rich reasoning for observability
+				flumelogger.LogAgentReasoning(ctx, parent.ID, "system", fmt.Sprintf("child_count lag reconciled: stored=%d true=%d lag=%d", parent.ChildCount, trueCount, diff), map[string]any{
+					"lag": diff, "true_count": trueCount, "stored": parent.ChildCount,
+				})
+
+				// Atomic correction via script (authoritative)
+				now := time.Now().UTC().Format(time.RFC3339)
+				script := `ctx._source.child_count = params.true_count; ctx._source.updated_at = params.now;`
+				_ = s.es.UpdateDocWithInlineScript(ctx, "agent-task-records", parent.ID, script, map[string]interface{}{
+					"true_count": trueCount,
+					"now":        now,
+				})
+			}
+		}
+	}
+	if lagDetected > 0 {
+		s.logger.Info("childCountReconciliationSweep complete", slog.Int("parents_with_lag", lagDetected))
 	}
 }

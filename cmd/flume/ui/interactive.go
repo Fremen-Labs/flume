@@ -50,6 +50,7 @@ const (
 	StepModel
 	StepOllamaScope
 	StepOllamaIP
+	StepPrimaryOllamaID // New: collect a node name/ID for the primary Ollama instance
 	StepAPIKey
 	StepCloudMore   // loop back to StepProvider if Y
 	StepNodeMesh    // "Add more Ollama nodes?" yes/no
@@ -223,6 +224,10 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cfg.Provider = "anthropic"
 				case "3":
 					m.cfg.Provider = "ollama"
+					// Jump straight into the node mesh flow for Ollama.
+					// Users will configure local or remote nodes (with their own models)
+					// using the consistent node wizard.
+					return m.next(StepNodeMesh)
 				case "4":
 					m.cfg.Provider = "exo"
 				case "5":
@@ -236,7 +241,10 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case StepModel:
 				m.cfg.Model = val
 				if m.cfg.Provider == "ollama" {
-					return m.next(StepOllamaScope)
+					// Simplified flow: selecting Ollama jumps directly into the node mesh wizard.
+					// Users add their primary (and any additional) Ollama nodes (local or remote)
+					// using the same consistent flow with full control over host, port, name, etc.
+					return m.next(StepNodeMesh)
 				}
 				if m.cfg.Provider == "exo" {
 					m.cfg.APIKey = ""
@@ -247,12 +255,27 @@ func (m promptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if val == "" || val == "1" {
 					m.cfg.Host = "127.0.0.1"
 					m.cfg.APIKey = ""
-					return m.next(StepNodeMesh)
+					// Local primary Ollama also needs a node ID for clean mesh registration
+					return m.next(StepPrimaryOllamaID)
 				}
 				return m.next(StepOllamaIP)
 			case StepOllamaIP:
 				if val != "" {
 					m.cfg.Host = val
+				}
+				// For the primary Ollama, collect a node name/ID so it is registered cleanly in the mesh
+				// instead of only relying on the special LocalOllamaBaseURL path.
+				return m.next(StepPrimaryOllamaID)
+			case StepPrimaryOllamaID:
+				// Store the primary Ollama as the first node in the mesh
+				primaryNode := NodeEntry{
+					ID:   val,
+					Host: m.cfg.Host,
+					Port: "11434", // default; user can add more precise nodes later via mesh wizard
+				}
+				// Avoid duplicates if user somehow reaches here multiple times
+				if len(m.cfg.Nodes) == 0 {
+					m.cfg.Nodes = append(m.cfg.Nodes, primaryNode)
 				}
 				return m.next(StepCloudMore)
 			case StepAPIKey:
@@ -366,12 +389,21 @@ func (m promptModel) View() string {
 	case StepProvider:
 		return NeonGreen("Select LLM Provider by number:\n") + "\n1. openai\n2. anthropic\n3. ollama\n4. exo\n5. gemini\n6. grok\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepModel:
-		return NeonGreen("Enter "+pLabel+" model constraint (e.g. gpt-4o, claude-opus-4-5, qwen2.5-coder:32b):\n") + "\n" + ti.View() + err + "\n" + Dim("(Tab to autocomplete · Enter to confirm)") + "\n"
+		example := "gpt-4o, claude-opus-4-5, qwen2.5-coder:32b"
+		if m.cfg.Provider == "ollama" {
+			example = "llama3.2, qwen2.5-coder:32b, phi3:14b"
+		}
+		return NeonGreen("Enter "+pLabel+" model constraint (e.g. "+example+"):\n") + "\n" + ti.View() + err + "\n" + Dim("(Tab to autocomplete · Enter to confirm)") + "\n"
 	case StepOllamaScope:
-		return NeonGreen("Ollama detected. Is this model local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("You selected Ollama as provider.\nIs your primary Ollama instance local or remote?\n") + "\n1. Local\n2. Remote\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepOllamaIP:
-		return NeonGreen("Enter the remote Ollama hostname or IP address:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		return NeonGreen("Enter the IP address or DNS name of your primary Ollama host:\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
+	case StepPrimaryOllamaID:
+		return NeonGreen("Enter a name/ID for this primary Ollama node (e.g. primary-mac or ollama-server-1):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepNodeMesh:
+		if m.cfg.Provider == "ollama" && len(m.cfg.Nodes) == 0 {
+			return NeonGreen("Configure your Ollama node(s) for the mesh.\nWould you like to add an Ollama node now? (local or remote)\n") + "\n1. Yes, add a node\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
+		}
 		return NeonGreen("Would you like to add more Ollama nodes to the mesh?\n") + "\n1. Yes, add a node\n2. No, continue\n\n" + ti.View() + err + "\n(Press enter to continue)\n"
 	case StepNodeID:
 		return NeonGreen("Enter a unique Node ID (e.g. mac-mini-1):\n") + "\n" + ti.View() + err + "\n(Press enter to continue)\n"

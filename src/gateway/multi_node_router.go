@@ -246,6 +246,16 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 	Metrics.RecordNodeRequest(node.ID, node.ModelTag)
 	Metrics.SetNodeLoad(node.ID, node.Health.CurrentLoad)
 
+	// === Planning-aware resilience (high impact fix) ===
+	// For planning / intake calls we use a dedicated path that is much more
+	// patient with the local mesh and uses fresh contexts for fallbacks.
+	// This prevents a single slow primary node from burning the entire
+	// high-value planning request and immediately escalating to frontier.
+	if taskType == "planning" || req.AgentRole == "intake" {
+		Metrics.RecordRoutingDecision("planning_mesh_resilient_path", taskType)
+		return m.executePlanningWithMeshResilience(ctx, req, taskType, withTools, log)
+	}
+
 	// Inject asynchronous Kanban telemetry back out to Elasticsearch natively
 	if req.TaskID != "" {
 		go func(taskID, host, model string) {
@@ -313,6 +323,82 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 		slog.String("task_type", taskType),
 	)
 	Metrics.RecordRoutingDecision("frontier_all_failed", taskType)
+	return m.routeFrontierFallback(ctx, req, withTools)
+}
+
+// executePlanningWithMeshResilience is a dedicated planning-aware path.
+// For high-value, long-running planning/intake calls, we are much more stubborn
+// about using the local mesh before escalating to frontier.
+//
+// Key improvements:
+// - Uses fresh child contexts with generous timeouts for fallback attempts
+//   (prevents a slow primary from poisoning the entire request context).
+// - Exhausts the healthy local mesh more thoroughly for planning tasks.
+func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context, req *ChatRequest, taskType string, withTools bool, log *slog.Logger) (*ChatResponse, error) {
+	// Still use the normal selection for the initial attempt (respects ReasoningScore, load, etc.)
+	node := m.registry.SelectNode(taskType, 5, false, withTools)
+	if node == nil {
+		log.Warn("planning_router: no suitable local nodes for planning task — frontier escalation",
+			slog.String("task_type", taskType),
+		)
+		Metrics.RecordRoutingDecision("frontier_planning_no_nodes", taskType)
+		return m.routeFrontierFallback(ctx, req, withTools)
+	}
+
+	log.Info("planning_router: attempting primary node for planning task",
+		slog.String("node_id", node.ID),
+		slog.String("host", node.Host),
+		slog.String("model", node.ModelTag),
+	)
+
+	resp, err := m.routeToNode(ctx, req, node, withTools)
+	if err == nil {
+		return resp, nil
+	}
+
+	log.Warn("planning_router: primary node failed for planning task, trying remaining healthy mesh with fresh context",
+		slog.String("node_id", node.ID),
+		slog.String("error", err.Error()),
+	)
+
+	// === Planning-specific resilience: fresh context for fallbacks ===
+	// Give planning calls a generous independent budget for the mesh fallback phase.
+	// This is the key fix for "one slow node burns the whole planning request".
+	fallbackCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// Try all other healthy nodes using the fresh context.
+	healthy := m.registry.HealthyNodes()
+	for _, n := range healthy {
+		if n.ID == node.ID {
+			continue
+		}
+
+		log.Info("planning_router: trying additional mesh node with fresh context",
+			slog.String("node_id", n.ID),
+			slog.String("host", n.Host),
+		)
+
+		Metrics.RecordNodeRequest(n.ID, n.ModelTag)
+		fbResp, fbErr := m.routeToNode(fallbackCtx, req, n, withTools)
+		if fbErr == nil {
+			log.Info("planning_router: planning task recovered on secondary mesh node",
+				slog.String("node_id", n.ID),
+			)
+			return fbResp, nil
+		}
+
+		log.Warn("planning_router: secondary mesh node also failed for planning task",
+			slog.String("node_id", n.ID),
+			slog.String("error", fbErr.Error()),
+		)
+	}
+
+	// Only now, after genuinely exhausting the local mesh with fresh attempts, escalate.
+	log.Warn("planning_router: exhausted local mesh for planning task — escalating to frontier",
+		slog.String("task_type", taskType),
+	)
+	Metrics.RecordRoutingDecision("frontier_planning_exhausted_mesh", taskType)
 	return m.routeFrontierFallback(ctx, req, withTools)
 }
 

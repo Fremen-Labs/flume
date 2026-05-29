@@ -263,6 +263,120 @@ func (c *Client) UpdateDocOCC(ctx context.Context, index, id string, body interf
 	return nil
 }
 
+// UpdateDocByScript executes a stored Painless script (e.g. "flume-append-execution-thought")
+// against a document. Used by the logger reasoning bridge for best-effort append of
+// execution thoughts without blocking the worker goroutine.
+//
+// The script must have been seeded at bootstrap (see orchestrator/elastic.go).
+// params typically contains "entry" (the thought object) and "touch" (RFC3339 timestamp).
+func (c *Client) UpdateDocByScript(ctx context.Context, index, id, scriptID string, params map[string]interface{}) error {
+	return c.updateDocByScriptWithRetry(ctx, index, id, scriptID, params, 0, 0, 5)
+}
+
+// UpdateDocByScriptOCC is like UpdateDocByScript but performs the update with
+// optimistic concurrency control. Useful for hardening append paths under high
+// contention (e.g. the reasoning bridge).
+func (c *Client) UpdateDocByScriptOCC(ctx context.Context, index, id, scriptID string, params map[string]interface{}, seqNo, primaryTerm int64) error {
+	return c.updateDocByScriptWithRetry(ctx, index, id, scriptID, params, seqNo, primaryTerm, 0)
+}
+
+func (c *Client) updateDocByScriptWithRetry(ctx context.Context, index, id, scriptID string, params map[string]interface{}, seqNo, primaryTerm int64, retryOnConflict int) error {
+	payload := map[string]interface{}{
+		"script": map[string]interface{}{
+			"id":     scriptID,
+			"params": params,
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("es: marshal script update failed: %w", err)
+	}
+
+	path := fmt.Sprintf("%s/_update/%s", index, id)
+	if retryOnConflict > 0 {
+		path = fmt.Sprintf("%s?retry_on_conflict=%d", path, retryOnConflict)
+	}
+	if seqNo > 0 && primaryTerm > 0 {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		path = fmt.Sprintf("%s%sif_seq_no=%d&if_primary_term=%d", path, sep, seqNo, primaryTerm)
+	}
+
+	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("es: script update %s/%s (%s) failed: %w", index, id, scriptID, err)
+	}
+	defer resp.Body.Close()
+
+	// 404 on the doc is common during storms / partial failures — treat as non-fatal for best-effort bridge.
+	if resp.StatusCode == 404 {
+		return nil
+	}
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("es: script update %s/%s (%s) returned HTTP %d: %s", index, id, scriptID, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// UpdateDocWithInlineScript executes an inline Painless script for atomic updates.
+// Preferred for budget counters (plan current_* ) and authoritative child_count increments
+// (ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta).
+// Avoids races that the prior best-effort UpdateDoc(child_count = N) could suffer under concurrent PMs.
+// Supports optional OCC via seq/prim (pass 0,0 for none). Retries on conflict a few times.
+func (c *Client) UpdateDocWithInlineScript(ctx context.Context, index, id, scriptSource string, params map[string]interface{}) error {
+	return c.updateDocWithInlineScriptWithRetry(ctx, index, id, scriptSource, params, 0, 0, 3)
+}
+
+// UpdateDocWithInlineScriptOCC is the OCC variant for contended counter updates.
+func (c *Client) UpdateDocWithInlineScriptOCC(ctx context.Context, index, id, scriptSource string, params map[string]interface{}, seqNo, primaryTerm int64) error {
+	return c.updateDocWithInlineScriptWithRetry(ctx, index, id, scriptSource, params, seqNo, primaryTerm, 0)
+}
+
+func (c *Client) updateDocWithInlineScriptWithRetry(ctx context.Context, index, id, scriptSource string, params map[string]interface{}, seqNo, primaryTerm int64, retryOnConflict int) error {
+	payload := map[string]interface{}{
+		"script": map[string]interface{}{
+			"lang":   "painless",
+			"source": scriptSource,
+			"params": params,
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("es: marshal inline script update failed: %w", err)
+	}
+
+	path := fmt.Sprintf("%s/_update/%s", index, id)
+	if retryOnConflict > 0 {
+		path = fmt.Sprintf("%s?retry_on_conflict=%d", path, retryOnConflict)
+	}
+	if seqNo > 0 && primaryTerm > 0 {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		path = fmt.Sprintf("%s%sif_seq_no=%d&if_primary_term=%d", path, sep, seqNo, primaryTerm)
+	}
+
+	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("es: inline script update %s/%s failed: %w", index, id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		// Doc missing during high-churn; non-fatal (creation race or sweep cleanup)
+		return nil
+	}
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("es: inline script update %s/%s returned HTTP %d: %s", index, id, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 // ─── Search ─────────────────────────────────────────────────────────────────
 
 // SearchHit represents a raw Elasticsearch search hit with metadata.
