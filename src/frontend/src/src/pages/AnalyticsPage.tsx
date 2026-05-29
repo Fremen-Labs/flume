@@ -2,10 +2,77 @@ import { motion } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useTelemetry } from '@/hooks/useTelemetry';
+import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
-import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network } from 'lucide-react';
+import { TrendingUp, Clock, Zap, Target, Loader2, Cpu, Activity, ServerCrash, Network, Server, AlertTriangle, HelpCircle } from 'lucide-react';
+import { createLogger } from '@/utils/logger';
 
 const COLORS = ['hsl(160,84%,39%)', 'hsl(38,92%,50%)', 'hsl(0,84%,60%)', 'hsl(239,84%,67%)'];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Logger (LogLoom structured) + local types for unified /api/nodes source
+// Authoritative loads come from gateway health_checker + node_registry (CurrentLoad
+// derived from sum(size_vram) / MemoryGB). Telemetry flume_node_load path is dead.
+// ─────────────────────────────────────────────────────────────────────────────
+const log = createLogger('pages.AnalyticsPage');
+
+// Minimal shapes matching Node + Health + Capabilities from /api/nodes (via dashboard proxy)
+interface NodeHealth {
+  current_load?: number;
+  status?: string;
+  loaded_models?: string[];
+  last_seen?: string;
+  latency_ms?: number;
+}
+interface NodeCapabilities {
+  memory_gb?: number;
+  reasoning_score?: number;
+  max_context?: number;
+  quantization?: string;
+  estimated_tps?: number;
+}
+interface ApiNode {
+  id: string;
+  host?: string;
+  model_tag?: string;
+  capabilities?: NodeCapabilities;
+  health?: NodeHealth;
+}
+interface NodesApiResponse {
+  nodes?: ApiNode[];
+  count?: number;
+  error?: string; // set by dashboard when gateway unreachable (partial resilience)
+}
+
+interface NodeChartDatum {
+  name: string;
+  load: number;
+  loadRaw: number;
+  memoryGB: number;
+  usedGB: number;
+  modelCount: number;
+  status: string;
+}
+
+// Stable custom tooltip renderer (hoisted to avoid per-render recreation for Recharts)
+function NodeLoadTooltip({ active, payload }: { active?: boolean; payload?: { payload?: NodeChartDatum }[] }) {
+  if (!active || !payload?.length) return null;
+  const d = (payload[0].payload || {}) as NodeChartDatum;
+  const used = typeof d.usedGB === 'number' ? d.usedGB.toFixed(1) : '?';
+  const total = typeof d.memoryGB === 'number' && d.memoryGB > 0 ? d.memoryGB : '?';
+  return (
+    <div className="rounded-lg border border-[hsl(215,28%,17%)] bg-[hsl(222,47%,8%)] p-3 text-xs shadow-xl">
+      <div className="font-semibold text-foreground mb-1">{d.name || 'node'}</div>
+      <div className="text-muted-foreground">
+        Load: <span className="font-mono text-foreground">{d.load ?? 0}%</span> ({used} / {total} GB VRAM)
+      </div>
+      <div className="text-muted-foreground">Models loaded: <span className="font-mono text-foreground">{d.modelCount ?? 0}</span></div>
+      <div className="text-muted-foreground">Status: <span className="font-mono text-foreground capitalize">{d.status || 'unknown'}</span></div>
+      <div className="mt-1 text-[10px] text-muted-foreground/70">Lower load preferred for routing</div>
+    </div>
+  );
+}
 
 export default function AnalyticsPage() {
   const { data: snapshot, isLoading: isSnapLoading } = useSnapshot();
@@ -69,11 +136,53 @@ export default function AnalyticsPage() {
   
   const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
 
-  const nodeLoads = (telemetry?.flume_node_load ?? []).map(l => ({
-    name: l.tags['node_id'] || 'unknown',
-    load: Math.round(l.value * 100)
-  }));
-  
+  // ── Unified real data source: /api/nodes (NodeRegistry + HealthChecker) ──
+  // Replaces dead telemetry?.flume_node_load. Shares react-query cache with NodesOverview.
+  const { data: nodesData, isLoading: isNodesLoading, isError: isNodesError, error: nodesQueryError } = useQuery<NodesApiResponse>({
+    queryKey: ['nodes'],
+    queryFn: async () => {
+      log.debug('fetchNodes', 'Fetching fresh /api/nodes for Node Mesh Distribution chart');
+      try {
+        const res = await fetch('/api/nodes');
+        if (!res.ok) {
+          log.warn('fetchNodes', `Non-OK response from /api/nodes`, { status: res.status });
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const json = await res.json();
+        log.info('fetchNodes', 'Node mesh data arrived for Analytics', {
+          nodeCount: json?.nodes?.length ?? 0,
+          gatewayError: json?.error || null,
+        });
+        return json as NodesApiResponse;
+      } catch (e) {
+        log.error('fetchNodes', 'Failed to fetch /api/nodes for chart (will show resilient state)', { error: String(e) });
+        throw e;
+      }
+    },
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+    retry: 1,
+  });
+
+  const gatewayError = nodesData?.error;
+  const rawNodes: ApiNode[] = nodesData?.nodes ?? [];
+  const nodeChartData = rawNodes
+    .map((n) => {
+      const load = n.health?.current_load ?? 0; // 0.0–1.0 authoritative from health_checker
+      const memGB = n.capabilities?.memory_gb ?? 0;
+      const usedGB = load * memGB;
+      return {
+        name: n.id || 'unknown',
+        load: Math.round(load * 100),
+        loadRaw: load,
+        memoryGB: memGB,
+        usedGB: usedGB,
+        modelCount: n.health?.loaded_models?.length ?? 0,
+        status: n.health?.status || 'unknown',
+      };
+    })
+    .sort((a, b) => b.load - a.load); // sort desc by load (actionable: highest pressure first)
+
   const routingDecisions = Object.entries((telemetry?.flume_routing_decision ?? []).reduce<Record<string, number>>((acc, d) => {
     const strategy = d.tags['strategy'] || 'unknown';
     acc[strategy] = (acc[strategy] || 0) + d.count;
@@ -109,19 +218,80 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-5 relative z-10">
+            {/* Node Mesh Distribution — now unified on real /api/nodes (health.current_load) */}
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="glass-card p-5">
-              <h3 className="text-sm font-semibold text-foreground mb-4">Node Mesh Distribution</h3>
-              {nodeLoads.length === 0 ? (
-                <div className="text-xs text-muted-foreground text-center py-8">No mesh data</div>
+              <div className="mb-3">
+                <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                  Node Mesh Distribution
+                  <span title="VRAM memory pressure (sum of loaded models' size_vram ÷ node's declared MemoryGB). Lower is preferred for routing. Data from health_checker probes.">
+                    <HelpCircle className="w-3.5 h-3.5 text-muted-foreground/60 hover:text-muted-foreground transition-colors" />
+                  </span>
+                </h3>
+                <p className="text-[10px] leading-snug text-muted-foreground mt-0.5">
+                  VRAM memory pressure (sum of loaded models' size_vram ÷ node's declared MemoryGB). Lower is preferred for routing.
+                </p>
+              </div>
+
+              {isNodesLoading ? (
+                <div className="flex h-[170px] items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading node loads from registry…
+                </div>
+              ) : (isNodesError || gatewayError) && nodeChartData.length === 0 ? (
+                <div className="flex h-[170px] flex-col items-center justify-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-4 text-center text-xs">
+                  <AlertTriangle className="h-6 w-6 text-amber-400" />
+                  <div className="font-medium text-amber-300">Gateway unreachable</div>
+                  <div className="text-amber-400/80">Last known loads unavailable. Check Node Mesh or gateway health.</div>
+                </div>
+              ) : nodeChartData.length === 0 ? (
+                <div className="flex h-[170px] flex-col items-center justify-center gap-2 text-center">
+                  <Server className="h-8 w-8 text-muted-foreground/40" />
+                  <p className="text-xs text-muted-foreground">No nodes registered in the mesh</p>
+                  <Link
+                    to="/nodes"
+                    className="inline-flex items-center gap-1 rounded-md border border-border/30 px-2.5 py-1 text-[10px] text-primary hover:bg-white/5 hover:text-primary/90 transition-colors"
+                  >
+                    Go to Node Mesh → Register nodes
+                  </Link>
+                </div>
               ) : (
-                <ResponsiveContainer width="100%" height={180}>
-                   <BarChart data={nodeLoads}>
-                    <XAxis dataKey="name" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
-                    <YAxis unit="%" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
-                    <Tooltip contentStyle={{ background: 'hsl(222,47%,8%)', border: '1px solid hsl(215,28%,17%)', borderRadius: 8, fontSize: 12 }} />
-                    <Bar dataKey="load" fill="hsl(160,84%,39%)" radius={[4, 4, 0, 0]} />
+                <ResponsiveContainer width="100%" height={170}>
+                  <BarChart data={nodeChartData} margin={{ top: 4, right: 4, left: -4, bottom: 0 }}>
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fill: 'hsl(215,20%,65%)', fontSize: 9 }}
+                      tickLine={{ stroke: 'hsl(215,28%,17%)' }}
+                    />
+                    <YAxis
+                      unit="%"
+                      domain={[0, 100]}
+                      tick={{ fill: 'hsl(215,20%,65%)', fontSize: 9 }}
+                      tickLine={{ stroke: 'hsl(215,28%,17%)' }}
+                    />
+                    <Tooltip content={<NodeLoadTooltip />} cursor={{ fill: 'hsl(215,20%,65%,0.08)' }} />
+                    <Bar dataKey="load" radius={[4, 4, 0, 0]}>
+                      {nodeChartData.map((entry, index) => {
+                        const fill = entry.load >= 80
+                          ? 'hsl(0,84%,60%)'   // high pressure — red
+                          : entry.load >= 55
+                          ? 'hsl(38,92%,50%)'  // medium — amber
+                          : 'hsl(160,84%,39%)'; // healthy — emerald
+                        return <Cell key={`cell-${index}`} fill={fill} />;
+                      })}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+              )}
+
+              {/* Partial / resilience footer */}
+              {gatewayError && nodeChartData.length > 0 && (
+                <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px] text-amber-400">
+                  Partial data — gateway unreachable (showing last cached loads)
+                </div>
+              )}
+              {nodeChartData.length > 0 && (
+                <div className="mt-1.5 text-right text-[9px] text-muted-foreground/60">
+                  {nodeChartData.length} node{nodeChartData.length === 1 ? '' : 's'} • sorted by load desc
+                </div>
               )}
             </motion.div>
 
