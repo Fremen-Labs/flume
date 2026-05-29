@@ -79,11 +79,23 @@ export default function AnalyticsPage() {
   const estimatedCost = tm?.estimated_cost_usd ?? 0;
   const dollarsSaved = (estimatedCost > 0 && actualTokensSent > 0) ? (estimatedCost / actualTokensSent) * realSavings : 0;
   const historicalBurn = tm?.historical_burn ?? [];
+  const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
+
   // Local mesh / hybrid (Recommendation 1): data-driven est + note when no Elastro savings docs
   const localMeshEst = tm?.local_mesh_estimated_savings ?? 0;
   const meshEfficiencyNote = tm?.mesh_efficiency_note ?? (tm as any)?.local_mesh_efficiency_note;
   
-  const fmtTokens = (n: number) => n > 1000000 ? `${(n / 1000000).toFixed(1)}M` : (n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
+  // UX derivations for AST Savings card (local-est mode polish): clean value, conditional trend/partial/subtitle.
+  // Preserves all original hybrid + LogLoom derivation logic and fields.
+  const astSavingsValue = realSavings > 0 ? fmtTokens(realSavings) : (localMeshEst ? fmtTokens(localMeshEst) : "0");
+  const astSavingsTrend = realSavings > 0
+    ? { value: savingsPercent, label: `$${dollarsSaved.toFixed(2)} saved vs base cost`, suffix: '%' as const }
+    : undefined;
+  const astSavingsSubtitle = realSavings > 0 ? undefined : (localMeshEst ? "local estimate" : undefined);
+  const astSavingsPartial = realSavings === 0 && localMeshEst === 0 && !snapLoading;
+  const astSavingsSecondary = realSavings > 0 
+    ? { label: 'Elastro', value: `${fmtTokens(baselineTokens)} baseline` } 
+    : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined);
 
   const nodeLoads = (telemetry?.flume_node_load ?? []).map(l => ({
     name: l.tags['node_id'] || 'unknown',
@@ -193,17 +205,15 @@ export default function AnalyticsPage() {
             />
             <GlassMetricCard
               title="AST Savings"
-              value={realSavings > 0 ? fmtTokens(realSavings) : (localMeshEst ? fmtTokens(localMeshEst) + " (mesh est.)" : fmtTokens(0))}
+              value={astSavingsValue}
+              subtitle={astSavingsSubtitle}
               icon={TrendingUp}
-              trend={{ value: savingsPercent, label: realSavings > 0 ? `$${dollarsSaved.toFixed(2)} saved vs base cost` : "Local mesh efficiency", suffix: '%' }}
-              helpText="Hybrid model: Elastro (when present) delivers precise AST-aware compression savings vs naive full-context baseline (sourced from agent-token-telemetry 'savings' docs). In local-only / mesh mode (no Elastro data): data-driven estimate of tokens avoided via intelligent multi-node routing + LogLoom-path structural awareness, computed live from Telemetry Bridge (flume_worker_tokens_total + routing decisions + node loads). See mesh_efficiency_note for derivation details."
+              trend={astSavingsTrend}
+              helpText="Hybrid model: Elastro (when present) delivers precise AST-aware compression savings vs naive full-context baseline (sourced from agent-token-telemetry 'savings' docs). In local-only / mesh mode (no Elastro data): data-driven estimate of tokens avoided via intelligent multi-node routing + LogLoom-path structural awareness, computed live from Telemetry Bridge (flume_worker_tokens_total + routing decisions + node loads). See mesh_efficiency_note for derivation details. In estimate mode the number is clean; 'local estimate' appears as subtitle and derivation is in secondary (no trend shown)."
               loading={snapLoading}
               error={snapErrMsg}
-              partial={baselineTokens === 0 && realSavings === 0 && !snapLoading}
-              secondary={realSavings > 0 
-                ? { label: 'Elastro', value: `${fmtTokens(baselineTokens)} baseline` } 
-                : (meshEfficiencyNote ? { label: 'Mesh/LogLoom', value: 'routing-aware est.' } : undefined)
-              }
+              partial={astSavingsPartial}
+              secondary={astSavingsSecondary}
             />
             {/* New: Code Intelligence Backend card (Recommendation 3). Minimal addition using existing Glass resilience + system-state ES counts. */}
             <GlassMetricCard
