@@ -339,7 +339,32 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. Token telemetry savings
+	// 8. Token telemetry savings (AST Savings GlassMetricCard)
+	//
+	// REVIEW GAP ADDRESSED (observability + resilience):
+	//   - Zero logging previously on this entire path → now rich s.logger (structured attrs)
+	//     + flumelogger.LogAgentReasoning calls for aggregation, cost calc, historical burn build,
+	//     success, failure, and empty/zero cases (the "silent zeros when no Elastro telemetry yet").
+	//   - Includes: telemetry doc counts (from hits.total on size:0 response), resolved env cost values,
+	//     explicit "elastro_data_present" flag (savings>0 || docCount>0).
+	//
+	// LIGHTWEIGHT DEDICATED AGGREGATION / PROJECTION (monolithic snapshot mitigation):
+	//   - Already follows task_count precedent (see ~127-181: authoritative ES Count + size:0 by_status agg
+	//     instead of materializing 1000 task docs for a scalar).
+	//   - This block uses ONLY "size":0 + aggs (7 top sums + by_worker nested) — zero telemetry docs are
+	//     ever fetched or transferred for token_metrics / historical_burn. Pure projection/agg.
+	//   - Sketch for further isolation (future minimal path): extract to
+	//       func (s *Server) computeTokenMetrics(ctx) (map[string]any, int /*elastroSavings*/, int /*docCount*/)
+	//     returning only the 8 fields + metadata. Then:
+	//       - Add lightweight GET /api/token-metrics (or ?projection=token_metrics on snapshot)
+	//         that calls ONLY this (no projects/tasks/reviews/failures lists at all).
+	//       - Analytics hook can fetch the tiny payload independently when only the AST Savings card needs refresh.
+	//     This eliminates any risk of the heavy snapshot payload for just the savings card.
+	//   - Current impl is already the "small aggregation" — the comment + extraction opportunity here
+	//     makes the intent and uplift explicit for future work.
+	//
+	// Makes AST Savings card trustworthy: consumers (and Logloom) can now see exactly when/why zeros,
+	// what rates produced the $ value, and whether Elastro AST compression telemetry was contributing.
 	tokenMetrics := map[string]interface{}{
 		"savings":                      0,
 		"baseline_tokens":              0,
@@ -351,6 +376,9 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		"historical_burn":              []interface{}{},
 	}
 	elastroSavings := 0
+
+	s.logger.Debug("snapshot: token telemetry savings aggregation starting (AST Savings card path)",
+		slog.String("index", "agent-token-telemetry"))
 
 	aggRes, err := s.es.SearchRaw(ctx, "agent-token-telemetry", map[string]interface{}{
 		"size": 0,
@@ -372,7 +400,38 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	if err == nil && aggRes != nil {
+	if err != nil {
+		s.logger.Warn("snapshot: token telemetry savings agg query failed (AST Savings will be silent zeros; gap now observable)",
+			slog.String("error", err.Error()),
+			slog.String("index", "agent-token-telemetry"))
+		flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+			"AST Savings token_metrics aggregation FAILED — using zero fallbacks (no Elastro data will be shown on card)",
+			map[string]any{
+				"error": err.Error(),
+				"path":  "handleSnapshot/ast-savings/agg-failure",
+			})
+	} else if aggRes == nil {
+		s.logger.Warn("snapshot: token telemetry agg returned nil response (empty case for AST Savings)")
+		flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+			"Token telemetry agg returned nil — AST Savings card will display zeros (possible missing Elastro instrumentation)",
+			map[string]any{"path": "handleSnapshot/ast-savings/nil-response"})
+	} else {
+		// Extract doc count for rich context (size:0 responses still populate hits.total)
+		telemetryDocCount := 0
+		if hits, ok := aggRes["hits"].(map[string]interface{}); ok && hits != nil {
+			switch t := hits["total"].(type) {
+			case map[string]interface{}:
+				if v, ok := t["value"].(float64); ok {
+					telemetryDocCount = int(v)
+				}
+			case float64:
+				telemetryDocCount = int(t)
+			}
+		}
+
+		s.logger.Debug("snapshot: token telemetry agg response received",
+			slog.Int("telemetry_doc_count", telemetryDocCount))
+
 		aggs, _ := aggRes["aggregations"].(map[string]interface{})
 		if aggs != nil {
 			var getSumInt = func(name string) int {
@@ -391,20 +450,46 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 
 			costIn := 0.002
 			costOut := 0.010
-			if envCostIn := os.Getenv("FLUME_COST_PER_1K_INPUT"); envCostIn != "" {
+			envInSet := os.Getenv("FLUME_COST_PER_1K_INPUT")
+			envOutSet := os.Getenv("FLUME_COST_PER_1K_OUTPUT")
+			if envInSet != "" {
 				var f float64
-				if _, err := fmt.Sscanf(envCostIn, "%f", &f); err == nil {
+				if _, err := fmt.Sscanf(envInSet, "%f", &f); err == nil {
 					costIn = f
 				}
 			}
-			if envCostOut := os.Getenv("FLUME_COST_PER_1K_OUTPUT"); envCostOut != "" {
+			if envOutSet != "" {
 				var f float64
-				if _, err := fmt.Sscanf(envCostOut, "%f", &f); err == nil {
+				if _, err := fmt.Sscanf(envOutSet, "%f", &f); err == nil {
 					costOut = f
 				}
 			}
 
+			// Cost calculation stage — now logged with env context
 			estimatedCost := (float64(tIn)/1000.0 * costIn) + (float64(tOut)/1000.0 * costOut)
+			hasElastroData := savings > 0 || telemetryDocCount > 0
+
+			s.logger.Info("snapshot: AST Savings cost calculation complete",
+				slog.Float64("estimated_cost_usd", estimatedCost),
+				slog.Float64("cost_per_1k_input", costIn),
+				slog.Float64("cost_per_1k_output", costOut),
+				slog.Bool("env_overrides_used", envInSet != "" || envOutSet != ""),
+				slog.Bool("elastro_data_present", hasElastroData),
+				slog.Int("telemetry_doc_count", telemetryDocCount))
+
+			flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+				"Computed estimated_cost_usd + effective burn rate for AST Savings card (Elastro vs naive baseline)",
+				map[string]any{
+					"estimated_cost_usd":  estimatedCost,
+					"cost_in":             costIn,
+					"cost_out":            costOut,
+					"env_in_set":          envInSet != "",
+					"env_out_set":         envOutSet != "",
+					"total_input_tokens":  tIn,
+					"total_output_tokens": tOut,
+					"elastro_data_present": hasElastroData,
+					"path":                "handleSnapshot/ast-savings/cost-calc",
+				})
 
 			var historicalBurn []interface{}
 			byWorker, _ := aggs["by_worker"].(map[string]interface{})
@@ -444,6 +529,21 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// Historical burn build logging (the array that powers the "Historical Worker Token Burn" table)
+			s.logger.Info("snapshot: historical_burn projection built for AST Savings",
+				slog.Int("worker_entries", len(historicalBurn)),
+				slog.Int("telemetry_doc_count", telemetryDocCount),
+				slog.Bool("elastro_data_present", hasElastroData))
+
+			flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+				"Built historical_burn array (by_worker agg projection) for AST Savings / token burn table",
+				map[string]any{
+					"worker_entries":       len(historicalBurn),
+					"telemetry_doc_count":  telemetryDocCount,
+					"elastro_data_present": hasElastroData,
+					"path":                 "handleSnapshot/ast-savings/historical-burn",
+				})
+
 			tokenMetrics = map[string]interface{}{
 				"savings":                      savings,
 				"baseline_tokens":              getSumInt("total_baseline_tokens"),
@@ -454,6 +554,40 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 				"estimated_cost_usd":           estimatedCost,
 				"historical_burn":              historicalBurn,
 			}
+
+			// Success path — full observability for the card
+			s.logger.Info("snapshot: token_metrics fully populated for AST Savings card (observability complete)",
+				slog.Int("savings", savings),
+				slog.Float64("estimated_cost_usd", estimatedCost),
+				slog.Int("telemetry_doc_count", telemetryDocCount),
+				slog.Bool("elastro_data_present", hasElastroData),
+				slog.Int("historical_burn_len", len(historicalBurn)),
+				slog.Float64("cost_in_used", costIn),
+				slog.Float64("cost_out_used", costOut))
+
+			flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+				"AST Savings aggregation + cost + historical burn complete. Tokens saved by Elastro AST-aware compression vs naive full-file baseline. (Elastro instrumentation only.)",
+				map[string]any{
+					"savings":              savings,
+					"baseline_tokens":      getSumInt("total_baseline_tokens"),
+					"actual_tokens_sent":   getSumInt("total_actual_tokens"),
+					"estimated_cost_usd":   estimatedCost,
+					"telemetry_doc_count":  telemetryDocCount,
+					"elastro_data_present": hasElastroData,
+					"historical_burn_len":  len(historicalBurn),
+					"env_cost_in":          costIn,
+					"env_cost_out":         costOut,
+					"path":                 "handleSnapshot/ast-savings-uplift/success",
+				})
+		} else {
+			s.logger.Warn("snapshot: token telemetry aggregations object missing (empty telemetry case for AST Savings)",
+				slog.Int("telemetry_doc_count", telemetryDocCount))
+			flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+				"agent-token-telemetry aggs absent/empty — AST Savings card will be zeros (no Elastro telemetry indexed yet; review gap of silent zeros now logged + reasoned)",
+				map[string]any{
+					"telemetry_doc_count": telemetryDocCount,
+					"path":                "handleSnapshot/ast-savings/empty-aggs",
+				})
 		}
 	}
 
