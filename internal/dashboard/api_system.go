@@ -1120,10 +1120,32 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Overlay / inject the flume_* live data, normalized to TS shapes where needed.
+	// CRITICAL TELEMETRY BRIDGE PATH for VRAM Pressure + Live Token Streaming Usage.
+	// All changes here are logged with rich LogAgentReasoning so silent 0s are diagnosable.
 	if liveGateway != nil {
+		flumelogger.LogAgentReasoning(ctx, "_telemetry_merge", "dashboard",
+			"starting live gateway metrics merge into /api/telemetry (VRAM + worker_tokens data path for Analytics)",
+			"semantic_tags", []interface{}{"telemetry", "gateway-metrics", "merge", "vram", "live-tokens"},
+			"live_keys_sample", func() []string {
+				ks := []string{}
+				for k := range liveGateway {
+					if strings.HasPrefix(k, "flume_") || strings.HasPrefix(k, "go_") {
+						ks = append(ks, k)
+					}
+				}
+				return ks
+			}(),
+		)
+
 		// Direct numeric counters/gauges (exact match to TelemetryData)
 		if v, ok := liveGateway["flume_vram_pressure_events_total"]; ok {
 			merged["flume_vram_pressure_events_total"] = v
+			flumelogger.LogAgentReasoning(ctx, "_telemetry_merge", "dashboard",
+				"populated flume_vram_pressure_events_total from gateway live metrics via Telemetry Bridge (fixes VRAM Pressure 0)",
+				"semantic_tags", []interface{}{"telemetry", "vram-pressure", "gateway-metrics"},
+				"value", v,
+				"value_type", fmt.Sprintf("%T", v),
+			)
 		}
 		if v, ok := liveGateway["flume_escalation_total"]; ok {
 			merged["flume_escalation_total"] = v
@@ -1166,6 +1188,13 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 		if v, ok := liveGateway["flume_worker_tokens_total"]; ok {
 			merged["flume_worker_tokens_total"] = v
+			if arr, ok2 := v.([]interface{}); ok2 {
+				flumelogger.LogAgentReasoning(ctx, "_telemetry_merge", "dashboard",
+					"populated flume_worker_tokens_total []LabeledValue from gateway (powers per-worker input/output in Live Token Streaming Usage table + getTokens filter)",
+					"semantic_tags", []interface{}{"telemetry", "live-tokens", "gateway-metrics"},
+					"array_len", len(arr),
+				)
+			}
 		}
 		if v, ok := liveGateway["flume_ensemble_requests_total"]; ok {
 			merged["flume_ensemble_requests_total"] = v
@@ -1184,14 +1213,28 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Also ensure some top-levels that tests/UI may assume exist (defensive 0s)
+	// These defensive paths now emit rich LogAgentReasoning so "0 again" symptoms are never silent.
 	if _, ok := merged["flume_vram_pressure_events_total"]; !ok {
 		merged["flume_vram_pressure_events_total"] = 0
+		flumelogger.LogAgentReasoning(ctx, "_telemetry_merge", "dashboard",
+			"flume_vram_pressure_events_total absent after gateway merge + ES copy — using defensive 0 (VRAM card will render but indicate no pressure events this gateway lifetime)",
+			"semantic_tags", []interface{}{"telemetry", "vram-pressure", "resilience", "defensive"},
+			"path", "handleTelemetry/defensive-vram",
+		)
 	}
 	if _, ok := merged["flume_node_load"]; !ok {
 		merged["flume_node_load"] = []interface{}{}
 	}
 	if _, ok := merged["flume_active_models"]; !ok {
 		merged["flume_active_models"] = []interface{}{}
+	}
+	if _, ok := merged["flume_worker_tokens_total"]; !ok {
+		merged["flume_worker_tokens_total"] = []interface{}{}
+		flumelogger.LogAgentReasoning(ctx, "_telemetry_merge", "dashboard",
+			"flume_worker_tokens_total absent — defensive empty array (Live Token Streaming table will clearly show 'no streaming yet' instead of mystery zeros)",
+			"semantic_tags", []interface{}{"telemetry", "live-tokens", "resilience", "defensive"},
+			"path", "handleTelemetry/defensive-worker-tokens",
+		)
 	}
 
 	// Robust fallback for System Memory card (go_memstats_*).
