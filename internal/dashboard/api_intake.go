@@ -1103,6 +1103,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			DependsOn:  []string{},
 			ChildCount: 0,
 			DecomposedAt: "",
+			HierarchyDepth: 0, // Epic root
 		})
 
 		for _, feat := range epic.Features {
@@ -1128,6 +1129,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 				ChildCount: 0,
 				DecomposedAt: "",
+				HierarchyDepth: 1, // Feature under epic
 			})
 
 			for _, story := range feat.Stories {
@@ -1159,6 +1161,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					UpdatedAt:          now,
 					ChildCount: 0,
 					DecomposedAt: "",
+					HierarchyDepth: 2, // Story under feature
 				})
 
 				prevTaskID := ""
@@ -1199,6 +1202,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 						UpdatedAt:          now,
 						ChildCount: 0,
 						DecomposedAt: "",
+						HierarchyDepth: 3, // Task under story
 					})
 					prevTaskID = taskID
 				}
@@ -1259,6 +1263,7 @@ func (s *Server) buildFastPathTasks(ctx context.Context, plan PlanResponse, repo
 						UpdatedAt:          now,
 						ChildCount: 0,
 						DecomposedAt: "",
+						HierarchyDepth: 0, // Fastpath tasks are flat roots
 					})
 					prevTaskID = taskID
 				}
@@ -1448,11 +1453,10 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 		}
 
 		// Propagate correlation for budget/depth enforcement downstream.
-		// Depth: intake roots start at 0; hierarchy children in buildTaskHierarchy get incremental (epic=0,feat=1,story=2,task=3);
-		// PM-created children get parent.depth+1 (enforced <= MAX in handlePM/promote).
+		// Depth is now computed accurately inside the hierarchy builders (epic=0, feat=1, story=2, task=3 for hierarchy; 0 for fastpath).
+		// PM-created children get parent.depth + 1 (enforced <= MAX in handlePM/promote).
 		for i := range docs {
 			docs[i].PlanSessionID = planSessionID
-			// Do not force depth here; build* and PM creation paths set appropriate values (default 0 for flat/fastpath roots)
 		}
 	}
 
