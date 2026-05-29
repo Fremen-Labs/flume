@@ -279,6 +279,9 @@ type metricsRegistry struct {
 	LocalRequests *counterVec
 
 	// flume_vram_pressure_events_total
+	// Single counter (no labels). Incremented ONLY on adaptive degrade-to-1 paths (see adaptive_ensemble.go).
+	// Exposed as scalar uint64 in LiveGatewayMetrics and /metrics. 0 = no pressure events this gateway process lifetime (expected when headroom sufficient).
+	// Telemetry Bridge carries it to dashboard /api/telemetry for VRAM Pressure GlassMetricCard.
 	VRAMPressureEvents *simpleCounter
 
 	// flume_request_duration_seconds{provider, success}
@@ -305,6 +308,11 @@ type metricsRegistry struct {
 	LocalOffloadPct *gaugeVec
 
 	// flume_worker_tokens_total{worker_name, direction}
+	// Labels EXACTLY match frontend AnalyticsPage getTokens() filter:
+	//   t.tags['worker_name'] === wName && t.tags['direction'] === 'input' | 'output'
+	// Emitted via RecordWorkerTokensBatch (preferred, from X-Worker-Name header in llm/client.go postGateway).
+	// Populated into LiveGatewayMetrics.FlumeWorkerTokensTotal as []LabeledValue{tags, count}
+	// for the Telemetry Bridge -> handleTelemetry merge -> useTelemetry -> Live Token Streaming Usage table.
 	WorkerTokens *counterVec
 
 	// ── Frontier Spend metrics ─────────────────────────────────────────
@@ -383,6 +391,12 @@ func (m *metricsRegistry) RecordEscalation() {
 }
 
 // RecordVRAMPressure tracks when ensemble is degraded due to VRAM pressure.
+// NOTE: This is ONLY called from the "insufficient headroom -> return 1" branches in
+// AdaptiveEnsembleSize / AdaptiveEnsembleSizeForNode (adaptive_ensemble.go:243,314).
+// It is a cumulative counter of *pressure events* (degrades), not of all ensembles.
+// If VRAM card shows 0 it means either (a) no complex ensembles ran, or (b) all had sufficient headroom.
+// The full data path (this counter -> BuildLive... -> gateway-metrics JSON -> dashboard handleTelemetry merge
+// with LogAgentReasoning -> frontend telemetry?.flume_vram...) was repaired in this fix.
 func (m *metricsRegistry) RecordVRAMPressure() {
 	m.VRAMPressureEvents.Inc()
 	Log().Debug("metrics: VRAM pressure event recorded",
@@ -420,7 +434,9 @@ func (m *metricsRegistry) SetNodeLoad(nodeID string, load float64) {
 }
 
 // SetNodeHealth sets the health status gauge for a node.
-// RecordWorkerTokens records usage for a specific worker.
+
+// RecordWorkerTokens (legacy, uses Inc loop) — prefer RecordWorkerTokensBatch.
+// Labels: worker_name + direction ("input" | "output") — contract must match AnalyticsPage.tsx:getTokens exactly.
 func (m *metricsRegistry) RecordWorkerTokens(workerName string, input, output int) {
 	if workerName == "" {
 		workerName = "unknown"
@@ -442,7 +458,8 @@ func (c *counterVec) Add(labels string, val uint64) {
 	c.mu.Unlock()
 }
 
-// RecordWorkerTokensBatch directly adds instead of looping
+// RecordWorkerTokensBatch directly adds instead of looping (used by server.go dispatchChat on X-Worker-Name header).
+// This is the hot path that feeds the Live Token Streaming Usage table end-to-end.
 func (m *metricsRegistry) RecordWorkerTokensBatch(workerName string, input, output int) {
 	if workerName == "" {
 		workerName = "unknown"
@@ -792,10 +809,17 @@ func appendHistogramMetric(buf []byte, name, help string, h *histogram) []byte {
 // It exposes live flume_* counters/gauges from the in-memory registry + NodeRegistry
 // health (CurrentLoad etc) without touching the Prometheus text exposition.
 //
+// This struct + BuildLiveGatewayMetrics + /api/gateway-metrics handler is the source of truth
+// for the repaired Telemetry Bridge data path (post-merge regression fix):
+//   gateway metrics (Record*) -> BuildLive... -> handleGatewayMetrics JSON
+//   -> dashboard fetchGatewayLiveMetrics (with cache + LogAgentReasoning) -> handleTelemetry merge (NOW WITH RICH LOGS)
+//   -> /api/telemetry -> useTelemetry hook -> AnalyticsPage (VRAM card + getTokens on worker_tokens)
+//
 // Minimum fields per spec:
 //   - flume_vram_pressure_events_total (number)
 //   - flume_node_load ([]{node_id, load})
 //   - flume_active_models (string[])
+//   - flume_worker_tokens_total ([]LabeledValue) — exact label match for frontend filter
 //
 // Plus other easy flume_* for Analytics cards (throttled, blocked, escalation, and
 // the labeled vecs normalized so useTelemetry.ts shapes are populated).

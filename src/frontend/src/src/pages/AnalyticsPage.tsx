@@ -317,7 +317,7 @@ export default function AnalyticsPage() {
             {/* Live Token Usage by Worker via Gateway Metrics */}
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="glass-card p-5">
               <h3 className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2"><Network className="w-4 h-4 text-emerald-400" /> Live Token Streaming Usage</h3>
-              <p className="text-xs text-muted-foreground mb-4">Powered by direct socket measurement from the Gateway</p>
+              <p className="text-xs text-muted-foreground mb-4">Powered by gateway in-memory counters (flume_worker_tokens_total{'{'}worker_name, direction{'}'}). Cumulative since gateway start; 0 is real if no traffic yet. Resilient: never mystery blank — see "no streaming yet" row.</p>
               {workers.length === 0 ? (
                 <div className="text-xs text-muted-foreground text-center py-8">No workers connected</div>
               ) : (
@@ -358,7 +358,7 @@ export default function AnalyticsPage() {
                       {workers.every(w => getTokens(w.name, 'input') === 0 && getTokens(w.name, 'output') === 0 && w.status === 'idle') && (
                         <tr>
                           <td colSpan={5} className="py-4 text-center text-xs text-muted-foreground">
-                            Waiting for live stream token events...
+                            No streaming yet — 0 input/output active token burn (live gateway counters via flume_worker_tokens_total). Check X-Worker-Name header traffic or gateway restart.
                           </td>
                         </tr>
                       )}

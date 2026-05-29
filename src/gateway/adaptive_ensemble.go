@@ -240,6 +240,9 @@ func AdaptiveEnsembleSize(model string, configuredSize int, ollamaBaseURL string
 			slog.Float64("available_gb", availableGB),
 			slog.Float64("total_used_gb", alreadyUsedGB),
 		)
+		// NOTE: RecordVRAMPressure is the ONLY increment site for the global counter.
+		// It feeds flume_vram_pressure_events_total -> LiveGatewayMetrics -> Telemetry Bridge.
+		// 0 on dashboard is legitimate if no degrade ever occurred (or gateway restarted).
 		Metrics.RecordVRAMPressure()
 		return 1
 	}
@@ -311,6 +314,9 @@ func AdaptiveEnsembleSizeForNode(model string, configuredSize int, node *Node) i
 			slog.Float64("total_used_gb", alreadyUsedGB),
 			slog.Float64("node_memory_gb", totalMemGB),
 		)
+		// NOTE: Even the per-node variant records to the *global* VRAMPressureEvents counter.
+		// This keeps the Analytics "VRAM Pressure" card as a single cumulative "pressure events" number.
+		// (The per-node detail is visible via flume_node_load instead.)
 		Metrics.RecordVRAMPressure()
 		return 1
 	}
