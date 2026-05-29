@@ -124,6 +124,62 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Tasks (recent, not archived, limit 1000)
+	// Grok uplift (Total Tasks card): Authoritative efficient count + status breakdown
+	// using ES Count + size:0 agg instead of materializing 1000 docs just for the scalar.
+	// This makes the Analytics "Total Tasks" card scale correctly and eliminates
+	// massive unnecessary data transfer for a single number.
+	taskCount := 0
+	taskCountsByStatus := map[string]int{}
+	{
+		countQuery := map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must_not": []interface{}{
+					map[string]interface{}{"term": map[string]string{"status": "archived"}},
+				},
+			},
+		}
+
+		if c, err := s.es.Count(ctx, "agent-task-records", countQuery); err == nil {
+			taskCount = c
+		} else {
+			s.logger.Warn("snapshot: task count query failed", slog.String("error", err.Error()))
+		}
+
+		// Small status breakdown agg (very cheap)
+		aggRes, err := s.es.SearchRaw(ctx, "agent-task-records", map[string]interface{}{
+			"size": 0,
+			"query": countQuery,
+			"aggs": map[string]interface{}{
+				"by_status": map[string]interface{}{
+					"terms": map[string]interface{}{"field": "status", "size": 20},
+				},
+			},
+		})
+		if err == nil && aggRes != nil {
+			if aggs, ok := aggRes["aggregations"].(map[string]interface{}); ok {
+				if byStatus, ok := aggs["by_status"].(map[string]interface{}); ok {
+					if buckets, ok := byStatus["buckets"].([]interface{}); ok {
+						for _, b := range buckets {
+							if bm, ok := b.(map[string]interface{}); ok {
+								key, _ := bm["key"].(string)
+								docCount, _ := bm["doc_count"].(float64)
+								taskCountsByStatus[key] = int(docCount)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		flumelogger.LogAgentReasoning(ctx, "_system_analytics", "dashboard",
+			"Computed efficient Total Tasks count + status breakdown for Analytics",
+			map[string]any{
+				"task_count": taskCount,
+				"status_breakdown": taskCountsByStatus,
+				"path": "handleSnapshot/total-tasks-uplift",
+			})
+	}
+
 	var tasks []interface{}
 	tasksRes, err := s.es.SearchRaw(ctx, "agent-task-records", map[string]interface{}{
 		"size": 1000,
@@ -401,16 +457,19 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workers":         orSliceIface(workers),
-		"tasks":           orSliceIface(tasks),
-		"reviews":         orSliceIface(reviews),
-		"failures":        orSliceIface(failures),
-		"provenance":      orSliceIface(provenance),
-		"repos":           orSliceIface(repos),
-		"projects":        orSliceIface(projects),
-		"elastro_savings": elastroSavings,
-		"token_metrics":   tokenMetrics,
-		"timestamp":       nowISO(),
+		"workers":              orSliceIface(workers),
+		"tasks":                orSliceIface(tasks),
+		"reviews":              orSliceIface(reviews),
+		"failures":             orSliceIface(failures),
+		"provenance":           orSliceIface(provenance),
+		"repos":                orSliceIface(repos),
+		"projects":             orSliceIface(projects),
+		"elastro_savings":      elastroSavings,
+		"token_metrics":        tokenMetrics,
+		"timestamp":            nowISO(),
+		// Grok uplift: efficient Total Tasks scalar + breakdown (see count logic above)
+		"task_count":           taskCount,
+		"task_counts_by_status": taskCountsByStatus,
 	})
 }
 

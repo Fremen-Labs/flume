@@ -116,6 +116,11 @@ export interface Snapshot {
     total_input_tokens: number;
     total_output_tokens: number;
   };
+
+  // Grok uplift (Total Tasks card): efficient authoritative count + breakdown
+  // from backend (ES Count + small agg). Fallback to tasks.length during transition.
+  task_count?: number;
+  task_counts_by_status?: Record<string, number>;
 }
 
 // ─── LLM Settings API ──────────────────────────────────────────────────────────

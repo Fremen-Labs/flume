@@ -23,7 +23,10 @@ export default function AnalyticsPage() {
   const planned = tasks.filter(t => t.status === 'planned' || t.status === 'ready').length;
   const blocked = tasks.filter(t => t.status === 'blocked').length;
   const totalFailuresAndBlocked = failures.length + blocked;
-  const total = tasks.length;
+
+  // Grok uplift: prefer efficient backend task_count (Total Tasks card).
+  // Falls back to tasks.length for backward compat during rollout.
+  const total = snapshot?.task_count ?? tasks.length;
 
   const getTokens = (wName: string, dir: 'input' | 'output') => {
     if (!telemetry?.flume_worker_tokens_total) return 0;

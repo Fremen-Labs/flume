@@ -11,6 +11,13 @@ interface GlassMetricCardProps {
   glow?: boolean;
   className?: string;
   children?: ReactNode;
+
+  // Grok uplift cross-cutting: resilient states for all Analytics metric cards
+  loading?: boolean;
+  error?: string | null;
+  partial?: boolean;
+  helpText?: string; // tooltip explaining what this metric actually measures post-uplift
+  secondary?: { value?: string | number; label?: string };
 }
 
 export function GlassMetricCard({ title, value, subtitle, icon: Icon, trend, glow, className = '', children }: GlassMetricCardProps) {
