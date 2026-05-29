@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -558,14 +559,223 @@ func (s *Server) handleSystemState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ─── Live gateway metrics cache + fetch (resilience uplift for telemetry) ───
+
+// gatewayMetricsCache holds last-known-good values from /api/gateway-metrics
+// (the clean JSON path). On gateway unreachable we serve cached + structured
+// LogAgentReasoning + warning logs so cards never go permanently 0/empty.
+type gatewayMetricsCache struct {
+	mu   sync.RWMutex
+	data map[string]interface{}
+	ts   time.Time
+}
+
+var gmCache = &gatewayMetricsCache{}
+
+// prevTelemetryState tracks prior values for change detection (models, nodes)
+// so we can emit rich LogAgentReasoning on diffs.
+var (
+	prevMu            sync.Mutex
+	prevActiveModels  []string
+	prevNodeLoads     map[string]float64 // node_id -> load
+)
+
+// fetchGatewayLiveMetrics performs a short-timeout GET to the gateway's new
+// structured /api/gateway-metrics JSON endpoint (preferred clean path, not
+// the prom scrape in gatherTelemetryEvents which is WS-logs only).
+//
+// Resilience: always returns data (live or last-known-good). Uses
+// LogAgentReasoning with "telemetry","gateway-metrics" tags on success/failure
+// and on model/node changes. Mirrors recent uplift patterns.
+func (s *Server) fetchGatewayLiveMetrics(ctx context.Context) (map[string]interface{}, bool) {
+	gatewayURL := os.Getenv("GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://localhost:8090"
+	}
+
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/api/gateway-metrics", nil)
+	if err != nil {
+		return s.serveCachedGatewayMetrics(ctx, "request build failed: "+err.Error()), false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return s.serveCachedGatewayMetrics(ctx, "gateway unreachable: "+err.Error()), false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return s.serveCachedGatewayMetrics(ctx, fmt.Sprintf("gateway status %d", resp.StatusCode)), false
+	}
+
+	var raw map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return s.serveCachedGatewayMetrics(ctx, "decode failed: "+err.Error()), false
+	}
+
+	// Success path: update cache + detect changes for rich reasoning
+	gmCache.mu.Lock()
+	gmCache.data = raw
+	gmCache.ts = time.Now()
+	gmCache.mu.Unlock()
+
+	s.detectAndLogTelemetryChanges(ctx, raw)
+
+	s.logger.Info("gateway-metrics: live fetch succeeded",
+		slog.String("endpoint", "/api/gateway-metrics"),
+		slog.Time("fetched_at", gmCache.ts),
+	)
+	flumelogger.LogAgentReasoning(ctx, "telemetry", "dashboard",
+		"successfully fetched live gateway metrics via /api/gateway-metrics JSON (restored VRAM/Node data path)",
+		"semantic_tags", []interface{}{"telemetry", "gateway-metrics"},
+		"status", "success",
+		"gateway_url", gatewayURL,
+	)
+
+	return raw, true
+}
+
+// serveCachedGatewayMetrics returns the last known values (or minimal defaults)
+// and emits warning + LogAgentReasoning (never silent).
+func (s *Server) serveCachedGatewayMetrics(ctx context.Context, reason string) map[string]interface{} {
+	gmCache.mu.RLock()
+	cached := gmCache.data
+	cachedTs := gmCache.ts
+	gmCache.mu.RUnlock()
+
+	if cached == nil {
+		cached = map[string]interface{}{
+			"flume_vram_pressure_events_total":   0,
+			"flume_escalation_total":             0,
+			"flume_concurrency_throttled_total":  0,
+			"flume_tasks_blocked_total":          0,
+			"flume_active_models":                []interface{}{},
+			"flume_node_load":                    []interface{}{},
+			"flume_node_requests_total":          []interface{}{},
+			"flume_routing_decision":             []interface{}{},
+			"flume_worker_tokens_total":          []interface{}{},
+			"flume_ensemble_requests_total":      []interface{}{},
+			"updated_at":                         nowISO(),
+		}
+	}
+
+	s.logger.Warn("gateway-metrics: serving last-known-good (gateway unreachable or error)",
+		slog.String("reason", reason),
+		slog.Time("last_good_at", cachedTs),
+		slog.Any("keys", func() []string {
+			ks := make([]string, 0, len(cached))
+			for k := range cached {
+				ks = append(ks, k)
+			}
+			return ks
+		}()),
+	)
+
+	flumelogger.LogAgentReasoning(ctx, "telemetry", "dashboard",
+		fmt.Sprintf("gateway /api/gateway-metrics fetch failed — serving last-known-good values: %s", reason),
+		"semantic_tags", []interface{}{"telemetry", "gateway-metrics", "resilience"},
+		"status", "degraded",
+		"reason", reason,
+		"last_known_ts", cachedTs.Format(time.RFC3339),
+	)
+
+	return cached
+}
+
+// detectAndLogTelemetryChanges compares current live metrics against previous
+// and emits LogAgentReasoning (with tags) when active models or node loads change.
+// This provides high-signal observability for the mesh/VRAM cards.
+func (s *Server) detectAndLogTelemetryChanges(ctx context.Context, live map[string]interface{}) {
+	prevMu.Lock()
+	defer prevMu.Unlock()
+
+	// Active models
+	var curModels []string
+	if arr, ok := live["flume_active_models"].([]interface{}); ok {
+		for _, v := range arr {
+			if m, ok := v.(string); ok {
+				curModels = append(curModels, m)
+			}
+		}
+	}
+	if !stringSlicesEqual(prevActiveModels, curModels) && len(curModels) > 0 {
+		flumelogger.LogAgentReasoning(ctx, "telemetry", "dashboard",
+			fmt.Sprintf("active models changed: %v -> %v", prevActiveModels, curModels),
+			"semantic_tags", []interface{}{"telemetry", "gateway-metrics", "model-change"},
+			"previous", prevActiveModels,
+			"current", curModels,
+		)
+		s.logger.Info("telemetry: active models changed",
+			slog.Any("from", prevActiveModels),
+			slog.Any("to", curModels),
+		)
+	}
+	prevActiveModels = curModels
+
+	// Node loads (for Node Mesh Distribution)
+	curLoads := map[string]float64{}
+	if arr, ok := live["flume_node_load"].([]interface{}); ok {
+		for _, v := range arr {
+			if m, ok := v.(map[string]interface{}); ok {
+				id, _ := m["node_id"].(string)
+				if load, ok := m["load"].(float64); ok && id != "" {
+					curLoads[id] = load
+				}
+			}
+		}
+	}
+	changed := false
+	for id, load := range curLoads {
+		if prev, ok := prevNodeLoads[id]; !ok || prev != load {
+			changed = true
+			break
+		}
+	}
+	if !changed && prevNodeLoads != nil {
+		for id := range prevNodeLoads {
+			if _, ok := curLoads[id]; !ok {
+				changed = true
+				break
+			}
+		}
+	}
+	if changed && len(curLoads) > 0 {
+		flumelogger.LogAgentReasoning(ctx, "telemetry", "dashboard",
+			"node mesh loads changed (affects Node Mesh Distribution chart)",
+			"semantic_tags", []interface{}{"telemetry", "gateway-metrics", "node-mesh"},
+			"loads", curLoads,
+		)
+		s.logger.Info("telemetry: node loads changed", slog.Any("loads", curLoads))
+	}
+	prevNodeLoads = curLoads
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ─── GET /api/telemetry ─────────────────────────────────────────────────────
 
 // handleTelemetry returns system telemetry (task throughput, token usage).
 // Derived from Python: api/system.py get_system_telemetry().
+// Now extended (post Go migration repair): merges ES token aggs with live
+// gateway metrics fetched from the new clean /api/gateway-metrics JSON
+// endpoint (with 1.5s timeout + last-known-good cache + LogAgentReasoning).
+// This ensures flume_vram_pressure_events_total, flume_node_load etc are
+// real instead of always 0/empty for Analytics cards and useTelemetry.ts.
 func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Task event throughput (last 24h)
+	// Task event throughput (last 24h) — unchanged ES path
 	result, err := s.es.SearchRaw(ctx, "agent-token-telemetry", map[string]interface{}{
 		"size": 0,
 		"query": map[string]interface{}{
@@ -607,7 +817,88 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// ── NEW: merge live gateway metrics (the fix) ───────────────────────────
+	// Call the dedicated clean JSON endpoint (not the incomplete prom scrape).
+	// 1.5s timeout + last-known-good + rich tagged LogAgentReasoning.
+	liveGateway, _ := s.fetchGatewayLiveMetrics(ctx)
+
+	// Build merged response that satisfies TelemetryData in useTelemetry.ts
+	// (top-level numbers + arrays of {tags,count} + {tags,value} etc).
+	merged := make(map[string]interface{})
+
+	// Start with ES result (token aggs etc) — preserve existing contract
+	for k, v := range result {
+		merged[k] = v
+	}
+
+	// Overlay / inject the flume_* live data, normalized to TS shapes where needed.
+	if liveGateway != nil {
+		// Direct numeric counters/gauges (exact match to TelemetryData)
+		if v, ok := liveGateway["flume_vram_pressure_events_total"]; ok {
+			merged["flume_vram_pressure_events_total"] = v
+		}
+		if v, ok := liveGateway["flume_escalation_total"]; ok {
+			merged["flume_escalation_total"] = v
+		}
+		if v, ok := liveGateway["flume_concurrency_throttled_total"]; ok {
+			merged["flume_concurrency_throttled_total"] = v
+		}
+		if v, ok := liveGateway["flume_tasks_blocked_total"]; ok {
+			merged["flume_tasks_blocked_total"] = v
+		}
+
+		// Active models as string[]
+		if v, ok := liveGateway["flume_active_models"]; ok {
+			merged["flume_active_models"] = v
+		}
+
+		// flume_node_load: gateway gives []{node_id, load}; reshape to []{tags, value}
+		// so AnalyticsPage nodeLoads extraction (l.tags['node_id'], l.value) works.
+		if rawLoads, ok := liveGateway["flume_node_load"].([]interface{}); ok {
+			reshaped := make([]map[string]interface{}, 0, len(rawLoads))
+			for _, item := range rawLoads {
+				if m, ok := item.(map[string]interface{}); ok {
+					nid, _ := m["node_id"].(string)
+					load, _ := m["load"].(float64)
+					reshaped = append(reshaped, map[string]interface{}{
+						"tags":  map[string]string{"node_id": nid},
+						"value": load,
+					})
+				}
+			}
+			merged["flume_node_load"] = reshaped
+		}
+
+		// The other labeled arrays are already in correct {tags, count} shape from gateway.
+		if v, ok := liveGateway["flume_node_requests_total"]; ok {
+			merged["flume_node_requests_total"] = v
+		}
+		if v, ok := liveGateway["flume_routing_decision"]; ok {
+			merged["flume_routing_decision"] = v
+		}
+		if v, ok := liveGateway["flume_worker_tokens_total"]; ok {
+			merged["flume_worker_tokens_total"] = v
+		}
+		if v, ok := liveGateway["flume_ensemble_requests_total"]; ok {
+			merged["flume_ensemble_requests_total"] = v
+		}
+
+		// Also surface go_ style basics if present or add light runtime (optional)
+		// For now the gateway JSON focuses on flume_*; go_* fallbacks remain from prior scrape if needed.
+	}
+
+	// Also ensure some top-levels that tests/UI may assume exist (defensive 0s)
+	if _, ok := merged["flume_vram_pressure_events_total"]; !ok {
+		merged["flume_vram_pressure_events_total"] = 0
+	}
+	if _, ok := merged["flume_node_load"]; !ok {
+		merged["flume_node_load"] = []interface{}{}
+	}
+	if _, ok := merged["flume_active_models"]; !ok {
+		merged["flume_active_models"] = []interface{}{}
+	}
+
+	writeJSON(w, http.StatusOK, merged)
 }
 
 // ─── GET /api/logs ──────────────────────────────────────────────────────────
