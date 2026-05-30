@@ -252,7 +252,13 @@ func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) 
 	if provider == "ollama" {
 		gatewayURL := os.Getenv("FLUME_GATEWAY_URL")
 		if gatewayURL == "" {
-			gatewayURL = "http://gateway:8090"
+			// Native mode: gateway runs in-process on localhost.
+			// Docker mode: docker compose DNS resolves "gateway".
+			if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+				gatewayURL = "http://localhost:8090"
+			} else {
+				gatewayURL = "http://gateway:8090"
+			}
 		}
 		urlStr = strings.TrimRight(gatewayURL, "/") + "/api/nodes"
 	} else {

@@ -142,7 +142,13 @@ func New(logger *slog.Logger) *Client {
 	}
 	gatewayURL := os.Getenv("FLUME_GATEWAY_URL")
 	if gatewayURL == "" {
-		gatewayURL = "http://gateway:8090"
+		// Native mode: gateway runs in-process on localhost.
+		// Docker mode: docker compose DNS resolves "gateway".
+		if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+			gatewayURL = "http://localhost:8090"
+		} else {
+			gatewayURL = "http://gateway:8090"
+		}
 	}
 	gatewayURL = strings.TrimRight(gatewayURL, "/")
 
@@ -151,7 +157,7 @@ func New(logger *slog.Logger) *Client {
 		workerName = "go-worker"
 	}
 
-	return &Client{
+	c := &Client{
 		gatewayURL: gatewayURL,
 		httpClient: &http.Client{
 			Timeout: 180 * time.Second,
@@ -159,6 +165,23 @@ func New(logger *slog.Logger) *Client {
 		logger:     logger,
 		workerName: workerName,
 	}
+
+	// Startup health check — make misconfiguration loud and immediately visible.
+	go func() {
+		time.Sleep(3 * time.Second)
+		if !c.gatewayAvailable(context.Background()) {
+			c.logger.Error("STARTUP CRITICAL: gateway unreachable at configured URL — all LLM calls will use legacy fallback",
+				slog.String("gateway_url", c.gatewayURL),
+				slog.String("hint", "Set FLUME_GATEWAY_URL=http://localhost:8090 for native mode"),
+			)
+		} else {
+			c.logger.Info("gateway health check passed",
+				slog.String("gateway_url", c.gatewayURL),
+			)
+		}
+	}()
+
+	return c
 }
 
 // Chat calls the LLM and returns the assistant's text response.
@@ -546,7 +569,11 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 		return nil, fmt.Errorf("llm: legacy marshal failed: %w", err)
 	}
 
-	url := strings.TrimRight(baseURL, "/") + "/api/chat"
+	// Strip common "/v1" or "/v1/" suffixes that come from the OpenAI-compatible
+	// wrapper URL (LOCAL_OLLAMA_BASE_URL). Ollama native API uses /api/chat directly.
+	cleanBase := strings.TrimRight(baseURL, "/")
+	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
+	url := cleanBase + "/api/chat"
 	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
@@ -624,7 +651,10 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 		return nil, fmt.Errorf("llm: legacy marshal failed: %w", err)
 	}
 
-	url := strings.TrimRight(baseURL, "/") + "/api/chat"
+	// Strip common "/v1" suffix — same fix as legacyChat (Ollama native API is /api/chat, not /v1/api/chat)
+	cleanBase := strings.TrimRight(baseURL, "/")
+	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
+	url := cleanBase + "/api/chat"
 	reqCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 

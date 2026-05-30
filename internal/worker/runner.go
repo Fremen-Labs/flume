@@ -119,8 +119,31 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 				"error":  err.Error(),
 			})
 
+		// Detect persistent LLM config errors (404, DNS failures) that won't self-heal.
+		// Escalate immediately to "blocked" instead of allowing infinite retry loops
+		// (the dominant failure mode in the post-migration field test).
+		errStr := err.Error()
+		isPersistentConfigError := strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "no such host") ||
+			strings.Contains(errStr, "gateway is unreachable and no Ollama base URL")
+
+		if isPersistentConfigError {
+			reason := fmt.Sprintf("Worker %s (role=%s) hit persistent config error (will not self-heal): %s",
+				worker.Name, worker.Role, errStr)
+			flumelogger.LogAgentReasoning(ctx, taskID, worker.Role, reason, map[string]any{
+				"error_class": "persistent_config", "action": "blocked",
+			})
+			flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "blocked", reason)
+			_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, map[string]interface{}{
+				"status": "blocked", "error_message": reason,
+				"active_worker": nil, "queue_state": "available",
+				"updated_at": time.Now().UTC().Format(time.RFC3339),
+			})
+			return err
+		}
+
 		// Clear stale claim (now also emits LogStateTransition + LogAgentReasoning via helper)
-		r.clearStaleClaim(ctx, taskID, task.Status)
+		r.clearStaleClaim(ctx, taskID, task.Status, worker.Role)
 		return err
 	}
 
@@ -255,6 +278,9 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 
 	resp, err := r.llm.Chat(ctx, req)
 	if err != nil {
+		// Use shared LLM failure handler with retry-cap instead of raw error return
+		// (prevents infinite retry loops when gateway/Ollama is misconfigured)
+		r.handleRoleLLMFailure(ctx, task.ID, task, worker.Role)
 		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
 	}
 
@@ -922,10 +948,21 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 
 // clearStaleClaim resets a task after a worker crash.
 // Derived from Python: run_worker() error handling (L2215-2227)
-func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStatus ftypes.TaskStatus) {
+func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStatus ftypes.TaskStatus, workerRole string) {
+	// Determine the correct reset target based on both the worker role and
+	// current status. Reviewer/tester tasks should reset to "review" so they
+	// can be re-claimed by the same role. Implementers reset to "ready".
+	// PM tasks reset to "planned" so the promote sweep can re-evaluate them.
 	targetStatus := "ready"
-	if currentStatus == ftypes.TaskStatusReview {
+	switch workerRole {
+	case "reviewer", "tester":
 		targetStatus = "review"
+	case "pm":
+		targetStatus = "planned"
+	default:
+		if currentStatus == ftypes.TaskStatusReview {
+			targetStatus = "review"
+		}
 	}
 
 	update := map[string]interface{}{
@@ -940,18 +977,20 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
+			slog.String("worker_role", workerRole),
 			slog.String("reset_to", targetStatus))
 
 		// Centralized structured logging for the agent reasoning popout + Logloom graphs.
 		// This is the exact path exercised on every LLM/gateway crash during the local-mesh stress test.
 		flumelogger.LogStateTransition(ctx, taskID, string(currentStatus), targetStatus,
 			"stale claim cleared after worker crash or LLM/gateway failure (reset for re-claim)")
-		flumelogger.LogAgentReasoning(ctx, taskID, "system",
-			fmt.Sprintf("Worker (%s) crashed or LLM call failed; stale claim cleared and task reset to %s to allow recovery.",
-				"unknown-role", targetStatus),
+		flumelogger.LogAgentReasoning(ctx, taskID, workerRole,
+			fmt.Sprintf("Worker (role=%s) crashed or LLM call failed; stale claim cleared and task reset to %s to allow recovery.",
+				workerRole, targetStatus),
 			map[string]any{
 				"previous_status": string(currentStatus),
 				"reset_to":        targetStatus,
+				"worker_role":     workerRole,
 				"reason":          "worker_crash_or_llm_failure",
 			})
 	}
@@ -1169,6 +1208,43 @@ func implementerMaxLLMFailuresCap() int {
 		}
 	}
 	return cap
+}
+
+// handleRoleLLMFailure is a shared retry-cap handler for reviewer/tester roles.
+// Mirrors ImplementerHandleLLMFailure: after N failures, escalates to "blocked" instead
+// of allowing the infinite retry loop that was the dominant post-migration failure mode.
+func (r *Runner) handleRoleLLMFailure(ctx context.Context, taskID string, task ftypes.Task, role string) {
+	failureCount := task.Attempts + 1
+	maxCap := 3 // reviewer/tester are lightweight; 3 retries is generous
+
+	if failureCount >= maxCap {
+		reason := fmt.Sprintf("%s blocked after %d LLM failures (cap=%d)", role, failureCount, maxCap)
+		flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "blocked", reason)
+		flumelogger.LogAgentReasoning(ctx, taskID, role, reason, map[string]any{
+			"failures": failureCount,
+			"cap":      maxCap,
+			"action":   "block",
+		})
+		r.logger.Error(role+": task blocked after LLM failures",
+			slog.String("task_id", taskID),
+			slog.Int("failures", failureCount),
+			slog.Int("cap", maxCap))
+		update := map[string]interface{}{
+			"status":        "blocked",
+			"attempts":      failureCount,
+			"error_message": reason,
+			"active_worker": nil,
+			"queue_state":   "available",
+			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
+	} else {
+		// Increment attempts so the next claim cycle sees the counter
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, map[string]interface{}{
+			"attempts":   failureCount,
+			"updated_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
 }
 
 // spawnReviewTasks creates a reviewer and tester subtask for review-consensus.

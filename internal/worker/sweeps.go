@@ -164,6 +164,9 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 		"bool": map[string]interface{}{
 			"must": []interface{}{
 				map[string]interface{}{"term": map[string]string{"status": "running"}},
+				// Only target implementer tasks — reviewer/tester stuck tasks are handled
+				// by requeueStuckReviewTasks with the correct reset status.
+				map[string]interface{}{"term": map[string]string{"worker_role": "implementer"}},
 				map[string]interface{}{
 					"range": map[string]interface{}{
 						"claimed_at": map[string]string{"lt": threshold},
@@ -212,7 +215,12 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 	query := map[string]interface{}{
 		"bool": map[string]interface{}{
 			"must": []interface{}{
-				map[string]interface{}{"term": map[string]string{"status": "review"}},
+				// Match both "review" and "running" statuses — reviewer/tester tasks can get
+				// stuck in either state depending on when the crash occurred.
+				map[string]interface{}{"terms": map[string]interface{}{"status": []string{"review", "running"}}},
+				// Only target reviewer/tester roles — implementer stuck tasks are handled
+				// separately by requeueStuckImplementerTasks with the correct reset status.
+				map[string]interface{}{"terms": map[string]interface{}{"worker_role": []string{"reviewer", "tester"}}},
 				map[string]interface{}{
 					"range": map[string]interface{}{
 						"claimed_at": map[string]string{"lt": threshold},
