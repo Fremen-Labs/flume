@@ -45,7 +45,8 @@ type Server struct {
 	onSettingsReload func()
 	mu               sync.RWMutex
 
-	rateLimiter *rateLimiter
+	rateLimiter          *rateLimiter
+	rateLimitExemptions  []*net.IPNet // merged: private ranges + user config + dynamic Docker discovery
 }
 
 // RegisterSweepTrigger registers a callback for manual sweep triggering.
@@ -72,7 +73,8 @@ type Config struct {
 	CORSOrigins    []string
 	StaticRoot     string
 	NativeMode     bool
-	RateLimitPerMin int
+	RateLimitPerMin  int
+	InternalIPRanges []string // Additional CIDRs to exempt from rate limiting (merged with private ranges + Docker discovery)
 }
 
 // DefaultConfig returns production-safe defaults, overridden by env vars.
@@ -97,16 +99,28 @@ func DefaultConfig() *Config {
 		cors = []string{"http://localhost:8080", "http://localhost:8765", "http://127.0.0.1:8080"}
 	}
 
-	return &Config{
-		Host:           host,
-		Port:           port,
-		ESUrl:          esURL,
-		ESApiKey:       envOr("ES_API_KEY", ""),
-		CORSOrigins:    cors,
-		StaticRoot:     envOr("FLUME_STATIC_ROOT", ""),
-		NativeMode:     envOr("FLUME_NATIVE_MODE", "0") == "1",
+	cfg := &Config{
+		Host:            host,
+		Port:            port,
+		ESUrl:           esURL,
+		ESApiKey:        envOr("ES_API_KEY", ""),
+		CORSOrigins:     cors,
+		StaticRoot:      envOr("FLUME_STATIC_ROOT", ""),
+		NativeMode:      envOr("FLUME_NATIVE_MODE", "0") == "1",
 		RateLimitPerMin: envInt("FLUME_RATE_LIMIT", 2000),
 	}
+
+	internalRanges := envOr("FLUME_INTERNAL_IP_RANGES", "")
+	if internalRanges != "" {
+		for _, r := range strings.Split(internalRanges, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				cfg.InternalIPRanges = append(cfg.InternalIPRanges, r)
+			}
+		}
+	}
+
+	return cfg
 }
 
 // New creates a new Dashboard server.
@@ -124,6 +138,9 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 		startTime:   time.Now(),
 		rateLimiter: newRateLimiter(cfg.RateLimitPerMin),
 	}
+
+	// Build merged list of exempted CIDRs (user config + standard private + dynamic Docker discovery)
+	s.rateLimitExemptions = buildRateLimitExemptions(cfg.InternalIPRanges)
 	// Phase 0: Wire reasoning bridge for any Go-side Log* calls that reach the dashboard
 	// (primarily benefits future admin/recovery paths and consistency with worker).
 	flumelogger.SetESBridge(esClient)
@@ -282,8 +299,10 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 
 		// Rate limiting (Medium priority implementation)
 		// Internal/private IPs (Docker, Kubernetes pods, service mesh, localhost)
-		// are exempted. This protects external clients while ensuring internal
-		// worker <-> dashboard communication is never throttled.
+		// are exempted using a combination of:
+		//   - Standard private ranges
+		//   - User-provided ranges (FLUME_INTERNAL_IP_RANGES)
+		//   - Dynamically discovered Docker/K8s bridge subnets at boot
 		if s.rateLimiter != nil {
 			ip := r.Header.Get("X-Forwarded-For")
 			if ip == "" {
@@ -294,14 +313,14 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 				ip = strings.TrimSpace(ip[:idx])
 			}
 
-			if !isInternalIP(ip) {
+			if !isIPExempted(ip, s.rateLimitExemptions) {
 				if !s.rateLimiter.allow(ip) {
 					s.logger.Warn("rate limit exceeded", slog.String("ip", ip), slog.String("path", r.URL.Path))
 					writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 					return
 				}
 			} else {
-				// Optional: debug log for visibility into internal traffic patterns
+				// Debug visibility for internal traffic (very useful in container environments)
 				s.logger.Debug("bypassing rate limit for internal IP",
 					slog.String("ip", ip),
 					slog.String("path", r.URL.Path))
@@ -532,6 +551,111 @@ func isInternalIP(ipStr string) bool {
 	// IsPrivate() covers RFC 1918 ranges + some others (Go 1.17+)
 	// We also explicitly check loopback and link-local for robustness in container environments.
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+// discoverDockerNetworkCIDRs attempts to find additional internal subnets
+// by inspecting network interfaces that look like Docker/K8s bridges.
+// This runs at boot and is best-effort (never fails the application).
+func discoverDockerNetworkCIDRs() []string {
+	if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+		return nil
+	}
+
+	var cidrs []string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		name := strings.ToLower(iface.Name)
+		// Common Docker / Compose / K8s bridge interface patterns
+		if strings.HasPrefix(name, "br-") ||
+			strings.Contains(name, "docker") ||
+			strings.HasPrefix(name, "veth") ||
+			strings.Contains(name, "flannel") ||
+			strings.Contains(name, "calico") {
+			addrs, _ := iface.Addrs()
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok {
+					// Prefer IPv4 for simplicity
+					if ipnet.IP.To4() != nil {
+						cidrs = append(cidrs, ipnet.String())
+					}
+				}
+			}
+		}
+	}
+	return cidrs
+}
+
+// buildRateLimitExemptions creates the final list of CIDRs that should bypass rate limiting.
+// Order of precedence (later overrides/extends):
+//   1. Hardcoded private + loopback + link-local ranges
+//   2. User-provided ranges from config (FLUME_INTERNAL_IP_RANGES)
+//   3. Dynamically discovered Docker/Kubernetes network subnets (best effort)
+func buildRateLimitExemptions(userRanges []string) []*net.IPNet {
+	standard := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+	}
+
+	all := append([]string{}, standard...)
+	all = append(all, userRanges...)
+	all = append(all, discoverDockerNetworkCIDRs()...)
+
+	var nets []*net.IPNet
+	seen := make(map[string]bool)
+	for _, cidr := range all {
+		if seen[cidr] {
+			continue
+		}
+		seen[cidr] = true
+
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			// Try treating it as a single IP
+			if ip := net.ParseIP(cidr); ip != nil {
+				if ip.To4() != nil {
+					ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+				} else {
+					ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+				}
+			} else {
+				continue // skip bad entry
+			}
+		}
+		nets = append(nets, ipnet)
+	}
+	return nets
+}
+
+// isIPExempted checks whether the given IP falls inside any of the exempted networks.
+func isIPExempted(ipStr string, exemptions []*net.IPNet) bool {
+	// Strip port
+	if host, _, err := net.SplitHostPort(ipStr); err == nil {
+		ipStr = host
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	for _, n := range exemptions {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // logReasoning is the standardized way to emit both regular structured logs

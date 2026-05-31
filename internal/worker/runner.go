@@ -84,32 +84,10 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 	switch worker.Role {
 	case "implementer":
 		result, err = r.handleImplementer(ctx, task, worker)
-		if err == nil && result.Success && result.NextStatus == ftypes.TaskStatusReview {
-			// Quick pre-filter to avoid even calling spawn on tasks that are already review/test items
-			lower := strings.ToLower(task.Title)
-			if !strings.Contains(lower, "review") && !strings.Contains(lower, "test") {
-				spawnResult := r.spawnReviewTasks(ctx, task)
-				if spawnResult == errSpawnGuardFired {
-					// Children already exist from a previous cycle. If they're all done,
-					// skip review-consensus entirely and mark the parent done directly.
-					// This prevents the loop: implementer → review-consensus → consensus evaluates
-					// old children → rejects → ready → implementer → spawns again.
-					result.NextStatus = ftypes.TaskStatusDone
-					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-						"Review children already exist from a prior cycle; skipping re-review and marking task done.",
-						map[string]any{"action": "skip_re_review", "task_id": task.ID})
-				} else if spawnResult != nil {
-					r.logger.Error("failed to spawn review tasks", slog.String("error", spawnResult.Error()))
-					result.NextStatus = ftypes.TaskStatusReview
-				} else {
-					// Spawn succeeded — transition to review-consensus
-					result.NextStatus = ftypes.TaskStatusReviewConsensus
-				}
-			} else {
-				// Already a review/test-flavored task; do not spawn more
-				result.NextStatus = ftypes.TaskStatusReviewConsensus
-			}
-		}
+		// Python model (v0.1.126): implementer completes → task transitions to
+		// "review" status → reviewer worker claims the SAME task (role rotation).
+		// No child task spawning. This keeps 1 task as 1 task throughout its lifecycle.
+		// result.NextStatus is already "review" from handleImplementer — let it pass through.
 	case "reviewer":
 		result, err = r.handleReviewer(ctx, task, worker)
 	case "tester":
@@ -188,10 +166,17 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		slog.String("task_id", task.ID),
 		slog.String("title", task.Title))
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Starting implementation of task: %s", task.Title),
+		map[string]any{"phase": "start", "worker": worker.Name})
+
 	// Check if task requires code
 	if !TaskRequiresCode(task) {
 		r.logger.Info("implementer: non-code task, completing",
 			slog.String("task_id", task.ID))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			"Task does not require code changes. Marking as done.",
+			map[string]any{"phase": "complete", "reason": "non_code_task"})
 		return ftypes.AgentResult{
 			Success:    true,
 			NextStatus: ftypes.TaskStatusDone,
@@ -201,11 +186,18 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 	// 1. Ensure task branch exists
 	repoPath, branch, err := r.EnsureTaskBranch(ctx, task)
 	if err != nil {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Failed to set up task branch: %s", err.Error()),
+			map[string]any{"phase": "branch_setup", "error": err.Error()})
 		return ftypes.AgentResult{
 			Success: false,
 			Errors:  []string{err.Error()},
 		}, err
 	}
+
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Branch ready: %s. Executing agent loop against repository.", branch),
+		map[string]any{"phase": "branch_ready", "branch": branch, "repo_path": repoPath})
 
 	// 2. Build LLM context and execute agent loop
 	// (This will be fully fleshed out when internal/llm is implemented in Phase 3)
@@ -221,6 +213,9 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		r.logger.Error("auto_commit: failed",
 			slog.String("task_id", task.ID),
 			slog.String("error", err.Error()))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Auto-commit failed: %s. Proceeding to review.", err.Error()),
+			map[string]any{"phase": "commit", "error": err.Error()})
 	}
 
 	// 4. Create PR if branch has new commits
@@ -228,6 +223,13 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		r.logger.Info("implementer: committed and pushed",
 			slog.String("task_id", task.ID),
 			slog.String("sha", commitSHA))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Changes committed and pushed (SHA: %s). Transitioning to review.", commitSHA[:min(len(commitSHA), 8)]),
+			map[string]any{"phase": "complete", "commit_sha": commitSHA})
+	} else {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			"Implementation complete. No new commits detected. Transitioning to review.",
+			map[string]any{"phase": "complete", "had_commits": false})
 	}
 
 	return ftypes.AgentResult{
@@ -291,6 +293,12 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 	}
 
 	reviewerSystemPrompt := readSystemPrompt("reviewer")
+
+	diffLen := len(diffOut)
+	flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+		fmt.Sprintf("Reviewing implementation for task: %s. Diff size: %d chars. Sending to LLM for analysis.", parent.Title, diffLen),
+		map[string]any{"phase": "llm_review", "diff_size": diffLen, "parent_task": parent.ID})
+
 	req := llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "system", Content: reviewerSystemPrompt},
@@ -330,6 +338,10 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 		verdict = "rejected"
 	}
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+		fmt.Sprintf("Code review complete. Verdict: %s. Analyzed diff for task: %s", verdict, parent.Title),
+		map[string]any{"phase": "complete", "verdict": verdict, "parent_task": parent.ID})
+
 	update := map[string]interface{}{
 		"review_verdict": verdict,
 		"feedback":       resp.Content,
@@ -346,6 +358,10 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 // handleTester runs the tester agent.
 func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("tester: starting", slog.String("task_id", task.ID))
+
+	flumelogger.LogAgentReasoning(ctx, task.ID, "tester",
+		"Starting test execution. Checking out branch and running test suite.",
+		map[string]any{"phase": "start", "worker": worker.Name})
 
 	// Fetch parent task
 	var parent ftypes.Task
@@ -399,6 +415,11 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 		}
 	}
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "tester",
+		fmt.Sprintf("Test execution complete. Verdict: %s.", verdict),
+		map[string]any{"phase": "complete", "verdict": verdict, "parent_task": parent.ID,
+			"feedback_preview": firstNChars(feedback, 200)})
+
 	update := map[string]interface{}{
 		"review_verdict": verdict,
 		"feedback":       feedback,
@@ -425,6 +446,15 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 // query pattern already present in parentCompletionSweep.
 func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("pm: decomposing", slog.String("task_id", task.ID))
+
+	// === Hard status guard: never re-decompose a task that has already left planned/ready ===
+	// This catches race conditions where a done/blocked task ends up back in the claim pool.
+	if task.Status == ftypes.TaskStatusDone || task.Status == ftypes.TaskStatusArchived || task.Status == ftypes.TaskStatusBlocked {
+		r.logger.Info("pm: skipping — task already in terminal/blocked status",
+			slog.String("task_id", task.ID),
+			slog.String("status", string(task.Status)))
+		return ftypes.AgentResult{Success: true, NextStatus: task.Status}, nil
+	}
 
 	// === Anti-explosion guard: skip decomposition for intake-created hierarchy nodes ===
 	// Epics, features, and stories are organizational containers created by buildTaskHierarchy().
@@ -531,7 +561,13 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 						"error_message": reason,
 						"updated_at":    time.Now().UTC().Format(time.RFC3339),
 					})
-					return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+					// Return blocked as NextStatus with nil error so RunWorker does NOT call clearStaleClaim.
+					// This prevents the PM re-decomposition loop (GAP-3 / Phase 1).
+					return ftypes.AgentResult{
+						Success:    false,
+						Errors:     []string{reason},
+						NextStatus: ftypes.TaskStatusBlocked,
+					}, nil
 				}
 			}
 		}
@@ -644,7 +680,13 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 				"error_message": reason,
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			})
-			return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+			// Return blocked as NextStatus with nil error (GAP-3 / Phase 1).
+			// Prevents clearStaleClaim from resetting a permanently failed PM back to planned.
+			return ftypes.AgentResult{
+				Success:    false,
+				Errors:     []string{reason},
+				NextStatus: ftypes.TaskStatusBlocked,
+			}, nil
 		}
 		// If we reach here, plan was populated by the repair response — fall through to creation.
 	}
@@ -699,7 +741,12 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 						"error_message": reason,
 						"updated_at":    time.Now().UTC().Format(time.RFC3339),
 					})
-					return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+					// Return blocked + nil error (GAP-3 consistency).
+					return ftypes.AgentResult{
+						Success:    false,
+						Errors:     []string{reason},
+						NextStatus: ftypes.TaskStatusBlocked,
+					}, nil
 				}
 			}
 		}
@@ -772,9 +819,18 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 			"parent_title":  task.Title,
 		})
 
-	// Authoritative ChildCount via atomic ES inline script (task 3).
-	// Replaces previous best-effort absolute set which could race under concurrent PM claims.
+	// Set child_count and decomposed_at via direct UpdateDoc first (synchronous, reliable).
+	// The inline script below is a secondary atomic counter increment for concurrent PM claims,
+	// but the direct set ensures the anti-re-decomp guard always has data even if the
+	// script races with updateTaskStatus or fails silently.
 	nowISO := time.Now().UTC().Format(time.RFC3339)
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+		"child_count":   len(plan.Tasks),
+		"decomposed_at": nowISO,
+		"updated_at":    nowISO,
+	})
+
+	// Authoritative ChildCount via atomic ES inline script (task 3) — secondary reinforcement.
 	delta := len(plan.Tasks)
 	scriptSrc := `ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta; ctx._source.decomposed_at = params.now; ctx._source.updated_at = params.now;`
 	_ = r.es.UpdateDocWithInlineScript(ctx, "agent-task-records", task.ID, scriptSrc, map[string]interface{}{
@@ -997,6 +1053,19 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		targetStatus = "review"
 	case "pm":
 		targetStatus = "planned"
+
+		// GAP-7 / Phase 1 hardening:
+		// If this PM task already successfully decomposed (child_count > 0 or decomposed_at set),
+		// do NOT reset it back to "planned". That would cause duplicate decomposition attempts
+		// and feed the explosion loop. Instead treat it as completed decomposition.
+		if doc, err := r.es.GetDoc(ctx, "agent-task-records", taskID); err == nil && doc != nil {
+			var t ftypes.Task
+			if json.Unmarshal(doc, &t) == nil {
+				if t.ChildCount > 0 || t.DecomposedAt != nil {
+					targetStatus = "done"
+				}
+			}
+		}
 	default:
 		if currentStatus == ftypes.TaskStatusReview {
 			targetStatus = "review"
@@ -1047,6 +1116,11 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 		now := time.Now().UTC().Format(time.RFC3339)
 		update["completed_at"] = now
 	}
+
+	// Log state transition — feeds the Agent Reasoning popout + Logloom.
+	flumelogger.LogStateTransition(ctx, taskID, "", string(status),
+		fmt.Sprintf("Task transitioned to %s", status))
+
 	_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
 }
 
@@ -1486,6 +1560,14 @@ func readSystemPrompt(role string) string {
 
 func cleanJSONContent(s string) string {
 	s = strings.TrimSpace(s)
+
+	// Strip <think>...</think> blocks (thinking models like qwen3.5 emit these).
+	// Must happen BEFORE any JSON extraction so the JSON finder sees clean text.
+	thinkRe := regexp.MustCompile(`(?s)<think>.*?</think>`)
+	s = thinkRe.ReplaceAllString(s, "")
+	s = strings.TrimSpace(s)
+
+	// Strip markdown code fences
 	if strings.HasPrefix(s, "```json") {
 		s = strings.TrimPrefix(s, "```json")
 		s = strings.TrimSuffix(s, "```")
@@ -1495,6 +1577,28 @@ func cleanJSONContent(s string) string {
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}
+
+	// If the result doesn't start with '{', try to find the first JSON object.
+	// LLMs frequently emit leading prose like "Here is the plan:" before the JSON.
+	if !strings.HasPrefix(s, "{") {
+		if idx := strings.Index(s, "{"); idx >= 0 {
+			s = s[idx:]
+			// Find the matching closing brace
+			depth := 0
+			for i, ch := range s {
+				if ch == '{' {
+					depth++
+				} else if ch == '}' {
+					depth--
+					if depth == 0 {
+						s = s[:i+1]
+						break
+					}
+				}
+			}
+		}
+	}
+
 	return s
 }
 

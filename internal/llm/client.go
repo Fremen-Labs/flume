@@ -160,7 +160,13 @@ func New(logger *slog.Logger) *Client {
 	c := &Client{
 		gatewayURL: gatewayURL,
 		httpClient: &http.Client{
-			Timeout: 180 * time.Second,
+			// No Client.Timeout — we use per-request context timeouts (300s) instead.
+			// Client.Timeout applies to the ENTIRE request lifecycle including reading
+			// the response body. With streaming (stream:true), the response body is read
+			// incrementally over the full generation time, which can exceed 180s for
+			// thinking models. The old 180s Client.Timeout caused:
+			//   "Client.Timeout exceeded while awaiting headers"
+			// Per-request context.WithTimeout is the correct approach for streaming.
 		},
 		logger:     logger,
 		workerName: workerName,
@@ -404,10 +410,9 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 		cancel()
 
 		if err != nil {
-			// Timeout errors on long requests (>= 60s) are not retried
-			if timeoutSec >= 60 {
-				return nil, fmt.Errorf("llm: gateway timeout after %ds: %w", timeoutSec, err)
-			}
+			// Allow retries on transient gateway/network errors even for long-running calls.
+			// Previously we skipped retries entirely for timeoutSec >= 60s (GAP-4 / Phase 1).
+			// This was a major contributor to the 120s timeout storm.
 			if attempt < maxRetries {
 				sleep := c.jitteredBackoff(backoffs, attempt)
 				flumelogger.WithContext(ctx).Warn("gateway connection error, retrying",
@@ -532,6 +537,13 @@ func (c *Client) parseToolsResponse(raw map[string]interface{}) (*ChatToolsRespo
 
 // legacyChat falls back to direct Ollama calls when the gateway is unavailable.
 // Mirrors the Python worker's direct-provider fallback path.
+//
+// CRITICAL: Uses stream:true + NDJSON aggregation, matching both the Python
+// implementation (_ollama_stream_strip_think) and the Go gateway (StreamOllamaChat).
+// The original non-streaming version caused "context deadline exceeded" errors
+// because thinking models (qwen3.5:35b-a3b etc.) can take >120s to produce
+// a complete non-streamed response. Streaming keeps the HTTP connection alive
+// with periodic chunks, eliminating the timeout.
 func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	baseURL := c.resolveOllamaBaseURL()
 	if baseURL == "" {
@@ -552,11 +564,12 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 		slog.String("model", model),
 	)
 
-	// Build Ollama-native payload (same format as gateway/providers.go ollamaNonStream)
+	// Build Ollama-native payload with stream:true (critical for thinking models).
+	// Python equivalent: _ollama_stream_strip_think() in llm_client_legacy.py.
 	payload := map[string]interface{}{
 		"model":    model,
 		"messages": req.Messages,
-		"stream":   false,
+		"stream":   true, // Keeps connection alive — prevents timeout on large responses
 		"options": map[string]interface{}{
 			"temperature": req.Temperature,
 			"num_predict": req.MaxTokens,
@@ -574,7 +587,11 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 	cleanBase := strings.TrimRight(baseURL, "/")
 	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
 	url := cleanBase + "/api/chat"
-	reqCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+
+	// 300s safety net — streaming chunks keep the connection alive so this
+	// should never fire under normal operation. Matches Python's behavior
+	// of effectively no single-response timeout when streaming.
+	reqCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
@@ -594,18 +611,36 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 		return nil, fmt.Errorf("llm: legacy Ollama HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
 	}
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("llm: legacy response decode failed: %w", err)
+	// Read NDJSON stream and aggregate content chunks.
+	// Each line is a JSON object with {"message":{"content":"..."},"done":false/true}.
+	// Think blocks (<think>...</think>) are stripped post-aggregation.
+	var contentBuilder strings.Builder
+	decoder := json.NewDecoder(resp.Body)
+	for decoder.More() {
+		var chunk map[string]interface{}
+		if err := decoder.Decode(&chunk); err != nil {
+			// Partial read is OK — use what we have
+			c.logger.Warn("legacy stream: decode error (using accumulated content)",
+				slog.String("error", err.Error()))
+			break
+		}
+
+		// Extract content from this chunk
+		if msg, ok := chunk["message"].(map[string]interface{}); ok {
+			if content, ok := msg["content"].(string); ok {
+				contentBuilder.WriteString(content)
+			}
+		}
+
+		// Check if this is the final chunk
+		if done, ok := chunk["done"].(bool); ok && done {
+			break
+		}
 	}
 
-	// Parse Ollama response (same structure as gateway's ollamaNonStream)
-	content := ""
-	if msg, ok := result["message"].(map[string]interface{}); ok {
-		content, _ = msg["content"].(string)
-	}
+	content := contentBuilder.String()
 
-	// Strip <think> blocks if present
+	// Strip <think> blocks if present (matches Python _strip_think_blocks)
 	content = stripThinkBlocks(content)
 
 	return &ChatResponse{
@@ -633,12 +668,13 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 		slog.String("model", model),
 	)
 
-	// Build Ollama-native payload with tools
+	// Build Ollama-native payload with tools + stream:true
+	// (same streaming fix as legacyChat — prevents timeout on thinking models)
 	payload := map[string]interface{}{
 		"model":    model,
 		"messages": req.Messages,
 		"tools":    req.Tools,
-		"stream":   false,
+		"stream":   true,
 		"options": map[string]interface{}{
 			"temperature": req.Temperature,
 			"num_predict": req.MaxTokens,
@@ -655,7 +691,7 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 	cleanBase := strings.TrimRight(baseURL, "/")
 	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
 	url := cleanBase + "/api/chat"
-	reqCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
@@ -675,31 +711,45 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 		return nil, fmt.Errorf("llm: legacy Ollama HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
 	}
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("llm: legacy response decode failed: %w", err)
-	}
-
-	// Parse Ollama response
-	content := ""
+	// Read NDJSON stream — aggregate content and capture tool_calls from final chunk.
+	// Ollama emits tool_calls in the done:true chunk's message object.
+	var contentBuilder strings.Builder
 	var toolCalls []ToolCall
-	if msg, ok := result["message"].(map[string]interface{}); ok {
-		content, _ = msg["content"].(string)
-		if tcs, ok := msg["tool_calls"].([]interface{}); ok {
-			for _, tc := range tcs {
-				tcMap, _ := tc.(map[string]interface{})
-				fn, _ := tcMap["function"].(map[string]interface{})
-				toolCalls = append(toolCalls, ToolCall{
-					Function: ToolCallFunction{
-						Name:      strVal(fn["name"]),
-						Arguments: fn["arguments"],
-					},
-				})
+	decoder := json.NewDecoder(resp.Body)
+	for decoder.More() {
+		var chunk map[string]interface{}
+		if err := decoder.Decode(&chunk); err != nil {
+			c.logger.Warn("legacy tool stream: decode error (using accumulated content)",
+				slog.String("error", err.Error()))
+			break
+		}
+
+		if msg, ok := chunk["message"].(map[string]interface{}); ok {
+			// Accumulate content
+			if content, ok := msg["content"].(string); ok {
+				contentBuilder.WriteString(content)
 			}
+			// Extract tool_calls (present in the final chunk)
+			if tcs, ok := msg["tool_calls"].([]interface{}); ok {
+				for _, tc := range tcs {
+					tcMap, _ := tc.(map[string]interface{})
+					fn, _ := tcMap["function"].(map[string]interface{})
+					toolCalls = append(toolCalls, ToolCall{
+						Function: ToolCallFunction{
+							Name:      strVal(fn["name"]),
+							Arguments: fn["arguments"],
+						},
+					})
+				}
+			}
+		}
+
+		if done, ok := chunk["done"].(bool); ok && done {
+			break
 		}
 	}
 
-	content = stripThinkBlocks(content)
+	content := stripThinkBlocks(contentBuilder.String())
 
 	return &ChatToolsResponse{
 		Message: ToolMessage{
