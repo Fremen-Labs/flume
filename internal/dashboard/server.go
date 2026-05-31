@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
 	"github.com/Fremen-Labs/flume/internal/es"
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	"github.com/Fremen-Labs/flume/internal/llm"
@@ -42,6 +44,8 @@ type Server struct {
 	onSweepTrigger   func(sweepName string) error
 	onSettingsReload func()
 	mu               sync.RWMutex
+
+	rateLimiter *rateLimiter
 }
 
 // RegisterSweepTrigger registers a callback for manual sweep triggering.
@@ -112,12 +116,13 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 	}
 	esClient := es.New(cfg.ESUrl, cfg.ESApiKey, logger)
 	s := &Server{
-		mux:       http.NewServeMux(),
-		es:        esClient,
-		llmClient: llm.New(logger),
-		logger:    logger,
-		cfg:       cfg,
-		startTime: time.Now(),
+		mux:         http.NewServeMux(),
+		es:          esClient,
+		llmClient:   llm.New(logger),
+		logger:      logger,
+		cfg:         cfg,
+		startTime:   time.Now(),
+		rateLimiter: newRateLimiter(cfg.RateLimitPerMin),
 	}
 	// Phase 0: Wire reasoning bridge for any Go-side Log* calls that reach the dashboard
 	// (primarily benefits future admin/recovery paths and consistency with worker).
@@ -275,6 +280,34 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", reqID)
 
+		// Rate limiting (Medium priority implementation)
+		// Internal/private IPs (Docker, Kubernetes pods, service mesh, localhost)
+		// are exempted. This protects external clients while ensuring internal
+		// worker <-> dashboard communication is never throttled.
+		if s.rateLimiter != nil {
+			ip := r.Header.Get("X-Forwarded-For")
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			// Take first IP if comma-separated (original client)
+			if idx := strings.Index(ip, ","); idx > 0 {
+				ip = strings.TrimSpace(ip[:idx])
+			}
+
+			if !isInternalIP(ip) {
+				if !s.rateLimiter.allow(ip) {
+					s.logger.Warn("rate limit exceeded", slog.String("ip", ip), slog.String("path", r.URL.Path))
+					writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+					return
+				}
+			} else {
+				// Optional: debug log for visibility into internal traffic patterns
+				s.logger.Debug("bypassing rate limit for internal IP",
+					slog.String("ip", ip),
+					slog.String("path", r.URL.Path))
+			}
+		}
+
 		// Bypass statusWriter wrapping for WebSockets to allow http.Hijacker
 		if r.Header.Get("Upgrade") == "websocket" || strings.HasPrefix(r.URL.Path, "/ws") {
 			next.ServeHTTP(w, r)
@@ -335,8 +368,8 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		// Best-effort: headers are already sent
-		_ = err
+		// Log at package level if possible; this is a last-resort after headers sent
+		slog.Default().Error("failed to encode JSON response", slog.String("error", err.Error()))
 	}
 }
 
@@ -344,9 +377,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeErrorWithLog logs the error at the appropriate level before responding.
+func writeErrorWithLog(w http.ResponseWriter, status int, msg string, logger *slog.Logger) {
+	if logger != nil {
+		if status >= 500 {
+			logger.Error("request error", slog.Int("status", status), slog.String("error", msg))
+		} else {
+			logger.Warn("request error", slog.Int("status", status), slog.String("error", msg))
+		}
+	}
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
 func decodeBody(r *http.Request, dst interface{}) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(dst)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
 }
 
 // ─── Env Helpers ────────────────────────────────────────────────────────────
@@ -404,6 +452,120 @@ func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.C
 		d = 15 * time.Second
 	}
 	return context.WithTimeout(parent, d)
+}
+
+// ─── Simple Rate Limiter (Medium priority) ──────────────────────────────────
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	visitors map[string]*visitor
+	limit    int
+	window   time.Duration
+}
+
+type visitor struct {
+	tokens    int
+	lastSeen  time.Time
+}
+
+func newRateLimiter(limitPerMin int) *rateLimiter {
+	if limitPerMin <= 0 {
+		limitPerMin = 2000 // sane default from config
+	}
+	rl := &rateLimiter{
+		visitors: make(map[string]*visitor),
+		limit:    limitPerMin,
+		window:   time.Minute,
+	}
+	// Background cleanup goroutine
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	v, ok := rl.visitors[ip]
+	now := time.Now()
+
+	if !ok || now.Sub(v.lastSeen) > rl.window {
+		rl.visitors[ip] = &visitor{tokens: rl.limit - 1, lastSeen: now}
+		return true
+	}
+
+	if v.tokens > 0 {
+		v.tokens--
+		v.lastSeen = now
+		return true
+	}
+	return false
+}
+
+func (rl *rateLimiter) cleanup() {
+	for {
+		time.Sleep(rl.window)
+		rl.mu.Lock()
+		for ip, v := range rl.visitors {
+			if time.Since(v.lastSeen) > rl.window*2 {
+				delete(rl.visitors, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// isInternalIP returns true for private, loopback, and link-local addresses.
+// This is used to exempt internal Docker/Kubernetes/service-to-service traffic
+// from rate limiting (per reliable-go-systems principle of not breaking internal reliability).
+func isInternalIP(ipStr string) bool {
+	// Strip port if present (e.g. "10.0.0.5:12345")
+	if host, _, err := net.SplitHostPort(ipStr); err == nil {
+		ipStr = host
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	// IsPrivate() covers RFC 1918 ranges + some others (Go 1.17+)
+	// We also explicitly check loopback and link-local for robustness in container environments.
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+// logReasoning is the standardized way to emit both regular structured logs
+// and rich LogAgentReasoning (for UI popouts + Logloom graphs).
+// This implements the flume-go requirement for consistent observability on
+// important decisions and state changes.
+func (s *Server) logReasoning(ctx context.Context, taskOrSystemID, role, message string, meta map[string]any) {
+	fields := []any{
+		slog.String("role", role),
+		slog.String("id", taskOrSystemID),
+	}
+	for k, v := range meta {
+		fields = append(fields, slog.Any(k, v))
+	}
+
+	s.logger.Info(message, fields...)
+	flumelogger.LogAgentReasoning(ctx, taskOrSystemID, role, message, meta)
+}
+
+// logDecision is a lighter variant for non-task events (e.g. config changes, node operations).
+func (s *Server) logDecision(ctx context.Context, component, action string, meta map[string]any) {
+	fields := []any{
+		slog.String("component", component),
+		slog.String("action", action),
+	}
+	for k, v := range meta {
+		fields = append(fields, slog.Any(k, v))
+	}
+	s.logger.Info("decision", fields...)
+
+	// Also emit reasoning for auditability when component is system-level
+	if component == "system" || component == "config" || component == "workflow" {
+		flumelogger.LogAgentReasoning(ctx, "system", component, action, meta)
+	}
 }
 
 // ─── Type aliases for request bodies ────────────────────────────────────────

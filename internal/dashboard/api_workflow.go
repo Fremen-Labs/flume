@@ -178,10 +178,9 @@ func (s *Server) handleWorkflowAgentsStop(w http.ResponseWriter, r *http.Request
 		}
 		s.logger.Warn("EMERGENCY GLOBAL HALT: attempted to pause all projects", slog.Int("paused", pausedCount))
 
-		// Rich reasoning for global halt (critical for diagnosing swarm explosions)
-		flumelogger.LogAgentReasoning(r.Context(), "system", "dashboard",
-			"EMERGENCY GLOBAL HALT: WorkPaused set on multiple projects via /agents/stop (no repo specified)",
-			map[string]any{"action": "agents_stop", "scope": "global", "paused_count": pausedCount})
+		// Use standardized helper
+		s.logDecision(r.Context(), "workflow", "EMERGENCY_GLOBAL_HALT",
+			map[string]any{"paused_count": pausedCount, "scope": "global"})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

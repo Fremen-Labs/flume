@@ -203,7 +203,9 @@ func (s *Server) guardedTaskMutator(ctx context.Context, esID string, src map[st
 	if opts.AuditReason != "" {
 		meta["audit_reason"] = opts.AuditReason
 	}
-	flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, meta)
+
+	// Use standardized helper for consistent dual logging (slog + reasoning)
+	s.logReasoning(ctx, taskID, "system", reason, meta)
 
 	return nil
 }
@@ -606,7 +608,7 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 
 	var req TaskTransitionRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeErrorWithLog(w, http.StatusBadRequest, "invalid request body: "+err.Error(), s.logger)
 		return
 	}
 
@@ -708,7 +710,7 @@ func (s *Server) handleTasksBulkRequeue(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	var req BulkRequeueRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeErrorWithLog(w, http.StatusBadRequest, "invalid request body: "+err.Error(), s.logger)
 		return
 	}
 
@@ -811,7 +813,7 @@ func (s *Server) handleTasksBulkUpdate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req BulkUpdateRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeErrorWithLog(w, http.StatusBadRequest, "invalid request body: "+err.Error(), s.logger)
 		return
 	}
 
@@ -908,7 +910,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		Provider   string `json:"provider,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeErrorWithLog(w, http.StatusBadRequest, "invalid request body: "+err.Error(), s.logger)
 		return
 	}
 
@@ -998,7 +1000,7 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request) {
 		TaskID string `json:"task_id"`
 	}
 	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeErrorWithLog(w, http.StatusBadRequest, "invalid request body: "+err.Error(), s.logger)
 		return
 	}
 
