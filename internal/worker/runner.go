@@ -23,6 +23,12 @@ import (
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
+// errSpawnGuardFired is a sentinel error returned by spawnReviewTasks when the
+// idempotency guard prevents spawning because reviewer/tester children already
+// exist for this parent. The caller uses this to distinguish "guard fired" from
+// "actual spawn failure" and can skip re-review instead of looping.
+var errSpawnGuardFired = fmt.Errorf("spawn guard: reviewer/tester children already exist")
+
 // Runner contains the core agent execution loop.
 // Derived from Python: worker_handlers.py (2410 LOC, 112 AST nodes) —
 // the densest module in the Flume codebase.
@@ -82,10 +88,22 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 			// Quick pre-filter to avoid even calling spawn on tasks that are already review/test items
 			lower := strings.ToLower(task.Title)
 			if !strings.Contains(lower, "review") && !strings.Contains(lower, "test") {
-				result.NextStatus = ftypes.TaskStatusReviewConsensus
-				if spawnErr := r.spawnReviewTasks(ctx, task); spawnErr != nil {
-					r.logger.Error("failed to spawn review tasks", slog.String("error", spawnErr.Error()))
+				spawnResult := r.spawnReviewTasks(ctx, task)
+				if spawnResult == errSpawnGuardFired {
+					// Children already exist from a previous cycle. If they're all done,
+					// skip review-consensus entirely and mark the parent done directly.
+					// This prevents the loop: implementer → review-consensus → consensus evaluates
+					// old children → rejects → ready → implementer → spawns again.
+					result.NextStatus = ftypes.TaskStatusDone
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"Review children already exist from a prior cycle; skipping re-review and marking task done.",
+						map[string]any{"action": "skip_re_review", "task_id": task.ID})
+				} else if spawnResult != nil {
+					r.logger.Error("failed to spawn review tasks", slog.String("error", spawnResult.Error()))
 					result.NextStatus = ftypes.TaskStatusReview
+				} else {
+					// Spawn succeeded — transition to review-consensus
+					result.NextStatus = ftypes.TaskStatusReviewConsensus
 				}
 			} else {
 				// Already a review/test-flavored task; do not spawn more
@@ -245,7 +263,15 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 				if repoPath == "" {
 					workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
 					if workspace == "" {
-						workspace = "/app/workspace"
+						if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+							// Native mode: use current directory, not Docker path.
+							workspace, _ = os.Getwd()
+							if workspace == "" {
+								workspace = "."
+							}
+						} else {
+							workspace = "/app/workspace"
+						}
 					}
 					repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", proj.ID))
 				}
@@ -799,11 +825,23 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 	workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
 	if workspace == "" {
-		workspace = "/app/workspace"
+		if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+			// Native mode: use current directory, not Docker path.
+			workspace, _ = os.Getwd()
+			if workspace == "" {
+				workspace = "."
+			}
+		} else {
+			workspace = "/app/workspace"
+		}
 	}
 	repoPath := project.LocalPath
 	if repoPath == "" {
 		repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", project.ID))
+		r.logger.Info("EnsureTaskBranch: resolved workspace (project.LocalPath was empty)",
+			slog.String("project_id", task.ProjectID),
+			slog.String("workspace", workspace),
+			slog.String("repo_path", repoPath))
 	}
 
 	// Check if local clone exists. If not, clone it dynamically.
@@ -1287,7 +1325,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 						flumelogger.LogAgentReasoning(ctx, parent.ID, "system",
 							"Refused to spawn additional reviewer/tester children — quota already met for this parent.",
 							map[string]any{"parent_id": parent.ID, "existing_count": existingReviewOrTest})
-						return nil
+						return errSpawnGuardFired
 					}
 				}
 			}
@@ -1303,7 +1341,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		flumelogger.LogAgentReasoning(ctx, parent.ID, "system",
 			"Refused additional review/test spawn — children already present (concurrent reset/spawn race closed).",
 			map[string]any{"parent_id": parent.ID, "existing": existingReviewOrTest})
-		return nil
+		return errSpawnGuardFired
 	}
 
 	// Final atomic-ish recheck using fresh search before any Index to minimize dup window under high churn.
@@ -1322,7 +1360,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 			r.logger.Info("spawnReviewTasks skipped on final recheck — race detected and prevented",
 				slog.String("parent_id", parent.ID), slog.Int("recheck_count", recheckCount))
 			flumelogger.LogAgentReasoning(ctx, parent.ID, "system", "Final recheck prevented duplicate review/test spawn under failure loop.", map[string]any{"parent_id": parent.ID, "recheck": recheckCount})
-			return nil
+			return errSpawnGuardFired
 		}
 	}
 

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"context"
+	"os"
 	"testing"
 )
 
@@ -73,5 +75,25 @@ func TestCloudLLMProviders(t *testing.T) {
 		if CloudLLMProviders[p] {
 			t.Errorf("expected %q to NOT be a cloud provider", p)
 		}
+	}
+}
+
+func TestGetActiveLLMModel_ESFailureFallback(t *testing.T) {
+	// When ES is unreachable or returns no document, should fall back to env or default
+	os.Unsetenv("LLM_MODEL")
+	defer os.Unsetenv("LLM_MODEL")
+
+	// Use an invalid URL to force loadLLMConfigFromES to return empty map (failure path)
+	got := GetActiveLLMModel(context.Background(), "http://127.0.0.1:1", "", nil)
+	if got != DefaultOllamaModel {
+		t.Errorf("expected fallback to default %q on ES failure, got %q", DefaultOllamaModel, got)
+	}
+
+	// Env var should still win even if ES fails
+	os.Setenv("LLM_MODEL", "qwen2.5:72b")
+	defer os.Unsetenv("LLM_MODEL")
+	got = GetActiveLLMModel(context.Background(), "http://127.0.0.1:1", "", nil)
+	if got != "qwen2.5:72b" {
+		t.Errorf("expected env var to win on ES failure, got %q", got)
 	}
 }

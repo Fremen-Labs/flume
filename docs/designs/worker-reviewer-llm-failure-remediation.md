@@ -1,12 +1,40 @@
 # Remediation Plan: Post-Migration Worker Reviewer LLM 404 Loops + Role/Status Reset Storms
 
 **Date**: 2026-06 (current on `feature/workitem-explosion`)
+**Latest implementation pass**: commits `6dbe8956`, `06b4c4fe`, `44b185dc` + uncommitted overlay on `feature/workitem-explosion` (reviewed 2026-05-30).
 **Context**: After Python→Go worker migration (internal/worker/*, ~2k LOC port of runner/claim/sweeps + LLM client), agent reasoning popout (LogAgentReasoning + execution_thoughts bridge in logger.go:386) now surfaces the exact failure signatures the user observed:
 - "Worker reviewer failed: llm: legacy Ollama HTTP 404: 404 page not found..."
 - "Worker (unknown-role) crashed or LLM call failed; stale claim cleared and task reset to ready..."
 These loop until a task is externally forced into `review` (or equivalent "In Review"), at which point more review-consensus children + top-level workitems spawn via implementer success paths + PM decomp.
 
 **Why the popout was decisive**: It (plus the new LogStateTransition sites) made the reset/spawn causal chains visible without log grepping. The prior "empty reasoning" bug hid exactly these loops.
+
+## Implementation Status After First Pass (reviewed 2026-05-30)
+
+The three commits + local edits land the large majority of Phase 1 and Phase 2 (core P0 fixes):
+- Role-aware `clearStaleClaim` (now takes `workerRole`, switches on reviewer/tester/pm, targets "review"/"planned", no more "unknown-role" in reasoning logs).
+- Supervisor now exports `FLUME_GATEWAY_URL` (and `FLUME_NATIVE_MODE`) before worker manager starts; `llm.Client` has native localhost default + "direct Ollama" fallback path + 3s delayed healthcheck + persistent 404/blocking after N failures.
+- `handleRoleLLMFailure` + caps for reviewer, `isPersistentConfigError` fast-path to blocked.
+- Strengthened spawn guards (including new `errSpawnGuardFired` sentinel), intake hierarchy anti-explosion, PM skip for system nodes, git lock cleanup, execution_thoughts nested mapping fix, backfill script (exists, but see review findings).
+- Many rich LogAgentReasoning / LogStateTransition sites added on the exact failure/reset paths.
+
+**Independent review performed** (full artifacts below):
+- Review diff collected for the exact 3 commits + uncommitted runner.go overlay vs. merge-base with main.
+- Full review + summary written by dedicated reviewer subagent (cross-checked every changed file + the original plan).
+- 11 issues found (7 of severity **bug**). Core reported signatures are fixed in nominal/native happy paths. However, several subtle races and incomplete items can still recreate loops under concurrent claim/reset/spawn/ES contention — exactly the conditions that produced the original 74- and 258-item explosions.
+
+See the review outputs:
+- Full structured review: `/tmp/grok-review-640e38c5.md`
+- Executive summary + top issues + recommended next actions: `/tmp/grok-review-summary-640e38c5.md`
+
+**Key remaining high-severity gaps** (prioritized from the review; see full review for all 11 + line numbers):
+1. Supervisor gateway export race (supervisor.go:88) + llm.New still depending on racy env + FLUME_NATIVE_MODE flag → can still hit the Docker default and legacy 404 on some native starts.
+2. Status fight: `handleRoleLLMFailure` writes "blocked" after 3 failures; outer RunWorker error path then calls `clearStaleClaim` which overwrites it back to "review" for many error strings.
+3. Claimer still has no "ready + worker_role=reviewer/tester" recovery query (plan Phase 2.3 not implemented) → pre-fix orphans stay stuck forever.
+4. Backfill script only blocks; does not repair to correct status+role (contradicts plan Phase 5).
+5. Multiple bare `UpdateDoc` (no error handling, no OCC, no reasoning emission) on critical status paths + parallel reset paths in sweeps that bypass the new central role-aware logic.
+6. Persistent error detection is brittle string matching; no typed sentinels or configurable caps for reviewer path.
+7. Many Phase 0/4 checklist items (logloom rebuild + doctor gates, reset-status unit test, troubleshooting updates, metrics) still open.
 
 ## Root Cause Analysis (with code pointers)
 
@@ -60,66 +88,81 @@ These loop until a task is externally forced into `review` (or equivalent "In Re
 ## Prioritized Remediation Plan (8-12 hours of focused work)
 
 ### Phase 0 (30 min) — Fresh Observability Baseline
-- [ ] Run `logloom build --source . --languages go,python --output flume-robust-ast-graph.json --git --call-graph --tags` (and commit the updated graph + any new nodes for `clearStaleClaim`, `legacyChat`, `handleReviewer`, `roleToTargetStatus`, `spawnReviewTasks`).
-- [ ] Re-run `flume doctor --logloom` and `logloom graph find "clearStaleClaim|legacy Ollama|unknown-role"` to confirm new nodes appear. This gives the popout + future agents the exact call-graph edges for the fixes below.
-- [ ] Add a permanent doctor gate (already sketched in doctor.go:466) that asserts >0 nodes for "reviewer" + "clearStaleClaim" + "FLUME_GATEWAY_URL".
+- [x] (partially) Core reset/spawn/failure paths now emit rich LogAgentReasoning + LogStateTransition (enables the popout that diagnosed the original problem and the review that found the 11 follow-ups).
+- [ ] Run `logloom build --source . --languages go,python --output flume-robust-ast-graph.json --git --call-graph --tags` (and commit the updated graph + any new nodes for `clearStaleClaim`, `legacyChat`, `handleReviewer`, `roleToTargetStatus`, `spawnReviewTasks`, `handleRoleLLMFailure`). **Still open per review.**
+- [ ] Re-run `flume doctor --logloom` and `logloom graph find "clearStaleClaim|legacy Ollama|unknown-role|handleRoleLLMFailure"` to confirm new nodes appear. Promote at least one hard assertion in doctor.go (plan + review both call for this).
+- [ ] Add a permanent doctor gate (already sketched in doctor.go:466) that asserts >0 nodes for "reviewer" + "clearStaleClaim" + "FLUME_GATEWAY_URL" + the new failure sentinel. **Still open.**
 
 ### Phase 1 (2h) — Kill the 404 at the Source (Native Gateway Wiring)
-1. **Make LLM client native-aware + fix default** ([internal/llm/client.go](/Users/jonathandoughty/clients/fremenlabs/flume /flume/internal/llm/client.go)):
-   - Change New() default: if `FLUME_NATIVE_MODE=1` or `FLUME_GATEWAY_URL==""`, default to `http://localhost:8090` (or read from a new `GatewayURL` field in internal/config).
-   - Better: pass gateway URL explicitly from Supervisor (it already knows the addr at L268) into NewManager → NewRunner/Claimer/Sweeper → llm.NewWithGatewayURL(...).
-   - Also set `os.Setenv("FLUME_GATEWAY_URL", s.GatewayURL())` early in supervisor.StartAll so any legacy paths or other clients (api_intake.go:253 etc.) see it.
-   - Update resolveOllamaBaseURL and related docs for native mac (direct 127.0.0.1:11434) vs. container (host.docker.internal).
+**Status after implementation pass + review**: Most landed (supervisor export + llm.Client native default + direct Ollama fallback + healthcheck + persistent block path). **One critical regression risk remains (see Review Issue 1 + 3).**
 
-2. **Add a loud startup check** in worker manager cycle (or NewManager): attempt a 2s gateway /health; if failing and no usable Ollama base URL, log a FATAL-style "LLM path misconfigured for native mode — reviewers will 404-loop. Set FLUME_GATEWAY_URL=http://localhost:8090 or run with docker." + emit agent reasoning event.
+1. **Make LLM client native-aware + fix default** ([internal/llm/client.go](/Users/jonathandoughty/clients/fremenlabs/flume /flume/internal/llm/client.go)):
+   - [x] Native localhost default + `FLUME_NATIVE_MODE` awareness added.
+   - [x] Supervisor now does `Setenv` for `FLUME_GATEWAY_URL` + `FLUME_NATIVE_MODE` (supervisor.go).
+   - [ ] **Open (high priority per review)**: The export still has a startup race (blind 500ms sleep after `startGateway` goroutine; `gatewayAddr` may be empty at Setenv time). Plus `llm.New` still falls back to the MODE env check. Can still produce the original "legacy Ollama 404" on some native wizard starts. Recommendation from review: make startup synchronous or pass explicit URL into NewManager/llm constructors instead of (only) env.
+
+2. **Add a loud startup check** in worker manager cycle (or NewManager): attempt a 2s gateway /health; if failing and no usable Ollama base URL, log a FATAL-style "LLM path misconfigured for native mode — reviewers will 404-loop..." + emit agent reasoning event.
+   - [x] 3s delayed healthcheck + error log added in llm/client (good observability).
 
 3. **Parallel quick win**: in gatewayAvailable, on failure also log the exact URL that was tried (currently silent after first cache miss).
+   - [x] Improved logging present.
 
 ### Phase 2 (2h) — Make Stale-Claim Role-Aware + Eliminate "unknown-role"
+**Status after implementation pass + review**: Core landed and eliminates the reported "unknown-role" + wrong-status reviewer resets in nominal paths. Several follow-ups remain open (see Review Issues 2, 4, 6, 8).
+
 1. **Signature change + logic fix** (runner.go + callers):
-   - `clearStaleClaim(ctx, taskID string, workerRole string, currentStatus TaskStatus)`
-   - Inside: 
-     ```go
-     targetStatus := "ready"
-     switch workerRole {
-     case "reviewer", "tester": targetStatus = "review"
-     case "pm": targetStatus = "planned"
-     }
-     // also look at task.WorkerRole as fallback if role==""
-     ```
-   - Update the single callsite in RunWorker:183 (pass `worker.Role`).
-   - Update the LogAgentReasoning call (950) to use the real role.
-   - In the error log path (115), the existing one already has the role — keep it.
+   - [x] `clearStaleClaim` now accepts role, switches correctly, targets "review" for reviewer/tester (and "planned" for pm). "unknown-role" string eliminated from reasoning logs. Callsite updated. Excellent.
+   - [ ] Minor: some git helpers still use global slog (inconsistency with rich reasoning goal).
 
 2. **Harden the stuck sweeps** (sweeps.go):
-   - `requeueStuckImplementerTasks`: instead of hardcoding "ready", inspect `worker_role` (or title prefix) on the hit and choose the correct target status (or delegate to a new `ResetTaskForRole` helper that lives in one place).
-   - Same for `requeueStuckReviewTasks` (currently only touches status=review anyway).
-   - Add a unit test (worker_test.go already exists) that creates a review-status task, simulates LLM crash via runner, asserts it lands back in "review" not "ready".
+   - [x] Role-aware filters added to requeueStuck* (good).
+   - [ ] **Open (review Issue 8)**: Still multiple parallel reset paths that hardcode "ready" or bypass the central `clearStaleClaim` + EnforceTransitionOrLog. Recommendation: extract single `ResetTaskForRole` helper used everywhere (plan originally asked for this).
+   - [ ] Unit test asserting correct "review" (not "ready") reset target for a reviewer task under LLM crash **still missing** (plan + review both require it before declaring done).
 
 3. **Claimer safety**: in TryAtomicClaim and roleToTargetStatus, also allow "ready" tasks that have `worker_role=reviewer|tester` (for recovery of the orphaned ones created by the current bug). This is a migration bandage.
+   - [ ] **Open (high priority, review Issue 4)**: Not implemented. Orphaned review tasks in "ready" will never be claimed by reviewer workers even after the reset logic is correct. Pre-fix backfill + any resume/consensus path can still create them. Add the secondary query (document as temporary).
 
 ### Phase 3 (1.5h) — Resilience & Anti-Loop Hardening
-1. **Lightweight retry inside handlers** (or in llm.Chat for non-permanent errors): for reviewer/tester (simple single-turn), retry once with 5s backoff on 4xx/5xx from legacy or gateway. Log the retry via LogAgentReasoning so popout shows "LLM transient 404, retrying".
-2. **Fast-fail + poison the task** on persistent legacy 404: after 2 failures, set task to `blocked` (or a new `llm-config-error` status) with clear `last_error`, instead of infinite ready/reset. This stops the log spam and spawn amplification.
-3. **Strengthen spawnReviewTasks guards** (already excellent):
-   - Also key the "already have children" check on `worker_role` + `parent_id` (not just title strings).
-   - On any spawn attempt for a parent that already has 2+ review/test children, force the implementer result.NextStatus to ReviewConsensus **without** re-spawning, and emit reasoning.
+**Status**: Significant progress (persistent 404 block after N failures, strengthened spawn guards including new sentinel, intake/PM guards). The block-vs-clear fight (Review Issue 2) and brittle string detection (Review Issue 10) are the main remaining correctness gaps.
 
-4. **Implementer stub awareness**: add an env guard or complexity check so stub implementers do **not** auto-spawn review children until real codegen lands (or at least require an explicit "changes committed" marker). Prevents the "empty diff → review loop" fuel.
+1. **Lightweight retry...** — partial (retry logic exists in places; not uniformly wired for reviewer path yet).
+2. **Fast-fail + poison...** — [x] `handleRoleLLMFailure` + `isPersistentConfigError` (string-based 404/gateway unreachable) + cap + block path landed. **Caveat (review)**: string matching is brittle; the block write can be overwritten by the outer clearStaleClaim path for non-exact-match errors.
+3. **Strengthen spawnReviewTasks guards** — [x] landed (plus intake hierarchy guards and errSpawnGuardFired sentinel in the uncommitted overlay).
+4. **Implementer stub awareness** — partial (some guards improved; full "do not spawn reviews from stub" not yet enforced per plan).
 
 ### Phase 4 (1h) — Tests + Gates + Observability
-- Add integration test in worker_test.go or e2e that:
-  - Starts supervisor in native mode (with a fake gateway or stubbed llm client).
-  - Creates a review task.
-  - Forces a legacy 404 (by setting bad LLM_HOST).
-  - Asserts: exactly one "Worker reviewer failed" + one state transition to the *correct* target status, no "unknown-role", task not left in ready, no extra children spawned.
-- Promote the existing logloom doctor gate to a hard CI assertion (find nodes for the 6 new anti-explosion symbols).
-- Add a metrics counter in runner for "llm_failure_resets_by_role" (expose via /metrics or gateway).
-- Update troubleshooting.md and the agent reasoning popout docs with the exact signatures and "first thing to check: FLUME_GATEWAY_URL in native".
+**Status per review**: None of the concrete test/gate items landed. This is the largest gap for claiming the remediation complete.
+- [ ] Integration test for correct reset status + no extra children under forced 404 (plan + review both require before wider use).
+- [ ] Promote logloom doctor gate + at least one assertion for the new symbols (clearStaleClaim, handleRoleLLMFailure, etc.).
+- [ ] Metrics for llm_failure_resets_by_role.
+- [ ] troubleshooting.md + popout docs updates.
 
 ### Phase 5 (30min) — Backfill & Migration
-- One-time ES script / sweeper to repair any orphaned review-flavored tasks that are currently in "ready" (set status=review + worker_role if missing).
-- Add a "worker role mismatch detector" sweep that logs + reasons when a task's worker_role doesn't match the status bucket it sits in.
+**Status per review**: Script exists but is incomplete (only blocks; does not repair).
+- [ ] Repair mode (or separate pass) that sets status=review + worker_role=reviewer for review-flavored orphans (instead of / in addition to blocking). See Review Issue 5.
+- [ ] "worker role mismatch detector" sweep (or incorporate into existing sweeps).
+- [ ] The claimer "ready + role" recovery query (Phase 2.3) is the runtime equivalent of this backfill.
+
+## Post-Review Follow-ups (from 2026-05-30 independent review of the implementation commits)
+
+The review (full notes at /tmp/grok-review-640e38c5.md) found **11 issues** (7 bugs) even after the good core fixes. Prioritize these before declaring the remediation complete or rolling out widely:
+
+**Bugs (highest priority first)**:
+- Supervisor gateway export race + llm.New env dependency (supervisor.go:88, llm/client.go:143, manager.go:81) — can still recreate the original 404 loop on native starts.
+- Block vs. clearStaleClaim status fight in reviewer error path (runner.go:164 and handleRoleLLMFailure) — "blocked" writes can be overwritten, re-enabling loops.
+- Missing claimer recovery for orphaned ready+worker_role tasks (claim.go:60) — plan Phase 2.3 not implemented.
+- Backfill script only blocks instead of repairing (scripts/backfill_orphaned_tasks.sh) — contradicts plan Phase 5.
+- Bare UpdateDoc + parallel reset paths bypassing central logic (multiple sites in runner.go + sweeps.go) — lost writes under contention.
+- Brittle string-based persistent error detection + magic caps (runner.go + llm/client.go) — easy to regress the fast-block path.
+- (Plus the sweeps unification and test gaps already noted in the phases above.)
+
+**Suggestions / nits** (important for long-term health):
+- Update this plan document with "Landed" vs. "Still open" (this edit does a first pass) and promote the missing unit test + doctor assertion.
+- Use errors.Is / typed sentinel instead of == for errSpawnGuardFired.
+- Thread structured logger through git helpers instead of global slog.
+- Add typed IsLLMConfigError helper and make reviewer cap configurable.
+
+All 11 issues are tracked in the review artifact. Addressing the top 3-4 bugs + the missing test will make the system robust against the original concurrent failure scenarios.
 
 ## Verification Checklist (after each phase)
 - `flume doctor --deep --logloom` passes with 0 "unknown-role" or legacy-404 suggestions.

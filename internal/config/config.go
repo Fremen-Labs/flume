@@ -22,6 +22,20 @@ import (
 	"time"
 )
 
+// configHTTPClient is a shared HTTP client for config bootstrap operations
+// (ES flume-settings and flume-llm-config fetches). It provides connection
+// pooling, idle timeouts, and TLS handshake bounds instead of relying on
+// the unbounded http.DefaultClient. Per-request context deadlines still apply.
+var configHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+		// ExpectContinueTimeout left at default (good for small config payloads)
+	},
+}
+
 // Config holds all Flume runtime configuration.
 // Mirrors Python's FlumeSettings(BaseSettings) from flume_secrets.py.
 type Config struct {
@@ -161,16 +175,25 @@ func (c *Config) OverlayFromEnv() {
 	if v := os.Getenv("DASHBOARD_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.DashboardPort = n
+		} else {
+			slog.Default().Debug("invalid DASHBOARD_PORT env value, ignoring",
+				slog.String("value", v), slog.String("error", err.Error()))
 		}
 	}
 	if v := os.Getenv("WORKER_MANAGER_POLL_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.WorkerManagerPollSeconds = n
+		} else {
+			slog.Default().Debug("invalid WORKER_MANAGER_POLL_SECONDS env value, ignoring",
+				slog.String("value", v), slog.String("error", err.Error()))
 		}
 	}
 	if v := os.Getenv("WORKERS_PER_ROLE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.WorkersPerRole = n
+		} else {
+			slog.Default().Debug("invalid WORKERS_PER_ROLE env value, ignoring",
+				slog.String("value", v), slog.String("error", err.Error()))
 		}
 	}
 	c.NativeMode = os.Getenv("FLUME_NATIVE_MODE") == "1"
@@ -202,7 +225,7 @@ func (c *Config) OverlayFromES(ctx context.Context, logger *slog.Logger) {
 		req.SetBasicAuth("elastic", password)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := configHTTPClient.Do(req)
 	if err != nil {
 		logger.Debug("ES config unreachable, using env defaults", slog.String("error", err.Error()))
 		return
@@ -262,6 +285,21 @@ func Load(ctx context.Context, logger *slog.Logger) *Config {
 		globalConfig = DefaultConfig()
 		globalConfig.OverlayFromES(ctx, logger)
 		globalConfig.OverlayFromEnv() // Env always wins
+
+		// Structured observability of the final resolved configuration.
+		// Critical for diagnosing worker/LLM connectivity issues (native vs container,
+		// gateway URL, ES reachability). Secrets are never logged.
+		if logger != nil {
+			logger.Info("config resolved",
+				slog.String("llm_provider", globalConfig.LLMProvider),
+				slog.String("llm_model", globalConfig.LLMModel),
+				slog.String("llm_base_url", globalConfig.LLMBaseURL),
+				slog.String("es_url", globalConfig.ESURL),
+				slog.String("openbao_addr", globalConfig.OpenBaoAddr),
+				slog.Bool("native_mode", globalConfig.NativeMode),
+				slog.Int("workers_per_role", globalConfig.WorkersPerRole),
+			)
+		}
 	})
 	return globalConfig
 }
@@ -298,6 +336,17 @@ func (c *Config) Reload(ctx context.Context, logger *slog.Logger) {
 	c.NativeMode = fresh.NativeMode
 
 	logger.Info("Configuration reloaded in-place from ES and Environment")
+
+	// Emit resolved config on reload as well (same fields as initial Load).
+	logger.Info("config resolved (after reload)",
+		slog.String("llm_provider", c.LLMProvider),
+		slog.String("llm_model", c.LLMModel),
+		slog.String("llm_base_url", c.LLMBaseURL),
+		slog.String("es_url", c.ESURL),
+		slog.String("openbao_addr", c.OpenBaoAddr),
+		slog.Bool("native_mode", c.NativeMode),
+		slog.Int("workers_per_role", c.WorkersPerRole),
+	)
 }
 
 // Reload re-reads global config. Returns the reloaded global config.

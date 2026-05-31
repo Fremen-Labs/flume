@@ -105,6 +105,14 @@ func GetActiveLLMModel(ctx context.Context, esURL, esAPIKey string, logger *slog
 		return model
 	}
 
+	// ES config was unavailable or had no LLM_MODEL (best-effort hot-reload path).
+	// This is normal in many environments; we fall back gracefully.
+	// Structured log for diagnostics (affects worker LLM behavior).
+	if logger != nil {
+		logger.Debug("LLM hot-reload config not found in ES, using env/default",
+			slog.String("es_url", esURL))
+	}
+
 	// Fall back to env var
 	if model := strings.TrimSpace(os.Getenv("LLM_MODEL")); model != "" {
 		return model
@@ -117,7 +125,7 @@ func GetActiveLLMModel(ctx context.Context, esURL, esAPIKey string, logger *slog
 // to prevent import cycles (config ← secrets → config).
 func loadLLMConfigFromES(ctx context.Context, esURL, esAPIKey string) map[string]string {
 	if esURL == "" {
-		return nil
+		return make(map[string]string)
 	}
 
 	url := fmt.Sprintf("%s/flume-llm-config/_doc/singleton", strings.TrimRight(esURL, "/"))
@@ -126,25 +134,25 @@ func loadLLMConfigFromES(ctx context.Context, esURL, esAPIKey string) map[string
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil
+		return make(map[string]string)
 	}
 	if esAPIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+esAPIKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := configHTTPClient.Do(req)
 	if err != nil {
-		return nil
+		return make(map[string]string)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil
+		return make(map[string]string)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil
+		return make(map[string]string)
 	}
 
 	var esDoc struct {
@@ -152,7 +160,7 @@ func loadLLMConfigFromES(ctx context.Context, esURL, esAPIKey string) map[string
 		Source map[string]interface{} `json:"_source"`
 	}
 	if err := json.Unmarshal(body, &esDoc); err != nil || !esDoc.Found {
-		return nil
+		return make(map[string]string)
 	}
 
 	result := make(map[string]string)
