@@ -397,6 +397,15 @@ func timeNowUnixMilli() int64 {
 	return time.Now().UnixMilli()
 }
 
+// withTimeout derives a child context with a reasonable deadline for dashboard operations.
+// This addresses reliable-go-systems context discipline for ES/LLM/git calls originating from APIs.
+func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = 15 * time.Second
+	}
+	return context.WithTimeout(parent, d)
+}
+
 // ─── Type aliases for request bodies ────────────────────────────────────────
 
 // TaskTransitionRequest is the request body for POST /api/tasks/{id}/transition.

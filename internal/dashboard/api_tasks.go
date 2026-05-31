@@ -118,45 +118,92 @@ type GuardedMutateOptions struct {
 }
 
 func (s *Server) guardedTaskMutator(ctx context.Context, esID string, src map[string]interface{}, targetStatus string, opts GuardedMutateOptions) error {
-	projectID := str(src["repo"]) // or "project_id" depending on mapping
+	taskID := str(src["id"])
+	projectID := str(src["repo"])
 	if projectID == "" {
 		projectID = str(src["project_id"])
 	}
 
-	// 1. Pause guard (re-uses the mechanism from claim/runner)
+	prevStatus := str(src["status"])
+
+	// 1. WorkPaused guard (defense in depth, matches runner/claimer)
 	if projectID != "" {
 		projDoc, _ := s.es.GetDoc(ctx, "flume-projects", projectID)
 		if projDoc != nil {
 			var proj ftypes.Project
 			if json.Unmarshal(projDoc, &proj) == nil && proj.WorkPaused {
-				reason := "mutation refused: project work is paused"
-				flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system", reason, map[string]any{"project": projectID})
+				reason := fmt.Sprintf("mutation %s -> %s refused: project %s is paused (WorkPaused emergency brake)", prevStatus, targetStatus, projectID)
+				flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, map[string]any{
+					"project":     projectID,
+					"prev_status": prevStatus,
+					"target":      targetStatus,
+				})
 				return fmt.Errorf("project paused")
 			}
 		}
 	}
 
-	prev := str(src["status"])
-
-	// 2. Evidence gate for Done (Phase 1)
+	// 2. Evidence gate for terminal states (Phase 1)
 	if targetStatus == "done" || targetStatus == "review-consensus" {
 		if opts.RequireEvidenceForDone && !opts.Evidence.ForceAudit && !hasAnyEvidence(opts.Evidence) {
-			reason := "mutation to done refused: insufficient evidence (thoughts, git, or review consensus required)"
-			flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system", reason, map[string]any{"target": targetStatus})
+			reason := "mutation to terminal state refused: insufficient evidence (thoughts, git commit, or review consensus required)"
+			flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, map[string]any{
+				"target":      targetStatus,
+				"prev_status": prevStatus,
+			})
 			if !ftypes.DefaultTaskStateMachine.ShadowMode {
 				return fmt.Errorf("evidence required for terminal state")
 			}
-			// shadow: log only
 		}
 	}
 
-	// 3. Perform the update (caller builds the doc)
-	// In real usage the caller would pass the delta doc here.
-	// For now this is a guard + logging skeleton that future refactors call.
+	// 3. Central state machine enforcement (PR2 + flume-go requirement)
+	ev := ftypes.Evidence{
+		ForceAudit:  opts.Evidence.ForceAudit,
+		AuditReason: opts.Evidence.AuditReason,
+	}
+	if err := ftypes.DefaultTaskStateMachine.EnforceWithEvidenceOrLog(
+		ftypes.TaskStatus(prevStatus),
+		ftypes.TaskStatus(targetStatus),
+		ev,
+		s.logger.Warn,
+	); err != nil && !ftypes.DefaultTaskStateMachine.ShadowMode {
+		return fmt.Errorf("invalid state transition: %w", err)
+	}
 
-	flumelogger.LogAgentReasoning(ctx, str(src["id"]), "system",
-		fmt.Sprintf("guarded mutation: %s -> %s", prev, targetStatus),
-		map[string]any{"evidence": opts.Evidence})
+	// 4. Build standard safe mutation document (clear worker, set queued state, touch timestamps)
+	now := nowISO()
+	doc := map[string]interface{}{
+		"status":       targetStatus,
+		"queue_state":  "queued",
+		"active_worker": nil,
+		"updated_at":   now,
+		"last_update":  now,
+	}
+
+	// Clear consecutive LLM failure counters on successful manual intervention
+	if targetStatus == "ready" || targetStatus == "review" {
+		doc["implementer_consecutive_llm_failures"] = 0
+		doc["reviewer_consecutive_llm_failures"] = 0
+	}
+
+	// Perform the update
+	if err := s.es.Post(ctx, fmt.Sprintf("agent-task-records/_update/%s", esID), map[string]interface{}{"doc": doc}); err != nil {
+		return fmt.Errorf("failed to apply guarded mutation: %w", err)
+	}
+
+	// 5. Always emit rich reasoning (core flume-go observability requirement)
+	reason := fmt.Sprintf("Guarded task mutation: %s -> %s", prevStatus, targetStatus)
+	meta := map[string]any{
+		"prev_status": prevStatus,
+		"target":      targetStatus,
+		"project":     projectID,
+		"evidence":    opts.Evidence,
+	}
+	if opts.AuditReason != "" {
+		meta["audit_reason"] = opts.AuditReason
+	}
+	flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, meta)
 
 	return nil
 }
@@ -598,34 +645,32 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 		autoRecovery = *req.AutoRecoveryPrompt
 	}
 
-	// Phase 1+ recovery + evidence path (highest-leverage for seamless queue under failure).
-	// Support ForceAudit/AuditReason for common recovery transitions (e.g. review -> blocked when LLM outage causes stuck review).
-	// Always emit rich LogAgentReasoning (populates execution_thoughts via bridge) + pause guard.
-	// Uses EnforceWithEvidenceOrLog (extends PR2 Enforce) for auditability; actual guardedTaskMutator mutation
-	// wiring is skeleton for follow-up refactor (see design doc residual risk table).
+	// Phase 1+: Route all mutations through the central guarded mutator (flume-go + reliable-go requirement).
+	// This ensures consistent WorkPaused check, evidence gates, state machine enforcement,
+	// and rich LogAgentReasoning on every transition.
 	ev := ftypes.Evidence{
 		ForceAudit:  req.ForceAudit,
 		AuditReason: strings.TrimSpace(req.AuditReason),
 	}
-	_ = ftypes.DefaultTaskStateMachine.EnforceWithEvidenceOrLog(ftypes.TaskStatus(prevStatus), ftypes.TaskStatus(status), ev, s.logger.Warn)
 
-	// Pause guard (defense-in-depth; matches guardedTaskMutator + runner paths). Fail closed for recovery safety.
-	projectID := str(src["repo"])
-	if projectID == "" {
-		projectID = str(src["project_id"])
+	opts := GuardedMutateOptions{
+		RequireEvidenceForDone: (status == "done" || status == "review-consensus"),
+		Evidence:               ev,
+		AuditReason:            req.AuditReason,
 	}
-	if projectID != "" {
-		if projDoc, _ := s.es.GetDoc(ctx, "flume-projects", projectID); projDoc != nil {
-			var proj ftypes.Project
-			if json.Unmarshal(projDoc, &proj) == nil && proj.WorkPaused {
-				reason := fmt.Sprintf("transition %s -> %s refused: project %s is paused (emergency stop)", prevStatus, status, projectID)
-				flumelogger.LogAgentReasoning(ctx, taskID, "system", reason, map[string]any{"project": projectID, "force_audit": req.ForceAudit})
-				writeError(w, http.StatusConflict, "project paused; transitions blocked")
-				return
-			}
+
+	if err := s.guardedTaskMutator(ctx, esID, src, status, opts); err != nil {
+		if strings.Contains(err.Error(), "paused") {
+			writeError(w, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "evidence") {
+			writeError(w, http.StatusConflict, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to apply guarded transition")
 		}
+		return
 	}
 
+	// Human instruction / recovery notes are still useful as agent_log entries
 	if instruction != "" {
 		_ = s.appendTaskAgentLogNote(ctx, esID, fmt.Sprintf("[Human guidance] %s", instruction))
 	} else if status == "ready" && prevStatus == "blocked" && autoRecovery {
@@ -634,53 +679,12 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 				"fix the root cause, run or add tests, and iterate until acceptance criteria are met.")
 	}
 
-	// Record audit/recovery reason explicitly (visible in history + thoughts via bridge).
 	if req.ForceAudit && req.AuditReason != "" {
 		auditNote := fmt.Sprintf("[Audit/Recovery by %s] %s (force_audit=true)", orStr(owner, "operator"), req.AuditReason)
 		_ = s.appendTaskAgentLogNote(ctx, esID, auditNote)
 	}
 
-	now := nowISO()
-
-	// Rich reasoning for every transition (fixes silent recovery paths observed in live rflow test).
-	// This ensures the task (incl. review/test children) has execution_thoughts for Evidence gates and UI popout.
-	reason := fmt.Sprintf("Task transitioned %s -> %s", prevStatus, status)
-	meta := map[string]any{
-		"prev_status": prevStatus,
-		"new_status":  status,
-		"owner":       owner,
-	}
-	if req.ForceAudit {
-		meta["force_audit"] = true
-		meta["audit_reason"] = req.AuditReason
-	}
-	if instruction != "" {
-		meta["instruction"] = instruction
-	}
-	flumelogger.LogAgentReasoning(ctx, taskID, orStr(owner, "system"), reason, meta)
-
-	doc := map[string]interface{}{
-		"status":       status,
-		"queue_state":  "queued",
-		"active_worker": nil,
-		"needs_human":  false,
-		"updated_at":   now,
-		"last_update":  now,
-		"implementer_consecutive_llm_failures": 0,
-	}
-	if owner != "" {
-		doc["owner"] = owner
-		doc["assigned_agent_role"] = owner
-	}
-
-	// PR 2 + Phase 1: Enforce already called above; write proceeds (shadow allows all audited cases).
-	if err := s.es.Post(ctx, fmt.Sprintf("agent-task-records/_update/%s", esID), map[string]interface{}{"doc": doc}); err != nil {
-		s.logger.Error("task transition: ES update failed", slog.String("error", err.Error()))
-		writeError(w, http.StatusInternalServerError, "failed to update task")
-		return
-	}
-
-	s.logger.Info("task transition",
+	s.logger.Info("task transition (via guarded mutator)",
 		slog.String("task_id", taskID),
 		slog.String("status", status),
 		slog.String("owner", owner),
@@ -998,28 +1002,19 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	esID, _, err := s.findTaskByLogicalID(ctx, req.TaskID)
-	if err != nil || esID == "" {
+	esID, src, err := s.findTaskByLogicalID(ctx, req.TaskID)
+	if err != nil || esID == "" || src == nil {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
 
-	now := nowISO()
-	doc := map[string]interface{}{
-		// PR 2: complete path uses EnforceTransition (central FSM)
-		"status":        "done",
-		"queue_state":   "completed",
-		"active_worker": nil,
-		"completed_at":  now,
-		"updated_at":    now,
-		"last_update":   now,
+	opts := GuardedMutateOptions{
+		RequireEvidenceForDone: true,
+		Evidence:               ftypes.Evidence{}, // caller can be extended later to pass evidence
 	}
 
-	// PR 2: 100% of status changes use central TaskStateMachine.EnforceTransition (shadow mode: violation logged for audit/metrics, write proceeds).
-	// PR2 Enforce (scope-adjusted; see design - call sites use local prev/target)
-
-	if err := s.es.Post(ctx, fmt.Sprintf("agent-task-records/_update/%s", esID), map[string]interface{}{"doc": doc}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to complete task")
+	if err := s.guardedTaskMutator(ctx, esID, src, "done", opts); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 

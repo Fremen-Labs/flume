@@ -5,8 +5,11 @@
 package dashboard
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
+
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // ─── GET /api/workflow/workers ───────────────────────────────────────────────
@@ -142,6 +145,11 @@ func (s *Server) handleWorkflowAgentsStop(w http.ResponseWriter, r *http.Request
 			pausedCount = 1
 			s.logger.Warn("EMERGENCY HALT: project paused (no new work will be claimed or spawned)",
 				slog.String("repo", repo))
+
+			// Rich reasoning for the critical "halt the swarm" action (flume-go requirement)
+			flumelogger.LogAgentReasoning(r.Context(), "system", "dashboard",
+				fmt.Sprintf("EMERGENCY HALT: WorkPaused set on project %s via /agents/stop", repo),
+				map[string]any{"repo": repo, "action": "agents_stop", "scope": "single"})
 		}
 	} else {
 		// Global halt: best-effort pause every project (for the "the whole swarm is out of control" case)
@@ -169,6 +177,11 @@ func (s *Server) handleWorkflowAgentsStop(w http.ResponseWriter, r *http.Request
 			}
 		}
 		s.logger.Warn("EMERGENCY GLOBAL HALT: attempted to pause all projects", slog.Int("paused", pausedCount))
+
+		// Rich reasoning for global halt (critical for diagnosing swarm explosions)
+		flumelogger.LogAgentReasoning(r.Context(), "system", "dashboard",
+			"EMERGENCY GLOBAL HALT: WorkPaused set on multiple projects via /agents/stop (no repo specified)",
+			map[string]any{"action": "agents_stop", "scope": "global", "paused_count": pausedCount})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
