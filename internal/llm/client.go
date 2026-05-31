@@ -34,6 +34,12 @@ import (
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
+// ErrPersistentConfig is a sentinel for unrecoverable LLM/gateway configuration errors
+// (e.g. 404 on legacy path, unreachable gateway with no Ollama fallback).
+// Callers use errors.Is to trigger fast-fail to blocked instead of retry storms.
+// Per reliable-go-systems SKILL (explicit typed errors, no brittle strings).
+var ErrPersistentConfig = fmt.Errorf("llm: persistent config error (will not self-heal)")
+
 // Client is the Flume LLM client.
 // Routes traffic through the gateway; falls back to direct provider calls.
 type Client struct {
@@ -547,8 +553,8 @@ func (c *Client) parseToolsResponse(raw map[string]interface{}) (*ChatToolsRespo
 func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	baseURL := c.resolveOllamaBaseURL()
 	if baseURL == "" {
-		return nil, fmt.Errorf("llm: gateway is unreachable and no Ollama base URL is configured; " +
-			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway")
+		return nil, fmt.Errorf("%w: gateway is unreachable and no Ollama base URL is configured; "+
+			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway", ErrPersistentConfig)
 	}
 
 	model := req.Model
@@ -651,8 +657,8 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) (*ChatToolsResponse, error) {
 	baseURL := c.resolveOllamaBaseURL()
 	if baseURL == "" {
-		return nil, fmt.Errorf("llm: gateway is unreachable and no Ollama base URL is configured; " +
-			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway")
+		return nil, fmt.Errorf("%w: gateway is unreachable and no Ollama base URL is configured; "+
+			"set LLM_BASE_URL or LOCAL_OLLAMA_BASE_URL, or ensure the gateway is running: docker compose up gateway", ErrPersistentConfig)
 	}
 
 	model := req.Model

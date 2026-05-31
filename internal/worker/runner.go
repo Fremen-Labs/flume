@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +29,73 @@ import (
 // exist for this parent. The caller uses this to distinguish "guard fired" from
 // "actual spawn failure" and can skip re-review instead of looping.
 var errSpawnGuardFired = fmt.Errorf("spawn guard: reviewer/tester children already exist")
+
+// updateTaskLeaseState is the single choke point for mutating the core lease
+// columns of the Work Queue (status, active_worker, queue_state, claimed_at,
+// error_message, etc.).
+//
+// It enforces the TaskStateMachine, emits the mandatory dual Log* observability
+// required by the flume-go SKILL, and prefers OCC when seq/prim are supplied.
+//
+// This implements the "Cross-cutting Writer Rule" from the Phase 3 column
+// design document and directly mitigates bare UpdateDoc races on contended
+// claim/lease state (a major contributor to thundering herd and status fights
+// identified in the 2026-05-30 review).
+//
+// All future mutations of these columns (in runner, sweeps, claimer, and
+// dashboard paths where possible) should route through this helper.
+func updateTaskLeaseState(
+	ctx context.Context,
+	esClient *es.Client,
+	logger *slog.Logger,
+	taskID string,
+	update map[string]interface{},
+	seq, prim int64,
+	prevStatus ftypes.TaskStatus,
+	targetStatus ftypes.TaskStatus,
+	workerRole string,
+	reason string,
+) error {
+	// 1. State machine enforcement (shadow mode supported)
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(prevStatus, targetStatus, logger.Warn)
+
+	// 2. Write with OCC preference when we have seq/prim from a prior search
+	var err error
+	if seq > 0 && prim > 0 {
+		err = esClient.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seq, prim)
+	} else {
+		err = esClient.UpdateDoc(ctx, "agent-task-records", taskID, update)
+	}
+
+	if err != nil {
+		logger.Warn("lease state update failed",
+			slog.String("task_id", taskID),
+			slog.String("target_status", string(targetStatus)),
+			slog.String("error", err.Error()),
+			slog.String("reason", reason))
+		return err
+	}
+
+	// 3. Mandatory rich observability for popout + Logloom (flume-go SKILL)
+	flumelogger.LogStateTransition(ctx, taskID, string(prevStatus), string(targetStatus), reason)
+
+	flumelogger.LogAgentReasoning(ctx, taskID, workerRole, reason, map[string]any{
+		"previous_status": string(prevStatus),
+		"target_status":   string(targetStatus),
+		"worker_role":     workerRole,
+		"reason":          reason,
+		"columns_mutated": "status,active_worker,queue_state",
+	})
+
+	logger.Info("lease state updated",
+		slog.String("task_id", taskID),
+		slog.String("from", string(prevStatus)),
+		slog.String("to", string(targetStatus)),
+		slog.String("role", workerRole),
+		slog.String("reason", reason))
+
+	return nil
+}
 
 // Runner contains the core agent execution loop.
 // Derived from Python: worker_handlers.py (2410 LOC, 112 AST nodes) —
@@ -118,23 +186,33 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 		// Detect persistent LLM config errors (404, DNS failures) that won't self-heal.
 		// Escalate immediately to "blocked" instead of allowing infinite retry loops
 		// (the dominant failure mode in the post-migration field test).
+		// Per reliable-go-systems + flume-go SKILLs: use typed sentinel (ErrPersistentConfig)
+		// + errors.Is instead of brittle strings (see llm/client.go).
 		errStr := err.Error()
-		isPersistentConfigError := strings.Contains(errStr, "404") ||
-			strings.Contains(errStr, "no such host") ||
-			strings.Contains(errStr, "gateway is unreachable and no Ollama base URL")
+		isPersistentConfigError := errors.Is(err, llm.ErrPersistentConfig) ||
+			strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "no such host")
 
 		if isPersistentConfigError {
 			reason := fmt.Sprintf("Worker %s (role=%s) hit persistent config error (will not self-heal): %s",
 				worker.Name, worker.Role, errStr)
-			flumelogger.LogAgentReasoning(ctx, taskID, worker.Role, reason, map[string]any{
-				"error_class": "persistent_config", "action": "blocked",
-			})
-			flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "blocked", reason)
-			_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, map[string]interface{}{
-				"status": "blocked", "error_message": reason,
-				"active_worker": nil, "queue_state": "available",
-				"updated_at": time.Now().UTC().Format(time.RFC3339),
-			})
+
+			update := map[string]interface{}{
+				"status":        "blocked",
+				"error_message": reason,
+				"active_worker": nil,
+				"queue_state":   "available",
+				"updated_at":    time.Now().UTC().Format(time.RFC3339),
+			}
+
+			// Use the central lease state helper (Phase 3a-2).
+			// This removes a bare UpdateDoc on the critical lease columns (status/active_worker/queue_state)
+			// and guarantees Enforce + dual Log* emission.
+			_ = updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+				0, 0, // no OCC seq/prim available in this error path yet
+				task.Status, ftypes.TaskStatusBlocked,
+				worker.Role, reason)
+
 			return err
 		}
 
@@ -929,11 +1007,15 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 			cloneURL = git.EmbedCredentials(ctx, project.RepoURL, "")
 		}
 
-		// Execute git clone
-		cmd := exec.CommandContext(ctx, "git", "clone", "--", cloneURL, repoPath)
+		// Execute git clone with explicit long timeout (GAP-1)
+		cloneTimeout := 120 * time.Second // clones can be slow for large repos
+		cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(cloneCtx, "git", "clone", "--", cloneURL, repoPath)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			_ = os.RemoveAll(repoPath)
-			return "", "", fmt.Errorf("git clone failed: %s: %w", string(output), err)
+			return "", "", fmt.Errorf("git clone failed after %v: %s: %w", cloneTimeout, string(output), err)
 		}
 		r.logger.Info("EnsureTaskBranch: cloned successfully", slog.String("project_id", project.ID))
 	}
@@ -952,9 +1034,13 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 // AutoCommitAndPush stages, commits, and pushes changes.
 // Derived from Python: auto_commit_and_push() (L1918-2023, 11 parents, 3 children)
 func (r *Runner) AutoCommitAndPush(ctx context.Context, repoPath, branch, message, taskID string) (string, error) {
-	// Check if there are changes
-	out, err := gitCmd(repoPath, "status", "--porcelain")
+	// Check if there are changes (short timeout)
+	out, err := gitCmdWithTimeout(repoPath, 15*time.Second, "status", "--porcelain")
 	if err != nil {
+		class := classifyGitError(err, out)
+		r.logger.Warn("auto_commit: git status failed",
+			slog.String("task_id", taskID),
+			slog.String("classified_as", class))
 		return "", fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(out) == "" {
@@ -968,32 +1054,41 @@ func (r *Runner) AutoCommitAndPush(ctx context.Context, repoPath, branch, messag
 		return "", fmt.Errorf("git add: %w", err)
 	}
 
-	// Commit
-	if _, err := gitCmd(repoPath, "commit", "-m", message); err != nil {
+	// Commit (with classification on failure)
+	if out, err := gitCmdWithTimeout(repoPath, 30*time.Second, "commit", "-m", message); err != nil {
+		class := classifyGitError(err, out)
+		r.logger.Error("auto_commit: commit failed",
+			slog.String("task_id", taskID),
+			slog.String("classified_as", class),
+			slog.String("error", err.Error()))
 		return "", fmt.Errorf("git commit: %w", err)
 	}
 
-	// Rebase before push
-	if _, err := gitCmd(repoPath, "pull", "--rebase", "origin", branch); err != nil {
+	// Rebase before push (use longer timeout + classification)
+	if _, err := gitCmdWithTimeout(repoPath, 60*time.Second, "pull", "--rebase", "origin", branch); err != nil {
+		class := classifyGitError(err, "")
 		// Check for rebase conflict
-		if strings.Contains(err.Error(), "CONFLICT") || strings.Contains(err.Error(), "conflict") {
+		if strings.Contains(err.Error(), "CONFLICT") || strings.Contains(err.Error(), "conflict") || class == "conflict" {
 			r.logger.Error("auto_commit: rebase conflict detected",
 				slog.String("task_id", taskID),
 				slog.String("branch", branch))
-			_, _ = gitCmd(repoPath, "rebase", "--abort")
+			_, _ = gitCmdWithTimeout(repoPath, 15*time.Second, "rebase", "--abort")
 			return "", fmt.Errorf("rebase conflict on %s", branch)
 		}
 		r.logger.Warn("auto_commit: pre-push rebase error",
 			slog.String("task_id", taskID),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.String("classified_as", class))
 	}
 
-	// Push
-	if _, err := gitCmd(repoPath, "push", "origin", branch); err != nil {
+	// Push (explicit timeout)
+	if _, err := gitCmdWithTimeout(repoPath, 60*time.Second, "push", "origin", branch); err != nil {
+		class := classifyGitError(err, "")
 		r.logger.Error("auto_commit: push failed",
 			slog.String("task_id", taskID),
 			slog.String("branch", branch),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.String("classified_as", class))
 		return "", fmt.Errorf("git push: %w", err)
 	}
 
@@ -1079,27 +1174,19 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// PR2 Enforce
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(currentStatus, ftypes.TaskStatus(targetStatus), r.logger.Warn)
-	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
+	reason := fmt.Sprintf("stale claim cleared after worker crash or LLM/gateway failure (reset to %s for re-claim)", targetStatus)
+
+	// Phase 3a-2: Route through the central lease state helper.
+	// This guarantees consistent Enforce + dual Log* + reasoning on all claim/lease column mutations.
+	// (Previously this path had its own direct UpdateDoc + duplicated logging.)
+	if err := updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+		0, 0, // no OCC information at reset time in this path
+		currentStatus, ftypes.TaskStatus(targetStatus),
+		workerRole, reason); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
 			slog.String("worker_role", workerRole),
 			slog.String("reset_to", targetStatus))
-
-		// Centralized structured logging for the agent reasoning popout + Logloom graphs.
-		// This is the exact path exercised on every LLM/gateway crash during the local-mesh stress test.
-		flumelogger.LogStateTransition(ctx, taskID, string(currentStatus), targetStatus,
-			"stale claim cleared after worker crash or LLM/gateway failure (reset for re-claim)")
-		flumelogger.LogAgentReasoning(ctx, taskID, workerRole,
-			fmt.Sprintf("Worker (role=%s) crashed or LLM call failed; stale claim cleared and task reset to %s to allow recovery.",
-				workerRole, targetStatus),
-			map[string]any{
-				"previous_status": string(currentStatus),
-				"reset_to":        targetStatus,
-				"worker_role":     workerRole,
-				"reason":          "worker_crash_or_llm_failure",
-			})
 	}
 }
 
@@ -1127,10 +1214,52 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 // ─── Git Helpers ────────────────────────────────────────────────────────────
 
 func gitCmd(repoPath string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	// Default safe timeout for most git operations (status, diff, symbolic-ref, etc.)
+	return gitCmdWithTimeout(repoPath, 30*time.Second, args...)
+}
+
+// gitCmdWithTimeout executes a git command with an explicit timeout.
+// This addresses GAP-1 (per-command git timeouts) from the Python→Go migration review.
+func gitCmdWithTimeout(repoPath string, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("git %s timed out after %v: %w", strings.Join(args, " "), timeout, err)
+	}
 	return string(out), err
+}
+
+// classifyGitError provides basic classification of common git exit 128 / error patterns.
+// This addresses GAP-2 (error classification for exit code 128).
+func classifyGitError(err error, output string) string {
+	if err == nil {
+		return ""
+	}
+	combined := strings.ToLower(output + " " + err.Error())
+
+	switch {
+	case strings.Contains(combined, "authentication failed"),
+		strings.Contains(combined, "could not read username"),
+		strings.Contains(combined, "permission denied (publickey)"):
+		return "auth"
+	case strings.Contains(combined, "index.lock"):
+		return "lock"
+	case strings.Contains(combined, "conflict"):
+		return "conflict"
+	case strings.Contains(combined, "not a git repository"):
+		return "not_repo"
+	case strings.Contains(combined, "does not match any"):
+		return "branch_not_found"
+	case strings.Contains(combined, "network") || strings.Contains(combined, "connection") || strings.Contains(combined, "timeout"):
+		return "network"
+	default:
+		return "unknown"
+	}
 }
 
 func gitCheckoutBranch(repoPath, branch string) error {
@@ -1140,7 +1269,7 @@ func gitCheckoutBranch(repoPath, branch string) error {
 
 	// Always try to refresh refs first — this prevents the "main is not a commit" and similar races
 	// after crashes, resets, or dynamic clones that left the local state inconsistent.
-	_, _ = gitCmd(repoPath, "fetch", "--all", "--prune", "--quiet")
+	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "fetch", "--all", "--prune", "--quiet")
 
 	// Try checkout existing branch (fast path)
 	if _, err := gitCmd(repoPath, "checkout", branch); err == nil {
@@ -1150,16 +1279,16 @@ func gitCheckoutBranch(repoPath, branch string) error {
 		defaultBranch, _ := resolveDefaultBranch(repoPath)
 
 		// Hard reset + clean to get to a known clean state on the default branch
-		_, _ = gitCmd(repoPath, "checkout", "-B", defaultBranch, "origin/"+defaultBranch) // force track origin
-		_, _ = gitCmd(repoPath, "reset", "--hard", "origin/"+defaultBranch)
-		_, _ = gitCmd(repoPath, "clean", "-fd")
+		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, "origin/"+defaultBranch) // force track origin
+		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "reset", "--hard", "origin/"+defaultBranch)
+		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "clean", "-fd")
 
 		// Now attempt the feature branch creation from a known-good base.
 		// Use -B (force-create) so an existing branch from a prior failed attempt
 		// is reset to the clean base instead of causing "branch already exists" errors.
-		if out2, err2 := gitCmd(repoPath, "checkout", "-B", branch, "origin/"+defaultBranch); err2 != nil {
+		if out2, err2 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch, "origin/"+defaultBranch); err2 != nil {
 			// Last resort: try creating from local HEAD if origin ref was also bad
-			if out3, err3 := gitCmd(repoPath, "checkout", "-B", branch); err3 != nil {
+			if out3, err3 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch); err3 != nil {
 				return fmt.Errorf("git checkout branch %s failed after recovery. Existing: %s (%v). From origin/%s: %s (%v). Last resort: %s (%v)",
 					branch, strings.TrimSpace(string(err.Error())), err, defaultBranch, strings.TrimSpace(out2), err2, strings.TrimSpace(out3), err3)
 			}
