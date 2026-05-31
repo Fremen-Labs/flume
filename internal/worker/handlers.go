@@ -2,10 +2,16 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
+	"github.com/Fremen-Labs/flume/internal/es"
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -281,6 +287,40 @@ func NewToolRegistry(logger *slog.Logger) *ToolRegistry {
 	}
 }
 
+// NewToolRegistryWithElastro is the Phase 3.1 factory.
+// It registers:
+//   - elastro_query_ast  → uses the Elastro CLI (RAG over ingested codebase)
+//   - logloom_ast_query  → direct queries against Logloom indices in ES
+//
+// This matches the pre-migration architecture the user described:
+//   - Use Elastro (CLI) for high-quality RAG/codebase understanding.
+//   - Use direct ES (via this tool) for Logloom AST/call-graph data.
+func NewToolRegistryWithElastro(esClient *es.Client, logger *slog.Logger) *ToolRegistry {
+	reg := NewToolRegistry(logger)
+
+	// Elastro RAG tool (preferred for semantic + structural codebase queries)
+	elastroTool := NewElastroASTQueryExecutor(logger)
+	reg.Register(elastroTool)
+	if logger != nil {
+		logger.Info("ToolRegistry: registered elastro_query_ast (uses external Elastro CLI)")
+	}
+
+	// Logloom tool (for direct AST / enrichment / call-graph queries)
+	if esClient != nil {
+		logloomTool := NewLogloomASTQueryExecutor(esClient, logger)
+		reg.Register(logloomTool)
+		if logger != nil {
+			logger.Info("ToolRegistry: registered logloom_ast_query (direct ES on Logloom indices)")
+		}
+	} else {
+		if logger != nil {
+			logger.Warn("ToolRegistry: logloom_ast_query not registered (no ES client)")
+		}
+	}
+
+	return reg
+}
+
 // Register adds a tool executor.
 func (r *ToolRegistry) Register(t ToolExecutor) {
 	r.tools[t.Name()] = t
@@ -304,4 +344,201 @@ func ToolResultModifiedRepo(toolName, result string) bool {
 	default:
 		return false
 	}
+}
+
+// ─── Elastro RAG Tool (preferred way for codebase semantic/structural queries) ──
+
+// ElastroASTQueryExecutor implements the elastro_query_ast tool by shelling out
+// to the Elastro CLI (the official way to query the RAG data of ingested codebases).
+//
+// Per project lifecycle:
+//   - At repo onboarding: `elastro rag ingest <path> -i flume-elastro-graph` (already done in api_projects.go)
+//   - After code changes in a task: agents (or post-task) should call `elastro rag update`
+//   - For queries: agents MUST use this tool (which invokes Elastro) rather than raw ES queries
+//     on the graph index. This gives the same high-quality retrieval the Python agents had.
+//
+// Logloom indices are queried directly via the ES client (see LogloomASTQueryExecutor below).
+//
+// This restores the exact pre-migration capability where implementers were required
+// to call elastro_query_ast before editing code.
+type ElastroASTQueryExecutor struct {
+	logger *slog.Logger
+}
+
+func NewElastroASTQueryExecutor(logger *slog.Logger) *ElastroASTQueryExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ElastroASTQueryExecutor{
+		logger: logger.With(slog.String("tool", "elastro_query_ast")),
+	}
+}
+
+func (e *ElastroASTQueryExecutor) Name() string { return "elastro_query_ast" }
+
+func (e *ElastroASTQueryExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	start := time.Now()
+
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return "", fmt.Errorf("elastro_query_ast: 'query' argument is required")
+	}
+	targetPath := repoPath
+	if p, ok := args["target_path"].(string); ok && p != "" {
+		targetPath = p
+	}
+
+	elastroBin := findElastroBinary()
+	if elastroBin == "" {
+		return "", fmt.Errorf("elastro binary not found (checked PATH and /opt/venv/bin/elastro)")
+	}
+
+	// Elastro RAG query command. Adjust flags as the Elastro CLI evolves.
+	// Typical: elastro rag query "<question>" --index flume-elastro-graph --path <repo>
+	cmd := exec.CommandContext(ctx, elastroBin, "rag", "query", query,
+		"--index", "flume-elastro-graph",
+		"--path", targetPath,
+	)
+	cmd.Env = os.Environ()
+
+	// Pass ES connection info if available (same pattern as ingest in api_projects.go)
+	// This allows the Elastro CLI to talk to the correct cluster.
+	if esURL := os.Getenv("ES_URL"); esURL != "" {
+		cmd.Env = append(cmd.Env,
+			"ELASTIC_URL="+esURL,
+			"ELASTIC_ELASTICSEARCH_HOSTS="+esURL,
+			"ELASTIC_ELASTICSEARCH_VERIFY_CERTS=false",
+			"ELASTIC_VERIFY_CERTS=false",
+		)
+	}
+	if apiKey := os.Getenv("ES_API_KEY"); apiKey != "" {
+		cmd.Env = append(cmd.Env,
+			"ELASTIC_ELASTICSEARCH_AUTH_API_KEY="+apiKey,
+			"ELASTIC_ELASTICSEARCH_AUTH_TYPE=api_key",
+		)
+	}
+
+	output, err := cmd.CombinedOutput()
+	duration := time.Since(start)
+
+	flumelogger.LogAgentReasoning(ctx, "", "implementer",
+		fmt.Sprintf("Called elastro rag query (took %s)", duration),
+		map[string]any{
+			"tool":        "elastro_query_ast",
+			"query":       query,
+			"target_path": targetPath,
+			"bin":         elastroBin,
+			"duration_ms": duration.Milliseconds(),
+			"phase":       "tool_execution",
+		})
+
+	if err != nil {
+		return "", fmt.Errorf("elastro rag query failed: %w (output: %s)", err, string(output))
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "" {
+		result = fmt.Sprintf("No relevant code found in the RAG index for query: %s", query)
+	}
+
+	return result, nil
+}
+
+// findElastroBinary mirrors the logic used during project ingestion.
+func findElastroBinary() string {
+	if resolved, err := exec.LookPath("elastro"); err == nil {
+		return resolved
+	}
+	if _, err := os.Stat("/opt/venv/bin/elastro"); err == nil {
+		return "/opt/venv/bin/elastro"
+	}
+	return ""
+}
+
+// ─── Logloom AST Query Tool (direct ES queries on Logloom indices) ───────────
+
+// LogloomASTQueryExecutor lets agents query the Logloom AST / enrichment indices
+// directly in Elasticsearch. This is complementary to Elastro RAG.
+//
+// Use this for structural / call-graph questions ("find all callers of X",
+// "definition of Y in module Z", etc.).
+//
+// Indices typically involved: flume-logloom-ast, flume-logloom-enrichment, etc.
+// (populated by logloom build + ingest at project creation time).
+type LogloomASTQueryExecutor struct {
+	es     *es.Client
+	logger *slog.Logger
+}
+
+func NewLogloomASTQueryExecutor(esClient *es.Client, logger *slog.Logger) *LogloomASTQueryExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &LogloomASTQueryExecutor{
+		es:     esClient,
+		logger: logger.With(slog.String("tool", "logloom_ast_query")),
+	}
+}
+
+func (e *LogloomASTQueryExecutor) Name() string { return "logloom_ast_query" }
+
+func (e *LogloomASTQueryExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	start := time.Now()
+
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return "", fmt.Errorf("logloom_ast_query: 'query' is required")
+	}
+
+	// Query the main Logloom enrichment index (or ast index). Adjust as needed.
+	// This uses the same ES client the rest of the system uses.
+	esQuery := map[string]interface{}{
+		"query": map[string]interface{}{
+			"multi_match": map[string]interface{}{
+				"query":  query,
+				"fields": []string{"logloom.message_template^2", "logloom.function", "logloom.file", "content"},
+			},
+		},
+		"size": 15,
+	}
+
+	hits, err := e.es.Search(ctx, "flume-logloom-enrichment", esQuery, 15)
+	if err != nil {
+		// Fallback to the AST index if enrichment isn't present
+		hits, err = e.es.Search(ctx, "flume-logloom-ast", esQuery, 15)
+		if err != nil {
+			return "", fmt.Errorf("logloom query failed on both enrichment and ast indices: %w", err)
+		}
+	}
+
+	duration := time.Since(start)
+
+	flumelogger.LogAgentReasoning(ctx, "", "implementer",
+		fmt.Sprintf("logloom_ast_query returned %d hits (took %s)", len(hits.Hits), duration),
+		map[string]any{
+			"tool":        "logloom_ast_query",
+			"query":       query,
+			"hit_count":   len(hits.Hits),
+			"duration_ms": duration.Milliseconds(),
+			"phase":       "tool_execution",
+		})
+
+	if len(hits.Hits) == 0 {
+		return fmt.Sprintf("Logloom AST search for %q: no structural matches.", query), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Logloom structural results for %q:\n", query))
+
+	for i, raw := range hits.Hits {
+		if i >= 10 {
+			sb.WriteString("... (truncated)\n")
+			break
+		}
+		var doc map[string]interface{}
+		_ = json.Unmarshal(raw, &doc)
+		sb.WriteString(fmt.Sprintf("- %v\n", doc))
+	}
+
+	return sb.String(), nil
 }

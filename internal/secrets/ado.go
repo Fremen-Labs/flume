@@ -96,6 +96,16 @@ func (s *ADOTokenStore) GetActiveTokenPlain(ctx context.Context) string {
 			continue
 		}
 		token := strings.TrimSpace(c.Token)
+
+		// Hard safety: never return a raw secret that somehow came from ES.
+		// The contract is: ES may only contain the OpenbaoMask (or legacy "***").
+		// Real secrets must come from OpenBao.
+		if token != "" && token != OpenbaoMask && token != "***" && token != "***OPENBAO_DELEGATED***" {
+			s.logger.Error("SECURITY: raw secret value detected in ES document for ADO token — refusing to use it. This violates the ES-metadata-only contract.",
+				slog.String("token_id", aid))
+			return ""
+		}
+
 		if token == OpenbaoMask && s.bao != nil {
 			baoData, err := s.bao.KVGet(ctx, fmt.Sprintf("flume/ado_tokens/%s", aid))
 			if err == nil && baoData != nil {

@@ -122,7 +122,7 @@ func NewRunner(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger) 
 		llm:      llmClient,
 		logger:   logger.With(slog.String("component", "runner")),
 		registry: NewProviderRegistry(logger),
-		tools:    NewToolRegistry(logger),
+		tools:    NewToolRegistryWithElastro(esClient, logger), // Phase 3.1: first real code-intelligence tool wired
 	}
 }
 
@@ -277,12 +277,73 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		fmt.Sprintf("Branch ready: %s. Executing agent loop against repository.", branch),
 		map[string]any{"phase": "branch_ready", "branch": branch, "repo_path": repoPath})
 
-	// 2. Build LLM context and execute agent loop
-	// (This will be fully fleshed out when internal/llm is implemented in Phase 3)
-	r.logger.Info("implementer: executing agent loop",
+	// Phase 3.1: Minimal multi-turn skeleton demonstrating correct tool usage.
+	//
+	// Usage guidelines (documented for both humans and future LLM agents):
+	//   - Use "elastro_query_ast" (via the Elastro CLI) for semantic/RAG understanding
+	//     of the *current state of the codebase*. This is the primary tool for
+	//     "what does this function do?", "where is X implemented?", etc.
+	//   - Use "logloom_ast_query" (direct ES) when you need precise structural /
+	//     call-graph information ("who calls this?", "definition site of Y", etc.).
+	//   - After making code changes in a task, the implementer (or post-task process)
+	//     should eventually trigger `elastro rag update` so the RAG index reflects
+	//     the new code. Logloom re-ingest is also recommended on significant changes.
+	//
+	// This skeleton shows one proper first action: query via Elastro RAG.
+	r.logger.Info("implementer: executing agent loop (Phase 3.1 skeleton with correct tool usage)",
 		slog.String("task_id", task.ID),
 		slog.String("repo_path", repoPath),
 		slog.String("branch", branch))
+
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		"Beginning codebase investigation using Elastro RAG (preferred for semantic understanding of ingested code)",
+		map[string]any{
+			"phase":     "agent_loop_start",
+			"objective": task.Description,
+			"guidance":  "Prefer elastro_query_ast for RAG; use logloom_ast_query for precise call-graph/structural data",
+		})
+
+	// First action: use the Elastro RAG tool (the correct pre-migration pattern)
+	elastroResult, elastroErr := r.tools.Execute(ctx, "elastro_query_ast", map[string]interface{}{
+		"query":       task.Title + ". " + task.Description,
+		"target_path": repoPath,
+	}, repoPath)
+
+	if elastroErr != nil {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("elastro_query_ast failed: %v", elastroErr),
+			map[string]any{"phase": "tool_error", "tool": "elastro_query_ast", "error": elastroErr.Error()})
+	} else {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			"Received codebase context from Elastro RAG tool",
+			map[string]any{
+				"phase":          "tool_result",
+				"tool":           "elastro_query_ast",
+				"result_preview": truncateForLog(elastroResult, 400),
+			})
+	}
+
+	// Optional second action in skeleton: also query Logloom for structural info
+	if r.tools != nil {
+		logloomResult, logloomErr := r.tools.Execute(ctx, "logloom_ast_query", map[string]interface{}{
+			"query": task.Description,
+		}, repoPath)
+
+		if logloomErr == nil {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+				"Received structural/call-graph context from Logloom indices",
+				map[string]any{
+					"phase":          "tool_result",
+					"tool":           "logloom_ast_query",
+					"result_preview": truncateForLog(logloomResult, 300),
+				})
+		}
+	}
+
+	// End of minimal skeleton for this slice.
+	// In the next slice we will feed these tool results into the LLM and allow
+	// it to request additional tools (read/write file, run shell, etc.) and
+	// eventually emit implementation_complete.
 
 	// 3. Auto-commit and push changes
 	commitSHA, err := r.AutoCommitAndPush(ctx, repoPath, branch,
@@ -314,6 +375,14 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		Success:    true,
 		NextStatus: ftypes.TaskStatusReview,
 	}, nil
+}
+
+// truncateForLog is a tiny helper for safe reasoning payloads (Phase 3.1).
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }
 
 // handleReviewer runs the reviewer agent.
@@ -1005,6 +1074,30 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 		if isRemote {
 			cloneURL = git.EmbedCredentials(ctx, project.RepoURL, "")
+
+			// Explicit validation + reasoning for OpenBao credential flow (user request).
+			// If this is still a bare URL for a remote repo, credential resolution from
+			// OpenBao (via ES metadata + KV or direct flume/keys) failed.
+			if cloneURL == project.RepoURL {
+				repoType := git.DetectRepoType(project.RepoURL)
+				reason := fmt.Sprintf(
+					"Worker could not obtain credentials from OpenBao for repo type '%s'. "+
+						"Clone/checkout will likely fail with auth or ref errors. "+
+						"Verify: Settings → Repositories has an active PAT for this provider, "+
+						"OpenBao 'flume/keys' or per-token paths are populated, and OPENBAO_TOKEN is available to workers.",
+					repoType,
+				)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "system", reason, map[string]any{
+					"repo":            task.ProjectID,
+					"repo_url":        git.StripCredentials(project.RepoURL),
+					"detected_type":   repoType,
+					"credential_path": "OpenBao (ES-backed ADO/GH stores or flume/keys)",
+				})
+				r.logger.Error("EnsureTaskBranch: no OpenBao credentials resolved",
+					slog.String("task_id", task.ID),
+					slog.String("repo_type", repoType),
+					slog.String("repo", task.ProjectID))
+			}
 		}
 
 		// Execute git clone with explicit long timeout (GAP-1)
@@ -1025,7 +1118,25 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 	// Create/checkout branch
 	if err := gitCheckoutBranch(repoPath, branch); err != nil {
-		return "", "", fmt.Errorf("checkout branch %s: %w", branch, err)
+		class := classifyGitError(err, "")
+		r.logger.Error("EnsureTaskBranch: git checkout failed",
+			slog.String("task_id", task.ID),
+			slog.String("branch", branch),
+			slog.String("classified_error", class),
+			slog.String("error", err.Error()))
+
+		// Rich reasoning for the agent popout / Logloom (critical for diagnosing these exact post-migration git storms)
+		flumelogger.LogAgentReasoning(context.Background(), task.ID, "system",
+			fmt.Sprintf("Failed to set up task branch %s (classified: %s): %v", branch, class, err),
+			map[string]any{
+				"branch":          branch,
+				"repo":            task.ProjectID,
+				"classified":      class,
+				"error":           err.Error(),
+				"recovery_action": "see gitCheckoutBranch + classifyGitError for details",
+			})
+
+		return "", "", fmt.Errorf("checkout branch %s (classified %s): %w", branch, class, err)
 	}
 
 	return repoPath, branch, nil
@@ -1257,6 +1368,17 @@ func classifyGitError(err error, output string) string {
 		return "branch_not_found"
 	case strings.Contains(combined, "network") || strings.Contains(combined, "connection") || strings.Contains(combined, "timeout"):
 		return "network"
+	// New cases for the exact failures seen post-migration (origin/main not present, unborn branches)
+	case strings.Contains(combined, "not a commit"),
+		strings.Contains(combined, "could not resolve"),
+		strings.Contains(combined, "ref does not exist"),
+		strings.Contains(combined, "unrelated histories"):
+		return "missing_ref"
+	case strings.Contains(combined, "yet to be born"),
+		strings.Contains(combined, "unborn"):
+		return "unborn_branch"
+	case strings.Contains(combined, "128"): // generic git fatal often means the above
+		return "git_fatal_128"
 	default:
 		return "unknown"
 	}
@@ -1267,33 +1389,68 @@ func gitCheckoutBranch(repoPath, branch string) error {
 	// This prevents the "Unable to create index.lock: File exists" error.
 	cleanStaleLocks(repoPath)
 
-	// Always try to refresh refs first — this prevents the "main is not a commit" and similar races
-	// after crashes, resets, or dynamic clones that left the local state inconsistent.
-	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "fetch", "--all", "--prune", "--quiet")
+	// Robust fetch (not quiet) so we can classify failures. This is the #1 source of
+	// "origin/main is not a commit" and "branch yet to be born" after crashes/resets.
+	fetchOut, fetchErr := gitCmdWithTimeout(repoPath, 60*time.Second, "fetch", "--all", "--prune")
+	if fetchErr != nil {
+		class := classifyGitError(fetchErr, fetchOut)
+		slog.Warn("gitCheckoutBranch: fetch failed (will attempt recovery)",
+			slog.String("repo", repoPath),
+			slog.String("classified", class),
+			slog.String("error", fetchErr.Error()))
+		// Continue — recovery may still succeed or we surface a better error later.
+	}
 
 	// Try checkout existing branch (fast path)
 	if _, err := gitCmd(repoPath, "checkout", branch); err == nil {
 		return nil
-	} else {
-		// Existing branch checkout failed — try to recover the default branch state
-		defaultBranch, _ := resolveDefaultBranch(repoPath)
+	}
 
-		// Hard reset + clean to get to a known clean state on the default branch
-		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, "origin/"+defaultBranch) // force track origin
-		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "reset", "--hard", "origin/"+defaultBranch)
-		_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "clean", "-fd")
+	// Existing branch checkout failed — enter recovery.
+	defaultBranch, _ := resolveDefaultBranch(repoPath)
 
-		// Now attempt the feature branch creation from a known-good base.
-		// Use -B (force-create) so an existing branch from a prior failed attempt
-		// is reset to the clean base instead of causing "branch already exists" errors.
-		if out2, err2 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch, "origin/"+defaultBranch); err2 != nil {
-			// Last resort: try creating from local HEAD if origin ref was also bad
-			if out3, err3 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch); err3 != nil {
-				return fmt.Errorf("git checkout branch %s failed after recovery. Existing: %s (%v). From origin/%s: %s (%v). Last resort: %s (%v)",
-					branch, strings.TrimSpace(string(err.Error())), err, defaultBranch, strings.TrimSpace(out2), err2, strings.TrimSpace(out3), err3)
-			}
+	// Try to get a clean base on the default/integration branch.
+	// First attempt the common case.
+	baseRef := "origin/" + defaultBranch
+	_, resetErr := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, baseRef)
+	if resetErr != nil {
+		// The origin ref is missing or bad — this is the exact class of failure reported by the user.
+		// Try an explicit fetch of just that ref.
+		explicitFetchOut, explicitErr := gitCmdWithTimeout(repoPath, 45*time.Second,
+			"fetch", "origin", defaultBranch+":"+defaultBranch)
+		if explicitErr == nil {
+			// Retry the force checkout
+			_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, baseRef)
+		} else {
+			slog.Warn("gitCheckoutBranch: explicit fetch of default branch also failed",
+				slog.String("default", defaultBranch),
+				slog.String("classified", classifyGitError(explicitErr, explicitFetchOut)))
 		}
 	}
+
+	// Regardless, do a hard reset + clean to get to a known (hopefully) good state.
+	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "reset", "--hard", baseRef)
+	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "clean", "-fd")
+
+	// Now create the task branch from the (hopefully repaired) base.
+	out2, err2 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch, baseRef)
+	if err2 != nil {
+		class2 := classifyGitError(err2, out2)
+
+		// Last resort: create from whatever HEAD we have now (even if unborn).
+		out3, err3 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch)
+		if err3 != nil {
+			class3 := classifyGitError(err3, out3)
+			// Note: the initial checkout error is no longer in scope here; we surface the recovery failures which are what matter
+			return fmt.Errorf("git checkout branch %s failed after recovery (classified: %s/%s). "+
+				"From %s: %s (%v, class=%s). Last resort: %s (%v, class=%s). "+
+				"Consider: the clone may be in a bad state — delete the repo dir and let it re-clone, or check gitflow integrationBranch on the project.",
+				branch, class2, class3,
+				baseRef, strings.TrimSpace(out2), err2, class2,
+				strings.TrimSpace(out3), err3, class3)
+		}
+	}
+
 	return nil
 }
 
@@ -1317,17 +1474,51 @@ func cleanStaleLocks(repoPath string) {
 	}
 }
 
-// resolveDefaultBranch determines the repo's default branch.
-// Derived from Python: resolve_default_branch() (L814-840)
+// resolveDefaultBranch determines the repo's default branch with multiple fallbacks.
+// Matches the robustness in the pre-migration Python ensure_task_branch (v0.1.126).
 func resolveDefaultBranch(repoPath string) (string, error) {
 	if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
 		return override, nil
 	}
-	out, err := gitCmd(repoPath, "symbolic-ref", "--short", "HEAD")
-	if err != nil {
-		return "main", nil // safe default
+
+	// Best: ask the remote what its HEAD points to (works even if local refs are broken)
+	out, err := gitCmdWithTimeout(repoPath, 20*time.Second, "ls-remote", "--symref", "origin", "HEAD")
+	if err == nil {
+		// Output looks like: "ref: refs/heads/main\tHEAD"
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "ref:") && strings.Contains(line, "refs/heads/") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					ref := parts[1]
+					if strings.HasPrefix(ref, "refs/heads/") {
+						return strings.TrimPrefix(ref, "refs/heads/"), nil
+					}
+				}
+			}
+		}
 	}
-	return strings.TrimSpace(out), nil
+
+	// Next: try local symbolic-ref (may fail in unborn or broken states)
+	out, err = gitCmd(repoPath, "symbolic-ref", "--short", "HEAD")
+	if err == nil {
+		name := strings.TrimSpace(out)
+		if name != "" && name != "HEAD" {
+			return name, nil
+		}
+	}
+
+	// Fallback: inspect remote branches for common names, prefer integration branch if known
+	out, err = gitCmd(repoPath, "branch", "-r")
+	if err == nil {
+		remotes := out
+		for _, candidate := range []string{"develop", "main", "master", "trunk"} {
+			if strings.Contains(remotes, "origin/"+candidate) {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "main", nil // ultimate safe default
 }
 
 var branchSanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9._/-]+`)
