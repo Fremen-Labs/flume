@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -423,9 +424,19 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 		cancel()
 
 		if err != nil {
-			// Allow retries on transient gateway/network errors even for long-running calls.
-			// Previously we skipped retries entirely for timeoutSec >= 60s (GAP-4 / Phase 1).
-			// This was a major contributor to the 120s timeout storm.
+			// Fast-fail on timeout errors: these indicate Ollama/gateway is overwhelmed
+			// or unreachable. Retrying with 30/60/120s backoffs would burn 690s before
+			// falling through to the legacy path. The Python v0.1.126 equivalent had NO
+			// retry loop — it failed fast and fell back immediately.
+			if errors.Is(err, context.DeadlineExceeded) {
+				flumelogger.WithContext(ctx).Warn("gateway timed out — fast-failing to legacy path",
+					slog.String("error", err.Error()),
+					slog.Int("timeout_s", timeoutSec),
+				)
+				return nil, fmt.Errorf("llm: gateway timed out (fast-fail, no retry): %w", err)
+			}
+
+			// Retry on transient network errors (connection refused, DNS, etc.).
 			if attempt < maxRetries {
 				sleep := c.jitteredBackoff(backoffs, attempt)
 				flumelogger.WithContext(ctx).Warn("gateway connection error, retrying",
@@ -580,9 +591,10 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 	// Build Ollama-native payload with stream:true (critical for thinking models).
 	// Python equivalent: _ollama_stream_strip_think() in llm_client_legacy.py.
 	payload := map[string]interface{}{
-		"model":    model,
-		"messages": req.Messages,
-		"stream":   true, // Keeps connection alive — prevents timeout on large responses
+		"model":      model,
+		"messages":   req.Messages,
+		"stream":     true, // Keeps connection alive — prevents timeout on large responses
+		"keep_alive": "24h", // Prevent model cold starts between requests (Ollama default is 5m)
 		"options": map[string]interface{}{
 			"temperature": req.Temperature,
 			"num_predict": req.MaxTokens,
@@ -601,10 +613,12 @@ func (c *Client) legacyChat(ctx context.Context, req ChatRequest) (*ChatResponse
 	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
 	url := cleanBase + "/api/chat"
 
-	// 300s safety net — streaming chunks keep the connection alive so this
-	// should never fire under normal operation. Matches Python's behavior
-	// of effectively no single-response timeout when streaming.
-	reqCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
+	// 600s (10-min) safety net. Go's context.WithTimeout is an ABSOLUTE wall-clock
+	// deadline (unlike Python's socket idle timeout which resets on each byte).
+	// The old 300s was too tight: model cold starts can take 60-120s of silence
+	// before the first streaming chunk, leaving only 180-240s for actual generation.
+	// 600s provides headroom for cold start + full generation of thinking models.
+	reqCtx, cancel := context.WithTimeout(ctx, 600*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
@@ -684,10 +698,11 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 	// Build Ollama-native payload with tools + stream:true
 	// (same streaming fix as legacyChat — prevents timeout on thinking models)
 	payload := map[string]interface{}{
-		"model":    model,
-		"messages": req.Messages,
-		"tools":    req.Tools,
-		"stream":   true,
+		"model":      model,
+		"messages":   req.Messages,
+		"tools":      req.Tools,
+		"stream":     true,
+		"keep_alive": "24h", // Prevent model cold starts between requests (Ollama default is 5m)
 		"options": map[string]interface{}{
 			"temperature": req.Temperature,
 			"num_predict": req.MaxTokens,
@@ -704,7 +719,8 @@ func (c *Client) legacyChatWithTools(ctx context.Context, req ChatToolsRequest) 
 	cleanBase := strings.TrimRight(baseURL, "/")
 	cleanBase = strings.TrimSuffix(cleanBase, "/v1")
 	url := cleanBase + "/api/chat"
-	reqCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
+	// 600s safety net — matches legacyChat (see comment there for rationale).
+	reqCtx, cancel := context.WithTimeout(ctx, 600*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
