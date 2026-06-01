@@ -1,0 +1,22 @@
+{
+  "schema_version": "2.0",
+  "project": "flume",
+  "built_at": "2026-05-31T22:42:10.701888+00:00",
+  "commit_sha": "9260577cf6fd395e644399ea017f7fdc0991f4c5",
+  "branch": "feature/workitem-explosion",
+  "nodes": {},
+  "redacted_patterns": [],
+  "coverage": {
+    "total_functions": 2,
+    "instrumented_functions": 0,
+    "coverage_pct": 0.0,
+    "uninstrumented": [
+      "monitor:get_docker_logs",
+      "monitor:query_es"
+    ]
+  },
+  "models": {},
+  "imports": {
+    "flume .flume.monitor": []
+  }
+}

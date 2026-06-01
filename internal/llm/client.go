@@ -66,6 +66,7 @@ type ChatRequest struct {
 	TaskType         string    `json:"task_type,omitempty"` // "planning", "code", "reasoning", etc. — overrides AgentRole-derived type for routing
 	TaskID           string    `json:"task_id,omitempty"`
 	PlanSessionID    string    `json:"plan_session_id,omitempty"` // Phase 2: for per-plan budget + gateway PM rate limiter (keyed by (plan,role=pm))
+	WorkerName       string    `json:"worker_name,omitempty"`
 	TimeoutSeconds   int       `json:"-"` // client-side timeout, not sent to gateway
 	ReturnUsage      bool      `json:"-"`
 	ReturnTelemetry  bool      `json:"-"`
@@ -83,6 +84,7 @@ type ChatToolsRequest struct {
 	AgentRole        string         `json:"agent_role,omitempty"`
 	TaskID           string         `json:"task_id,omitempty"`
 	PlanSessionID    string         `json:"plan_session_id,omitempty"` // Phase 2: for per-plan budget + gateway PM rate limiter
+	WorkerName       string         `json:"worker_name,omitempty"`
 	ReturnTelemetry  bool           `json:"-"`
 }
 
@@ -227,7 +229,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 			payload["plan_session_id"] = req.PlanSessionID
 		}
 
-		resp, err := c.postGateway(ctx, "/v1/chat", payload, timeout)
+		resp, err := c.postGateway(ctx, "/v1/chat", payload, timeout, req.WorkerName)
 		if err != nil {
 			flumelogger.WithContext(ctx).Warn("gateway chat request failed, attempting fallback",
 				slog.String("error", err.Error()),
@@ -242,7 +244,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 					slog.String("to", fallback),
 				)
 				payload["model"] = fallback
-				resp, err = c.postGateway(ctx, "/v1/chat", payload, timeout)
+				resp, err = c.postGateway(ctx, "/v1/chat", payload, timeout, req.WorkerName)
 				if err == nil {
 					return c.parseChatResponse(ctx, resp)
 				}
@@ -303,7 +305,7 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 			payload["plan_session_id"] = req.PlanSessionID
 		}
 
-		resp, err := c.postGateway(ctx, "/v1/chat/tools", payload, 180)
+		resp, err := c.postGateway(ctx, "/v1/chat/tools", payload, 180, req.WorkerName)
 		if err != nil {
 			flumelogger.WithContext(ctx).Warn("gateway chat_with_tools request failed, attempting fallback",
 				slog.String("error", err.Error()),
@@ -317,7 +319,7 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatToolsRequest) (*Chat
 					slog.String("to", fallback),
 				)
 				payload["model"] = fallback
-				resp, err = c.postGateway(ctx, "/v1/chat/tools", payload, 180)
+				resp, err = c.postGateway(ctx, "/v1/chat/tools", payload, 180, req.WorkerName)
 				if err == nil {
 					return c.parseToolsResponse(resp)
 				}
@@ -391,7 +393,7 @@ func (c *Client) cacheGatewayStatus(ok bool) {
 
 // postGateway POSTs JSON to the gateway with exponential backoff.
 // Derived from Python: llm_client.py _post_gateway().
-func (c *Client) postGateway(ctx context.Context, path string, payload interface{}, timeoutSec int) (map[string]interface{}, error) {
+func (c *Client) postGateway(ctx context.Context, path string, payload interface{}, timeoutSec int, workerName string) (map[string]interface{}, error) {
 	const maxRetries = 3
 	backoffs := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
 
@@ -410,7 +412,12 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 			return nil, fmt.Errorf("llm: request build failed: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Worker-Name", c.workerName)
+		
+		wName := workerName
+		if wName == "" {
+			wName = c.workerName
+		}
+		req.Header.Set("X-Worker-Name", wName)
 
 		resp, err := c.httpClient.Do(req)
 		cancel()
@@ -834,7 +841,7 @@ func (c *Client) Embed(ctx context.Context, text string, model string, provider 
 		"provider": provider,
 	}
 
-	res, err := c.postGateway(ctx, "/v1/embeddings", payload, 30)
+	res, err := c.postGateway(ctx, "/v1/embeddings", payload, 30, "")
 	if err != nil {
 		return nil, err
 	}

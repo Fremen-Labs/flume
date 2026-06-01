@@ -81,7 +81,7 @@ func TestPostGateway(t *testing.T) {
 	result, err := c.postGateway(context.Background(), "/v1/chat", map[string]interface{}{
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 		"model":    "test-model",
-	}, 10)
+	}, 10, "")
 
 	if err != nil {
 		t.Fatalf("postGateway failed: %v", err)
@@ -104,7 +104,7 @@ func TestPostGateway4xxNoRetry(t *testing.T) {
 	c := New(nil)
 	c.gatewayURL = ts.URL
 
-	_, err := c.postGateway(context.Background(), "/v1/chat", map[string]interface{}{}, 5)
+	_, err := c.postGateway(context.Background(), "/v1/chat", map[string]interface{}{}, 5, "")
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}

@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -281,16 +283,25 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	ctx := ContextWithLogger(r.Context(), log)
 
 	// === Phase 2 per-plan-pm rate limiter (early, before any frontier or mesh calls) ===
-	// Keyed on plan_session_id + role=="pm". 3 attempts/min default. Rich log on hit.
-	// Returns 429 for callers (worker LLM path treats as transient failure + backoff).
+	// Keyed on plan_session_id + role=="pm". 3 attempts/min default.
+	// Always emit rich decision log (plan_id, current_count, cap, backoff, decision)
+	// for observability + agent reasoning trails. Includes jitter on deny.
 	if s.planPMRateLimiter != nil {
-		if allowed, reason := s.planPMRateLimiter.Allow(req.PlanSessionID, req.AgentRole); !allowed {
-			log.Warn("per-plan-pm rate limit hit",
-				slog.String("plan_session_id", req.PlanSessionID),
-				slog.String("agent_role", req.AgentRole),
-				slog.String("reason", reason),
-				slog.String("request_id", requestID),
-			)
+		allowed, reason, currentCount, suggestedBackoff := s.planPMRateLimiter.Allow(req.PlanSessionID, req.AgentRole)
+
+		// Rich decision log on every call (allow or deny) — highest-leverage observability win from monitoring.
+		log.Info("per-plan-pm rate limit decision",
+			slog.String("plan_session_id", req.PlanSessionID),
+			slog.String("agent_role", req.AgentRole),
+			slog.Bool("allowed", allowed),
+			slog.String("reason", reason),
+			slog.Int("current_count", currentCount),
+			slog.Int("cap", 3), // matches NewPlanPMRateLimiter default
+			slog.Duration("suggested_backoff", suggestedBackoff),
+			slog.String("request_id", requestID),
+		)
+
+		if !allowed {
 			// Graceful degradation: 429 tells worker to back off (existing decomp failure path handles it)
 			s.writeError(w, http.StatusTooManyRequests, "rate limit: too many PM decompositions for this plan; backing off", requestID)
 			return
@@ -313,6 +324,15 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		slog.Int("messages", len(req.Messages)),
 		slog.Int("tools", len(req.Tools)),
 	)
+
+	// === Tier 1 observability: surface when code-intel tools are missing for roles that benefit ===
+	// This makes the "tools:0" gap from monitoring visible in logs until full server-side injection lands.
+	if (req.AgentRole == "pm" || req.AgentRole == "reviewer" || req.AgentRole == "implementer" || req.AgentRole == "tester") && len(req.Tools) == 0 {
+		log.Warn("code-intel tools missing for role that should use them (elastro_query_ast + logloom_ast_query recommended)",
+			slog.String("agent_role", req.AgentRole),
+			slog.String("request_id", requestID),
+		)
+	}
 
 	// Resolve model/provider before choosing code path.
 	model, provider, _ := s.config.ResolveModel(&req)
@@ -383,9 +403,28 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		slog.Float64("duration_ms", msElapsed(start)),
 	)
 
+	// Rich tool usage context for observability (supports Item 3 goal of visible tool reasoning).
+	if withTools || len(resp.Message.ToolCalls) > 0 {
+		log.Info("tool usage context",
+			slog.String("agent_role", req.AgentRole),
+			slog.Int("tools_in_request", len(req.Tools)),
+			slog.Int("tool_calls_returned", len(resp.Message.ToolCalls)),
+			slog.String("request_id", requestID),
+		)
+	}
+
 	workerName := r.Header.Get("X-Worker-Name")
 	if workerName != "" {
 		Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		
+		workerRole := req.AgentRole
+		if workerRole == "" {
+			workerRole = agentRoleToTaskType(req.AgentRole)
+		}
+		if workerRole == "" {
+			workerRole = "unknown"
+		}
+		go s.persistTokenTelemetry(workerName, workerRole, string(provider), model, resp.Usage)
 	}
 
 	s.writeJSON(w, http.StatusOK, resp)
@@ -568,6 +607,16 @@ func StartGateway(addr string) error {
 	nodeCount := server.nodeRegistry.Count()
 	log.Info("node mesh initialized",
 		slog.Int("registered_nodes", nodeCount),
+	)
+
+	// Log configured embedding model (critical for RAG / code intelligence paths).
+	// Default is nomic-embed-text; can be overridden with FLUME_OLLAMA_EMBED_MODEL.
+	embedModel := os.Getenv("FLUME_OLLAMA_EMBED_MODEL")
+	if embedModel == "" {
+		embedModel = "nomic-embed-text (default)"
+	}
+	log.Info("embedding model configured",
+		slog.String("ollama_embed_model", embedModel),
 	)
 
 	// Start background health checker.
@@ -1062,3 +1111,71 @@ func (s *Server) handleGetFrontierModels(w http.ResponseWriter, r *http.Request)
 		)
 	}
 }
+
+// persistTokenTelemetry indexes a token usage telemetry record to Elasticsearch background.
+func (s *Server) persistTokenTelemetry(workerName, workerRole, provider, model string, usage Usage) {
+	payload := map[string]interface{}{
+		"worker_name":                  workerName,
+		"worker_role":                  workerRole,
+		"provider":                     provider,
+		"model":                        model,
+		"input_tokens":                 usage.PromptTokens,
+		"output_tokens":                usage.CompletionTokens,
+		"actual_tokens_sent":           usage.PromptTokens + usage.CompletionTokens,
+		"baseline_tokens":              usage.PromptTokens + usage.CompletionTokens,
+		"baseline_full_context_tokens": 0,
+		"savings":                      0,
+		"created_at":                   time.Now().UTC().Format(time.RFC3339),
+		"timestamp":                    time.Now().UTC().Format(time.RFC3339),
+		"total_duration_ns":            usage.TotalDurationNs,
+		"load_duration_ns":             usage.LoadDurationNs,
+		"prompt_eval_duration_ns":      usage.PromptEvalDurationNs,
+		"eval_duration_ns":             usage.EvalDurationNs,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		Log().Error("telemetry: failed to marshal document", slog.String("error", err.Error()))
+		return
+	}
+
+	esURL := s.config.esURL
+	if esURL == "" {
+		esURL = "http://elasticsearch:9200"
+	}
+	url := strings.TrimRight(esURL, "/") + "/agent-token-telemetry/_doc"
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		Log().Error("telemetry: failed to build request", slog.String("error", err.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	apiKey := os.Getenv("ES_API_KEY")
+	if apiKey != "" && !strings.Contains(apiKey, "bypass") {
+		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		Log().Warn("telemetry: failed to index document in Elasticsearch", slog.String("error", err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		Log().Warn("telemetry: index request rejected by Elasticsearch",
+			slog.Int("status", resp.StatusCode),
+			slog.String("body", string(body)),
+		)
+	}
+}
+

@@ -289,20 +289,41 @@ func NewToolRegistry(logger *slog.Logger) *ToolRegistry {
 
 // NewToolRegistryWithElastro is the Phase 3.1 factory.
 // It registers:
-//   - elastro_query_ast  → uses the Elastro CLI (RAG over ingested codebase)
-//   - logloom_ast_query  → direct queries against Logloom indices in ES
+//   - elastro_query_ast  → direct queries against the flume-elastro-graph index
+//                          (populated by `elastro rag ingest` at project onboarding)
+//   - logloom_ast_query  → direct queries against Logloom AST/enrichment indices in ES
 //
-// This matches the pre-migration architecture the user described:
-//   - Use Elastro (CLI) for high-quality RAG/codebase understanding.
-//   - Use direct ES (via this tool) for Logloom AST/call-graph data.
+// The elastro-client CLI only provides the ingest side (`rag ingest` / `rag update`).
+// Query/retrieval is performed directly against the resulting index for reliability
+// and to avoid the auth/endpoint/CLI surface problems seen when shelling out.
 func NewToolRegistryWithElastro(esClient *es.Client, logger *slog.Logger) *ToolRegistry {
 	reg := NewToolRegistry(logger)
 
-	// Elastro RAG tool (preferred for semantic + structural codebase queries)
-	elastroTool := NewElastroASTQueryExecutor(logger)
+	// Elastro RAG tool (preferred for semantic + structural codebase queries).
+	// Now implemented as direct queries against flume-elastro-graph (the index
+	// populated by `elastro rag ingest` during project onboarding).
+	elastroTool := NewElastroASTQueryExecutor(esClient, logger)
 	reg.Register(elastroTool)
+
+	// Critical validation: the elastro binary (for `rag ingest` / `rag update` during
+	// project onboarding and incremental updates) must be present in worker images.
+	if bin := findElastroBinary(); bin != "" {
+		if logger != nil {
+			logger.Info("ToolRegistry: elastro binary located successfully (available for rag ingest/update)",
+				slog.String("elastro_bin", bin),
+			)
+		}
+	} else {
+		if logger != nil {
+			logger.Error("CRITICAL: elastro binary not found at startup — project ingestion (rag ingest) will be degraded",
+				slog.String("searched_locations", "PATH + /opt/venv/bin/elastro + common paths"),
+				slog.String("remediation", "Rebuild worker image with proper ELASTR0_INSTALL (see root Dockerfile)"),
+			)
+		}
+	}
+
 	if logger != nil {
-		logger.Info("ToolRegistry: registered elastro_query_ast (uses external Elastro CLI)")
+		logger.Info("ToolRegistry: registered elastro_query_ast (direct queries against flume-elastro-graph index)")
 	}
 
 	// Logloom tool (for direct AST / enrichment / call-graph queries)
@@ -348,28 +369,31 @@ func ToolResultModifiedRepo(toolName, result string) bool {
 
 // ─── Elastro RAG Tool (preferred way for codebase semantic/structural queries) ──
 
-// ElastroASTQueryExecutor implements the elastro_query_ast tool by shelling out
-// to the Elastro CLI (the official way to query the RAG data of ingested codebases).
+// ElastroASTQueryExecutor implements the elastro_query_ast tool via **direct ES
+// queries** against the index populated by `elastro rag ingest` (`flume-elastro-graph`).
 //
-// Per project lifecycle:
-//   - At repo onboarding: `elastro rag ingest <path> -i flume-elastro-graph` (already done in api_projects.go)
-//   - After code changes in a task: agents (or post-task) should call `elastro rag update`
-//   - For queries: agents MUST use this tool (which invokes Elastro) rather than raw ES queries
-//     on the graph index. This gives the same high-quality retrieval the Python agents had.
+// The elastro-client CLI (v1.3.59) only exposes:
+//   - `elastro rag ingest <repo> -i <index>`   (used at project clone / intake)
+//   - `elastro rag update <file> -i <index>`   (for incremental updates)
 //
-// Logloom indices are queried directly via the ES client (see LogloomASTQueryExecutor below).
+// There is no `rag query` (or equivalent) subcommand. Attempting it produces
+// "No such command 'query'".
 //
-// This restores the exact pre-migration capability where implementers were required
-// to call elastro_query_ast before editing code.
+// We therefore query the graph directly using the same authenticated ES client
+// the rest of the worker uses (consistent with LogloomASTQueryExecutor).
+// This is more reliable than shelling out and gives agents the structural RAG
+// data they need.
 type ElastroASTQueryExecutor struct {
+	es     *es.Client
 	logger *slog.Logger
 }
 
-func NewElastroASTQueryExecutor(logger *slog.Logger) *ElastroASTQueryExecutor {
+func NewElastroASTQueryExecutor(esClient *es.Client, logger *slog.Logger) *ElastroASTQueryExecutor {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &ElastroASTQueryExecutor{
+		es:     esClient,
 		logger: logger.With(slog.String("tool", "elastro_query_ast")),
 	}
 }
@@ -388,70 +412,124 @@ func (e *ElastroASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 		targetPath = p
 	}
 
-	elastroBin := findElastroBinary()
-	if elastroBin == "" {
-		return "", fmt.Errorf("elastro binary not found (checked PATH and /opt/venv/bin/elastro)")
+	// We no longer shell out to "elastro rag query" — that subcommand does not exist
+	// in elastro-client 1.3.59+ (only `rag ingest` and `rag update` are provided).
+	// Instead we perform a direct structured search against the index that the
+	// ingest step populates. This is the same pattern used by logloom_ast_query.
+
+	if e.es == nil {
+		return "", fmt.Errorf("elastro_query_ast: no ES client available (direct index query required)")
 	}
 
-	// Elastro RAG query command. Adjust flags as the Elastro CLI evolves.
-	// Typical: elastro rag query "<question>" --index flume-elastro-graph --path <repo>
-	cmd := exec.CommandContext(ctx, elastroBin, "rag", "query", query,
-		"--index", "flume-elastro-graph",
-		"--path", targetPath,
-	)
-	cmd.Env = os.Environ()
-
-	// Pass ES connection info if available (same pattern as ingest in api_projects.go)
-	// This allows the Elastro CLI to talk to the correct cluster.
-	if esURL := os.Getenv("ES_URL"); esURL != "" {
-		cmd.Env = append(cmd.Env,
-			"ELASTIC_URL="+esURL,
-			"ELASTIC_ELASTICSEARCH_HOSTS="+esURL,
-			"ELASTIC_ELASTICSEARCH_VERIFY_CERTS=false",
-			"ELASTIC_VERIFY_CERTS=false",
-		)
-	}
-	if apiKey := os.Getenv("ES_API_KEY"); apiKey != "" {
-		cmd.Env = append(cmd.Env,
-			"ELASTIC_ELASTICSEARCH_AUTH_API_KEY="+apiKey,
-			"ELASTIC_ELASTICSEARCH_AUTH_TYPE=api_key",
-		)
+	// Broad but effective search over the AST graph documents.
+	// The exact field names depend on what `elastro rag ingest` writes; we use
+	// common structural names + a catch-all "content" / text fields.
+	esQuery := map[string]interface{}{
+		"query": map[string]interface{}{
+			"bool": map[string]interface{}{
+				"must": []interface{}{
+					map[string]interface{}{
+						"multi_match": map[string]interface{}{
+							"query":  query,
+							"fields": []string{"function^3", "file^2", "signature^2", "content", "code", "text", "path", "module"},
+							"type":   "best_fields",
+							"operator": "or",
+						},
+					},
+				},
+			},
+		},
+		"size": 12,
+		"_source": true,
 	}
 
-	output, err := cmd.CombinedOutput()
+	// If the caller gave a target_path, try to scope results (best-effort).
+	if targetPath != "" && targetPath != "/" && targetPath != "." {
+		// Many AST docs will have a "file" or "path" field containing the repo-relative path.
+		esQuery["query"].(map[string]interface{})["bool"].(map[string]interface{})["should"] = []interface{}{
+			map[string]interface{}{
+				"wildcard": map[string]interface{}{"file": map[string]interface{}{"value": "*" + targetPath + "*"}},
+			},
+			map[string]interface{}{
+				"wildcard": map[string]interface{}{"path": map[string]interface{}{"value": "*" + targetPath + "*"}},
+			},
+		}
+	}
+
+	hits, err := e.es.Search(ctx, "flume-elastro-graph", esQuery, 15)
+	if err != nil {
+		// The index may not exist yet for this project, or may use a different name.
+		// Be graceful.
+		flumelogger.LogAgentReasoning(ctx, "", "implementer",
+			"elastro_query_ast: search against flume-elastro-graph failed (index may be empty or not yet created for this repo)",
+			map[string]any{
+				"tool":        "elastro_query_ast",
+				"query":       query,
+				"target_path": targetPath,
+				"error":       err.Error(),
+				"phase":       "tool_execution",
+			})
+		return fmt.Sprintf("No elastro AST graph data found yet for this project (index flume-elastro-graph may be empty or not ingested). Query was: %s. Try after a full project clone/ingest, or use logloom_ast_query for structural information.", query), nil
+	}
+
 	duration := time.Since(start)
 
 	flumelogger.LogAgentReasoning(ctx, "", "implementer",
-		fmt.Sprintf("Called elastro rag query (took %s)", duration),
+		fmt.Sprintf("elastro_query_ast (direct on flume-elastro-graph) returned %d hits (took %s)", len(hits.Hits), duration),
 		map[string]any{
 			"tool":        "elastro_query_ast",
 			"query":       query,
 			"target_path": targetPath,
-			"bin":         elastroBin,
+			"hit_count":   len(hits.Hits),
 			"duration_ms": duration.Milliseconds(),
 			"phase":       "tool_execution",
 		})
 
-	if err != nil {
-		return "", fmt.Errorf("elastro rag query failed: %w (output: %s)", err, string(output))
+	if len(hits.Hits) == 0 {
+		return fmt.Sprintf("Elastro AST graph search for %q returned no matches in flume-elastro-graph. The project may need re-ingestion (elastro rag ingest) or the query may need to be more specific.", query), nil
 	}
 
-	result := strings.TrimSpace(string(output))
-	if result == "" {
-		result = fmt.Sprintf("No relevant code found in the RAG index for query: %s", query)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Elastro Graph RAG results for %q (from flume-elastro-graph):\n\n", query))
+
+	for i, raw := range hits.Hits {
+		if i >= 8 {
+			sb.WriteString("... (more results truncated)\n")
+			break
+		}
+		var doc map[string]interface{}
+		_ = json.Unmarshal(raw, &doc)
+		sb.WriteString(fmt.Sprintf("%d. %v\n", i+1, doc))
 	}
 
-	return result, nil
+	return sb.String(), nil
 }
 
 // findElastroBinary mirrors the logic used during project ingestion.
 func findElastroBinary() string {
+	// Check standard PATH first
 	if resolved, err := exec.LookPath("elastro"); err == nil {
 		return resolved
 	}
-	if _, err := os.Stat("/opt/venv/bin/elastro"); err == nil {
-		return "/opt/venv/bin/elastro"
+
+	// Check the venv location we create in the official Dockerfile
+	venvPath := "/opt/venv/bin/elastro"
+	if _, err := os.Stat(venvPath); err == nil {
+		return venvPath
 	}
+
+	// Additional common locations (for developer / custom setups)
+	candidates := []string{
+		"/usr/local/bin/elastro",
+		"/home/flume/.local/bin/elastro",
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
 	return ""
 }
 

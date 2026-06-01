@@ -59,5 +59,10 @@ Tasks that require modifying or writing files.
 - Do NOT use abstract reasoning or speculative file modifications outside of the explicit `instructions` payload.
 - Always execute `implementation_complete` to signal task completion. You must use the following schema:
   `{"status": "complete", "modified_files": ["..."], "lint_passed": boolean, "summary": "..."}`
-- **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` to retrieve mapped nodes corresponding to your workitem before editing code.
-- Target the explicit semantic AST bounds (`fremen_codebase_rag`) via `elastro` when `analysis` lacks direct file paths.
+- **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` (primary for semantic/structural RAG over the ingested codebase) **and consider** `logloom_ast_query` (for precise call-graph, log sites, signatures, and models) before editing code.
+- The tools query the internal indices populated automatically on project clone:
+  - `elastro_query_ast` → `flume-elastro-graph` (elastro rag ingest)
+  - `logloom_ast_query` → `flume-logloom-ast` (logloom build + es ship)
+- For manual debugging outside tools (advanced users or when suggesting commands in reasoning):
+  - Elastro: `elastro doc search flume-elastro-graph ...` (or `elastro rag` subcommands for maintenance)
+  - LogLoom: `logloom graph find ...` locally, or `elastro doc search flume-logloom-ast ...` against the ES index.

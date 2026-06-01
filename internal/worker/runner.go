@@ -367,8 +367,18 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 			map[string]any{"phase": "complete", "commit_sha": commitSHA})
 	} else {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Implementation complete. No new commits detected. Transitioning to review.",
-			map[string]any{"phase": "complete", "had_commits": false})
+			"Implementation complete. No code changes produced by skeleton (only investigation via Elastro/LogLoom). Marking Done to avoid re-claim loop.",
+			map[string]any{"phase": "complete", "had_commits": false, "skeleton_behavior": "no_op_investigation"})
+
+		// For the current minimal skeleton: if we did investigation (Elastro + Logloom
+		// queries) but produced no code changes, mark Done rather than Review.
+		// This prevents the tight re-claim loop the user observed on investigation-style
+		// tasks (e.g. "scan for CLI commands"). Real multi-turn LLM implementers will
+		// produce commits and legitimately go to Review.
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
 	}
 
 	return ftypes.AgentResult{
@@ -451,10 +461,11 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 			{Role: "system", Content: reviewerSystemPrompt},
 			{Role: "user", Content: fmt.Sprintf("Please review this implementation:\nTask: %s\nDiff:\n%s", parent.Title, diffOut)},
 		},
-		Model:     worker.Model,
-		Provider:  worker.Provider,
-		AgentRole: "reviewer",
-		TaskID:    task.ID,
+		Model:      worker.Model,
+		Provider:   worker.Provider,
+		AgentRole:  "reviewer",
+		TaskID:     task.ID,
+		WorkerName: worker.Name,
 	}
 
 	resp, err := r.llm.Chat(ctx, req)
@@ -731,6 +742,7 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		AgentRole:     "pm",
 		TaskID:        task.ID,
 		PlanSessionID: task.PlanSessionID, // Phase 2: enables gateway per-plan-pm rate limiter + budget context
+		WorkerName:    worker.Name,
 	}
 
 	resp, err := r.llm.Chat(ctx, req)
@@ -795,6 +807,7 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 			AgentRole:     "pm",
 			TaskID:        task.ID,
 			PlanSessionID: task.PlanSessionID,
+			WorkerName:    worker.Name,
 		}
 		repairResp, repairErr := r.llm.Chat(ctx, repairReq)
 		repairSucceeded := false
@@ -1302,8 +1315,13 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 }
 
 func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status ftypes.TaskStatus) {
-	// PR 2: all via Enforcer
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", status, r.logger.Warn) // prev unknown here; future pass current
+	// All status changes after handlers must go through the central guarded path
+	// (flume-go SKILL + Cross-cutting Writer Rule). This provides OCC (when seq/prim
+	// available), state machine Enforce, and mandatory dual logging.
+	//
+	// Note: For the common "post-handler" case we don't always have fresh seq/prim
+	// from the original claim. The wrapper will fall back to non-OCC UpdateDoc but
+	// still does the Enforce + rich Log* calls. Sweeps/Claimer use the OCC path.
 	update := map[string]interface{}{
 		"status":        string(status),
 		"active_worker": nil,
@@ -1315,11 +1333,14 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 		update["completed_at"] = now
 	}
 
-	// Log state transition — feeds the Agent Reasoning popout + Logloom.
-	flumelogger.LogStateTransition(ctx, taskID, "", string(status),
-		fmt.Sprintf("Task transitioned to %s", status))
-
-	_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
+	// Use the guarded wrapper. prevStatus unknown here (future improvement: pass it in).
+	// workerRole is left empty; the important thing is that we stop doing bare UpdateDoc
+	// on the lease columns from the runner.
+	_ = updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+		0, 0, // no seq/prim in this legacy path
+		"", status, // prev unknown
+		"", // role not known at this callsite yet
+		fmt.Sprintf("post-handler transition to %s", status))
 }
 
 // ─── Git Helpers ────────────────────────────────────────────────────────────

@@ -94,9 +94,13 @@ type ToolCallFunction struct {
 
 // Usage tracks token consumption.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens         int   `json:"prompt_tokens"`
+	CompletionTokens     int   `json:"completion_tokens"`
+	TotalTokens          int   `json:"total_tokens"`
+	TotalDurationNs      int64 `json:"total_duration_ns,omitempty"`
+	LoadDurationNs       int64 `json:"load_duration_ns,omitempty"`
+	PromptEvalDurationNs int64 `json:"prompt_eval_duration_ns,omitempty"`
+	EvalDurationNs       int64 `json:"eval_duration_ns,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

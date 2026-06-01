@@ -87,10 +87,14 @@ type ollamaStreamChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done            bool   `json:"done"`
-	Error           string `json:"error,omitempty"`
-	PromptEvalCount int    `json:"prompt_eval_count,omitempty"`
-	EvalCount       int    `json:"eval_count,omitempty"`
+	Done               bool   `json:"done"`
+	Error              string `json:"error,omitempty"`
+	PromptEvalCount    int    `json:"prompt_eval_count,omitempty"`
+	EvalCount          int    `json:"eval_count,omitempty"`
+	TotalDuration      int64  `json:"total_duration,omitempty"`
+	LoadDuration       int64  `json:"load_duration,omitempty"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
+	EvalDuration       int64  `json:"eval_duration,omitempty"`
 }
 
 // StreamOllamaToolCall sends a tool-call request to Ollama using stream:true
@@ -188,6 +192,18 @@ func StreamOllamaToolCall(
 		}
 		if chunk.EvalCount > 0 {
 			usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.TotalDuration > 0 {
+			usage.TotalDurationNs = chunk.TotalDuration
+		}
+		if chunk.LoadDuration > 0 {
+			usage.LoadDurationNs = chunk.LoadDuration
+		}
+		if chunk.PromptEvalDuration > 0 {
+			usage.PromptEvalDurationNs = chunk.PromptEvalDuration
+		}
+		if chunk.EvalDuration > 0 {
+			usage.EvalDurationNs = chunk.EvalDuration
 		}
 
 		if chunk.Done {
@@ -295,6 +311,18 @@ func StreamOllamaChat(
 		}
 		if chunk.EvalCount > 0 {
 			usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.TotalDuration > 0 {
+			usage.TotalDurationNs = chunk.TotalDuration
+		}
+		if chunk.LoadDuration > 0 {
+			usage.LoadDurationNs = chunk.LoadDuration
+		}
+		if chunk.PromptEvalDuration > 0 {
+			usage.PromptEvalDurationNs = chunk.PromptEvalDuration
+		}
+		if chunk.EvalDuration > 0 {
+			usage.EvalDurationNs = chunk.EvalDuration
 		}
 
 		if chunk.Done {

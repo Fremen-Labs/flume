@@ -385,6 +385,18 @@ func (r *ProviderRouter) ollamaNonStream(
 		usage.CompletionTokens = int(v)
 	}
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	if v, ok := data["total_duration"].(float64); ok {
+		usage.TotalDurationNs = int64(v)
+	}
+	if v, ok := data["load_duration"].(float64); ok {
+		usage.LoadDurationNs = int64(v)
+	}
+	if v, ok := data["prompt_eval_duration"].(float64); ok {
+		usage.PromptEvalDurationNs = int64(v)
+	}
+	if v, ok := data["eval_duration"].(float64); ok {
+		usage.EvalDurationNs = int64(v)
+	}
 
 	return &ChatResponse{
 		Message: ResponseMessage{
@@ -911,7 +923,10 @@ func (r *ProviderRouter) Embed(ctx context.Context, text string, provider, model
 func (r *ProviderRouter) ollamaEmbed(ctx context.Context, text, model string) ([]float64, error) {
 	baseURL := r.config.GetOllamaBaseURL()
 	if model == "" {
-		model = "nomic-embed-text"
+		model = os.Getenv("FLUME_OLLAMA_EMBED_MODEL")
+		if model == "" {
+			model = "nomic-embed-text"
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -939,7 +954,11 @@ func (r *ProviderRouter) ollamaEmbed(ctx context.Context, text, model string) ([
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+		errMsg := fmt.Sprintf("ollama embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode == 404 && strings.Contains(string(respBody), "not found") {
+			errMsg += " — try pulling the embedding model (e.g. `docker exec flume-gateway ollama pull " + model + "`) or set FLUME_OLLAMA_EMBED_MODEL"
+		}
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	var out struct {

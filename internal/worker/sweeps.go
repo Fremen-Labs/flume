@@ -685,10 +685,11 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 					{Role: "system", Content: consensusSystemPrompt},
 					{Role: "user", Content: fmt.Sprintf("Parent Task: %s\n%s", task.Title, explanation.String())},
 				},
-				Model:     task.Model,
-				Provider:  task.Provider,
-				AgentRole: "critic",
-				TaskID:    task.ID,
+				Model:      task.Model,
+				Provider:   task.Provider,
+				AgentRole:  "critic",
+				TaskID:     task.ID,
+				WorkerName: "critic",
 			}
 			resp, chatErr := s.llm.Chat(ctx, req)
 			if chatErr == nil {

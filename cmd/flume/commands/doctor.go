@@ -431,6 +431,12 @@ func runLogloomDiagnostics(jsonOutput bool, report *DiagnosticsReport) {
 	if logloomBin == "" {
 		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
 	}
+	// Also check container venv (installed in Dockerfile for reliable ingestion in `flume start`)
+	if _, err := os.Stat(logloomBin); err != nil {
+		if _, venvErr := os.Stat("/opt/venv/bin/logloom"); venvErr == nil {
+			logloomBin = "/opt/venv/bin/logloom"
+		}
+	}
 	graphPath := "flume-robust-ast-graph.json"
 
 	if !jsonOutput {

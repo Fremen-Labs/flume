@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -152,10 +153,12 @@ func NewPlanPMRateLimiter(maxPerMinute int) *PlanPMRateLimiter {
 	}
 }
 
-// Allow returns (allowed, reasonIfDenied). Thread-safe. Logs hit at caller.
-func (l *PlanPMRateLimiter) Allow(planSessionID, role string) (bool, string) {
+// Allow returns (allowed, reason, currentCount, suggestedBackoff).
+// Thread-safe. Rich decision info for logging/telemetry.
+// Suggested backoff includes small jitter for thundering herd mitigation.
+func (l *PlanPMRateLimiter) Allow(planSessionID, role string) (allowed bool, reason string, currentCount int, suggestedBackoff time.Duration) {
 	if planSessionID == "" || role != "pm" {
-		return true, "" // only gate PM decomp paths
+		return true, "", 0, 0 // only gate PM decomp paths
 	}
 	key := planSessionID + ":pm"
 	l.mu.Lock()
@@ -165,15 +168,25 @@ func (l *PlanPMRateLimiter) Allow(planSessionID, role string) (bool, string) {
 	w, ok := l.windows[key]
 	if !ok || now.Sub(w.start) >= l.window {
 		l.windows[key] = struct{ start time.Time; count int }{start: now, count: 1}
-		return true, ""
+		return true, "", 1, 0
 	}
+
+	currentCount = w.count
 	if w.count >= l.maxPerWin {
-		reason := fmt.Sprintf("per-plan-pm rate limit hit: %d attempts in last minute for plan %s (cap=%d)", w.count, planSessionID, l.maxPerWin)
-		return false, reason
+		reason = fmt.Sprintf("per-plan-pm rate limit hit: %d attempts in last minute for plan %s (cap=%d)", w.count, planSessionID, l.maxPerWin)
+		// Remaining time in window + small jitter (0-2s) to reduce thundering herd on window reset
+		remaining := l.window - now.Sub(w.start)
+		jitter := time.Duration(rand.Intn(2000)) * time.Millisecond
+		suggestedBackoff = remaining + jitter
+		if suggestedBackoff < 0 {
+			suggestedBackoff = 2 * time.Second
+		}
+		return false, reason, currentCount, suggestedBackoff
 	}
+
 	w.count++
 	l.windows[key] = w
-	return true, ""
+	return true, "", w.count, 0
 }
 
 // For tests / future: Reset clears state (not for prod hot path).

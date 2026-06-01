@@ -402,13 +402,19 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
 	}
 
-	// Verify binary (LookPath first for PATH, then exact fallback; no venv for logloom)
+	// Verify binary (LookPath first for PATH, then exact fallback).
+	// The Dockerfile installs logloom (via pip) into /opt/venv/bin for reliable
+	// AST ingestion during `flume start` (containerized dashboard) just like elastro.
 	if resolved, err := exec.LookPath(logloomBin); err == nil {
 		logloomBin = resolved
 	} else if _, statErr := os.Stat(logloomBin); statErr != nil {
-		s.logger.Info("logloom binary not found — skipping LogLoom AST ingest (best-effort)",
-			slog.String("id", projectID), slog.String("tried", logloomBin))
-		return false
+		if _, venvErr := os.Stat("/opt/venv/bin/logloom"); venvErr == nil {
+			logloomBin = "/opt/venv/bin/logloom"
+		} else {
+			s.logger.Info("logloom binary not found — skipping LogLoom AST ingest (best-effort)",
+				slog.String("id", projectID), slog.String("tried", logloomBin))
+			return false
+		}
 	}
 
 	// Temporary graph artifact (cleaned after ship or on error)
