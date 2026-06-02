@@ -126,6 +126,13 @@ func NewRunner(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger) 
 	}
 }
 
+// ReconcileComms (Phase 2): health/circuit recon for LLM comms (call from manager cycle before claims).
+func (r *Runner) ReconcileComms(ctx context.Context) {
+	if r.llm != nil {
+		r.llm.ReconcileComms(ctx)
+	}
+}
+
 // RunWorker executes a single worker cycle for a claimed task.
 // Derived from Python: run_worker() (L2186-2231, 24 parents, 31 children)
 func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID string) error {
@@ -324,6 +331,20 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 			fmt.Sprintf("Implementer LLM turn %d/%d (streaming for visibility)", turns, maxTurns),
 			map[string]any{"phase": "llm_turn", "turn": turns})
 
+		// Phase 2: acquire backpressure WIP before LLM (per plan/hierarchy; prevents herd on local LLM).
+		level := task.HierarchyDepth
+		if ok, reason := r.llm.AcquireCommsWIP(ctx, task.PlanSessionID, "implementer", level); !ok {
+			reason = "comms backpressure: " + reason
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", reason, map[string]any{"plan_session_id": task.PlanSessionID, "level": level})
+			_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+				"status":             "blocked",
+				"error_message":      reason,
+				"explosion_evidence": []string{"llm_wip_backpressure:" + task.PlanSessionID},
+				"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			})
+			break
+		}
+
 		streamReq := llm.ChatRequest{
 			Messages:       messages,
 			Model:          worker.Model,
@@ -337,6 +358,7 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		streamCh, err := r.llm.ChatStream(ctx, streamReq)
 		if err != nil {
 			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "LLM call failed in agent loop", map[string]any{"error": err.Error()})
+			r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level)
 			break
 		}
 
@@ -364,6 +386,8 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 				break
 			}
 		}
+
+		r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level) // release after stream
 
 		responseText := strings.TrimSpace(llmResponse.String())
 

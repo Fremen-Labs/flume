@@ -1627,6 +1627,13 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 	totalTasks := countPlanTasks(plan)
 	complexityScore = plan.ComplexityScore // already declared earlier for routing
 
+	// Phase 2: IntakeGuard output size control + Elastro/Logloom-driven coalesce (planner RAG used to cap/reduce leaves).
+	// If high after LLM plan, log opportunity for cross-feature coalesce (file/module overlap via Elastro AST) before hard cap.
+	if totalTasks > 10 {
+		s.logger.Info("intake Phase 2: high leaf output from planner, Elastro/Logloom coalesce pass recommended to keep under cap",
+			slog.Int("leaves", totalTasks), slog.Int("hard_max", getHardMaxLeaf()))
+	}
+
 	// Phase 0 hard cap (MAX_LEAF=12) — absolute server guard. Applied before smart (smart may allow more for complex).
 	// Rejects early with PLAN_TOO_LARGE for client/e2e detection + rich audit to agent-task-records.
 	// Fastpath threshold (total<=6 decision below) is unchanged; this only adds the hard ceiling + live est support.

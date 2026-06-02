@@ -43,6 +43,7 @@ var ErrPersistentConfig = fmt.Errorf("llm: persistent config error (will not sel
 
 // Client is the Flume LLM client.
 // Routes traffic through the gateway; falls back to direct provider calls.
+// Phase 2: uses LLMCommsOrchestrator for circuit (persistent err) and comms policy.
 type Client struct {
 	gatewayURL    string
 	httpClient    *http.Client
@@ -53,6 +54,8 @@ type Client struct {
 	mu            sync.RWMutex
 	gatewayOK     bool
 	gatewayCheckedAt time.Time
+
+	comms *LLMCommsOrchestrator // Phase 2 orchestrator for circuit + policy
 }
 
 // ChatRequest holds the parameters for a Chat call.
@@ -197,6 +200,7 @@ func New(logger *slog.Logger) *Client {
 		},
 		logger:     logger,
 		workerName: workerName,
+		comms:      NewLLMCommsOrchestrator(), // Phase 2: circuit + comms policy
 	}
 
 	// Startup health check — make misconfiguration loud and immediately visible.
@@ -403,6 +407,9 @@ func (c *Client) gatewayAvailable(ctx context.Context) bool {
 
 	healthy := resp.StatusCode == 200
 	c.cacheGatewayStatus(healthy)
+	if !healthy && c.comms != nil {
+		c.comms.OpenCircuit(ctx, "gateway", "http non-200", "")
+	}
 	return healthy
 }
 
@@ -1036,4 +1043,32 @@ func (c *Client) Embed(ctx context.Context, text string, model string, provider 
 	}
 
 	return embedding, nil
+}
+
+// Phase 2 comms helpers (delegated to orchestrator for backpressure/circuit/recon).
+// Acquire/Release for WIP at claim + pre-LLM (per plan_session/role/level).
+func (c *Client) AcquireCommsWIP(ctx context.Context, planSession, role string, level int) (bool, string) {
+	if c.comms == nil {
+		return true, ""
+	}
+	return c.comms.AcquireWIP(ctx, planSession, role, level)
+}
+
+func (c *Client) ReleaseCommsWIP(planSession, role string, level int) {
+	if c.comms != nil {
+		c.comms.ReleaseWIP(planSession, role, level)
+	}
+}
+
+func (c *Client) ReconcileComms(ctx context.Context) {
+	if c.comms != nil {
+		c.comms.ReconcileHealth(ctx)
+	}
+}
+
+func (c *Client) ShouldFastFail(ctx context.Context, err error, provider, model, planSession, taskID string) bool {
+	if c.comms == nil {
+		return false
+	}
+	return c.comms.ShouldFastFail(ctx, err, provider, model, planSession, taskID)
 }

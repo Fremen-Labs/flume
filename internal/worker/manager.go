@@ -245,6 +245,9 @@ func (m *Manager) cycle(ctx context.Context) {
 	m.logger.Debug("cycle complete",
 		slog.Duration("duration", time.Since(cycleStart)),
 		slog.Int("workers", len(state.Workers)))
+
+	// Phase 2: LLM comms recon (health/circuit) every cycle (before claims in next tick)
+	m.pool.ReconcileComms(ctx)
 }
 
 // processWorker handles a single worker in the heartbeat cycle.

@@ -114,6 +114,13 @@ func (p *Pool) Shutdown(ctx context.Context) {
 	}
 }
 
+// ReconcileComms Phase 2: delegate to runner for LLM comms health/circuit recon (called from manager cycle).
+func (p *Pool) ReconcileComms(ctx context.Context) {
+	if p.runner != nil {
+		p.runner.ReconcileComms(ctx)
+	}
+}
+
 // ErrPoolShutdown is returned when submitting to a shutdown pool.
 var ErrPoolShutdown = &poolError{"pool is shutting down"}
 
