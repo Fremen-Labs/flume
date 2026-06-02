@@ -43,7 +43,7 @@ func NewProviderRouter(config *Config, secrets *SecretStore) *ProviderRouter {
 	return &ProviderRouter{
 		config:  config,
 		secrets: secrets,
-		client:  &http.Client{Timeout: 180 * time.Second},
+		client:  &http.Client{Timeout: 300 * time.Second}, // Match gateway WriteTimeout (300s)
 	}
 }
 

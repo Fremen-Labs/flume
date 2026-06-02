@@ -403,8 +403,10 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 	}
 
 	// Verify binary (LookPath first for PATH, then exact fallback).
-	// The Dockerfile installs logloom (via pip) into /opt/venv/bin for reliable
-	// AST ingestion during `flume start` (containerized dashboard) just like elastro.
+	// When the image is built with --build-arg LOGLOOM_INSTALL=wheel (providing the
+	// wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7),
+	// /opt/venv/bin/logloom will be present for reliable dual Elastro+LogLoom
+	// AST ingest during project creation in container mode.
 	if resolved, err := exec.LookPath(logloomBin); err == nil {
 		logloomBin = resolved
 	} else if _, statErr := os.Stat(logloomBin); statErr != nil {

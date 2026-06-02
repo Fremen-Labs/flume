@@ -344,6 +344,11 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 	// In the next slice we will feed these tool results into the LLM and allow
 	// it to request additional tools (read/write file, run shell, etc.) and
 	// eventually emit implementation_complete.
+	//
+	// When adding the LLM step for the agent loop, use r.llm.ChatStream (not .Chat)
+	// + loop over chunks emitting LogAgentReasoning for deltas/thoughts/telemetry
+	// (node/mesh visibility) exactly as done for reviewer and PM. This keeps
+	// long generations alive and makes implementer reasoning observable.
 
 	// 3. Auto-commit and push changes
 	commitSHA, err := r.AutoCommitAndPush(ctx, repoPath, branch,
@@ -468,10 +473,62 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 		WorkerName: worker.Name,
 	}
 
-	resp, err := r.llm.Chat(ctx, req)
+	// Use streaming for reviewer too, so the model's review analysis/thoughts (and
+	// which mesh node was used) are emitted live into agent reasoning.
+	streamCh, err := r.llm.ChatStream(ctx, req)
 	if err != nil {
 		// Use shared LLM failure handler with retry-cap instead of raw error return
 		// (prevents infinite retry loops when gateway/Ollama is misconfigured)
+		r.handleRoleLLMFailure(ctx, task.ID, task, worker.Role)
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	var finalContent string
+	for ch := range streamCh {
+		if ch.Error != "" {
+			err = fmt.Errorf("reviewer stream error: %s", ch.Error)
+			break
+		}
+		if ch.DeltaContent != "" {
+			finalContent += ch.DeltaContent
+			flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer", ch.DeltaContent, map[string]any{
+				"phase":       "review_stream",
+				"partial":     true,
+				"from_stream": true,
+				"diff_size":   diffLen,
+			})
+		}
+		if ch.Thoughts != "" {
+			// Surface reviewer's internal thoughts (may include analysis before the JSON verdict)
+			flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+				"Reviewer thoughts: "+firstNChars(ch.Thoughts, 400),
+				map[string]any{"phase": "review_thoughts", "partial": true})
+		}
+		if ch.Telemetry != nil {
+			nodeID := ""
+			if v, ok := ch.Telemetry["node_id"].(string); ok {
+				nodeID = v
+			}
+			nodeHost := ""
+			if v, ok := ch.Telemetry["node_host"].(string); ok {
+				nodeHost = v
+			}
+			if nodeID != "" || nodeHost != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+					fmt.Sprintf("Reviewer routed to ollama mesh node %s (%s)", nodeID, nodeHost),
+					map[string]any{"node_id": nodeID, "node_host": nodeHost, "via": "stream"})
+			}
+			flumelogger.WithContext(ctx).Info("gateway telemetry retrieved (reviewer stream)",
+				slog.String("node_id", nodeID), slog.String("node_host", nodeHost))
+		}
+		if ch.Done {
+			if finalContent == "" && ch.DeltaContent != "" {
+				finalContent = ch.DeltaContent
+			}
+			break
+		}
+	}
+	if err != nil {
 		r.handleRoleLLMFailure(ctx, task.ID, task, worker.Role)
 		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
 	}
@@ -480,13 +537,13 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 	var reviewResult struct {
 		Approved bool `json:"approved"`
 	}
-	content := cleanJSONContent(resp.Content)
+	content := cleanJSONContent(finalContent)
 	if json.Unmarshal([]byte(content), &reviewResult) == nil {
 		approved = reviewResult.Approved
 	} else {
 		// Fallback check
-		if strings.Contains(strings.ToLower(resp.Content), `"approved": false`) ||
-			strings.Contains(strings.ToLower(resp.Content), `approved: false`) {
+		if strings.Contains(strings.ToLower(finalContent), `"approved": false`) ||
+			strings.Contains(strings.ToLower(finalContent), `approved: false`) {
 			approved = false
 		}
 	}
@@ -502,7 +559,7 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 
 	update := map[string]interface{}{
 		"review_verdict": verdict,
-		"feedback":       resp.Content,
+		"feedback":       finalContent,
 		"updated_at":     time.Now().UTC().Format(time.RFC3339),
 	}
 	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
@@ -636,42 +693,21 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 	}
 
 	// === Anti-re-decomposition guard (core fix for workitem explosion) ===
-	// Prefer the cheap denormalized ChildCount / DecomposedAt (populated by previous decompositions
-	// and by intake creation). Fall back to a small child search if the denorm fields are not yet set.
 	//
-	// Hardened (post 74-task incident): also treat a recent failed decomp attempt (even if no children
-	// were created because the LLM call failed early) as a reason to back off. This breaks the
-	// "gateway down → error → clearStaleClaim → re-claim → repeat decomp attempt" storm.
-	if task.ChildCount > 0 || task.DecomposedAt != nil {
-		r.logger.Info("pm: skipping re-decomposition — denorm fields indicate children exist (cheap guard)",
-			slog.String("task_id", task.ID),
-			slog.Int("child_count", task.ChildCount),
-			slog.String("title", task.Title))
-		return ftypes.AgentResult{
-			Success:    true,
-			NextStatus: ftypes.TaskStatusDone,
-		}, nil
-	}
+	// Guard ordering rationale (Fix 3, death spiral root cause):
+	//   1. ES child search (AUTHORITATIVE) — always runs first. The denorm fields
+	//      (ChildCount, DecomposedAt) on the task struct may be stale because the
+	//      task was fetched by the claimer BEFORE handlePM wrote them.
+	//   2. Denorm fields (CHEAP FALLBACK) — catches cases where ES search fails.
+	//   3. Recent failure backoff — prevents retry storms after LLM/gateway errors.
 
-	// New backoff for recent failed attempts (recorded on every early LLM failure path)
-	if task.DecompLastAttemptAt != nil {
-		age := time.Since(*task.DecompLastAttemptAt)
-		if age < 2*time.Minute {  // conservative backoff window while LLM/gateway is unhealthy
-			reason := fmt.Sprintf("recent PM decomp attempt failed %s ago (gateway or LLM issue) — backing off to prevent retry storm", age.Round(time.Second))
-			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"age": age.String()})
-			r.logger.Info("pm: skipping — recent failed decomp attempt, backing off",
-				slog.String("task_id", task.ID),
-				slog.Duration("attempt_age", age))
-			return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusReady}, nil
-		}
-	}
-
+	// PRIMARY guard: ES child existence search (authoritative, survives stale reads)
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": task.ID},
+		"term": map[string]string{"parent_id.keyword": task.ID},
 	}
 	childRes, cerr := r.es.Search(ctx, "agent-task-records", childQuery, 1)
 	if cerr == nil && len(childRes.Hits) > 0 {
-		r.logger.Info("pm: skipping re-decomposition — task already has children (anti-explosion guard)",
+		r.logger.Info("pm: skipping re-decomposition — task already has children (ES search, authoritative guard)",
 			slog.String("task_id", task.ID),
 			slog.Int("existing_child_count", len(childRes.Hits)),
 			slog.String("title", task.Title))
@@ -681,9 +717,34 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		}, nil
 	}
 	if cerr != nil {
-		r.logger.Warn("pm: child-existence check failed (proceeding conservatively)",
+		r.logger.Warn("pm: ES child-existence check failed (falling through to denorm guard)",
 			slog.String("task_id", task.ID),
 			slog.String("error", cerr.Error()))
+	}
+
+	// SECONDARY guard: denorm fields (cheap, may be stale at claim time but catches most cases)
+	if task.ChildCount > 0 || task.DecomposedAt != nil {
+		r.logger.Info("pm: skipping re-decomposition — denorm fields indicate children exist (cheap fallback guard)",
+			slog.String("task_id", task.ID),
+			slog.Int("child_count", task.ChildCount),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
+	}
+
+	// TERTIARY guard: recent failed attempt backoff (breaks gateway-down retry storms)
+	if task.DecompLastAttemptAt != nil {
+		age := time.Since(*task.DecompLastAttemptAt)
+		if age < 2*time.Minute {
+			reason := fmt.Sprintf("recent PM decomp attempt failed %s ago (gateway or LLM issue) — backing off to prevent retry storm", age.Round(time.Second))
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"age": age.String()})
+			r.logger.Info("pm: skipping — recent failed decomp attempt, backing off",
+				slog.String("task_id", task.ID),
+				slog.Duration("attempt_age", age))
+			return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusReady}, nil
+		}
 	}
 
 	// === Phase 2 BUDGET ENFORCEMENT in handlePM (before expensive LLM call) ===
@@ -745,7 +806,15 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		WorkerName:    worker.Name,
 	}
 
-	resp, err := r.llm.Chat(ctx, req)
+	// Use streaming for the main decomp call. This keeps the HTTP connection to the
+	// gateway (and thus to the chosen Ollama mesh node) open for the entire generation.
+	// Partial visible content and thoughts from the model (after think-milling) are
+	// emitted as agent reasoning in real time. This provides the visibility needed
+	// to diagnose what the PM agent is actually doing / failing on, instead of
+	// opaque timeouts or single final JSON.
+	// Mesh node selection still happens (we call through the normal routing), and
+	// node telemetry is logged + turned into reasoning entries.
+	streamCh, err := r.llm.ChatStream(ctx, req)
 	if err != nil {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "PM LLM call to gateway/mesh failed during decomposition", map[string]any{
 			"error": err.Error(),
@@ -766,6 +835,87 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
 	}
 
+	// Accumulate final content from stream (for JSON parse), while emitting live
+	// reasoning for every delta. This is what makes "agent reasoning" show the
+	// actual model output and which mesh node was used.
+	var finalContent string
+	var finalThoughts string
+	for ch := range streamCh {
+		if ch.Error != "" {
+			err = fmt.Errorf("pm stream error: %s", ch.Error)
+			break
+		}
+		if ch.DeltaContent != "" {
+			finalContent += ch.DeltaContent
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", ch.DeltaContent, map[string]any{
+				"phase":       "decomp_stream",
+				"partial":     true,
+				"from_stream": true,
+			})
+		}
+		if ch.Thoughts != "" {
+			finalThoughts = ch.Thoughts
+		}
+		if ch.Telemetry != nil {
+			nodeID := ""
+			if v, ok := ch.Telemetry["node_id"].(string); ok {
+				nodeID = v
+			}
+			nodeHost := ""
+			if v, ok := ch.Telemetry["node_host"].(string); ok {
+				nodeHost = v
+			}
+			if nodeID != "" || nodeHost != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+					fmt.Sprintf("routed to ollama mesh node %s (%s) for decomposition", nodeID, nodeHost),
+					map[string]any{
+						"node_id":   nodeID,
+						"node_host": nodeHost,
+						"via":       "stream",
+					})
+			}
+			// Also the generic telemetry log (as non-stream path does)
+			flumelogger.WithContext(ctx).Info("gateway telemetry retrieved (pm stream)",
+				slog.String("node_id", nodeID),
+				slog.String("node_host", nodeHost),
+			)
+		}
+		if ch.Done {
+			if finalContent == "" && ch.DeltaContent != "" {
+				finalContent = ch.DeltaContent
+			}
+			break
+		}
+	}
+	if err != nil {
+		// Same failure recording as before
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "PM LLM call to gateway/mesh failed during decomposition", map[string]any{
+			"error": err.Error(),
+			"model": worker.Model,
+		})
+		now := time.Now().UTC()
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+			"decomp_last_attempt_at": now.Format(time.RFC3339),
+			"decomp_failures":        (task.ChildCount + 1),
+			"error_message":          "PM LLM failure (stream) - decomp attempt recorded for backoff",
+			"updated_at":             now.Format(time.RFC3339),
+		})
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	// Log accumulated thoughts once (the "internal monologue" of the PM before the JSON).
+	// This (plus the per-delta visible content and the node routing entry above) is what
+	// populates agent reasoning with what the model actually emitted while talking to
+	// the specific ollama mesh node.
+	if finalThoughts != "" {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+			"PM decomp thoughts (from mesh node): "+firstNChars(finalThoughts, 800),
+			map[string]any{
+				"thoughts_len": len(finalThoughts),
+				"via":          "stream",
+			})
+	}
+
 	type SubtaskPlan struct {
 		ID        string   `json:"id"`
 		Title     string   `json:"title"`
@@ -776,79 +926,97 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		Tasks []SubtaskPlan `json:"tasks"`
 	}
 
-	content := cleanJSONContent(resp.Content)
+	content := cleanJSONContent(finalContent)
 	if err := json.Unmarshal([]byte(content), &plan); err != nil {
 		// === PM JSON resilience (highest-leverage local-LLM fix) ===
 		// Local models (even qwen3.5 35b) frequently emit leading text, ".", or markdown
 		// before the JSON. This single path was responsible for the entire 40+ minute
 		// death-spiral storm in the field test (75-120s calls, gateway collapse, repeated
 		// stale-claim resets, shadow violations).
-		r.logger.Warn("pm: initial JSON parse failed, attempting one repair LLM call",
-			slog.String("task_id", task.ID),
-			slog.String("error", err.Error()),
-			slog.Int("raw_len", len(resp.Content)))
 
-		flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
-			"Initial subtask plan JSON parse failed (LLM output did not start with valid JSON). Attempting automatic repair with strict JSON-only instruction.",
-			map[string]any{
-				"raw_prefix":     firstNChars(resp.Content, 200),
-				"parse_error":    err.Error(),
-				"repair_attempt": 1,
-			})
-
-		// One repair attempt with a very strict prompt (re-uses same model for simplicity).
-		repairReq := llm.ChatRequest{
-			Messages: []llm.Message{
-				{Role: "system", Content: "You are a JSON repair assistant. Output ONLY a single valid JSON object. No markdown, no explanations, no leading or trailing text."},
-				{Role: "user", Content: fmt.Sprintf("The following text is supposed to be a JSON object with a top-level 'tasks' array matching this schema exactly:\n{\n  \"tasks\": [ {\"id\": \"task_1\", \"title\": \"...\", \"objective\": \"...\", \"depends_on\": [] } ]\n}\n\nPrevious model output (first 800 chars):\n%s\n\nRe-emit ONLY the corrected JSON object. Start with '{' and end with '}'.", firstNChars(resp.Content, 800))},
-			},
-			Model:         worker.Model,
-			Provider:      worker.Provider,
-			AgentRole:     "pm",
-			TaskID:        task.ID,
-			PlanSessionID: task.PlanSessionID,
-			WorkerName:    worker.Name,
+		// Cheap local/heuristic repair FIRST, before the expensive second LLM call.
+		heuristic := finalContent
+		heuristic = removeTrailingCommas(heuristic)
+		heuristic = cleanJSONContent(heuristic)
+		var hplan struct {
+			Tasks []SubtaskPlan `json:"tasks"`
 		}
-		repairResp, repairErr := r.llm.Chat(ctx, repairReq)
-		repairSucceeded := false
-		if repairErr == nil {
-			repairContent := cleanJSONContent(repairResp.Content)
-			if uerr := json.Unmarshal([]byte(repairContent), &plan); uerr == nil && len(plan.Tasks) > 0 {
-				repairSucceeded = true
-				r.logger.Info("pm: repair LLM call succeeded", slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
-				flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "Repair LLM call produced valid subtask plan JSON after initial failure.", map[string]any{"tasks": len(plan.Tasks)})
+		if uerr := json.Unmarshal([]byte(heuristic), &hplan); uerr == nil && len(hplan.Tasks) > 0 {
+			plan = hplan
+			r.logger.Info("pm: cheap local heuristic JSON repair succeeded (avoided LLM repair call)",
+				slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+				"Local heuristic repair (trailing commas + clean) produced valid subtask plan JSON before expensive LLM repair.",
+				map[string]any{"tasks": len(plan.Tasks), "heuristic": true})
+			// fallthrough to use the plan, skip LLM repair
+		} else {
+			r.logger.Warn("pm: initial JSON parse failed, attempting one repair LLM call",
+				slog.String("task_id", task.ID),
+				slog.String("error", err.Error()),
+				slog.Int("raw_len", len(finalContent)))
+
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+				"Initial subtask plan JSON parse failed (LLM output did not start with valid JSON). Attempting automatic repair with strict JSON-only instruction.",
+				map[string]any{
+					"raw_prefix":     firstNChars(finalContent, 200),
+					"parse_error":    err.Error(),
+					"repair_attempt": 1,
+				})
+
+			// One repair attempt with a very strict prompt (re-uses same model for simplicity).
+			repairReq := llm.ChatRequest{
+				Messages: []llm.Message{
+					{Role: "system", Content: "You are a JSON repair assistant. Output ONLY a single valid JSON object. No markdown, no explanations, no leading or trailing text."},
+					{Role: "user", Content: fmt.Sprintf("The following text is supposed to be a JSON object with a top-level 'tasks' array matching this schema exactly:\n{\n  \"tasks\": [ {\"id\": \"task_1\", \"title\": \"...\", \"objective\": \"...\", \"depends_on\": [] } ]\n}\n\nPrevious model output (first 800 chars):\n%s\n\nRe-emit ONLY the corrected JSON object. Start with '{' and end with '}'.", firstNChars(finalContent, 800))},
+				},
+				Model:         worker.Model,
+				Provider:      worker.Provider,
+				AgentRole:     "pm",
+				TaskID:        task.ID,
+				PlanSessionID: task.PlanSessionID,
+				WorkerName:    worker.Name,
 			}
-		}
-		if !repairSucceeded {
-			// Circuit breaker: hard failure after repair attempt. Block to stop the retry storm.
-			reason := "PM failed to produce parseable subtask JSON even after one repair attempt (local LLM output format issue)"
-			flumelogger.LogStateTransition(ctx, task.ID, string(task.Status), "blocked", reason)
-			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{
-				"raw_prefix":       firstNChars(resp.Content, 300),
-				"repair_attempted": true,
-				"repair_error":     repairErr,
-				"model":            worker.Model,
-				"provider":         worker.Provider,
-				"action":           "blocked_to_prevent_storm",
-			})
-			r.logger.Error("pm: JSON parse failed after repair — blocking task to prevent retry storm",
-				slog.String("task_id", task.ID), slog.String("raw_prefix", firstNChars(resp.Content, 120)))
+			repairResp, repairErr := r.llm.Chat(ctx, repairReq)
+			repairSucceeded := false
+			if repairErr == nil {
+				repairContent := cleanJSONContent(repairResp.Content)
+				if uerr := json.Unmarshal([]byte(repairContent), &plan); uerr == nil && len(plan.Tasks) > 0 {
+					repairSucceeded = true
+					r.logger.Info("pm: repair LLM call succeeded", slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
+					flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "Repair LLM call produced valid subtask plan JSON after initial failure.", map[string]any{"tasks": len(plan.Tasks)})
+				}
+			}
+			if !repairSucceeded {
+				// Circuit breaker: hard failure after repair attempt. Block to stop the retry storm.
+				reason := "PM failed to produce parseable subtask JSON even after one repair attempt (local LLM output format issue)"
+				flumelogger.LogStateTransition(ctx, task.ID, string(task.Status), "blocked", reason)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{
+					"raw_prefix":       firstNChars(finalContent, 300),
+					"repair_attempted": true,
+					"repair_error":     repairErr,
+					"model":            worker.Model,
+					"provider":         worker.Provider,
+					"action":           "blocked_to_prevent_storm",
+				})
+				r.logger.Error("pm: JSON parse failed after repair — blocking task to prevent retry storm",
+					slog.String("task_id", task.ID), slog.String("raw_prefix", firstNChars(finalContent, 120)))
 
-			// Persist the block (best effort)
-			_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-				"status":        "blocked",
-				"error_message": reason,
-				"updated_at":    time.Now().UTC().Format(time.RFC3339),
-			})
-			// Return blocked as NextStatus with nil error (GAP-3 / Phase 1).
-			// Prevents clearStaleClaim from resetting a permanently failed PM back to planned.
-			return ftypes.AgentResult{
-				Success:    false,
-				Errors:     []string{reason},
-				NextStatus: ftypes.TaskStatusBlocked,
-			}, nil
+				// Persist the block (best effort)
+				_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+					"status":        "blocked",
+					"error_message": reason,
+					"updated_at":    time.Now().UTC().Format(time.RFC3339),
+				})
+				// Return blocked as NextStatus with nil error (GAP-3 / Phase 1).
+				// Prevents clearStaleClaim from resetting a permanently failed PM back to planned.
+				return ftypes.AgentResult{
+					Success:    false,
+					Errors:     []string{reason},
+					NextStatus: ftypes.TaskStatusBlocked,
+				}, nil
+			}
+			// If we reach here, plan was populated by the repair response — fall through to creation.
 		}
-		// If we reach here, plan was populated by the repair response — fall through to creation.
 	}
 
 	// === HARD per-parent child cap (prevents one bad decomposition from creating 50+ items) ===
@@ -979,20 +1147,25 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 			"parent_title":  task.Title,
 		})
 
-	// Set child_count and decomposed_at via direct UpdateDoc first (synchronous, reliable).
-	// The inline script below is a secondary atomic counter increment for concurrent PM claims,
-	// but the direct set ensures the anti-re-decomp guard always has data even if the
-	// script races with updateTaskStatus or fails silently.
+	// Fix 2: ATOMIC combined update — set child_count + decomposed_at + status=done
+	// + clear active_worker in ONE ES write. This eliminates the HTTP 409 version
+	// conflict that occurred when handlePM bumped the seq_no (via separate UpdateDoc
+	// calls) and then RunWorker's updateTaskStatus(done) tried to write with the
+	// stale seq_no. The 409 left the task stuck in 'running', triggering the death
+	// spiral via clearStaleClaim → re-claim → re-decompose.
 	nowISO := time.Now().UTC().Format(time.RFC3339)
 	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
 		"child_count":   len(plan.Tasks),
 		"decomposed_at": nowISO,
+		"status":        "done",
+		"active_worker": nil,
+		"queue_state":   "available",
 		"updated_at":    nowISO,
 	})
 
-	// Authoritative ChildCount via atomic ES inline script (task 3) — secondary reinforcement.
+	// Secondary reinforcement via atomic inline script (survives concurrent claim races)
 	delta := len(plan.Tasks)
-	scriptSrc := `ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta; ctx._source.decomposed_at = params.now; ctx._source.updated_at = params.now;`
+	scriptSrc := `ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta; ctx._source.decomposed_at = params.now; ctx._source.status = "done"; ctx._source.active_worker = null; ctx._source.queue_state = "available"; ctx._source.updated_at = params.now;`
 	_ = r.es.UpdateDocWithInlineScript(ctx, "agent-task-records", task.ID, scriptSrc, map[string]interface{}{
 		"delta": delta,
 		"now":   nowISO,
@@ -1013,9 +1186,12 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		})
 	}
 
+	// Return empty NextStatus so RunWorker does NOT call updateTaskStatus(done) —
+	// we already set status=done in the combined update above. A second update
+	// would race with a stale seq_no and cause HTTP 409.
 	return ftypes.AgentResult{
 		Success:    true,
-		NextStatus: ftypes.TaskStatusDone, // Decomposition complete; subtasks + sweep drive completion. Prevents lingering PM org items.
+		NextStatus: "", // handlePM already wrote status=done atomically
 	}, nil
 }
 
@@ -1721,7 +1897,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 	// 2. Strong idempotency / anti-explosion guard (prevents reviewer/tester multiplication)
 	// We now count existing review/test children for this parent and refuse if we already have the expected pair.
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": parent.ID},
+		"term": map[string]string{"parent_id.keyword": parent.ID},
 	}
 	childRes, cerr := r.es.Search(ctx, "agent-task-records", childQuery, 100)
 	existingReviewOrTest := 0
@@ -1941,6 +2117,13 @@ func cleanJSONContent(s string) string {
 	}
 
 	return s
+}
+
+// removeTrailingCommas is a cheap heuristic to fix common LLM JSON output errors
+// (trailing commas before } or ]) before falling back to expensive LLM repair.
+func removeTrailingCommas(s string) string {
+	re := regexp.MustCompile(`,(\s*[}\]])`)
+	return re.ReplaceAllString(s, "$1")
 }
 
 func generateShortID() string {

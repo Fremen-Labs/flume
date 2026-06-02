@@ -1054,18 +1054,25 @@ func countPlanTasks(plan PlanResponse) int {
 // big implementation report for full Devin/Cursor/LangGraph/Aider/OpenHands/CrewAI sources).
 // Uses the planner's own ComplexityScore (already 1-10 with existing Low/Med/High buckets)
 // plus a light structural bushiness signal to catch LLM over-decomposition on "simple" tasks.
+//
+// Structural thresholds are intentionally generous to avoid rejecting legitimate plans.
+// A normal 2-epic/2-feature/4-story plan (structural=8) should never be flagged.
+// The 258-item incident produced structural counts of 30+ — that's the target.
 func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 	base := 6
 	switch {
 	case complexity <= 3:
-		base = 6 // Simple: align with prompt ("trivial 1-2", "single-component 3-5")
+		base = 8 // Simple: allows reasonable multi-story decomposition (was 6, too tight)
 	case complexity <= 6:
-		base = 12 // Medium
+		base = 15 // Medium
 	default:
 		base = 25 // Complex / high-risk
 	}
 
-	// Structural over-decomposition detector (common failure mode in the 258-item incident)
+	// Structural over-decomposition detector (common failure mode in the 258-item incident).
+	// "structural" = total non-leaf containers (features + stories across all epics).
+	// A normal small plan: 2 epics * (1 feat * 2 stories) = structural ~4-8. This is fine.
+	// The 258-item incident had structural counts of 30+. That's what we're catching.
 	structural := 0
 	for _, e := range plan.Epics {
 		structural += len(e.Features)
@@ -1073,12 +1080,12 @@ func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 			structural += len(f.Stories)
 		}
 	}
-	if complexity <= 3 && structural > 4 {
-		base = 4 // LLM claimed "simple" but produced a bushy tree → tighten aggressively
+	if complexity <= 3 && structural > 12 {
+		base = 6 // LLM claimed "simple" but produced a very bushy tree → tighten to baseline
 	}
-	if complexity <= 6 && structural > 12 {
-		if base > 8 {
-			base = 8
+	if complexity <= 6 && structural > 20 {
+		if base > 10 {
+			base = 10
 		}
 	}
 

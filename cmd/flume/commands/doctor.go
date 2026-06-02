@@ -431,7 +431,8 @@ func runLogloomDiagnostics(jsonOutput bool, report *DiagnosticsReport) {
 	if logloomBin == "" {
 		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
 	}
-	// Also check container venv (installed in Dockerfile for reliable ingestion in `flume start`)
+	// Also check container venv (present when built with --build-arg LOGLOOM_INSTALL=wheel
+	// using wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7)
 	if _, err := os.Stat(logloomBin); err != nil {
 		if _, venvErr := os.Stat("/opt/venv/bin/logloom"); venvErr == nil {
 			logloomBin = "/opt/venv/bin/logloom"

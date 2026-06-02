@@ -94,35 +94,29 @@ RUN mkdir -p /app && chown -R flume:flume /app
 ARG ELASTR0_INSTALL=public
 ARG ELASTR0_PIP_INDEX_URL=""
 
+# LogLoom CLI for dashboard-side project AST graph generation + ES shipping
+# during "Plan New Work" / project creation + clone.
+# Use the wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7
+ARG LOGLOOM_INSTALL=skip
+
 # Create isolated venv (even on python-slim base) so we control exact packages
 # and can keep the final layer free of build tools.
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade pip
 
-# ── LogLoom CLI (for dashboard-side project AST ingestion) ────────────────────
-# The `logloom` binary (used by runLogloomGraphIngest) is **not** reliably
-# available via public `pip install logloom` from a clean python:3.12-slim
-# environment (it appears to be a Fremen-Labs internal / private distribution
-# at the moment, similar to the original "elastro" vs "elastro-client" issue).
+# ── LogLoom CLI (for dashboard-side project AST ingestion on "Plan New Work") ─
+# LogLoom provides rich structural AST (call graph, signatures, models, tags, etc.)
+# and is pushed to `flume-logloom-ast`. It complements Elastro RAG.
 #
-# We therefore do **not** attempt to pip-install it here. This keeps the
-# unified image buildable for everyone.
+# Installation is controlled by LOGLOOM_INSTALL (modeled after ELASTR0_INSTALL).
 #
-# Current behavior:
-#   - Native mode (`flume start --native`): Uses $HOME/.local/bin/logloom (or LOGLOOM_BIN)
-#   - Container mode: LogLoom AST ingest is gracefully skipped (best-effort, non-fatal)
+# Recommended (reproducible):
+#   curl -L -o logloom-0.3.7-py3-none-any.whl \
+#     https://github.com/Fremen-Labs/logloom/releases/download/v0.3.7/logloom-0.3.7-py3-none-any.whl
+#   docker build --build-arg LOGLOOM_INSTALL=wheel -t flume .
 #
-# Discovery logic in api_projects.go + doctor.go already checks:
-#   - $LOGLOOM_BIN
-#   - $HOME/.local/bin/logloom
-#   - /opt/venv/bin/logloom   (ready for when a reliable install method exists)
-#
-# When a public wheel, correct package name, or GitHub release becomes available,
-# we will add a LOGLOOM_INSTALL=public|wheel|... build-arg (exactly like ELASTR0_INSTALL).
-#
-# For advanced users who have a working logloom wheel/sdist:
-#   docker build --build-arg ... -t ... .
-#   (then COPY the wheel into the context and pip install it in a custom stage)
+# The binary will be at /opt/venv/bin/logloom and available to the dashboard
+# during project clone (so both Elastro + LogLoom AST indexes get populated).
 
 # Install Elastro (with temporary compilers only for the native tree-sitter bits).
 # We deliberately install build deps in this layer then purge them so the
@@ -164,13 +158,26 @@ RUN set -eux; \
         ;; \
     esac; \
     \
+    # LogLoom CLI (v0.3.7+) — required for rich structural AST + ES ship on "Plan New Work"
+    case "${LOGLOOM_INSTALL}" in \
+      wheel) \
+        echo "Installing LogLoom from local wheel (https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7)..."; \
+        /opt/venv/bin/pip install --no-cache-dir /tmp/logloom-*.whl; \
+        ;; \
+      skip) \
+        echo "Skipping LogLoom installation (LOGLOOM_INSTALL=skip) — LogLoom AST ingest unavailable in container mode"; \
+        ;; \
+      *) \
+        echo "ERROR: Unknown LOGLOOM_INSTALL value: ${LOGLOOM_INSTALL}"; exit 1; \
+        ;; \
+    esac; \
+    \
     # Purge compilers to keep the final worker image lean
     apt-get purge -y --auto-remove build-essential python3-dev; \
     rm -rf /var/lib/apt/lists/* /root/.cache /tmp/*.whl 2>/dev/null || true
 
 # Hard assertion + functional smoke test. Fails the *build* (not just runtime)
-# if the critical binary for code-aware agents is missing or broken.
-# This is the single source of truth that elastro_query_ast will work inside workers.
+# if the critical binaries for code intelligence are missing or broken.
 RUN set -eux; \
     if [ "${ELASTR0_INSTALL}" != "skip" ]; then \
       if [ ! -x /opt/venv/bin/elastro ]; then \
@@ -180,9 +187,20 @@ RUN set -eux; \
         ls -la /opt/venv/bin/ || true; \
         exit 1; \
       fi; \
-      # Functional verification — the CLI must actually start (catches packaging / entrypoint bugs)
       /opt/venv/bin/elastro --help >/dev/null 2>&1 || /opt/venv/bin/elastro --version >/dev/null 2>&1 || (echo "FATAL: elastro binary exists but is not executable/functional"; exit 1); \
       echo "SUCCESS: elastro binary present and functional at /opt/venv/bin/elastro"; \
+    fi; \
+    \
+    if [ "${LOGLOOM_INSTALL}" != "skip" ]; then \
+      if [ ! -x /opt/venv/bin/logloom ]; then \
+        echo "FATAL: logloom binary not found at /opt/venv/bin/logloom after installation step."; \
+        echo "       Download wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7"; \
+        echo "       Rebuild with --build-arg LOGLOOM_INSTALL=wheel (place logloom-*.whl in build context)."; \
+        ls -la /opt/venv/bin/ || true; \
+        exit 1; \
+      fi; \
+      /opt/venv/bin/logloom --help >/dev/null 2>&1 || /opt/venv/bin/logloom --version >/dev/null 2>&1 || (echo "FATAL: logloom binary exists but is not executable/functional"; exit 1); \
+      echo "SUCCESS: logloom binary present and functional at /opt/venv/bin/logloom"; \
     fi && \
     chown -R flume:flume /opt/venv
 

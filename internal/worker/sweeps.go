@@ -173,6 +173,12 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 					},
 				},
 			},
+			// Fix 5: Exclude already-decomposed tasks. If decomposed_at is set,
+			// handlePM already completed this task's work. Resurrecting it would
+			// trigger a re-claim → re-decompose cycle (the death spiral).
+			"must_not": []interface{}{
+				map[string]interface{}{"exists": map[string]string{"field": "decomposed_at"}},
+			},
 		},
 	}
 
@@ -516,6 +522,21 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 		return
 	}
 
+	// Fix 4: PM circuit-breaker error messages that indicate INTENTIONAL blocks.
+	// These tasks were deliberately blocked by handlePM and should NOT be auto-recovered
+	// by the resume sweep. The logs showed task-3 being blocked by PM budget at 22:55:04
+	// and unblocked by resume sweep at 22:55:05 — ONE SECOND later — feeding the death spiral.
+	pmBlockPatterns := []string{
+		"PM decomp blocked",
+		"PM failed to produce",
+		"plan budget",
+		"PM decomposition refused",
+		"depth limit exceeded",
+		"blocked_to_prevent_storm",
+		"blocked_pre_llm_budget",
+		"blocked_exact_budget",
+	}
+
 	for _, hit := range result.Hits {
 		var task struct {
 			ID           string `json:"id"`
@@ -524,6 +545,21 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 			MaxAttempts  int    `json:"max_attempts"`
 		}
 		if json.Unmarshal(hit, &task) != nil {
+			continue
+		}
+
+		// Skip PM-blocked tasks — these were intentionally blocked by circuit breakers
+		isPMBlock := false
+		for _, pattern := range pmBlockPatterns {
+			if strings.Contains(task.ErrorMessage, pattern) {
+				isPMBlock = true
+				break
+			}
+		}
+		if isPMBlock {
+			s.logger.Debug("resume sweep: skipping PM-blocked task (intentional circuit breaker)",
+				slog.String("task_id", task.ID),
+				slog.String("error_message", task.ErrorMessage))
 			continue
 		}
 
@@ -620,7 +656,7 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 		childQuery := map[string]interface{}{
 			"bool": map[string]interface{}{
 				"must": []interface{}{
-					map[string]interface{}{"term": map[string]string{"parent_id": task.ID}},
+					map[string]interface{}{"term": map[string]string{"parent_id.keyword": task.ID}},
 					map[string]interface{}{"terms": map[string]interface{}{"worker_role": []string{"reviewer", "tester"}}},
 				},
 			},
@@ -691,9 +727,32 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 				TaskID:     task.ID,
 				WorkerName: "critic",
 			}
-			resp, chatErr := s.llm.Chat(ctx, req)
+			// Wire streaming for the critic synthesis too, so partial reasoning from the
+			// consensus LLM is emitted (for observability), and mesh node is visible.
+			streamCh, chatErr := s.llm.ChatStream(ctx, req)
 			if chatErr == nil {
-				explanation.WriteString(fmt.Sprintf("\nConsensus Critic Synthesis:\n%s", resp.Content))
+				var synth string
+				for ch := range streamCh {
+					if ch.Error != "" {
+						break
+					}
+					if ch.DeltaContent != "" {
+						synth += ch.DeltaContent
+						// Emit as system-level reasoning (not per-task agent, but useful for logs/Logloom)
+						flumelogger.LogAgentReasoning(ctx, task.ID, "critic", ch.DeltaContent, map[string]any{
+							"phase": "consensus_stream", "partial": true,
+						})
+					}
+					if ch.Done {
+						if synth == "" && ch.DeltaContent != "" {
+							synth = ch.DeltaContent
+						}
+						break
+					}
+				}
+				if synth != "" {
+					explanation.WriteString(fmt.Sprintf("\nConsensus Critic Synthesis:\n%s", synth))
+				}
 			}
 		}
 
@@ -844,7 +903,7 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 
 			// Only consider items that actually have children
 			childQuery := map[string]interface{}{
-				"term": map[string]string{"parent_id": potentialParent.ID},
+				"term": map[string]string{"parent_id.keyword": potentialParent.ID},
 			}
 			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQuery, 1)
 			if cerr != nil || len(childRes.Hits) == 0 {
@@ -859,7 +918,7 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 // tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by parentCompletionSweep.
 func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, parent ftypes.Task) {
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": parent.ID},
+		"term": map[string]string{"parent_id.keyword": parent.ID},
 	}
 
 	childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 100)
@@ -930,7 +989,7 @@ func (s *Sweeper) childCountReconciliationSweep(ctx context.Context) {
 		}
 		if json.Unmarshal(hit, &parent) == nil && parent.ID != "" {
 			// Compute authoritative live count
-			childQ := map[string]interface{}{"term": map[string]string{"parent_id": parent.ID}}
+			childQ := map[string]interface{}{"term": map[string]string{"parent_id.keyword": parent.ID}}
 			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQ, 1000)
 			if cerr != nil {
 				continue

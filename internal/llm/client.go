@@ -123,6 +123,24 @@ type ToolCallFunction struct {
 	Arguments interface{} `json:"arguments"`
 }
 
+// ChatStreamChunk is the client-side view of an incremental streaming response
+// from the gateway (or legacy direct path).
+//
+// Matches the gateway's ChatStreamChunk shape (see src/gateway/models.go).
+// Used by workers to observe partial reasoning / thoughts in real time during
+// long local Ollama generations (the key to diagnosing PM and other agent
+// behavior that was previously invisible behind aggregated responses).
+type ChatStreamChunk struct {
+	RequestID    string                 `json:"request_id,omitempty"`
+	DeltaContent string                 `json:"delta_content,omitempty"`
+	Thoughts     string                 `json:"thoughts,omitempty"`
+	ToolCalls    []ToolCall             `json:"tool_calls,omitempty"`
+	Usage        map[string]interface{} `json:"usage,omitempty"`
+	Telemetry    map[string]interface{} `json:"telemetry,omitempty"`
+	Done         bool                   `json:"done"`
+	Error        string                 `json:"error,omitempty"`
+}
+
 // ChatResponse is the unified response from a Chat call.
 type ChatResponse struct {
 	Content   string                 `json:"content"`
@@ -210,7 +228,10 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	}
 	timeout := req.TimeoutSeconds
 	if timeout == 0 {
-		timeout = 120
+		timeout = 300 // Must match gateway WriteTimeout (300s). The old 120s caused
+		// "context deadline exceeded" because the gateway aggregates the full Ollama
+		// stream before responding — the client sees zero bytes until completion.
+		// Thinking models (qwen3.5:35b-a3b) routinely need 2-5 minutes.
 	}
 
 	if c.gatewayAvailable(ctx) {
@@ -483,6 +504,136 @@ func (c *Client) postGateway(ctx context.Context, path string, payload interface
 	}
 
 	return nil, fmt.Errorf("llm: gateway exhausted all retries")
+}
+
+// postGatewayStream performs the POST and returns the raw *http.Response so the
+// caller can incrementally decode NDJSON chunks. The caller is responsible for
+// closing the response body.
+//
+// This is the foundation for restoring true streaming of agent reasoning from
+// the gateway (and eventually from direct Ollama in the legacy path).
+func (c *Client) postGatewayStream(ctx context.Context, path string, payload interface{}, timeoutSec int, workerName string) (*http.Response, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal failed: %w", err)
+	}
+
+	url := c.gatewayURL + path
+
+	reqCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("llm: request build failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	wName := workerName
+	if wName == "" {
+		wName = c.workerName
+	}
+	req.Header.Set("X-Worker-Name", wName)
+	// Signal streaming preference (in addition to body flag)
+	req.Header.Set("Accept", "application/x-ndjson")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("llm: gateway stream request failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("llm: gateway stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	// IMPORTANT: Do NOT cancel here. The reqCtx (with its timeout) must remain
+	// active while the caller reads the (potentially very long) streaming body.
+	// Canceling immediately (as was done in non-stream postGateway) would cause
+	// "context canceled" on the NDJSON decoder for slow/large generations.
+	// The WithTimeout will fire after timeoutSec if the stream is still open.
+	// Caller should consume until Done, at which point the timer can harmlessly fire later.
+	return resp, nil
+}
+
+// ChatStream initiates a streaming chat request.
+// Returns a channel that will yield ChatStreamChunk values (including a final
+// Done chunk or an Error chunk). The channel is closed when the stream ends.
+//
+// For Phase 0 this exercises the full NDJSON writer path even though the
+// gateway is still emitting a single terminal chunk. True incremental deltas
+// arrive in Phase 1+.
+func (c *Client) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamChunk, error) {
+	if req.Temperature == 0 {
+		req.Temperature = 0.3
+	}
+	if req.MaxTokens == 0 {
+		req.MaxTokens = 8192
+	}
+	timeout := req.TimeoutSeconds
+	if timeout == 0 {
+		timeout = 600 // Generous for streaming; the open connection + chunks keep it alive
+	}
+
+	ch := make(chan ChatStreamChunk, 16)
+
+	if c.gatewayAvailable(ctx) {
+		payload := map[string]interface{}{
+			"messages":    req.Messages,
+			"model":       req.Model,
+			"provider":    req.Provider,
+			"temperature": req.Temperature,
+			"max_tokens":  req.MaxTokens,
+			"think":       req.Think,
+			"agent_role":  req.AgentRole,
+			"stream":      true, // explicit opt-in
+		}
+		if req.TaskID != "" {
+			payload["task_id"] = req.TaskID
+		}
+		if req.PlanSessionID != "" {
+			payload["plan_session_id"] = req.PlanSessionID
+		}
+
+		resp, err := c.postGatewayStream(ctx, "/v1/chat", payload, timeout, req.WorkerName)
+		if err != nil {
+			close(ch)
+			return nil, err
+		}
+
+		go func() {
+			defer close(ch)
+			defer resp.Body.Close()
+
+			decoder := json.NewDecoder(resp.Body)
+			for decoder.More() {
+				var chunk ChatStreamChunk
+				if err := decoder.Decode(&chunk); err != nil {
+					ch <- ChatStreamChunk{Error: err.Error(), Done: true}
+					return
+				}
+				ch <- chunk
+				if chunk.Telemetry != nil {
+					flumelogger.WithContext(ctx).Info("gateway telemetry retrieved (stream)",
+						slog.String("node_id", strVal(chunk.Telemetry["node_id"])),
+						slog.String("node_host", strVal(chunk.Telemetry["node_host"])),
+					)
+				}
+				if chunk.Done || chunk.Error != "" {
+					return
+				}
+			}
+		}()
+
+		return ch, nil
+	}
+
+	// Legacy direct path — for Phase 0 we simply don't support streaming yet
+	// (or we could wire legacyChat into a channel, but keep it simple).
+	close(ch)
+	return nil, fmt.Errorf("llm: streaming not yet available on legacy direct path (use gateway)")
 }
 
 // jitteredBackoff returns the backoff duration with ±10% jitter.

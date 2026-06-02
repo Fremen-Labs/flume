@@ -358,7 +358,71 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		defer s.ollamaSem.Release()
 	}
 
-	// ── Route to the correct execution path ─────────────────────────────
+	// ── Streaming path (Phase 0 foundations) ────────────────────────────
+	// Opt-in via ChatRequest.Stream or headers. For the initial rollout we only
+	// support the direct router.Route path (no ensemble/multi-router yet — see plan).
+	// This is the critical change that lets long Ollama generations (especially
+	// PM + thinking models) keep the connection alive and emit reasoning deltas.
+	if wantsStream(&req, r.Header) && !withTools {
+		// For now, force the simple direct Ollama path when streaming.
+		// Ensemble and mesh routing will be added in Phase 4.
+		chunkCh := make(chan ChatStreamChunk, 32)
+
+		go func() {
+			defer close(chunkCh)
+
+			// Replicate the routing decision from the non-stream path so that
+			// mesh nodes (multiRouter) and ensemble are still used for streaming
+			// requests. This ensures "agents making calls to the ollama nodes in the mesh"
+			// continue to be logged and telemetry (node_id/host) is attached.
+			// Phase 0 still emits a single terminal chunk; incremental deltas come later.
+			taskType := req.TaskType
+			if taskType == "" {
+				taskType = agentRoleToTaskType(req.AgentRole)
+			}
+			isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
+
+			var resp *ChatResponse
+			var routeErr error
+			if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
+				resp, routeErr = s.ExecuteEnsemble(ctx, &req, withTools)
+			} else if s.multiRouter != nil && s.nodeRegistry != nil {
+				resp, routeErr = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, withTools)
+			} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+				resp, routeErr = s.ExecuteEnsemble(ctx, &req, withTools)
+			} else {
+				resp, routeErr = s.router.Route(ctx, &req, withTools)
+			}
+
+			if routeErr != nil {
+				chunkCh <- ChatStreamChunk{
+					Error: routeErr.Error(),
+					Done:  true,
+				}
+				return
+			}
+
+			// Emit the final aggregated result as the terminal chunk for Phase 0.
+			// In later phases we will refactor to true incremental chunk production
+			// from the Ollama NDJSON + ThinkMill stream (so partial reasoning is visible live).
+			chunkCh <- ChatStreamChunk{
+				DeltaContent: resp.Message.Content,
+				Thoughts:     resp.Message.Thoughts,
+				ToolCalls:    resp.Message.ToolCalls,
+				Usage:        resp.Usage,
+				Telemetry:    resp.Telemetry,
+				Done:         true,
+			}
+		}()
+
+		s.writeStreamingChat(w, ctx, requestID, chunkCh)
+		// Record as success for now (the chunk itself carries any routeErr).
+		// Full error classification for streaming can be enhanced later.
+		Metrics.RecordRequest(string(provider), true, time.Since(start))
+		return
+	}
+
+	// ── Route to the correct execution path (non-streaming, unchanged) ────
 	var resp *ChatResponse
 	var err error
 
@@ -553,6 +617,78 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message, requestI
 		"error":      message,
 		"request_id": requestID,
 	})
+}
+
+// wantsStream returns true if the request opts into incremental NDJSON streaming.
+// Supports the existing ChatRequest.Stream field plus common header signals
+// for robustness during the rollout.
+func wantsStream(req *ChatRequest, h http.Header) bool {
+	if req != nil && req.Stream {
+		return true
+	}
+	if h.Get("Accept") == "application/x-ndjson" {
+		return true
+	}
+	if h.Get("X-Stream") == "true" {
+		return true
+	}
+	return false
+}
+
+// writeStreamingChat writes ChatStreamChunk values as NDJSON (one object per line)
+// and flushes after each write so the client sees data as soon as it is produced
+// by the Ollama stream + ThinkMill.
+//
+// This is the core of restoring real-time agent reasoning visibility.
+// The caller is responsible for closing the channel when the generation is complete
+// (or on error). Context cancellation aborts writing.
+func (s *Server) writeStreamingChat(w http.ResponseWriter, ctx context.Context, requestID string, chunkCh <-chan ChatStreamChunk) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+
+	enc := json.NewEncoder(w)
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Best-effort terminal error chunk on cancellation
+			_ = enc.Encode(ChatStreamChunk{
+				RequestID: requestID,
+				Error:     "stream cancelled by client or gateway",
+				Done:      true,
+			})
+			if canFlush {
+				flusher.Flush()
+			}
+			return
+
+		case ch, ok := <-chunkCh:
+			if !ok {
+				// Channel closed without an explicit done chunk — emit one
+				_ = enc.Encode(ChatStreamChunk{RequestID: requestID, Done: true})
+				if canFlush {
+					flusher.Flush()
+				}
+				return
+			}
+
+			ch.RequestID = requestID // ensure correlation
+			if err := enc.Encode(ch); err != nil {
+				Log().Error("streaming write failed", slog.String("error", err.Error()), slog.String("request_id", requestID))
+				return
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+
+			if ch.Done || ch.Error != "" {
+				return
+			}
+		}
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
