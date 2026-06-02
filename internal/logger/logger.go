@@ -386,6 +386,43 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 	appendExecutionThoughtNonBlocking(ctx, taskID, agentRole, reasoning, meta)
 }
 
+// LogTaskStateViolation instruments TaskStateMachine violations (Phase 0: flip shadow audit + instrument to ES/metrics).
+// Always emits (regardless of ShadowMode) via LogAgentReasoning (routes to slog + execution_thoughts[] + ES bridge for Logloom/Elastro/UI)
+// plus explicit WARN for "flume_task_state_violation" style aggregation (metric proxy).
+// Call sites (sweeps, claim, runner, intake) do: if err := ftypes.Default...OrLog(...); err != nil { LogTaskStateViolation(ctx, id, string(current), string(target), err, sm.ShadowMode) }
+func LogTaskStateViolation(ctx context.Context, taskID, from, to string, violationErr error, shadow bool, metadata ...any) {
+	reason := fmt.Sprintf("state machine violation: %s -> %s (shadow=%v)", from, to, shadow)
+	if violationErr != nil {
+		reason += " err=" + violationErr.Error()
+	}
+	meta := map[string]any{
+		"from":      from,
+		"to":        to,
+		"shadow":    shadow,
+		"violation": true,
+		"audit":     true,
+		"event":     "task_state_violation",
+	}
+	for _, m := range metadata {
+		if mm, ok := m.(map[string]any); ok {
+			for k, v := range mm {
+				meta[k] = v
+			}
+		}
+	}
+	LogAgentReasoning(ctx, taskID, "state-machine", reason, meta)
+
+	// Plain structured (easy to count for metrics; feeds "violation rate" dashboards).
+	TaskLogger(ctx, taskID).Warn("task state violation (audit instrumented)",
+		slog.String("task_id", taskID),
+		slog.String("from", from),
+		slog.String("to", to),
+		slog.Bool("shadow", shadow),
+		slog.Bool("violation", true),
+		slog.String("event", "task_state_violation"),
+	)
+}
+
 // LogLLMCall logs details of an LLM invocation with proper structure.
 func LogLLMCall(ctx context.Context, taskID, provider, model string, promptTokens, completionTokens int, durationMs float64, err error, extra ...any) {
 	attrs := []any{

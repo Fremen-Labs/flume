@@ -389,9 +389,9 @@ func defaultShadowMode() bool {
 // EnforceTransition is the primary entrypoint called by 100% of status writers.
 //
 // It invokes ValidateTransition (preserving all existing behavior and error types).
-// In shadow mode a violation error is still surfaced to the caller so the call site
-// can emit a structured log line containing "shadow_violation" (treated as metric
-// source for now) while allowing the subsequent ES write.
+// Phase 0: violations are audited at call sites via logger (instrument to ES/metrics via
+// LogTaskStateViolation or LogAgentReasoning + index to agent-task-records). ShadowMode only
+// gates whether the *write proceeds* after audit; the violation is always observable.
 //
 // Returns:
 //   - nil for valid (including no-op/empty/self)
@@ -414,26 +414,33 @@ func (sm *TaskStateMachine) EnforceTransition(current, target TaskStatus) error 
 }
 
 // EnforceTransitionOrLog is a convenience for sites that have a logger.
+// Phase 0 update: violations are *always* audited via logFn (with explicit "shadow" flag) for
+// instrumentation to ES/metrics (even in strict mode the attempt is logged for audit trail).
+// ShadowMode only controls whether the write is allowed to proceed on violation.
 func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransition(current, target)
-	if err != nil && sm.ShadowMode && logFn != nil {
-		logFn("SHADOW MODE: TaskStateMachine.EnforceTransition violation allowed (write proceeds for rollout safety)",
+	if err != nil && logFn != nil {
+		// Always emit for audit (instrument to structured logs + downstream ES via Log* at call sites).
+		// "shadow" flag tells consumer whether write will proceed.
+		logFn("TaskStateMachine.EnforceTransition violation (audit)",
 			"error", err.Error(),
 			"from", current,
 			"to", target,
-			"shadow", true,
+			"shadow", sm.ShadowMode,
 			"violation", true,
+			"audit", true,
 		)
 	}
 	return err
 }
 
 // EnforceWithEvidenceOrLog is the Phase 1+ convenience with evidence.
+// Phase 0: always audit violations (see EnforceTransitionOrLog).
 func (sm *TaskStateMachine) EnforceWithEvidenceOrLog(current, target TaskStatus, ev Evidence, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransitionWithEvidence(current, target, ev)
-	if err != nil && sm.ShadowMode && logFn != nil {
-		logFn("SHADOW MODE: evidence gate violation (write proceeds)",
-			"error", err.Error(), "from", current, "to", target, "evidence", ev, "shadow", true)
+	if err != nil && logFn != nil {
+		logFn("TaskStateMachine.EnforceWithEvidence violation (audit)",
+			"error", err.Error(), "from", current, "to", target, "evidence", ev, "shadow", sm.ShadowMode, "violation", true, "audit", true)
 	}
 	return err
 }

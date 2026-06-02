@@ -265,6 +265,48 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 	return cleared
 }
 
+// plannedTask is the internal candidate shape for promote (hoisted to package scope for test hook visibility + reliable-go testability).
+// RawHit kept for OCC path only.
+type plannedTask struct {
+	ID             string
+	ParentID       string
+	DependsOn      []string
+	HierarchyDepth int
+	PlanSessionID  string
+	// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
+	RawHit *es.SearchHit
+}
+
+// canPromoteSiblingsTestHook extracts the pure sibling/parent/depends/depth decision for promotePlannedTasks.
+// Enables unit testing of hierarchy sibling promotion (Phase 0) without full ES (reliable-go: testable small units, table tests).
+// Returns (okToPromote, skipReason). The Enforce + update is separate (OCC etc).
+func canPromoteSiblingsTestHook(pt plannedTask, statusCache map[string]string) (bool, string) {
+	if pt.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
+		return false, "depth_exceeded"
+	}
+	if pt.ParentID != "" {
+		pstatus := statusCache[pt.ParentID]
+		if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+			return false, "parent_inactive"
+		}
+	}
+	dependsOnMet := true
+	for _, depID := range pt.DependsOn {
+		if depID == "" {
+			continue
+		}
+		dstatus := statusCache[depID]
+		if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
+			dependsOnMet = false
+			break
+		}
+	}
+	if !dependsOnMet {
+		return false, "dep_unmet"
+	}
+	return true, ""
+}
+
 // promotePlannedTasks moves planned tasks to ready when dependencies (parent + depends_on) are met.
 // 
 // This is the SINGLE SOURCE OF TRUTH for all promotion logic (design: flume-queue-planning-reliability PR3).
@@ -309,15 +351,6 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	// Collect needed parent + depends IDs for batch resolution (resilience for large/complex plans)
 	neededIDs := make(map[string]bool)
-	type plannedTask struct {
-		ID             string
-		ParentID       string
-		DependsOn      []string
-		HierarchyDepth int
-		PlanSessionID  string
-		// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
-		RawHit *es.SearchHit
-	}
 	var candidates []plannedTask
 
 	for i, hit := range result.Hits {
@@ -398,9 +431,8 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	promoted := 0
 	for _, task := range candidates {
-		// === Phase 2 DEPTH ENFORCEMENT in promotePlannedTasks ===
-		// Skip (with rich LogAgentReasoning for UI/Logloom) any task whose depth already exceeds MAX.
-		// This prevents promotion of deeply nested items created by runaway PM decomp.
+		// Use extracted pure hook for depth/parent/depends (enables unit test of hierarchy siblings promotion).
+		// Depth still gets rich Log* on skip (kept for obs).
 		if task.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
 			reason := fmt.Sprintf("promote blocked: hierarchy_depth=%d exceeds MAX_HIERARCHY_DEPTH=%d (anti-nesting explosion guard)", task.HierarchyDepth, ftypes.MAX_HIERARCHY_DEPTH)
 			flumelogger.LogAgentReasoning(ctx, task.ID, "system", reason, map[string]any{
@@ -415,55 +447,32 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			continue
 		}
 
-		// Parent check (using cache)
-		//
-		// FIX for Hierarchy promotion deadlock (P0 from flume-queue-planning-reliability):
-		// Intake (buildTaskHierarchy) creates stories/feats/epics with status="planned".
-		// Previously we skipped *any* child whose parent was still "planned".
-		// This meant that in any story with 2+ tasks, only the first sibling (pre-created "ready")
-		// would ever run. All subsequent siblings stayed "planned" forever even after depends_on met.
-		//
-		// We now only block promotion when the parent is in a definitively bad terminal state.
-		// "planned" parents are normal for organizational hierarchy items created by Plan New Work.
-		// The depends_on check (below) is the primary ordering mechanism for siblings.
-		if task.ParentID != "" {
-			pstatus := statusCache[task.ParentID]
-			if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+		ok, skipReason := canPromoteSiblingsTestHook(task, statusCache)
+		if !ok {
+			// Preserve prior debug logs for parent/dep cases (for ops continuity)
+			if skipReason == "parent_inactive" {
+				pstatus := statusCache[task.ParentID]
 				s.logger.Debug("promote skip (parent inactive)",
 					slog.String("task_id", task.ID),
 					slog.String("parent_id", task.ParentID),
 					slog.String("parent_status", pstatus),
 					slog.String("repo", repoFilter))
-				continue
+			} else if skipReason == "dep_unmet" {
+				// (log would require re-walking; debug only on first fail in original, keep simple)
+				s.logger.Debug("promote skip (dep unmet)", slog.String("task_id", task.ID), slog.String("reason", skipReason))
 			}
-		}
-
-		// DependsOn sibling deps check (full logic; old ComputeReadyForRepo omitted this — bug)
-		dependsOnMet := true
-		for _, depID := range task.DependsOn {
-			if depID == "" {
-				continue
-			}
-			dstatus := statusCache[depID]
-			if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
-				dependsOnMet = false
-				s.logger.Debug("promote skip (dep unmet)",
-					slog.String("task_id", task.ID),
-					slog.String("dep_id", depID),
-					slog.String("dep_status", dstatus))
-				break
-			}
-		}
-		if !dependsOnMet {
 			continue
 		}
 
 		// PR2 Enforcer (central TaskStateMachine from PR2)
-		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
+		if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
 			ftypes.TaskStatusPlanned,
 			ftypes.TaskStatusReady,
 			s.logger.Warn,
-		)
+		); enforceErr != nil {
+			// Phase 0: instrument every violation to ES/metrics via logger (feeds audit, Logloom, violation rate).
+			flumelogger.LogTaskStateViolation(ctx, task.ID, string(ftypes.TaskStatusPlanned), string(ftypes.TaskStatusReady), enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode, map[string]any{"plan_session_id": task.PlanSessionID, "depth": task.HierarchyDepth})
+		}
 
 		// Resilient update (PR3): prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
 		now := time.Now().UTC().Format(time.RFC3339)

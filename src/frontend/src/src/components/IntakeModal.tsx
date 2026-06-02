@@ -303,6 +303,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
   const [error, setError] = useState('');
   const [commitCount, setCommitCount] = useState(0);
   const [committed, setCommitted] = useState(false);
+  const [planEstimate, setPlanEstimate] = useState<any>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
   // Live clock for client-side elapsed time during long planning requests (so progress numbers/bar update live even if backend only snapshots elapsed at end)
@@ -322,6 +323,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setError('');
       setCommitCount(0);
       setCommitted(false);
+      setPlanEstimate(null);
       setLiveNow(Date.now());
     }
   }, [open]);
@@ -344,6 +346,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setMessages(pollData.messages ?? []);
       setPlan(pollData.plan ?? { epics: [] });
       setPlanSource(pollData.planSource === 'placeholder' || pollData.planSource === 'llm' ? pollData.planSource : null);
+      if (pollData.planEstimate) setPlanEstimate(pollData.planEstimate);
       if (pollData.status === 'ready' || pollData.status === 'failed') {
         setPhase('chat');
       }
@@ -389,6 +392,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
       setPlanSource(
         data.planSource === 'placeholder' || data.planSource === 'llm' ? data.planSource : null,
       );
+      if (data.planEstimate) setPlanEstimate(data.planEstimate);
       setPhase(data.status === 'ready' || data.status === 'failed' ? 'chat' : 'planning');
     } catch (e: unknown) {
       log.error('startSession', 'Failed to start planning session', { projectId, error: String(e) });
@@ -421,6 +425,7 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
         setPlanSource(data.planSource);
       }
       setPlanningStatus(data.planningStatus ?? null);
+      if (data.planEstimate) setPlanEstimate(data.planEstimate);
     } catch (e: unknown) {
       log.error('sendMessage', 'Chat message failed', { sessionId, error: String(e) });
       // Remove thinking msg and show error
@@ -537,9 +542,11 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                 <span className="text-sm font-semibold text-foreground">Plan New Work</span>
                 <span className="text-xs text-muted-foreground ml-2">→ {projectName}</span>
               </div>
-              {phase === 'chat' && epicCount > 0 && (
+              {phase === 'chat' && (planEstimate && planEstimate.leaves != null ? planEstimate.leaves > 0 : epicCount > 0) && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 border border-primary/20 text-primary">
-                  {epicCount} epic{epicCount !== 1 ? 's' : ''} · {taskCount} task{taskCount !== 1 ? 's' : ''}
+                  {planEstimate && planEstimate.leaves != null
+                    ? `${planEstimate.leaves} leaf${planEstimate.leaves !== 1 ? 's' : ''}${planEstimate.fastpath ? ' (fastpath)' : ''}`
+                    : `${epicCount} epic${epicCount !== 1 ? 's' : ''} · ${taskCount} task${taskCount !== 1 ? 's' : ''}`}
                 </span>
               )}
               {phase === 'chat' && planSource === 'placeholder' && (
@@ -739,6 +746,21 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                       </div>
                     )}
 
+                    {/* Phase 0: live server-provided estimate + warning (from planEstimate in session responses).
+                        Shows on every chat turn / poll for immediate feedback before commit. No client-side count dup.
+                        Yellow for >WARN, red for hard cap exceed (server will reject). */}
+                    {planEstimate && planEstimate.warning && (
+                      <div className={cn(
+                        "px-4 py-1.5 text-[11px] border-b shrink-0 flex items-center gap-2",
+                        (planEstimate.leaves ?? 0) > (planEstimate.hardCap ?? 12)
+                          ? "text-destructive bg-destructive/10 border-destructive/30"
+                          : "text-amber-200/90 bg-amber-500/10 border-amber-500/20"
+                      )}>
+                        <span className="font-medium">⚠ {planEstimate.warning}</span>
+                        <span className="text-[10px] opacity-70">· leaves: {planEstimate.leaves ?? 0} / cap {planEstimate.hardCap ?? 12}</span>
+                      </div>
+                    )}
+
                     <div className="flex-1 overflow-y-auto p-4">
                       <PlanTree plan={plan} onChange={setPlan} />
                     </div>
@@ -746,7 +768,9 @@ export function IntakeModal({ open, onOpenChange, projectId, projectName }: Inta
                     {/* Commit bar */}
                     <div className="border-t border-white/8 p-3 flex items-center justify-between bg-white/[0.02] shrink-0">
                       <span className="text-[11px] text-muted-foreground">
-                        {epicCount > 0 ? `${epicCount} epic${epicCount !== 1 ? 's' : ''} · ${taskCount} task${taskCount !== 1 ? 's' : ''}` : 'No work items yet'}
+                        {planEstimate && planEstimate.leaves != null
+                          ? `${planEstimate.leaves} leaf${planEstimate.leaves !== 1 ? 's' : ''} (est, cap ${planEstimate.hardCap ?? 12}${planEstimate.fastpath ? ', fastpath' : ''})`
+                          : (epicCount > 0 ? `${epicCount} epic${epicCount !== 1 ? 's' : ''} · ${taskCount} task${taskCount !== 1 ? 's' : ''}` : 'No work items yet')}
                       </span>
                       <button
                         onClick={commitWork}

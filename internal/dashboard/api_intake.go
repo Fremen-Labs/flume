@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,14 @@ import (
 const (
 	planSessionsIndex = "agent-plan-sessions"
 	taskRecordsIndex  = "agent-task-records"
+)
+
+// Phase 0: hard server cap + live UI estimate support (builds on landed smart tiered cap in getSmartMaxLeafTasks).
+// MAX_LEAF=12 is the absolute ceiling (tunable via FLUME_MAX_PLAN_LEAVES). Fastpath decision (<=6) unchanged.
+// UI uses planEstimate from prepareSessionResponse for live warnings before commit.
+const (
+	MAX_LEAF  = 12
+	WARN_LEAF = 5
 )
 
 const plannerSystemPrompt = `You are a senior technical planner. The user describes what they want built and you break it down into a structured hierarchy of Epics, Features, Stories, and Tasks.
@@ -172,6 +181,7 @@ func prepareSessionResponse(session SessionDoc) map[string]interface{} {
 		status = "failed"
 	}
 
+	est := computeLiveEstimate(session.DraftPlan)
 	return map[string]interface{}{
 		"id":              session.ID,
 		"sessionId":       session.ID,
@@ -188,6 +198,9 @@ func prepareSessionResponse(session SessionDoc) map[string]interface{} {
 		"updated_at":      session.UpdatedAt,
 		"committed_at":    session.CommittedAt,
 		"committedDocs":   session.CommittedDocs,
+		// Phase 0: live estimate + warning for intake UI (computed server-side from draftPlan for accuracy post-coalesce).
+		// Frontend reads this on every poll/message to show banner/count without client duplication of count/coalesce.
+		"planEstimate": est,
 	}
 }
 
@@ -1248,6 +1261,58 @@ func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 	return base
 }
 
+// getHardMaxLeaf returns the Phase 0 hard server cap (env override supported for ops).
+// Used for absolute rejection independent of smart tier.
+func getHardMaxLeaf() int {
+	if v := os.Getenv("FLUME_MAX_PLAN_LEAVES"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return i
+		}
+	}
+	return MAX_LEAF
+}
+
+// planToResponse safely converts draft map (or any) to PlanResponse for pure estimators like count/est.
+func planToResponse(p interface{}) PlanResponse {
+	var pr PlanResponse
+	if p == nil {
+		return pr
+	}
+	b, _ := json.Marshal(p)
+	_ = json.Unmarshal(b, &pr)
+	return pr
+}
+
+// computeLiveEstimate produces the live estimate + warning for UI (intake chat/commit flow).
+// Called from prepareSessionResponse so every /message and session poll carries fresh est for live banner.
+// Includes leaves (post-coalesce), hard cap, fastpath flag (no behavior change), and human warning text.
+func computeLiveEstimate(draft interface{}) map[string]any {
+	if draft == nil {
+		return map[string]any{"leaves": 0, "fastpath": false, "warning": ""}
+	}
+	pr := planToResponse(draft)
+	leaves := countPlanTasks(pr)
+	hard := getHardMaxLeaf()
+	warnAt := WARN_LEAF
+	isFast := leaves > 0 && leaves <= 6
+	warn := ""
+	if leaves > hard {
+		warn = fmt.Sprintf("Exceeds hard server cap MAX_LEAF=%d (%d leaves). Commit will be rejected — refine or split.", hard, leaves)
+	} else if leaves > warnAt {
+		warn = fmt.Sprintf("Live estimate: %d leaves (warn>%d, cap=%d). Will use hierarchy (epic/feat/story tree) since >6. Target 1-6 for fastpath UX.", leaves, warnAt, hard)
+	} else if leaves > 0 {
+		warn = fmt.Sprintf("Live estimate: %d leaves (fastpath). Safe under cap=%d.", leaves, hard)
+	}
+	return map[string]any{
+		"leaves":        leaves,
+		"estTotalItems": leaves, // Phase 0: leaves dominant; hierarchy overhead small/known
+		"fastpath":      isFast,
+		"warnAt":        warnAt,
+		"hardCap":       hard,
+		"warning":       warn,
+	}
+}
+
 func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo, routingModel, now string) ([]AgentTaskRecord, error) {
 	var docs []AgentTaskRecord
 
@@ -1564,6 +1629,29 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 	var errBuild error
 	totalTasks := countPlanTasks(plan)
 	complexityScore = plan.ComplexityScore // already declared earlier for routing
+
+	// Phase 0 hard cap (MAX_LEAF=12) — absolute server guard. Applied before smart (smart may allow more for complex).
+	// Rejects early with PLAN_TOO_LARGE for client/e2e detection + rich audit to agent-task-records.
+	// Fastpath threshold (total<=6 decision below) is unchanged; this only adds the hard ceiling + live est support.
+	hardMax := getHardMaxLeaf()
+	if totalTasks > hardMax {
+		reason := fmt.Sprintf("Server cap MAX_LEAF=%d exceeded: planner produced %d leaf tasks (smart tier allowed %d for complexity=%d). Refine in chat or split the request.", hardMax, totalTasks, getSmartMaxLeafTasks(complexityScore, plan), complexityScore)
+		s.logger.Warn("intake hard cap refused plan",
+			slog.String("repo", repo),
+			slog.Int("complexityScore", complexityScore),
+			slog.Int("leaf_tasks", totalTasks),
+			slog.Int("hard_max", hardMax))
+		_ = s.es.IndexDoc(ctx, "agent-task-records", "intake-hard-cap-"+fmt.Sprintf("%d", time.Now().UnixNano()), map[string]interface{}{
+			"event":           "intake_hard_cap_refused",
+			"repo":            repo,
+			"complexityScore": complexityScore,
+			"leaf_tasks":      totalTasks,
+			"hard_max":        hardMax,
+			"reason":          reason,
+			"timestamp":       now,
+		})
+		return nil, fmt.Errorf("PLAN_TOO_LARGE: %s\n\nRepo: %s\nRecommended action: Hit 'refine' and ask the planner for a smaller scope (target ≤6 leaf tasks for fastpath).", reason, repo)
+	}
 
 	maxAllowed := getSmartMaxLeafTasks(complexityScore, plan)
 

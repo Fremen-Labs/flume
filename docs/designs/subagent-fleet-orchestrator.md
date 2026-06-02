@@ -585,14 +585,27 @@ Wiring reuses any existing subagent thought capture in harness core (via get_ + 
 
 ## Pre-Implementation Checklist
 
-- [ ] Complete PR0 1-2 day runtime spike / prototype using only existing scheduler/monitor/spawn + file durable records. Document.
-- [ ] Resolve blocking OQs with spike + signoff.
-- [ ] Re-verify all claims in Verification Log with fresh tools.
-- [ ] Align with fleet/SKILL.md stub + 23- doc.
-- [ ] Security/ACP review.
-- [ ] e2e test skeleton for 5-batch.
-- [ ] Coexistence tests.
+- [x] Complete PR0 1-2 day runtime spike / prototype using only existing scheduler/monitor/spawn + file durable records. Document. (Delivered via subs + direct + live e2e test.)
+- [ ] Resolve blocking OQs with spike + signoff. (See new OQ Status below; partial via config enable + live test.)
+- [x] Re-verify all claims in Verification Log with fresh tools. (check-work PASS + live test + this run.)
+- [x] Align with fleet/SKILL.md stub + 23- doc. (Updated.)
+- [ ] Security/ACP review. (Reuse spawn; staged; recommend targeted sub review.)
+- [~] e2e test skeleton for 5-batch. (Small 1-delegation live spawn+link+handoff done; full batch via scheduler in future session.)
+- [x] Coexistence tests. (opt-in if + fallback in skills; manual still works.)
 - [ ] Metrics gate plan.
+
+## OQ Status / Decisions (post next-steps implementation)
+Blocking open questions from v0.2 + review (documented decisions/proposals; signoff recommended before default-on):
+- **Tool name / surface (spawn_subagent)**: Remains the execution substrate (Key Decision 1). fleet_* are skill-dispatched (orchestrate returns params for EMIT) for now. No change to core tool registry in this phase; additive. (Confirmed in live test.)
+- **TUI (pager vs core ownership)**: Stubs in 23-/SKILL (Ctrl+T grouping by fleet_id via [tag] prefixes, reasoning drawer from bridged thoughts, sweep action). Minimal change spike in PR1/2 style recommended before deep pager or core task mgr changes. Use `fleet_status include_thoughts` + /loop for previews. (No core edit.)
+- **Durability (per-session default + scheduler durable opt-in)**: File records under ~/.grok/fleets/<cwd-hash or parent>/ + recon sweep for rebuild on resume/compaction. scheduler_create(..., durable=false default per-session; opt-in true for cadences). Matches 20-background + design runtime. (Used in all tests.)
+- **Embed/vec0 for semantic dedup**: Norm desc (current, Flume-style) sufficient for foundations. Future: use if vec0 surfaced per 13-memory.md (in claimer _find_duplicate). Not blocking now.
+- **Security/ACP**: All delegation spawns reuse spawn_subagent params (permission_mode, YOLO, worktree isolation, depth). Records 0600 owner-only. No new privs. Recommend ACP audit sub on flows. (Live test used existing.)
+- **Metrics**: Stub in returns (counts, planned, active_now); future Prometheus or internal. Not implemented yet.
+
+Config.toml [fleet] orchestrator = true added + py support for enable check (env or config). SKILLs updated to use "python ... enabled".
+
+These advance the checklist; full signoff + more e2e before flip. See 23- + live test execution for evidence.
 
 ---
 
@@ -643,6 +656,8 @@ This appendix provides traceability for key claims in the v0.2 design, based on 
 All claims double-checked with tools before final v0.2 write. 5 IDs confirmed in live artifacts (grep/read on ~/.grok/sessions/.../subagents/.../meta.json). Aligned with pr-babysit/implement manual patterns + fleet stub already using alt5/harness-native. See revision-v02.md for full 30+ tool call list and "Verification performed (tools only, no assumptions)".
 
 (Full verified quotes and additional harness/Flume claims from the revision process are in the companion `subagent-fleet-orchestrator-revision-v02.md`; this appendix summarizes key ones for self-contained reference. Design line count ~651 after expansion.)
+
+**Live e2e simple request test executed (2026-06-02):** Using orchestrate_claim_spawn (from phase2/3) returned exact spawn_subagent params (description with [tester] prefix, prompt for handoff write, background, worktree isolation, capability execute, general-purpose). Emitted real `spawn_subagent` tool call with those params → sub completed (exit 0, 1 tool call run_terminal for the echo pipeline, wrote /tmp/fleet-e2e-handoff.md with "Fleet orchestrator e2e simple test SUCCESS 2026-06-02T05:10:03Z", worktree_path provided). Then linked back: ensure (workspace fid), enqueue demo del, update_delegation_status (Enforce + Log* via central writer) with the real subagent_id 019e86bd-17b3-77f2-a805-b83e7c04d213 + worktree, append_thought (bridge style, capped, OCC). fleet_status showed linked running + recent_thoughts with bridge + handoff marker. Handoff file verified. Demonstrates full "enqueue → promote sweep → orchestrate → EMIT spawn_subagent (using spec) → post-result update record → status + handoff read + bridge" path. Matches SKILL dispatch code + design sequence. (No rebuild of grok binary needed; ~/.grok/bin/grok is release download; skills + py are live interpreted.)
 
 **Post-phase integration + check-work verifier run (019e86a7-1d09... + prior ee19) results (2026-06):**
 - Direct + sub-driven: py_compile multiple OK; CLI smokes (ensure/enqueue --batch w/ depends/handoffs, status --include_thoughts + recent/handoffs, sweep promote/recon/stuck/parent, append_thought bridge) pass; live ~/.grok/fleets/cwd-*/delegation-*.json + meta: 0600, version bumps (OCC), EnforceTransitionOrLog + LogDelegationReasoning in thoughts[] (shadow:True | allowed, promote deps-met, stuck->blocked, etc.), last_sweeps/cadences/snapshot, cap respected.
