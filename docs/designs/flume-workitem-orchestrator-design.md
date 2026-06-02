@@ -1,6 +1,6 @@
 # Anti-Task-Explosion and Hierarchy/WorkItem Orchestration Design for Flume
 
-**Author:** Grok Build subagent (design researcher)  
+**Author:** JD and Grok Build assisted
 **Date:** 2026-06-02  
 **Status:** Polished self-contained section (v1.0)  
 **Version:** 1.0 (incorporates user clarification, plan-new-work-queue-reliability-fixes.md, current code state post-5-ID Elastro/Logloom contract work, Grok fleet patterns, reliable-go-systems/SKILL.md)  
