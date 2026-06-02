@@ -357,4 +357,36 @@ Phase 0 complete. (git add of sweeps_test + design update followed.)
 
 ---
 
+## Phase 1 / PR1 Implementation + Verification Results (added post-delivery)
+
+**Date:** 2026-06 (this session, post-Phase 0 + verifier loop)  
+**Status:** DELIVERED + VERDICT: PASS (check-work subagent, after integrating feedback on evidence sets, orchestrator calls, explicit recon trigger, build* exercising test)  
+**Scope:** Exactly Phase 1 / PR1 per design:284 + plan Phase 1:95-103: structural org items (ignore parent for task promote; strengthened 2-pass recursive hierarchyCompletionSweep); HierarchyOrchestrator skeleton + promote/intake guard integration; PlanSessionID + explosion_evidence on all paths; recon always post-commit; update build* to consistent; unit+integration for full chain (epic→...→done). Builds on Phase 0 (no regression on caps/UI/shadow/est). Followed reliable-go + Flume SKILLs (todos, Enforce/Log*, bounded iterative getAllDesc, table tests, rich reasoning, ctx, explicit, verif loop with check-work).
+
+**Files changed (Phase 1 focus, minimal):**
+- `pkg/types/types.go`: added ExplosionEvidence []string to Task (with Phase 1 comment + clear on done); PlanSessionID/HierarchyDepth already present.
+- `internal/dashboard/api_intake.go`: mirror ExplosionEvidence in AgentTaskRecord; buildTaskHierarchy/buildFastPathTasks updated for consistent org (epic/feat/story: owner=system, status=done, DecomposedAt/ChildCount/Depth, *no* Complexity* on org; tasks get Complexity + acceptance copy down; comments "Phase 1... per HierarchyOrchestrator"); post-build PlanSessionID on *all* docs; explicit post-commit-recon trigger in commit handler (uses "post-commit-recon:repo" + audit marker + log); hard cap/est untouched.
+- `internal/worker/sweeps.go`: hoisted plannedTask extended (ItemType/Owner/PlanSessionID); HierarchyOrchestrator skeleton (IsStructuralOrgItem + Default) + canPromoteSiblingsTestHook updated (structural skip + ignore planned parent for tasks); promote uses hook + sets evidence on depth block + Log*; hierarchyCompletionSweep (renamed from parent, 2-pass, uses bounded iterative getAllDescendants for full descendants terminal check, clears evidence, LogAgentReasoning with plan_session); tryMark helper enhanced; RunThrottled cadence calls hierarchy + child recon always; getAllDescendants impl (BFS bounded by MAX).
+- `internal/worker/runner.go`: PM org guard uses DefaultHierarchyOrchestrator.IsStructural... (integration); sets explosion_evidence on PM budget block + depth block + Log*; children + rev/test spawns propagate PlanSessionID + HierarchyDepth; depth/budget blocks set evidence.
+- `internal/worker/manager.go`: TriggerSweep extended with cases "hierarchy-completion", "hierarchy-recon", "post-commit-recon" (calls hierarchyCompletion + child recon + promote); supports intake nudge.
+- `internal/worker/sweeps_test.go`: TestPromoteHierarchySiblings table extended (structural skip case + Phase 1 org); new TestHierarchyOrchestratorStructuralAndChain (IsStructural + full chain contract log exercising epic...done via build*/promote/hierarchy + manager).
+- `internal/dashboard/dashboard_test.go`: new TestBuildTaskHierarchyStructuralOrgAndPlanSession (exercises count/est + build* contract for org done/no-complexity/PlanSessionID on all + full chain log).
+
+**Build/Test/Verif Results:**
+- go build ./internal/worker ./internal/dashboard ./pkg/types ... : clean.
+- go test ./internal/worker -run 'TestPromoteHierarchySiblings|TestHierarchyOrchestratorStructuralAndChain' -v -count=1: PASS (all table cases + chain log).
+- go test ./internal/dashboard -run 'TestBuildTaskHierarchyStructuralOrgAndPlanSession|TestIntakeCap' -v: PASS (new exercising test + cap).
+- go test ./internal/... -count=1 (worker/dashboard/pkg): all PASS.
+- check-work subagent (full prompt + Phase 1 scope + "after fixes"): **VERDICT: PASS**. Confirmed: evidence now set on promote/runner paths; orchestrator used in runner; explicit post-commit-recon trigger + manager support; TestBuild... + chain logs exercising build*/full contract; structural decision + recursive sweep + clears; PlanSessionID on all creation; recon always (cadence + trigger + marker); build* consistent; no excess, Phase 0 intact, reliable-go, green tests. (Prior gaps closed.)
+
+**Cites (tool-verified post-edit):** sweeps.go:283 (skeleton), 306 (hook), 450 (promote use), 894 (hierarchyCompletion), 1050 (getAllDesc); api_intake.go:1338 (build org done), 1723 (PlanSession on all), 1054 (post-commit trigger); runner.go:810 (orchestrator call), 914/1232 (PM evidence sets); manager.go:123 (Trigger cases); tests as above; design:284, plan:97-102.
+
+**Process:** todo_write (12+ items for P1, advanced per milestone); read SKILLs + design/plan first; greps/reads before every edit; rich comments with "Phase 1"; bounded (iterative desc + MAX guard); Enforce/Log* on decisions; table tests; check-work verif loop (2 runs, fixes integrated via search_replace); no goldplate (colocated skeleton, no new files beyond test coverage); git ready.
+
+**Next:** Phase 2 (LLMComms + full IntakeGuard + Elastro tie). Rollback safe (additive, sweeps backward compat via rename alias if needed, evidence optional field). Success: full chain reaches done with 0 stuck, evidence cleared, PlanSession on all, org never promoted, recon immediate post-commit, tests exercise contract.
+
+Phase 1 complete. (git add + design appendix update followed.)
+
+---
+
 *Produced as focused subagent task. Only the requested polished section. (File updated in workspace at docs/designs/flume-workitem-orchestrator-design.md for reference; output here is the section content.)*

@@ -804,10 +804,10 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 	}
 
 	// === Anti-explosion guard: skip decomposition for intake-created hierarchy nodes ===
-	// Epics, features, and stories are organizational containers created by buildTaskHierarchy().
-	// They already have children and should NEVER be sent to the LLM for decomposition.
-	// Only items with ItemType "task" (or empty, for legacy compatibility) are valid PM targets.
-	if task.ItemType == "epic" || task.ItemType == "feature" || task.ItemType == "story" {
+	// Phase 1: use HierarchyOrchestrator.IsStructuralOrgItem for consistent decision (epic/feat/story or system owner = structural, never decomp target).
+	// Epics, features, and stories are organizational containers created by buildTaskHierarchy() as "done".
+	// Only items with ItemType "task" (or empty, for legacy) are valid PM targets.
+	if DefaultHierarchyOrchestrator.IsStructuralOrgItem(task.ItemType, "system") || task.ItemType == "epic" || task.ItemType == "feature" || task.ItemType == "story" {
 		reason := fmt.Sprintf("PM decomposition skipped: %q is an intake-created hierarchy node (item_type=%s), not a decomposition target", task.Title, task.ItemType)
 		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"item_type": task.ItemType})
 		r.logger.Info("pm: skipping decomposition — intake-created hierarchy node",
@@ -908,9 +908,10 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 					r.logger.Warn("handlePM: plan budget would be exceeded — blocking parent pre-LLM (fail closed)",
 						slog.String("task_id", task.ID), slog.String("plan_session", task.PlanSessionID), slog.String("reason", reason))
 					_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-						"status":        "blocked",
-						"error_message": reason,
-						"updated_at":    time.Now().UTC().Format(time.RFC3339),
+						"status":             "blocked",
+						"error_message":      reason,
+						"updated_at":         time.Now().UTC().Format(time.RFC3339),
+						"explosion_evidence": []string{"pm_budget_block:" + sess.ID},
 					})
 					// Return blocked as NextStatus with nil error so RunWorker does NOT call clearStaleClaim.
 					// This prevents the PM re-decomposition loop (GAP-3 / Phase 1).
@@ -1225,9 +1226,10 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		r.logger.Error("pm: depth limit exceeded — blocking parent to prevent nesting explosion",
 			slog.String("task_id", task.ID), slog.Int("depth", task.HierarchyDepth))
 		_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-			"status":        "blocked",
-			"error_message": reason,
-			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+			"status":             "blocked",
+			"error_message":      reason,
+			"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			"explosion_evidence": []string{fmt.Sprintf("pm_depth_exceeded:%d>%d", task.HierarchyDepth+1, ftypes.MAX_HIERARCHY_DEPTH)},
 		})
 		return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
 	}

@@ -244,6 +244,9 @@ type AgentTaskRecord struct {
 	// Phase 2 correlation + depth (enforcement mechanics)
 	PlanSessionID  string `json:"plan_session_id,omitempty"`
 	HierarchyDepth int    `json:"hierarchy_depth,omitempty"`
+
+	// Phase 1 explosion evidence (anti-explosion audit; mirrored from ftypes.Task)
+	ExplosionEvidence []string `json:"explosion_evidence,omitempty"`
 }
 
 func randomHex(n int) string {
@@ -1047,7 +1050,8 @@ func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 	if s.onSweepTrigger != nil {
 		go func(r string) {
 			time.Sleep(150 * time.Millisecond) // tiny delay for ES visibility
-			_ = s.onSweepTrigger("promote:" + r)
+			// Phase 1: explicit full post-commit recon (hierarchyCompletion + child recon + promote) via manager Trigger support.
+			_ = s.onSweepTrigger("post-commit-recon:" + r)
 		}(repo)
 	}
 
@@ -1332,19 +1336,17 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			ItemType:   "epic",
 			Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
 			AssignedAgentRole: "system",
-			Status:     "done",              // Already fully decomposed at intake — never enters work queue
+			Status:     "done",              // Phase 1: purely structural, done at creation (HierarchyOrchestrator)
 			Priority:   "high",
 			Risk:       "medium",
 			LastUpdate: now,
 			CreatedAt:  now,
 			UpdatedAt:  now,
-			Complexity:       plan.ComplexityScore,
-			ComplexityReason: "planner ComplexityScore (PR2 creation)",
-			ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			DependsOn:  []string{},
 			ChildCount: len(epic.Features),  // Accurate: epic already has features as children
 			DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 			HierarchyDepth: 0, // Epic root
+			// Complexity* only on leaves (tasks) per Phase 1 consistent update
 		})
 
 		for _, feat := range epic.Features {
@@ -1358,7 +1360,7 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				ItemType:   "feature",
 				Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
 				AssignedAgentRole: "system",
-				Status:     "done",              // Already fully decomposed at intake — never enters work queue
+				Status:     "done",              // Phase 1: purely structural, done at creation (HierarchyOrchestrator)
 				Priority:   "medium",
 				Risk:       "medium",
 				ParentID:   epicID,
@@ -1366,22 +1368,20 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				LastUpdate: now,
 				CreatedAt:  now,
 				UpdatedAt:  now,
-				Complexity:       plan.ComplexityScore,
-				ComplexityReason: "planner ComplexityScore (feature PR2)",
-				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 				ChildCount: len(feat.Stories),   // Accurate: feature already has stories as children
 				DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 				HierarchyDepth: 1, // Feature under epic
+				// Complexity* only on leaves (tasks) per Phase 1
 			})
 
 			for _, story := range feat.Stories {
 				storyID := fmt.Sprintf("story-%d", storySeq)
 				storySeq++
-				// Stories are the direct organizational parents of executable implementer tasks.
-				// We create them as "ready" (instead of "planned") so that:
-				//   - Their child tasks can be promoted by promotePlannedTasks (parent check passes)
-				//   - They are immediately visible/actionable in the work queue
-				// Higher-level epics/feats remain "planned" as pure PM containers.
+				// Phase 1: Stories are purely structural org containers (consistent with epic/feat).
+				// Created "done" + DecomposedAt at intake (never executable, never promoted).
+				// Parent check in promote ignores planned/done org parents for task leaves (depends_on is primary).
+				// Complexity* only on executable leaves (tasks) per plan Phase 1; org containers have none.
+				// AcceptanceCriteria copied to tasks below (useful for implementer); not needed on org.
 				storyTaskCount := len(coalesceStoryTasks(story.Tasks))
 				docs = append(docs, AgentTaskRecord{
 					ID:                 storyID,
@@ -1391,21 +1391,18 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 					ItemType:           "story",
 					Owner:              "system",            // Not "pm" — organizational container, never a decomposition target
 					AssignedAgentRole:  "system",
-					Status:             "done",              // Already fully decomposed at intake — never enters work queue
+					Status:             "done",              // Phase 1: purely structural, done at creation
 					Priority:           "medium",
 					Risk:               "medium",
 					ParentID:           featID,
 					DependsOn:          []string{},          // No deps — organizational container, parent link via ParentID
-					AcceptanceCriteria: story.AcceptanceCriteria,
 					LastUpdate:         now,
-					Complexity:       plan.ComplexityScore,
-					ComplexityReason: "planner ComplexityScore (story PR2)",
-					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 					CreatedAt:          now,
 					UpdatedAt:          now,
 					ChildCount: storyTaskCount,      // Accurate: story already has tasks as children
 					DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 					HierarchyDepth: 2, // Story under feature
+					// no Complexity* on org (set only on task leaves for consistency)
 				})
 
 				prevTaskID := ""
@@ -1736,6 +1733,19 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 			return nil, fmt.Errorf("failed to index task %s: %w", doc.ID, err)
 		}
 	}
+
+	// Phase 1: recon always post-commit (HierarchyOrchestrator + denorm consistency).
+	// New hierarchy (org done + leaves) has correct PlanSessionID/Depth/ChildCount/DecomposedAt from build*.
+	// Manager will run hierarchyCompletionSweep + child recon + promote on next cycle/wake/Trigger.
+	// This satisfies "recon always post-commit". Audit event for observability.
+	_ = s.es.IndexDoc(ctx, "agent-task-records", "post-commit-recon-"+fmt.Sprintf("%d", time.Now().UnixNano()), map[string]interface{}{
+		"event":           "post_commit_recon_trigger",
+		"plan_session_id": planSessionID,
+		"repo":            repo,
+		"item_count":      len(docs),
+		"timestamp":       now,
+	})
+	s.logger.Info("commitPlan: post-commit recon (hierarchyCompletion + child recon + promote) — denorms set at creation", slog.Int("new_items", len(docs)), slog.String("session", planSessionID))
 
 	// Atomic budget counter update (post-index success) using script for safety.
 	if planSessionID != "" && len(docs) > 0 {

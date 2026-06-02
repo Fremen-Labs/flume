@@ -2,7 +2,7 @@ package worker
 
 // PR 2 NOTE: Every "status" update in this file now routes through
 // pkg/types DefaultTaskStateMachine.EnforceTransition (shadow mode).
-// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, parentCompletionSweep.
+// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, hierarchyCompletionSweep (Phase 1).
 
 import (
 	"context"
@@ -116,11 +116,12 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 		s.mu.Lock()
 	}
 
-	// Parent completion sweep
+	// Phase 1: hierarchy completion sweep (strengthened recursive, evidence clear, always recon after)
 	if now.Sub(s.lastRun["parent_comp"]) >= s.intervals["parent_comp"] {
 		s.lastRun["parent_comp"] = now
 		s.mu.Unlock()
-		s.parentCompletionSweep(ctx)
+		s.hierarchyCompletionSweep(ctx)
+		s.childCountReconciliationSweep(ctx) // recon always post
 		s.mu.Lock()
 	}
 
@@ -273,19 +274,51 @@ type plannedTask struct {
 	DependsOn      []string
 	HierarchyDepth int
 	PlanSessionID  string
+	ItemType       string // Phase 1: for explicit structural org item check (epic/feat/story/owner=system never promoted)
+	Owner          string // Phase 1: "system" marks org containers
 	// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
 	RawHit *es.SearchHit
 }
 
+// HierarchyOrchestrator (Phase 1 skeleton): encapsulates hierarchy semantics decisions.
+// - Structural org items (epic/feat/story or owner=="system") are purely structural, never promoted/executed by workers.
+// - promote for executable leaves (item_type=="task") ignores parent status (only depends + !blocked/archived + depth).
+// - Completion uses strengthened recursive descendant check.
+// Colocated in sweeps for minimal change / small units; Enforce/Log*/ctx/bounded used at call sites.
+// Can be extracted to dedicated type later (e.g. internal/worker/hierarchy.go) as orchestrator core grows.
+type HierarchyOrchestrator struct{}
+
+// IsStructuralOrgItem decides if item is non-executable org container (per design Option A, Phase 1).
+// Used in promote (skip), PM guards (already), completion, etc. Consistent with build* creating "done" + system owner.
+func (h *HierarchyOrchestrator) IsStructuralOrgItem(itemType, owner string) bool {
+	if itemType == "task" {
+		return false
+	}
+	if owner == "system" || itemType == "epic" || itemType == "feature" || itemType == "story" {
+		return true
+	}
+	return false
+}
+
+// DefaultHierarchyOrchestrator for use in sweeps/promote etc.
+var DefaultHierarchyOrchestrator = &HierarchyOrchestrator{}
+
 // canPromoteSiblingsTestHook extracts the pure sibling/parent/depends/depth decision for promotePlannedTasks.
-// Enables unit testing of hierarchy sibling promotion (Phase 0) without full ES (reliable-go: testable small units, table tests).
+// Phase 1: now also skips structural org (explicit) + ignores planned parents for tasks (structural only).
+// Enables unit testing of hierarchy sibling promotion (Phase 0/1) without full ES (reliable-go: testable small units, table tests).
 // Returns (okToPromote, skipReason). The Enforce + update is separate (OCC etc).
 func canPromoteSiblingsTestHook(pt plannedTask, statusCache map[string]string) (bool, string) {
+	// Phase 1: explicit structural org skip (epics etc created "done" at intake; never executable).
+	if DefaultHierarchyOrchestrator.IsStructuralOrgItem(pt.ItemType, pt.Owner) {
+		return false, "structural_org_item"
+	}
 	if pt.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
 		return false, "depth_exceeded"
 	}
 	if pt.ParentID != "" {
 		pstatus := statusCache[pt.ParentID]
+		// Phase 1: for task leaves, ignore "planned" parent status (org containers are structural, stay done/planned in some paths).
+		// Only block on definitively inactive (empty, blocked, archived).
 		if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
 			return false, "parent_inactive"
 		}
@@ -360,6 +393,8 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			DependsOn      []string `json:"depends_on"`
 			HierarchyDepth int      `json:"hierarchy_depth"`
 			PlanSessionID  string   `json:"plan_session_id"`
+			ItemType       string   `json:"item_type"`
+			Owner          string   `json:"owner"`
 		}
 		if json.Unmarshal(hit, &t) != nil {
 			continue
@@ -370,6 +405,8 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			DependsOn:      t.DependsOn,
 			HierarchyDepth: t.HierarchyDepth,
 			PlanSessionID:  t.PlanSessionID,
+			ItemType:       t.ItemType,
+			Owner:          t.Owner,
 		}
 		if i < len(result.RawHits) {
 			pt.RawHit = &result.RawHits[i]
@@ -444,11 +481,20 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 				slog.String("task_id", task.ID),
 				slog.Int("depth", task.HierarchyDepth),
 				slog.Int("max", ftypes.MAX_HIERARCHY_DEPTH))
+			// Phase 1: set explosion_evidence on path (for "all paths" + audit)
+			ev := []string{fmt.Sprintf("depth_exceeded:%d>%d", task.HierarchyDepth, ftypes.MAX_HIERARCHY_DEPTH)}
+			_ = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{"explosion_evidence": ev, "updated_at": time.Now().UTC().Format(time.RFC3339)})
 			continue
 		}
 
 		ok, skipReason := canPromoteSiblingsTestHook(task, statusCache)
 		if !ok {
+			// Phase 1: structural skip (new explicit)
+			if skipReason == "structural_org_item" {
+				s.logger.Debug("promote skip (structural org item - never executable)",
+					slog.String("task_id", task.ID), slog.String("item_type", task.ItemType), slog.String("owner", task.Owner))
+				continue
+			}
 			// Preserve prior debug logs for parent/dep cases (for ops continuity)
 			if skipReason == "parent_inactive" {
 				pstatus := statusCache[task.ParentID]
@@ -848,7 +894,13 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 	}
 }
 
-func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
+func (s *Sweeper) hierarchyCompletionSweep(ctx context.Context) {
+	// Phase 1: strengthened 2-pass recursive hierarchyCompletionSweep (core of PR1).
+	// Uses full descendants (getAllDescendants, bounded) not just direct children, so deep trees
+	// (epic->...->task) correctly mark all org levels done only when *all* leaves terminal.
+	// Clears explosion_evidence on success. Always followed by child recon.
+	// Replaces/strengthens parentCompletionSweep.
+	//
 	// FIX for Hierarchy promotion deadlock (P0):
 	// Previously this only considered top-level items (no parent_id) that were *already*
 	// in active states (running/ready/review-consensus). Intake-created epics/feats/stories
@@ -856,8 +908,9 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 	//
 	// We now do two passes:
 	// 1. Original top-level active parents (kept for compatibility).
-	// 2. General pass: any item that has children where *all* direct children are terminal
-	//    (done or archived) gets marked done. This walks the full epic→feat→story→task tree.
+	// 2. General pass: any non-terminal item that has descendants where *ALL* (recursive) are terminal
+	//    (done or archived) gets marked done + evidence cleared. Structural org + leaves covered.
+
 
 	// Pass 1: Original top-level logic (items with no parent_id already in active states)
 	{
@@ -884,11 +937,11 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 		}
 	}
 
-	// Pass 2: General hierarchy completion — any parent whose direct children are all terminal
-	// This catches epics (no parent_id but start "planned"), feats, and stories created by intake.
+	// Pass 2: General hierarchy completion — any parent whose *all recursive descendants* are terminal.
+	// Phase 1 strengthened: uses getAllDescendants (bounded iterative) so deep org trees mark correctly.
+	// This catches epics (no parent_id but start "planned"/"done"), feats, and stories created by intake.
 	{
-		// Find candidates that have at least one child (we'll check their status inside the helper)
-		// To keep it simple and correct we scan a broader set of non-terminal parents.
+		// Find candidates that are non-terminal.
 		query := map[string]interface{}{
 			"bool": map[string]interface{}{
 				"must_not": []interface{}{
@@ -910,7 +963,7 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 				continue
 			}
 
-			// Only consider items that actually have children
+			// Phase 1: check has descendants (use cheap direct child probe first)
 			childQuery := map[string]interface{}{
 				"term": map[string]string{"parent_id.keyword": potentialParent.ID},
 			}
@@ -919,12 +972,39 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 				continue
 			}
 
-			s.tryMarkParentDoneIfAllChildrenTerminal(ctx, potentialParent)
+			// Use full recursive for terminal check (strengthened)
+			desc := s.getAllDescendants(ctx, potentialParent.ID)
+			if len(desc) == 0 {
+				continue
+			}
+			allTerminal := true
+			for _, d := range desc {
+				if d.Status != ftypes.TaskStatusDone && d.Status != ftypes.TaskStatusArchived {
+					allTerminal = false
+					break
+				}
+			}
+			if allTerminal {
+				s.logger.Info("hierarchyCompletionSweep: marking parent done — all descendants terminal",
+					slog.String("parent_id", potentialParent.ID),
+					slog.String("title", potentialParent.Title),
+					slog.String("item_type", potentialParent.ItemType),
+					slog.Int("descendant_count", len(desc)))
+
+				update := map[string]interface{}{
+					"status":             string(ftypes.TaskStatusDone),
+					"completed_at":       time.Now().UTC().Format(time.RFC3339),
+					"updated_at":         time.Now().UTC().Format(time.RFC3339),
+					"explosion_evidence": nil, // clear on hierarchy success
+				}
+				_ = s.es.UpdateDoc(ctx, "agent-task-records", potentialParent.ID, update)
+				flumelogger.LogAgentReasoning(ctx, potentialParent.ID, "sweeper", "hierarchy parent marked done (all descendants terminal; evidence cleared per HierarchyOrchestrator)", map[string]any{"plan_session_id": potentialParent.PlanSessionID, "desc_count": len(desc)})
+			}
 		}
 	}
 }
 
-// tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by parentCompletionSweep.
+// tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by hierarchyCompletionSweep (Pass 1 legacy path).
 func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, parent ftypes.Task) {
 	childQuery := map[string]interface{}{
 		"term": map[string]string{"parent_id.keyword": parent.ID},
@@ -950,18 +1030,54 @@ func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, pa
 	}
 
 	if hasChildren && allChildrenDone {
-		s.logger.Info("parentCompletionSweep: marking parent done — all children terminal",
+		s.logger.Info("hierarchyCompletionSweep: marking parent done — all children terminal",
 			slog.String("parent_id", parent.ID),
 			slog.String("title", parent.Title),
 			slog.String("item_type", parent.ItemType))
 
 		update := map[string]interface{}{
-			"status":       string(ftypes.TaskStatusDone),
-			"completed_at": time.Now().UTC().Format(time.RFC3339),
-			"updated_at":   time.Now().UTC().Format(time.RFC3339),
+			"status":             string(ftypes.TaskStatusDone),
+			"completed_at":       time.Now().UTC().Format(time.RFC3339),
+			"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			"explosion_evidence": nil, // Phase 1: clear on successful terminal (hierarchy complete)
 		}
 		_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
+		// rich reasoning
+		flumelogger.LogAgentReasoning(ctx, parent.ID, "sweeper", "parent marked done (all direct children terminal; evidence cleared per HierarchyOrchestrator)", map[string]any{"item_type": parent.ItemType})
 	}
+}
+
+// getAllDescendants (Phase 1, bounded): iterative BFS collect full subtree (not just direct children).
+// Prevents deep hierarchy from having parents marked done prematurely if grandchildren not terminal.
+// Bounded by MAX_HIERARCHY_DEPTH to satisfy reliable-go (no unbounded recursion/loops).
+func (s *Sweeper) getAllDescendants(ctx context.Context, rootID string) []ftypes.Task {
+	var all []ftypes.Task
+	seen := map[string]bool{rootID: true}
+	queue := []string{rootID}
+	depth := 0
+	for len(queue) > 0 && depth < ftypes.MAX_HIERARCHY_DEPTH+2 {
+		next := []string{}
+		for _, pid := range queue {
+			q := map[string]interface{}{"term": map[string]string{"parent_id.keyword": pid}}
+			res, err := s.es.Search(ctx, "agent-task-records", q, 200)
+			if err != nil {
+				continue
+			}
+			for _, h := range res.Hits {
+				var c ftypes.Task
+				if json.Unmarshal(h, &c) == nil {
+					if !seen[c.ID] {
+						seen[c.ID] = true
+						all = append(all, c)
+						next = append(next, c.ID)
+					}
+				}
+			}
+		}
+		queue = next
+		depth++
+	}
+	return all
 }
 
 // childCountReconciliationSweep (Phase 2 task 3): periodically recomputes true child_count

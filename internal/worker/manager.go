@@ -120,6 +120,11 @@ func (m *Manager) TriggerSweep(ctx context.Context, sweepName string) error {
 		m.sweeper.promotePlannedTasks(ctx, "") // global
 	case "auto-unblock", "resume":
 		m.sweeper.ExecuteResumeSweep(ctx)
+	case "hierarchy-completion", "hierarchy-recon", "post-commit-recon":
+		// Phase 1: support explicit post-commit / hierarchy recon trigger (for intake, UI, tests)
+		m.sweeper.hierarchyCompletionSweep(ctx)
+		m.sweeper.childCountReconciliationSweep(ctx)
+		m.sweeper.promotePlannedTasks(ctx, "")
 	default:
 		return fmt.Errorf("sweep %q not implemented or supported for manual trigger", sweepName)
 	}

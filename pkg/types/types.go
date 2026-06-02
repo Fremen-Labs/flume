@@ -142,6 +142,12 @@ type Task struct {
 	// Each level of PM decomposition increments by 1. Enforced at creation (intake + handlePM)
 	// and at promote/claim time against MAX_HIERARCHY_DEPTH to eliminate nesting explosions.
 	HierarchyDepth int `json:"hierarchy_depth,omitempty"`
+
+	// ExplosionEvidence (Phase 1): captures anti-explosion decision evidence for this item
+	// (e.g. "intake_hard_cap:13>12", "depth_exceeded:8>6", "pm_budget_block"). Set on refuse/block paths
+	// at intake/PM/promote/claim. Cleared on successful hierarchy terminal (done) by completion sweep.
+	// Enables debugging "why stuck" and audit for Logloom/Elastro + dashboard.
+	ExplosionEvidence []string `json:"explosion_evidence,omitempty"`
 }
 
 // Phase 2 constants (enforcement mechanics)
