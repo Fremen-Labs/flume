@@ -277,80 +277,187 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		fmt.Sprintf("Branch ready: %s. Executing agent loop against repository.", branch),
 		map[string]any{"phase": "branch_ready", "branch": branch, "repo_path": repoPath})
 
-	// Phase 3.1: Minimal multi-turn skeleton demonstrating correct tool usage.
+	// === Real (non-skeleton) Implementer Agent Loop ===
 	//
-	// Usage guidelines (documented for both humans and future LLM agents):
-	//   - Use "elastro_query_ast" (via the Elastro CLI) for semantic/RAG understanding
-	//     of the *current state of the codebase*. This is the primary tool for
-	//     "what does this function do?", "where is X implemented?", etc.
-	//   - Use "logloom_ast_query" (direct ES) when you need precise structural /
-	//     call-graph information ("who calls this?", "definition site of Y", etc.).
-	//   - After making code changes in a task, the implementer (or post-task process)
-	//     should eventually trigger `elastro rag update` so the RAG index reflects
-	//     the new code. Logloom re-ingest is also recommended on significant changes.
+	// This is a functional multi-turn ReAct-style loop that drives the LLM via
+	// ChatStream (for live reasoning visibility into the mesh node) while
+	// respecting the rich rules in src/agents/implementer/SYSTEM_PROMPT.md.
 	//
-	// This skeleton shows one proper first action: query via Elastro RAG.
-	r.logger.Info("implementer: executing agent loop (Phase 3.1 skeleton with correct tool usage)",
+	// It uses the registered tools (elastro_query_ast querying ElastroGraphIndex,
+	// logloom_ast_query querying Logloom*Index, plus file ops: list_directory/read_file/write_file/run_shell)
+	// and continues until the LLM signals completion or the turn limit is reached.
+	// Per contract #4: MANDATORY AST verification (elastro or logloom query success) tracked
+	// before any write/edit is allowed.
+
+	r.logger.Info("implementer: starting real multi-turn agent loop",
 		slog.String("task_id", task.ID),
-		slog.String("repo_path", repoPath),
-		slog.String("branch", branch))
+		slog.String("repo_path", repoPath))
 
 	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-		"Beginning codebase investigation using Elastro RAG (preferred for semantic understanding of ingested code)",
+		"Starting real multi-turn LLM + tool agent loop (non-skeleton)",
 		map[string]any{
-			"phase":     "agent_loop_start",
+			"phase":     "agent_loop_real",
 			"objective": task.Description,
-			"guidance":  "Prefer elastro_query_ast for RAG; use logloom_ast_query for precise call-graph/structural data",
 		})
 
-	// First action: use the Elastro RAG tool (the correct pre-migration pattern)
-	elastroResult, elastroErr := r.tools.Execute(ctx, "elastro_query_ast", map[string]interface{}{
-		"query":       task.Title + ". " + task.Description,
-		"target_path": repoPath,
-	}, repoPath)
+	systemPrompt := readSystemPrompt("implementer")
 
-	if elastroErr != nil {
-		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			fmt.Sprintf("elastro_query_ast failed: %v", elastroErr),
-			map[string]any{"phase": "tool_error", "tool": "elastro_query_ast", "error": elastroErr.Error()})
-	} else {
-		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Received codebase context from Elastro RAG tool",
-			map[string]any{
-				"phase":          "tool_result",
-				"tool":           "elastro_query_ast",
-				"result_preview": truncateForLog(elastroResult, 400),
-			})
+	// Conversation history for the LLM (we keep it as messages)
+	messages := []llm.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: fmt.Sprintf("Task: %s\n\nObjective: %s\n\nRepo path: %s\nBranch: %s\n\nYou have access to tools via function calls. Use them to explore, edit, test, and complete the task. When done, call implementation_complete with a clear summary.",
+			task.Title, task.Description, repoPath, branch)},
 	}
 
-	// Optional second action in skeleton: also query Logloom for structural info
-	if r.tools != nil {
-		logloomResult, logloomErr := r.tools.Execute(ctx, "logloom_ast_query", map[string]interface{}{
-			"query": task.Description,
-		}, repoPath)
+	const maxTurns = 12
+	turns := 0
+	// MANDATORY state for Elastro/Logloom contract #4 (point 4):
+	// Track whether the worker has successfully invoked elastro_query_ast or
+	// logloom_ast_query in *this task context*. Simple in-memory bool (no external
+	// memory tool needed for the enforcement). Writes/edits are rejected until true.
+	astVerified := false
 
-		if logloomErr == nil {
-			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-				"Received structural/call-graph context from Logloom indices",
-				map[string]any{
-					"phase":          "tool_result",
-					"tool":           "logloom_ast_query",
-					"result_preview": truncateForLog(logloomResult, 300),
+	for turns < maxTurns {
+		turns++
+
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Implementer LLM turn %d/%d (streaming for visibility)", turns, maxTurns),
+			map[string]any{"phase": "llm_turn", "turn": turns})
+
+		streamReq := llm.ChatRequest{
+			Messages:       messages,
+			Model:          worker.Model,
+			Provider:       worker.Provider,
+			AgentRole:      "implementer",
+			TaskID:         task.ID,
+			WorkerName:     worker.Name,
+			TimeoutSeconds: 600, // generous per turn; overall bounded by maxTurns
+		}
+
+		streamCh, err := r.llm.ChatStream(ctx, streamReq)
+		if err != nil {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "LLM call failed in agent loop", map[string]any{"error": err.Error()})
+			break
+		}
+
+		var llmResponse strings.Builder
+		var pendingToolCalls []llm.ToolCall
+
+		for ch := range streamCh {
+			if ch.Error != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "Stream error in agent loop", map[string]any{"error": ch.Error})
+				break
+			}
+			if ch.DeltaContent != "" {
+				llmResponse.WriteString(ch.DeltaContent)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", ch.DeltaContent, map[string]any{
+					"phase": "implementer_thought", "turn": turns, "from_stream": true,
 				})
+			}
+			if len(ch.ToolCalls) > 0 {
+				pendingToolCalls = append(pendingToolCalls, ch.ToolCalls...)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+					fmt.Sprintf("Received %d tool call(s) from LLM", len(ch.ToolCalls)),
+					map[string]any{"phase": "tool_call_received", "turn": turns, "tools": ch.ToolCalls})
+			}
+			if ch.Done {
+				break
+			}
+		}
+
+		responseText := strings.TrimSpace(llmResponse.String())
+
+		// Hardened tool call consumption (Task 1): always construct assistant message
+		// containing the ToolCalls from ChatStreamChunk (proper protocol; previously
+		// only naive text content was appended even on tool paths).
+		assistantMsg := llm.Message{
+			Role:      "assistant",
+			Content:   responseText,
+			ToolCalls: pendingToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+
+		// Handle explicit tool calls received in the stream chunks (preferred + hardened path)
+		if len(pendingToolCalls) > 0 {
+			for _, tc := range pendingToolCalls {
+				name := tc.Function.Name
+				if name == "implementation_complete" {
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"LLM called implementation_complete (structured tool call)",
+						map[string]any{"phase": "completion_signal", "turn": turns, "summary": tc.Function.Arguments})
+					goto afterLoop
+				}
+
+				// === Explicit enforcement of MANDATORY AST VERIFICATION (Task 2, contract #4) ===
+				// Before any write/edit, require successful prior call to elastro or logloom query
+				// in this task's agent loop context. Tracked via simple astVerified state.
+				if isWriteTool(name) && !astVerified {
+					errMsg := fmt.Sprintf("ERROR: MANDATORY AST VERIFICATION required before %s. "+
+						"Per the Elastro/Logloom contract #4 for work queue implementer workers: you MUST successfully call "+
+						"elastro_query_ast (queries exact index %s) or logloom_ast_query (queries exact indices %s or %s) "+
+						"at least once in the current task before any write_file / edit operation. "+
+						"Call one of the AST tools now to verify codebase structure and unblock edits.", name, ElastroGraphIndex, LogloomEnrichmentIndex, LogloomASTIndex)
+					messages = append(messages, llm.Message{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    errMsg,
+					})
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"Write tool blocked: AST verification not yet performed",
+						map[string]any{"phase": "ast_enforcement", "tool": name, "turn": turns})
+					continue
+				}
+
+				result, execErr := r.tools.Execute(ctx, name, normalizeToolArgs(tc.Function.Arguments), repoPath)
+				if execErr != nil {
+					result = fmt.Sprintf("ERROR executing %s: %v", name, execErr)
+				}
+
+				// Record successful AST verification for enforcement state
+				if (name == "elastro_query_ast" || name == "logloom_ast_query") && execErr == nil {
+					astVerified = true
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"AST verification recorded (elastro/logloom query succeeded) — writes now permitted for this task",
+						map[string]any{"phase": "ast_verified", "tool": name, "turn": turns})
+				}
+
+				// Hardened: append proper tool-role result message (with ToolCallID) instead of
+				// naive text "Tool results:" user message. This improves multi-turn fidelity (Task 3).
+				messages = append(messages, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    result,
+				})
+
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+					fmt.Sprintf("Executed tool %s", name),
+					map[string]any{"phase": "tool_execution", "tool": name, "result_preview": truncateForLog(result, 300), "ast_verified": astVerified})
+			}
+			continue // next turn; history now contains assistant + tool messages per proper protocol
+		}
+
+		// Fallback text-based detection for completion (kept for compatibility with models that
+		// emit natural language instead of structured tool calls)
+		lower := strings.ToLower(responseText)
+		if strings.Contains(lower, "implementation_complete") || strings.Contains(lower, "task complete") {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+				"LLM signaled completion (text fallback): "+firstNChars(responseText, 300),
+				map[string]any{"phase": "completion_signal", "turn": turns})
+			goto afterLoop
+		}
+
+		// Safety: if we've done several turns with no edits, give the model one more chance then finish
+		if turns >= maxTurns-2 {
+			break
 		}
 	}
 
-	// End of minimal skeleton for this slice.
-	// In the next slice we will feed these tool results into the LLM and allow
-	// it to request additional tools (read/write file, run shell, etc.) and
-	// eventually emit implementation_complete.
-	//
-	// When adding the LLM step for the agent loop, use r.llm.ChatStream (not .Chat)
-	// + loop over chunks emitting LogAgentReasoning for deltas/thoughts/telemetry
-	// (node/mesh visibility) exactly as done for reviewer and PM. This keeps
-	// long generations alive and makes implementer reasoning observable.
+afterLoop:
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Implementer agent loop finished after %d turns", turns),
+		map[string]any{"phase": "loop_end", "turns": turns})
 
-	// 3. Auto-commit and push changes
+	// 3. Auto-commit and push changes (real changes if the loop produced any)
 	commitSHA, err := r.AutoCommitAndPush(ctx, repoPath, branch,
 		fmt.Sprintf("[Flume] %s", task.Title), task.ID)
 	if err != nil {
@@ -372,14 +479,9 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 			map[string]any{"phase": "complete", "commit_sha": commitSHA})
 	} else {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Implementation complete. No code changes produced by skeleton (only investigation via Elastro/LogLoom). Marking Done to avoid re-claim loop.",
-			map[string]any{"phase": "complete", "had_commits": false, "skeleton_behavior": "no_op_investigation"})
+			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing).",
+			map[string]any{"phase": "complete", "had_commits": false})
 
-		// For the current minimal skeleton: if we did investigation (Elastro + Logloom
-		// queries) but produced no code changes, mark Done rather than Review.
-		// This prevents the tight re-claim loop the user observed on investigation-style
-		// tasks (e.g. "scan for CLI commands"). Real multi-turn LLM implementers will
-		// produce commits and legitimately go to Review.
 		return ftypes.AgentResult{
 			Success:    true,
 			NextStatus: ftypes.TaskStatusDone,
@@ -398,6 +500,36 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "...[truncated]"
+}
+
+// normalizeToolArgs converts various argument shapes into map[string]interface{} for tools.
+func normalizeToolArgs(args interface{}) map[string]interface{} {
+	if args == nil {
+		return map[string]interface{}{}
+	}
+	if m, ok := args.(map[string]interface{}); ok {
+		return m
+	}
+	if s, ok := args.(string); ok {
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(s), &m) == nil {
+			return m
+		}
+		return map[string]interface{}{"raw": s}
+	}
+	return map[string]interface{}{"raw": args}
+}
+
+// isWriteTool returns true for any tool that performs file modifications or shell
+// commands that could mutate the repo. Used for MANDATORY AST VERIFICATION gate
+// (Elastro/Logloom contract enforcement in the implementer loop).
+func isWriteTool(name string) bool {
+	switch name {
+	case "write_file", "edit_file", "multi_replace_file_content", "patch_file", "run_shell":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleReviewer runs the reviewer agent.

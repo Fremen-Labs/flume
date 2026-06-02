@@ -90,14 +90,16 @@ RUN mkdir -p /app && chown -R flume:flume /app
 #   docker build --build-arg ELASTR0_INSTALL=public -t flume-worker .
 #
 # Private index or wheel also supported. The build HARD FAILS if requested
-# but the resulting /opt/venv/bin/elastro is missing or non-functional.
+# but the resulting /opt/venv/bin/elastro (or logloom) is missing or non-functional.
+# Defaults: both ELASTR0_INSTALL=public and LOGLOOM_INSTALL=public so workers have them.
 ARG ELASTR0_INSTALL=public
 ARG ELASTR0_PIP_INDEX_URL=""
 
 # LogLoom CLI for dashboard-side project AST graph generation + ES shipping
 # during "Plan New Work" / project creation + clone.
-# Use the wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7
-ARG LOGLOOM_INSTALL=skip
+# Default "public" installs via pip from PyPI (package "logloom").
+# For reproducible: use wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7
+ARG LOGLOOM_INSTALL=public
 
 # Create isolated venv (even on python-slim base) so we control exact packages
 # and can keep the final layer free of build tools.
@@ -110,7 +112,10 @@ RUN python3 -m venv /opt/venv && \
 #
 # Installation is controlled by LOGLOOM_INSTALL (modeled after ELASTR0_INSTALL).
 #
-# Recommended (reproducible):
+# Default (public PyPI, now enabled by default for workers):
+#   docker build -t flume .
+#
+# Recommended (reproducible wheel):
 #   curl -L -o logloom-0.3.7-py3-none-any.whl \
 #     https://github.com/Fremen-Labs/logloom/releases/download/v0.3.7/logloom-0.3.7-py3-none-any.whl
 #   docker build --build-arg LOGLOOM_INSTALL=wheel -t flume .
@@ -164,6 +169,10 @@ RUN set -eux; \
         echo "Installing LogLoom from local wheel (https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7)..."; \
         /opt/venv/bin/pip install --no-cache-dir /tmp/logloom-*.whl; \
         ;; \
+      public|auto) \
+        echo "Installing LogLoom from public PyPI (logloom)..."; \
+        /opt/venv/bin/pip install --no-cache-dir logloom; \
+        ;; \
       skip) \
         echo "Skipping LogLoom installation (LOGLOOM_INSTALL=skip) — LogLoom AST ingest unavailable in container mode"; \
         ;; \
@@ -178,6 +187,7 @@ RUN set -eux; \
 
 # Hard assertion + functional smoke test. Fails the *build* (not just runtime)
 # if the critical binaries for code intelligence are missing or broken.
+# (Only runs the checks for the non-skipped ones; build args control installation.)
 RUN set -eux; \
     if [ "${ELASTR0_INSTALL}" != "skip" ]; then \
       if [ ! -x /opt/venv/bin/elastro ]; then \
@@ -194,8 +204,7 @@ RUN set -eux; \
     if [ "${LOGLOOM_INSTALL}" != "skip" ]; then \
       if [ ! -x /opt/venv/bin/logloom ]; then \
         echo "FATAL: logloom binary not found at /opt/venv/bin/logloom after installation step."; \
-        echo "       Download wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7"; \
-        echo "       Rebuild with --build-arg LOGLOOM_INSTALL=wheel (place logloom-*.whl in build context)."; \
+        echo "       For public: --build-arg LOGLOOM_INSTALL=public ; or wheel: download from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7 and use =wheel (place logloom-*.whl in build context)."; \
         ls -la /opt/venv/bin/ || true; \
         exit 1; \
       fi; \

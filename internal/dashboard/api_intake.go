@@ -17,6 +17,7 @@ import (
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/internal/secrets"
+	worker "github.com/Fremen-Labs/flume/internal/worker"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
@@ -74,7 +75,13 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
   "replace the SVG icon" when no SVG was mentioned by the user).
 - Combine all verification steps (lint, test, visual check) into ONE task unless
   the project has distinct test suites requiring separate execution.
-- A single-file edit should NEVER produce more than 3 tasks total.`
+- A single-file edit should NEVER produce more than 3 tasks total.
+
+RAG CONTEXT (Elastro/Logloom contract #3):
+- Before/around this planning call, the system performs best-effort direct queries (using the same elastro_query_ast / logloom_ast_query executor patterns as ToolRegistry) against flume-elastro-graph and flume-logloom-ast.
+- Relevant compact structural/semantic hits (functions, files, call relations, signatures from the ingested AST graphs) are injected as an additional system message.
+- Use ONLY structures evidenced in the RAG context for references in the plan. This grounds plans, prevents hallucinated modules, and reduces overall token usage vs. shipping raw source to the LLM (works for local Ollama + remote frontier models).
+- If RAG context is absent or thin, fall back to minimal plan; do not invent files.`
 
 // Plan Response structures
 type PlanTask struct {
@@ -409,6 +416,137 @@ func buildLLMMessages(session SessionDoc) []llm.Message {
 	return msgs
 }
 
+// ─── Elastro/Logloom RAG for Planner (contract point #3) ────────────────────
+//
+// During Plan New Work (initial + refine), we call the *existing tool executors*
+// (ElastroASTQueryExecutor, LogloomASTQueryExecutor) — same as registered in
+// NewToolRegistryWithElastro in internal/worker/handlers.go — or direct ES
+// equivalent via their Execute methods.
+//
+// This injects compact structural context from flume-elastro-graph + flume-logloom-ast
+// into the messages for *every* planner LLM call (buildLLMMessages path).
+// Works identically for local (ollama/gateway) and remote frontier models because
+// the context is pre-injected into the ChatRequest messages.
+//
+// Emissions: s.logReasoning (which does logger + LogAgentReasoning) + the
+// executors' own internal LogAgentReasoning (role may appear as implementer for
+// the reused executor code, but tagged with phase/tool).
+// Best-effort: never blocks planning; empty RAG just means no extra context.
+
+func (s *Server) fetchPlannerRAGContext(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	q := strings.TrimSpace(prompt)
+	if q == "" {
+		return ""
+	}
+
+	var parts []string
+	if c := s.queryElastroForPlanner(ctx, repo, q); c != "" {
+		parts = append(parts, c)
+	}
+	if c := s.queryLogloomForPlanner(ctx, repo, q); c != "" {
+		parts = append(parts, c)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	joined := strings.Join(parts, "\n\n")
+
+	// Top-level reasoning emission proving RAG was used for token-efficient planning.
+	s.logReasoning(ctx, "plan-rag-"+repo, "intake-planner",
+		"RAG used (elastro_query_ast + logloom_ast_query executor patterns) to inject structural context from indices before planner LLM invocation — fulfills Elastro/Logloom contract #3 for Plan New Work. Context is compact to keep added tokens low while providing high-signal grounding (vs raw file context).",
+		map[string]any{
+			"repo":              repo,
+			"prompt_preview":    plannerTruncate(q, 100),
+			"rag_chars":         len(joined),
+			"used_elastro":      strings.Contains(joined, "Elastro Graph RAG"),
+			"used_logloom":      strings.Contains(joined, "Logloom structural"),
+			"phase":             "planner_rag_prefetch",
+			"benefit":           "token_reduction + better grounded minimal plans",
+		})
+
+	s.logger.Info("intake planner RAG injected for context reduction",
+		slog.String("repo", repo),
+		slog.Int("rag_chars", len(joined)),
+		slog.Bool("elastro", strings.Contains(joined, "Elastro Graph RAG")),
+		slog.Bool("logloom", strings.Contains(joined, "Logloom structural")),
+	)
+
+	return joined
+}
+
+func plannerTruncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func (s *Server) queryElastroForPlanner(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	executor := worker.NewElastroASTQueryExecutor(s.es, s.logger)
+	args := map[string]interface{}{"query": prompt}
+	if repo != "" && repo != "/" && repo != "." {
+		args["target_path"] = repo
+	}
+	res, err := executor.Execute(ctx, args, repo)
+	if err != nil {
+		s.logger.Debug("planner elastro RAG via executor failed (best-effort, non-fatal)", slog.String("repo", repo), slog.String("err", err.Error()))
+		return ""
+	}
+	low := strings.ToLower(res)
+	if strings.Contains(low, "no elastro ast graph data") ||
+		strings.Contains(low, "returned no matches") ||
+		strings.Contains(low, "may need re-ingestion") ||
+		len(strings.TrimSpace(res)) < 30 {
+		return ""
+	}
+	return res
+}
+
+func (s *Server) queryLogloomForPlanner(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	executor := worker.NewLogloomASTQueryExecutor(s.es, s.logger)
+	args := map[string]interface{}{"query": prompt}
+	// logloom executor ignores target_path but we pass repo as repoPath anyway (best effort)
+	res, err := executor.Execute(ctx, args, repo)
+	if err != nil {
+		s.logger.Debug("planner logloom RAG via executor failed (best-effort, non-fatal)", slog.String("repo", repo), slog.String("err", err.Error()))
+		return ""
+	}
+	low := strings.ToLower(res)
+	if strings.Contains(low, "no structural matches") ||
+		len(strings.TrimSpace(res)) < 30 {
+		return ""
+	}
+	return res
+}
+
+func (s *Server) injectRAGIntoMessages(msgs []llm.Message, ragContext string) []llm.Message {
+	if ragContext == "" || len(msgs) == 0 {
+		return msgs
+	}
+	ragMsg := llm.Message{
+		Role: "system",
+		Content: "RELEVANT STRUCTURAL/Semantic CONTEXT FROM ELASTRO + LOGLOOM INDICES (injected pre-LLM by fetchPlannerRAGContext using tool executor patterns; this is how the planner leverages graph RAG instead of raw context for token-efficient, accurate plans):\n\n" + ragContext,
+	}
+	// Insert immediately after the primary planner system prompt (index 0)
+	if len(msgs) > 0 && msgs[0].Role == "system" {
+		res := make([]llm.Message, 0, len(msgs)+1)
+		res = append(res, msgs[0], ragMsg)
+		res = append(res, msgs[1:]...)
+		return res
+	}
+	// Fallback: prepend
+	return append([]llm.Message{ragMsg}, msgs...)
+}
+
 // hostFromBaseURL extracts a human-readable host for display in planning status UI.
 func hostFromBaseURL(baseURL string) string {
 	if baseURL == "" {
@@ -542,6 +680,10 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	}
 
 	chatMsgs := buildLLMMessages(sessDoc)
+	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier)
+	if rag := s.fetchPlannerRAGContext(ctx, repo, prompt); rag != "" {
+		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
+	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
 		Messages:    chatMsgs,
@@ -737,6 +879,10 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Call LLM
 	chatMsgs := buildLLMMessages(session)
+	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier)
+	if rag := s.fetchPlannerRAGContext(ctx, session.Repo, req.Text); rag != "" {
+		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
+	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
 		Messages:    chatMsgs,

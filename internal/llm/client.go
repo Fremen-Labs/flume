@@ -574,7 +574,9 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatSt
 	}
 	timeout := req.TimeoutSeconds
 	if timeout == 0 {
-		timeout = 600 // Generous for streaming; the open connection + chunks keep it alive
+		timeout = 1200 // 20 minutes for long-running agent loops (PM decomp, implementer multi-turn)
+		// This, combined with incremental chunk delivery, prevents "context deadline exceeded"
+		// on thinking models talking to the mesh while still bounding runaway generations.
 	}
 
 	ch := make(chan ChatStreamChunk, 16)
@@ -608,10 +610,16 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatSt
 			defer resp.Body.Close()
 
 			decoder := json.NewDecoder(resp.Body)
-			for decoder.More() {
+			decoder.UseNumber()
+
+			for {
 				var chunk ChatStreamChunk
 				if err := decoder.Decode(&chunk); err != nil {
-					ch <- ChatStreamChunk{Error: err.Error(), Done: true}
+					if err == io.EOF {
+						ch <- ChatStreamChunk{Done: true}
+					} else {
+						ch <- ChatStreamChunk{Error: fmt.Sprintf("stream decode: %v", err), Done: true}
+					}
 					return
 				}
 				ch <- chunk

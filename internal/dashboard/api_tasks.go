@@ -613,13 +613,13 @@ func (s *Server) handleTaskTransition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	allowedStatuses := map[string]bool{
-		"ready": true, "planned": true, "inbox": true,
+		"ready": true, "planned": true,
 		"blocked": true, "review": true, "review-consensus": true, "done": true, // Expanded for recovery from stuck review states under failure (high leverage for seamless queue)
 	}
 	status := strings.TrimSpace(strings.ToLower(req.Status))
 	if !allowedStatuses[status] {
 		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("status must be one of [inbox, planned, ready, blocked, review, review-consensus, done], got %q", status))
+			fmt.Sprintf("status must be one of [planned, ready, blocked, review, review-consensus, done], got %q", status))
 		return
 	}
 

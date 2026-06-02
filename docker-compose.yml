@@ -64,6 +64,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     container_name: flume-dashboard
     depends_on:
       elasticsearch:
@@ -102,6 +105,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     container_name: flume-gateway
     depends_on:
       elasticsearch:
@@ -137,6 +143,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     depends_on:
       dashboard:
         condition: service_healthy

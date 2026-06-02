@@ -7,12 +7,24 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
+)
+
+// Elastro / Logloom index names (the exact indices the implementer workers
+// MUST query via the registered tools for the Elastro/Logloom contract #4).
+// These are populated at project onboarding (elastro rag ingest + logloom build+ship).
+// Documented here + in src/agents/implementer/SYSTEM_PROMPT.md so agents and
+// code always know the canonical names.
+const (
+	ElastroGraphIndex      = "flume-elastro-graph"
+	LogloomEnrichmentIndex = "flume-logloom-enrichment"
+	LogloomASTIndex        = "flume-logloom-ast"
 )
 
 // Handler is the interface implemented by all role-specific agent handlers.
@@ -280,50 +292,84 @@ type ToolRegistry struct {
 }
 
 // NewToolRegistry creates a new tool registry.
+// It always registers the core FS tools (list_directory, read_file, write_file, run_shell)
+// so implementers can explore + edit. The AST tools (elastro + logloom) are added by the
+// WithElastro variant. Enforcement of "AST verification before writes" is applied in
+// the runner's implementer loop (not inside individual executors) to keep the contract
+// centralized and tied to per-task context.
 func NewToolRegistry(logger *slog.Logger) *ToolRegistry {
-	return &ToolRegistry{
+	reg := &ToolRegistry{
 		tools:  make(map[string]ToolExecutor),
 		logger: logger.With(slog.String("component", "tools")),
 	}
+	// Register FS tools (always available for agent coding work)
+	reg.Register(NewListDirectoryExecutor(logger))
+	reg.Register(NewReadFileExecutor(logger))
+	reg.Register(NewWriteFileExecutor(logger))
+	reg.Register(NewRunShellExecutor(logger))
+	return reg
 }
 
-// NewToolRegistryWithElastro is the Phase 3.1 factory.
-// It registers:
-//   - elastro_query_ast  → direct queries against the flume-elastro-graph index
+// NewToolRegistryWithElastro is the Phase 3.1 factory for contract #4.
+// It starts with NewToolRegistry (which includes FS tools: list/read/write/run_shell)
+// then registers the intelligence tools:
+//   - elastro_query_ast  → direct queries against ElastroGraphIndex
 //                          (populated by `elastro rag ingest` at project onboarding)
-//   - logloom_ast_query  → direct queries against Logloom AST/enrichment indices in ES
+//   - logloom_ast_query  → direct queries against Logloom*Index in ES
 //
-// The elastro-client CLI only provides the ingest side (`rag ingest` / `rag update`).
-// Query/retrieval is performed directly against the resulting index for reliability
-// and to avoid the auth/endpoint/CLI surface problems seen when shelling out.
+// Within work queue implementer workers, this gives easy, first-class access to
+// elastro + logloom indices so agents know exactly what to query for accurate RAG +
+// structural data before coding. The MANDATORY AST VERIFICATION rule is enforced
+// in handleImplementer before any write_file/edit.
 func NewToolRegistryWithElastro(esClient *es.Client, logger *slog.Logger) *ToolRegistry {
 	reg := NewToolRegistry(logger)
 
 	// Elastro RAG tool (preferred for semantic + structural codebase queries).
-	// Now implemented as direct queries against flume-elastro-graph (the index
+	// Now implemented as direct queries against ElastroGraphIndex (the index
 	// populated by `elastro rag ingest` during project onboarding).
 	elastroTool := NewElastroASTQueryExecutor(esClient, logger)
 	reg.Register(elastroTool)
 
-	// Critical validation: the elastro binary (for `rag ingest` / `rag update` during
-	// project onboarding and incremental updates) must be present in worker images.
-	if bin := findElastroBinary(); bin != "" {
+	// Critical validation at worker startup: BOTH elastro and logloom binaries
+	// (for project rag ingest + logloom build during "Plan New Work", and container
+	// worker images) must be present and executable. This is the runtime gate for
+	// the Elastro/LogLoom contract (point #1). Hard build-time asserts in Dockerfile
+	// catch at image build; this catches at worker-manager start for container mode.
+	elastroBin := findElastroBinary()
+	logloomBin := findLogloomBinary()
+	if elastroBin != "" {
 		if logger != nil {
 			logger.Info("ToolRegistry: elastro binary located successfully (available for rag ingest/update)",
-				slog.String("elastro_bin", bin),
+				slog.String("elastro_bin", elastroBin),
 			)
 		}
 	} else {
 		if logger != nil {
-			logger.Error("CRITICAL: elastro binary not found at startup — project ingestion (rag ingest) will be degraded",
+			logger.Error("FATAL: elastro binary not found at worker startup — LogLoom/Elastro contract violation",
 				slog.String("searched_locations", "PATH + /opt/venv/bin/elastro + common paths"),
-				slog.String("remediation", "Rebuild worker image with proper ELASTR0_INSTALL (see root Dockerfile)"),
+				slog.String("remediation", "Rebuild worker image with ELASTR0_INSTALL=public (default) or =wheel; see root Dockerfile and docker-compose.yml"),
 			)
 		}
+		os.Exit(1)
+	}
+	if logloomBin != "" {
+		if logger != nil {
+			logger.Info("ToolRegistry: logloom binary located successfully (available for AST graph ingest)",
+				slog.String("logloom_bin", logloomBin),
+			)
+		}
+	} else {
+		if logger != nil {
+			logger.Error("FATAL: logloom binary not found at worker startup — LogLoom/Elastro contract violation",
+				slog.String("searched_locations", "PATH + /opt/venv/bin/logloom + LOGLOOM_BIN + $HOME/.local/bin + common paths"),
+				slog.String("remediation", "Rebuild worker image with LOGLOOM_INSTALL=public (default) or =wheel; see root Dockerfile and docker-compose.yml"),
+			)
+		}
+		os.Exit(1)
 	}
 
 	if logger != nil {
-		logger.Info("ToolRegistry: registered elastro_query_ast (direct queries against flume-elastro-graph index)")
+		logger.Info("ToolRegistry: registered elastro_query_ast (direct queries against "+ElastroGraphIndex+" index)")
 	}
 
 	// Logloom tool (for direct AST / enrichment / call-graph queries)
@@ -331,7 +377,7 @@ func NewToolRegistryWithElastro(esClient *es.Client, logger *slog.Logger) *ToolR
 		logloomTool := NewLogloomASTQueryExecutor(esClient, logger)
 		reg.Register(logloomTool)
 		if logger != nil {
-			logger.Info("ToolRegistry: registered logloom_ast_query (direct ES on Logloom indices)")
+			logger.Info("ToolRegistry: registered logloom_ast_query (direct ES on Logloom indices: " + LogloomEnrichmentIndex + " primary, fallback " + LogloomASTIndex + ")")
 		}
 	} else {
 		if logger != nil {
@@ -360,7 +406,7 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string
 // Derived from Python: tools/executors.tool_result_modified_repo() (L613-623)
 func ToolResultModifiedRepo(toolName, result string) bool {
 	switch toolName {
-	case "write_file", "multi_replace_file_content", "run_shell":
+	case "write_file", "edit_file", "multi_replace_file_content", "run_shell":
 		return !strings.Contains(result, "error") && !strings.Contains(result, "Error")
 	default:
 		return false
@@ -370,7 +416,7 @@ func ToolResultModifiedRepo(toolName, result string) bool {
 // ─── Elastro RAG Tool (preferred way for codebase semantic/structural queries) ──
 
 // ElastroASTQueryExecutor implements the elastro_query_ast tool via **direct ES
-// queries** against the index populated by `elastro rag ingest` (`flume-elastro-graph`).
+// queries** against the index populated by `elastro rag ingest` (ElastroGraphIndex).
 //
 // The elastro-client CLI (v1.3.59) only exposes:
 //   - `elastro rag ingest <repo> -i <index>`   (used at project clone / intake)
@@ -456,12 +502,12 @@ func (e *ElastroASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 		}
 	}
 
-	hits, err := e.es.Search(ctx, "flume-elastro-graph", esQuery, 15)
+	hits, err := e.es.Search(ctx, ElastroGraphIndex, esQuery, 15)
 	if err != nil {
 		// The index may not exist yet for this project, or may use a different name.
 		// Be graceful.
 		flumelogger.LogAgentReasoning(ctx, "", "implementer",
-			"elastro_query_ast: search against flume-elastro-graph failed (index may be empty or not yet created for this repo)",
+			"elastro_query_ast: search against "+ElastroGraphIndex+" failed (index may be empty or not yet created for this repo)",
 			map[string]any{
 				"tool":        "elastro_query_ast",
 				"query":       query,
@@ -475,7 +521,7 @@ func (e *ElastroASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 	duration := time.Since(start)
 
 	flumelogger.LogAgentReasoning(ctx, "", "implementer",
-		fmt.Sprintf("elastro_query_ast (direct on flume-elastro-graph) returned %d hits (took %s)", len(hits.Hits), duration),
+		fmt.Sprintf("elastro_query_ast (direct on %s) returned %d hits (took %s)", ElastroGraphIndex, len(hits.Hits), duration),
 		map[string]any{
 			"tool":        "elastro_query_ast",
 			"query":       query,
@@ -486,7 +532,7 @@ func (e *ElastroASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 		})
 
 	if len(hits.Hits) == 0 {
-		return fmt.Sprintf("Elastro AST graph search for %q returned no matches in flume-elastro-graph. The project may need re-ingestion (elastro rag ingest) or the query may need to be more specific.", query), nil
+		return fmt.Sprintf("Elastro AST graph search for %q returned no matches in %s. The project may need re-ingestion (elastro rag ingest) or the query may need to be more specific.", query, ElastroGraphIndex), nil
 	}
 
 	var sb strings.Builder
@@ -533,10 +579,53 @@ func findElastroBinary() string {
 	return ""
 }
 
+// findLogloomBinary mirrors the discovery logic in doctor.go, api_projects.go,
+// and the container venv fallback. Used for the runtime startup verification
+// that both binaries are present in the worker (primary container deployment).
+func findLogloomBinary() string {
+	// Check standard PATH first (e.g. after ENV PATH update in Dockerfile)
+	if resolved, err := exec.LookPath("logloom"); err == nil {
+		return resolved
+	}
+
+	logloomBin := os.Getenv("LOGLOOM_BIN")
+	if logloomBin == "" {
+		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
+	}
+	if resolved, err := exec.LookPath(logloomBin); err == nil {
+		return resolved
+	}
+	if _, err := os.Stat(logloomBin); err == nil {
+		return logloomBin
+	}
+
+	// Check the venv location we create in the official Dockerfile (when
+	// built with LOGLOOM_INSTALL=public or =wheel)
+	venvPath := "/opt/venv/bin/logloom"
+	if _, err := os.Stat(venvPath); err == nil {
+		return venvPath
+	}
+
+	// Additional common locations (for developer / custom / flume user setups)
+	candidates := []string{
+		"/usr/local/bin/logloom",
+		"/home/flume/.local/bin/logloom",
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return ""
+}
+
 // ─── Logloom AST Query Tool (direct ES queries on Logloom indices) ───────────
 
 // LogloomASTQueryExecutor lets agents query the Logloom AST / enrichment indices
-// directly in Elasticsearch. This is complementary to Elastro RAG.
+// directly in Elasticsearch (LogloomEnrichmentIndex primary, LogloomASTIndex fallback).
+// This is complementary to Elastro RAG. Agents know the exact names via consts + SYSTEM_PROMPT.
 //
 // Use this for structural / call-graph questions ("find all callers of X",
 // "definition of Y in module Z", etc.).
@@ -568,7 +657,8 @@ func (e *LogloomASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 		return "", fmt.Errorf("logloom_ast_query: 'query' is required")
 	}
 
-	// Query the main Logloom enrichment index (or ast index). Adjust as needed.
+	// Query the main Logloom enrichment index (LogloomEnrichmentIndex) or fallback to ast.
+	// Exact names are the canonical ones for the Elastro/Logloom contract.
 	// This uses the same ES client the rest of the system uses.
 	esQuery := map[string]interface{}{
 		"query": map[string]interface{}{
@@ -580,19 +670,19 @@ func (e *LogloomASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 		"size": 15,
 	}
 
-	hits, err := e.es.Search(ctx, "flume-logloom-enrichment", esQuery, 15)
+	hits, err := e.es.Search(ctx, LogloomEnrichmentIndex, esQuery, 15)
 	if err != nil {
 		// Fallback to the AST index if enrichment isn't present
-		hits, err = e.es.Search(ctx, "flume-logloom-ast", esQuery, 15)
+		hits, err = e.es.Search(ctx, LogloomASTIndex, esQuery, 15)
 		if err != nil {
-			return "", fmt.Errorf("logloom query failed on both enrichment and ast indices: %w", err)
+			return "", fmt.Errorf("logloom query failed on both %s and %s indices: %w", LogloomEnrichmentIndex, LogloomASTIndex, err)
 		}
 	}
 
 	duration := time.Since(start)
 
 	flumelogger.LogAgentReasoning(ctx, "", "implementer",
-		fmt.Sprintf("logloom_ast_query returned %d hits (took %s)", len(hits.Hits), duration),
+		fmt.Sprintf("logloom_ast_query returned %d hits (took %s) [indices: %s/%s]", len(hits.Hits), duration, LogloomEnrichmentIndex, LogloomASTIndex),
 		map[string]any{
 			"tool":        "logloom_ast_query",
 			"query":       query,
@@ -619,4 +709,136 @@ func (e *LogloomASTQueryExecutor) Execute(ctx context.Context, args map[string]i
 	}
 
 	return sb.String(), nil
+}
+
+// ─── File System Tools (required for real edits; registered alongside AST tools) ──
+// These enable the implementer to act on the repo. Enforcement of MANDATORY AST
+// verification (elastro_query_ast or logloom_ast_query success) happens in the
+// handleImplementer loop in runner.go before dispatching writes. This makes the
+// Elastro/Logloom contract #4 real and enforceable for work queue workers.
+
+type ListDirectoryExecutor struct {
+	logger *slog.Logger
+}
+
+func NewListDirectoryExecutor(logger *slog.Logger) *ListDirectoryExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ListDirectoryExecutor{logger: logger.With(slog.String("tool", "list_directory"))}
+}
+func (e *ListDirectoryExecutor) Name() string { return "list_directory" }
+func (e *ListDirectoryExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	rel, _ := args["path"].(string)
+	target := repoPath
+	if rel != "" && rel != "." {
+		target = filepath.Join(repoPath, rel)
+	}
+	// Safety: ensure we stay under repoPath (prevent ../ escapes)
+	if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(repoPath)) {
+		return "", fmt.Errorf("list_directory: path %s escapes repo root", rel)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return "", fmt.Errorf("list_directory failed on %s: %w", target, err)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Directory listing for %s:\n", target))
+	for _, ent := range entries {
+		prefix := "  "
+		if ent.IsDir() {
+			prefix = "  [dir] "
+		}
+		sb.WriteString(prefix + ent.Name() + "\n")
+	}
+	return sb.String(), nil
+}
+
+type ReadFileExecutor struct {
+	logger *slog.Logger
+}
+
+func NewReadFileExecutor(logger *slog.Logger) *ReadFileExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ReadFileExecutor{logger: logger.With(slog.String("tool", "read_file"))}
+}
+func (e *ReadFileExecutor) Name() string { return "read_file" }
+func (e *ReadFileExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	rel, _ := args["path"].(string)
+	if rel == "" {
+		return "", fmt.Errorf("read_file: 'path' argument is required")
+	}
+	full := filepath.Join(repoPath, rel)
+	if !strings.HasPrefix(filepath.Clean(full), filepath.Clean(repoPath)) {
+		return "", fmt.Errorf("read_file: path %s escapes repo root", rel)
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return "", fmt.Errorf("read_file %s failed: %w", full, err)
+	}
+	return string(data), nil
+}
+
+type WriteFileExecutor struct {
+	logger *slog.Logger
+}
+
+func NewWriteFileExecutor(logger *slog.Logger) *WriteFileExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &WriteFileExecutor{logger: logger.With(slog.String("tool", "write_file"))}
+}
+func (e *WriteFileExecutor) Name() string { return "write_file" }
+func (e *WriteFileExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	rel, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+	if rel == "" {
+		return "", fmt.Errorf("write_file: 'path' argument is required")
+	}
+	full := filepath.Join(repoPath, rel)
+	if !strings.HasPrefix(filepath.Clean(full), filepath.Clean(repoPath)) {
+		return "", fmt.Errorf("write_file: path %s escapes repo root", rel)
+	}
+	// Ensure parent dirs
+	if dir := filepath.Dir(full); dir != "" {
+		_ = os.MkdirAll(dir, 0755)
+	}
+	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write_file %s failed: %w", full, err)
+	}
+	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), rel), nil
+}
+
+type RunShellExecutor struct {
+	logger *slog.Logger
+}
+
+func NewRunShellExecutor(logger *slog.Logger) *RunShellExecutor {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &RunShellExecutor{logger: logger.With(slog.String("tool", "run_shell"))}
+}
+func (e *RunShellExecutor) Name() string { return "run_shell" }
+func (e *RunShellExecutor) Execute(ctx context.Context, args map[string]interface{}, repoPath string) (string, error) {
+	cmdStr, _ := args["command"].(string)
+	if strings.TrimSpace(cmdStr) == "" {
+		return "", fmt.Errorf("run_shell: 'command' argument is required")
+	}
+	// Basic safety: disallow obviously dangerous top-level (rm -rf / etc). Workers run in controlled env.
+	lower := strings.ToLower(cmdStr)
+	if strings.Contains(lower, "rm -rf /") || strings.Contains(lower, "mkfs") || strings.Contains(lower, ":(){ :|:& };:") {
+		return "", fmt.Errorf("run_shell: disallowed dangerous command pattern")
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	cmd.Dir = repoPath
+	out, err := cmd.CombinedOutput()
+	result := string(out)
+	if err != nil {
+		result += "\n[exit error: " + err.Error() + "]"
+	}
+	return result, nil
 }

@@ -309,14 +309,22 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	}
 
 	// Apply request-level timeout if provided by the client
+	// For long-running agent roles (pm, implementer), be generous by default.
+	baseTimeout := 300 * time.Second
+	if req.AgentRole == "pm" || req.AgentRole == "implementer" {
+		baseTimeout = 1200 * time.Second // 20 minutes for deep thinking + tool use on local models
+	}
+
 	if timeoutStr := r.Header.Get("X-Timeout-Seconds"); timeoutStr != "" {
 		var timeoutSecs int
 		if _, err := fmt.Sscanf(timeoutStr, "%d", &timeoutSecs); err == nil && timeoutSecs > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
-			defer cancel()
+			baseTimeout = time.Duration(timeoutSecs) * time.Second
 		}
 	}
+
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, baseTimeout)
+	defer cancel()
 
 	s.config.Refresh(ctx)
 

@@ -105,7 +105,7 @@ export default function ProjectsPage() {
       total: ptasks.length,
       running: ptasks.filter(t => t.status === 'running').length,
       inReview: ptasks.filter(t => t.status === 'review').length,
-      planned: ptasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox').length,
+      planned: ptasks.filter(t => t.status === 'planned' || t.status === 'ready').length,
       done: ptasks.filter(t => t.status === 'done').length,
       blocked: ptasks.filter(t => t.status === 'blocked').length,
       agents: activeWorkers.length,

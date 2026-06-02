@@ -25,7 +25,6 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusInbox           TaskStatus = "inbox"
 	TaskStatusPlanned         TaskStatus = "planned"
 	TaskStatusReady           TaskStatus = "ready"
 	TaskStatusRunning         TaskStatus = "running"
@@ -38,12 +37,10 @@ const (
 
 // ValidTransitions defines the FSM for task state changes.
 // Direct port from Python: TaskStateMachine.TRANSITIONS.
+//
+// Note: The "inbox" state has been collapsed into "planned". New work enters the system
+// as "planned" (or directly "ready" for first tasks in a chain).
 var ValidTransitions = map[TaskStatus][]TaskStatus{
-	// Expanded inbox transitions to match real claimer/reset flows observed in production
-	// (inbox → running on direct claim after reset-to-ready or intake; also review-* states
-	// during certain recovery paths). This eliminates the most common shadow violations
-	// while keeping the rest of the DAG strict.
-	TaskStatusInbox:           {TaskStatusPlanned, TaskStatusReady, TaskStatusRunning, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusArchived},
 	TaskStatusPlanned:         {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusReady:           {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusRunning:         {TaskStatusReview, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},

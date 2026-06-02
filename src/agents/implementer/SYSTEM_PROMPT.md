@@ -59,10 +59,11 @@ Tasks that require modifying or writing files.
 - Do NOT use abstract reasoning or speculative file modifications outside of the explicit `instructions` payload.
 - Always execute `implementation_complete` to signal task completion. You must use the following schema:
   `{"status": "complete", "modified_files": ["..."], "lint_passed": boolean, "summary": "..."}`
-- **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` (primary for semantic/structural RAG over the ingested codebase) **and consider** `logloom_ast_query` (for precise call-graph, log sites, signatures, and models) before editing code.
-- The tools query the internal indices populated automatically on project clone:
-  - `elastro_query_ast` → `flume-elastro-graph` (elastro rag ingest)
-  - `logloom_ast_query` → `flume-logloom-ast` (logloom build + es ship)
+- **MANDATORY AST VERIFICATION**: You MUST explicitly call `elastro_query_ast` (primary for semantic/structural RAG over the ingested codebase) **or** `logloom_ast_query` (for precise call-graph, log sites, signatures, and models) **successfully at least once** in the current task context BEFORE any write_file / edit / code modification operation. This is the enforceable Elastro/Logloom contract #4 for work queue implementer workers. Failure to do so will result in tool rejection with explicit error.
+- The tools query the **exact canonical indices** (always use the tool names; workers know these from code + this prompt):
+  - `elastro_query_ast` → `flume-elastro-graph` (ElastroGraphIndex; populated by `elastro rag ingest` at onboarding)
+  - `logloom_ast_query` → primary `flume-logloom-enrichment`, fallback `flume-logloom-ast` (LogloomEnrichmentIndex / LogloomASTIndex; populated by logloom build + ES ship at project creation)
+- Within work queue workers that pick up implementer work: the ToolRegistry wires direct ES access via the authenticated client. You have easy access to query these for RAG + AST data to speed up + increase accuracy of coding.
 - For manual debugging outside tools (advanced users or when suggesting commands in reasoning):
   - Elastro: `elastro doc search flume-elastro-graph ...` (or `elastro rag` subcommands for maintenance)
-  - LogLoom: `logloom graph find ...` locally, or `elastro doc search flume-logloom-ast ...` against the ES index.
+  - LogLoom: `logloom graph find ...` locally, or `elastro doc search flume-logloom-enrichment ...` or `flume-logloom-ast ...` against the ES index.
