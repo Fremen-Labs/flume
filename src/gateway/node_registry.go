@@ -153,7 +153,15 @@ func NewNodeRegistry(esURL string, secrets *SecretStore) *NodeRegistry {
 //   - Graceful: missing secret or bao down → reasoning + warn + continue
 //     with no token (call will be unauthed; user sees the reasoning).
 func (r *NodeRegistry) resolveAuthTokenIfNeeded(ctx context.Context, node *Node) {
-	if node == nil || node.AuthSecretPath == "" || node.AuthToken != "" || r.secrets == nil {
+	if node == nil || node.AuthSecretPath == "" || r.secrets == nil {
+		return
+	}
+
+	// Check under RLock to avoid unsynchronized read of AuthToken concurrent with writes.
+	r.mu.RLock()
+	alreadySet := node.AuthToken != ""
+	r.mu.RUnlock()
+	if alreadySet {
 		return
 	}
 
@@ -345,6 +353,25 @@ func (r *NodeRegistry) GetNode(id string) *Node {
 		r.resolveAuthTokenIfNeeded(context.Background(), n)
 	}
 	return n
+}
+
+// AuthToken returns the auth token for the given node, ensuring any lazy load
+// from AuthSecretPath has occurred (via resolve), and reading the value under
+// the registry's mutex. This prevents data races on the AuthToken field when
+// concurrent goroutines (e.g. ensemble jury members, health probes, routing)
+// may trigger resolves or reads on the same shared *Node from HealthyNodes().
+//
+// Callers that previously did "if registry != nil { registry.resolve...(node) }; use node.AuthToken"
+// can now simply do "tok := registry.AuthToken(node)" (the resolve is included).
+func (r *NodeRegistry) AuthToken(node *Node) string {
+	if node == nil {
+		return ""
+	}
+	r.resolveAuthTokenIfNeeded(context.Background(), node)
+	r.mu.RLock()
+	tok := node.AuthToken
+	r.mu.RUnlock()
+	return tok
 }
 
 // UpdateHealth atomically updates the health state of a node.

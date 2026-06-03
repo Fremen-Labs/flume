@@ -260,13 +260,18 @@ func (r *ProviderRouter) getManagedOllamaClient(baseURL string, timeout time.Dur
 		return &http.Client{Timeout: timeout}
 	}
 	if r != nil && r.connMgr != nil {
-		// Better keying than pure base: use host-derived ID (real node.ID passed in future refactor of stream paths).
-		host := "default"
+		// Only use the persistent conn manager (intended for local Ollama mesh) for
+		// non-frontier hosts. Frontier calls (openai, anthropic etc) use the router's
+		// base client or their own pooling to avoid mixing concerns and large numbers
+		// of synth entries.
 		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
-			host = u.Host
+			h := strings.ToLower(u.Host)
+			if strings.Contains(h, "openai") || strings.Contains(h, "anthropic") || strings.Contains(h, "googleapis") || strings.Contains(h, "x.ai") || strings.HasPrefix(h, "api.") {
+				return &http.Client{Timeout: timeout}
+			}
+			synthNode := &Node{ID: "ollama-" + u.Host, Host: u.Host}
+			return r.connMgr.GetClientForNode(synthNode, timeout)
 		}
-		synthNode := &Node{ID: "ollama-" + host, Host: host}
-		return r.connMgr.GetClientForNode(synthNode, timeout)
 	}
 	// Fallback to package skeleton (used by stream paths until full threading of *Node to StreamOllama*).
 	return getOllamaStreamClientForBase(baseURL)

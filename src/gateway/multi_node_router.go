@@ -434,13 +434,6 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 
 // routeToNode routes a request to a specific Ollama node by overriding the base URL.
 func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, node *Node, withTools bool) (*ChatResponse, error) {
-	// Phase 2 (opt-in auth): resolve before reading node.AuthToken so that
-	// a node registered with auth_secret_path actually gets its token for
-	// the inference call (not just health). No-op + fast path for unauthed.
-	if m.registry != nil {
-		m.registry.resolveAuthTokenIfNeeded(ctx, node)
-	}
-
 	// Build node-specific URL.
 	nodeURL := "http://" + node.Host
 
@@ -449,8 +442,16 @@ func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, nod
 	cloned.Provider = ProviderOllama
 	cloned.Model = node.ModelTag
 
+	// Phase 2/4: use safe accessor (does resolve if needed + RLocked read) to avoid
+	// data races on node.AuthToken when concurrent jury/routing/health access the
+	// shared *Node pointers from the registry.
+	authTok := ""
+	if m.registry != nil {
+		authTok = m.registry.AuthToken(node)
+	}
+
 	// Use the node-specific routing path.
-	resp, err := m.router.RouteToNode(ctx, cloned, nodeURL, node.AuthToken, withTools)
+	resp, err := m.router.RouteToNode(ctx, cloned, nodeURL, authTok, withTools)
 	if err == nil && resp != nil {
 		resp.Telemetry = &Telemetry{
 			NodeID:   node.ID,

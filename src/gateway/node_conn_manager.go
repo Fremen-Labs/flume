@@ -133,6 +133,11 @@ func (m *NodeConnManager) GetClientForNode(node *Node, timeout time.Duration) *h
 	}
 	m.mu.RUnlock()
 
+	// Get transport *outside* the clients lock to avoid holding write lock while
+	// GetTransportForNode may acquire its own locks on the same mu (prevents self-deadlock).
+	// GetTransport handles its own concurrency and double-check.
+	transport := m.GetTransportForNode(node)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -140,7 +145,6 @@ func (m *NodeConnManager) GetClientForNode(node *Node, timeout time.Duration) *h
 		return c
 	}
 
-	transport := m.GetTransportForNode(node)
 	c := &http.Client{
 		Transport: transport,
 		Timeout:   timeout, // Note: for streaming paths we often pass 0 and rely on ctx (see Phase 1 unification).

@@ -588,6 +588,20 @@ func hostFromBaseURL(baseURL string) string {
 	return baseURL
 }
 
+// strFromMap safely extracts a string value from a telemetry map (or any map[string]interface{}).
+// Used for gateway Telemetry which is always a map (see internal/llm/client.go ChatResponse.Telemetry).
+func strFromMap(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	if v, ok := m[key]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // ─── POST /api/intake/session ───────────────────────────────────────────────
 
 func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request) {
@@ -786,13 +800,31 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	if elapsedSec > 60 {
 		tele := map[string]any{"elapsed_sec": elapsedSec}
 		if resp != nil && resp.Telemetry != nil {
-			tele["node_id"] = resp.Telemetry.NodeID
-			tele["node_host"] = resp.Telemetry.NodeHost
-			tele["model"] = resp.Telemetry.Model
+			tm := resp.Telemetry
+			tele["node_id"] = strFromMap(tm, "node_id")
+			tele["node_host"] = strFromMap(tm, "node_host")
+			tele["model"] = strFromMap(tm, "model")
 		}
 		s.logReasoning(ctx, "plan-slow-"+sessionID, "intake-planner",
 			fmt.Sprintf("Plan New Work LLM >60s (Phase 4 why-slow UX); inspect gateway node conn stats, health, and per-hop reasoning for root cause. Target <120s end-to-end on local for simple requests."),
 			map[string]any{"plan_session_id": sessionID, "telemetry": tele, "phase": "planner_slow_surface"})
+	}
+
+	// Phase 4: populate the actual routing node info from gateway telemetry into the
+	// planningStatus so the dashboard UI can display which mesh node handled the
+	// (potentially slow) Plan New Work LLM call.
+	if resp != nil && resp.Telemetry != nil {
+		tm := resp.Telemetry
+		if v := strFromMap(tm, "node_id"); v != "" {
+			status.Host = v
+		}
+		if v := strFromMap(tm, "model"); v != "" {
+			status.Model = v
+		}
+		if v := strFromMap(tm, "node_host"); v != "" {
+			status.BaseURL = "http://" + v
+		}
+		status.Provider = "local-mesh"
 	}
 
 	status.Stage = "ready"
@@ -988,6 +1020,21 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		} else {
 			planSrc = "llm"
 		}
+	}
+
+	// Phase 4: populate node info from telemetry for refine calls too.
+	if resp != nil && resp.Telemetry != nil {
+		tm := resp.Telemetry
+		if v := strFromMap(tm, "node_id"); v != "" {
+			session.PlanningStatus.Host = v
+		}
+		if v := strFromMap(tm, "model"); v != "" {
+			session.PlanningStatus.Model = v
+		}
+		if v := strFromMap(tm, "node_host"); v != "" {
+			session.PlanningStatus.BaseURL = "http://" + v
+		}
+		session.PlanningStatus.Provider = "local-mesh"
 	}
 
 	session.PlanningStatus.Stage = "ready"

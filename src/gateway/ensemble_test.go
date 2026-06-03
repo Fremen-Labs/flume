@@ -126,17 +126,17 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 	config.EnsembleSize = 3
 	config.FrontierFallbackModel = "mock-frontier"
 
-	var callCount int
-	frontierHit := false
+	var callCount atomic.Int32
+	var frontierHit atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var reqBody ChatRequest
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
 
 		if reqBody.Model == "mock-frontier" {
-			frontierHit = true
+			frontierHit.Store(true)
 		}
 
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 
 		// Return terrible responses that fail scoring (bestScore < 70)
@@ -189,11 +189,11 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 	}
 
 	// Should hit local 3 times, then hit frontier 1 time.
-	if callCount != 4 {
-		t.Errorf("Expected 4 total calls (3 local + 1 frontier), got %d", callCount)
+	if callCount.Load() != 4 {
+		t.Errorf("Expected 4 total calls (3 local + 1 frontier), got %d", callCount.Load())
 	}
 
-	if !frontierHit {
+	if !frontierHit.Load() {
 		t.Errorf("Expected frontier model fallback to be triggered due to low score")
 	}
 }
