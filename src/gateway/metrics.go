@@ -846,6 +846,11 @@ type LiveGatewayMetrics struct {
 	GoMemstatsSysBytes  uint64 `json:"go_memstats_sys_bytes"`
 	GoMemstatsAllocBytes uint64 `json:"go_memstats_alloc_bytes"`
 	GoGoroutines        int    `json:"go_goroutines"`
+
+	// Phase 1 + Phase 4: connection reuse stats per node (from NodeConnManager).
+	// Enables "why fast" UX, p99 visibility, and confirmation of keepalive/HTTP2 wins on local mesh.
+	// Populated from the (wired) conn manager stats.
+	FlumeNodeConnStats []map[string]interface{} `json:"flume_node_conn_stats,omitempty"`
 }
 
 // NodeLoadPoint is the gateway-native simple shape (per implementation spec).
@@ -890,7 +895,8 @@ func parseLabelsToMap(s string) map[string]string {
 // BuildLiveGatewayMetrics snapshots the global Metrics registry + NodeRegistry
 // health into a stable JSON struct. Called by the /api/gateway-metrics handler.
 // All operations are fast in-memory copies; no network or blocking calls.
-func BuildLiveGatewayMetrics(nodeReg *NodeRegistry) LiveGatewayMetrics {
+// connMgr (Phase 1/4) optional for conn reuse stats; falls back to package singleton if nil.
+func BuildLiveGatewayMetrics(nodeReg *NodeRegistry, connMgr *NodeConnManager) LiveGatewayMetrics {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	lm := LiveGatewayMetrics{
@@ -911,6 +917,24 @@ func BuildLiveGatewayMetrics(nodeReg *NodeRegistry) LiveGatewayMetrics {
 
 	// Node load: authoritative source is NodeRegistry.Health.CurrentLoad (updated
 	// by health checker + used by router). Fall back to metrics gauge if no reg.
+
+	// Phase 4: conn stats for "why the mesh feels fast" + reuse confirmation (Phase 1 win).
+	// Includes per-node max_idle etc; future versions can add in-use counts.
+	var connStats map[string]map[string]int
+	if connMgr != nil {
+		connStats = connMgr.Stats()
+	}
+	if len(connStats) == 0 {
+		connStats = OllamaConnStats()
+	}
+	if len(connStats) > 0 {
+		for nid, s := range connStats {
+			lm.FlumeNodeConnStats = append(lm.FlumeNodeConnStats, map[string]interface{}{
+				"node_id": nid,
+				"stats":   s,
+			})
+		}
+	}
 	if nodeReg != nil {
 		for _, n := range nodeReg.AllNodes() {
 			lm.FlumeNodeLoad = append(lm.FlumeNodeLoad, NodeLoadPoint{

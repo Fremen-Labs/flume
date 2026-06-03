@@ -166,7 +166,7 @@ func TestEnsembleRouter_Escalation(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "test-key-escalation")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 	router.client = ts.Client()
 
 	srv := &Server{
@@ -226,7 +226,7 @@ func TestEnsembleTimeout(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "test-key-timeout")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 	router.client = blockedServer.Client()
 
 	srv := &Server{
@@ -274,7 +274,7 @@ func TestHandleChat_EnsembleEnabled(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "test-key-ensemble")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 	router.client = mockLLM.Client()
 
 	srv := &Server{
@@ -445,7 +445,7 @@ func TestEarlyExitEnsemble(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "test-key-early-exit")
 
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 	router.client = goodServer.Client()
 
 	srv := &Server{

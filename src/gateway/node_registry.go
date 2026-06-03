@@ -466,6 +466,11 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requir
 			if strings.Contains(tagLower, "coder") || strings.Contains(tagLower, "code") {
 				modelFit = math.Min(1.0, modelFit*1.2)
 			}
+			// Phase 3: per-role preferred local model bias for planning/intake (fast path target).
+			// Boost strong reasoning/coder models commonly used for high-quality breakdown on local mesh.
+			if strings.Contains(tagLower, "qwen") || strings.Contains(tagLower, "32b") || strings.Contains(tagLower, "72b") {
+				modelFit = math.Min(1.0, modelFit*1.15)
+			}
 		case "review", "test", "fast", "evaluation":
 			// Prefer speed over reasoning power for lightweight analysis roles.
 			modelFit = math.Min(1.0, modelFit*0.8+float64(n.Capabilities.EstimatedTPS)/100.0*0.2)

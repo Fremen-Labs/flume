@@ -409,3 +409,14 @@ func getOllamaStreamClientForBase(baseURL string) *http.Client {
 // End of Phase 1 skeleton in tool_stream.go. Continue integration in providers.go
 // and server init. See todo for remaining Phase 1 steps (always-stream force,
 // ctx timeout unification, stats exposure, tests).
+
+// OllamaConnStats exposes the (package) NodeConnManager stats for Phase 4 observability
+// (used by BuildLiveGatewayMetrics + /api/gateway-metrics to surface conn reuse in dashboard).
+// In full explicit wiring the Server's connMgr.Stats() would be preferred, but this keeps
+// the skeleton working without changing all call sites yet. Stats include config + (future) counters.
+func OllamaConnStats() map[string]map[string]int {
+	if ollamaConnMgr == nil {
+		return nil
+	}
+	return ollamaConnMgr.Stats()
+}

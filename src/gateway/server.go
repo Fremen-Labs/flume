@@ -54,6 +54,9 @@ type Server struct {
 	// secrets holds the OpenBao client for lazy node auth token loading (Phase 2 opt-in).
 	// May be nil in some test paths; handleAddNode guards on it.
 	secrets *SecretStore
+	// connMgr is the Phase 1 per-node connection manager for local Ollama (reuse, HTTP2 attempt).
+	// Owned here for lifecycle, stats (Phase 4), and health integration. Passed to ProviderRouter.
+	connMgr *NodeConnManager
 	// planPMRateLimiter (Phase 2 task 4): basic in-memory fixed-window guard (3/min per plan for role=pm).
 	// Integrated early in dispatch before expensive work. Clean for Redis upgrade later.
 	planPMRateLimiter *PlanPMRateLimiter
@@ -85,7 +88,10 @@ func globalMaxConcurrent() int {
 
 // NewServer creates a fully wired gateway server.
 func NewServer(config *Config, secrets *SecretStore) *Server {
-	router := NewProviderRouter(config, secrets)
+	// Phase 1 completion + Phase 4 prep: Server explicitly owns the NodeConnManager (reliable-go: no hidden globals).
+	// Passed down to ProviderRouter (and available for health, metrics, lifecycle).
+	connMgr := NewNodeConnManager()
+	router := NewProviderRouter(config, secrets, connMgr)
 	// Detect Ollama capacity and create adaptive semaphore
 	ollamaURL := config.GetOllamaBaseURL()
 	maxConcurrent := DetectOllamaCapacity(ollamaURL)
@@ -98,6 +104,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		frontierQ:           NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
 		planPMRateLimiter:   NewPlanPMRateLimiter(3), // 3 PM decomp attempts per plan per minute (tunable)
 		secrets:             secrets,
+		connMgr:             connMgr,
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -886,7 +893,7 @@ func (s *Server) handleGatewayMetrics(w http.ResponseWriter, r *http.Request) {
 	log := WithContext(r.Context())
 	log.Debug("handling GET /api/gateway-metrics (live telemetry for dashboard)")
 
-	live := BuildLiveGatewayMetrics(s.nodeRegistry)
+	live := BuildLiveGatewayMetrics(s.nodeRegistry, s.connMgr)
 	s.writeJSON(w, http.StatusOK, live)
 }
 

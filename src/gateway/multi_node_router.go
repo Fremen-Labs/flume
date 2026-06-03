@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -374,14 +376,29 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 		slog.String("error", err.Error()),
 	)
 
-	// Try all other healthy nodes (each with its own 90s cap so total wall time stays reasonable).
+	// Phase 3: Planner-Specific Fast Path.
+	// For intake/planning (the critical <120s on-ramp for "Plan New Work"), avoid the full mesh exhaust
+	// that was burning 180s+ sequentially even when a good local node was available. Use top node + at most
+	// 1 secondary (quick retry) within per-attempt bounds. This + conn reuse + always-stream + slim RAG
+	// targets the historical reliable Python 120s window for simple requests (e.g. "document all CLI commands").
+	// Full resilience still applies to normal execution tasks via executeLocalOnly.
+	// Future: could race the top 2 in parallel goroutines and take the first success under a 60s child ctx.
+	maxSecondariesForPlanning := 1
+	flumelogger.LogAgentReasoning(context.Background(), req.PlanSessionID, "planning-router",
+		"using Phase 3 fast local path for planner (top + limited secondaries) to target <120s real draft on simple requests; avoiding full mesh exhaust",
+		"plan_session_id", req.PlanSessionID,
+		"max_secondaries", maxSecondariesForPlanning,
+		"selected_primary", node.ID,
+		"primary_host", node.Host,
+	)
 	healthy := m.registry.HealthyNodes()
+	attemptedSecondaries := 0
 	for _, n := range healthy {
 		if n.ID == node.ID {
 			continue
 		}
 
-		log.Info("planning_router: trying additional mesh node with fresh context",
+		log.Info("planning_router: trying additional mesh node with fresh context (Phase 3 limited for fast path)",
 			slog.String("node_id", n.ID),
 			slog.String("host", n.Host),
 		)
@@ -401,6 +418,10 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 			slog.String("node_id", n.ID),
 			slog.String("error", fbErr.Error()),
 		)
+		attemptedSecondaries++
+		if attemptedSecondaries >= maxSecondariesForPlanning {
+			break
+		}
 	}
 
 	// Only now, after genuinely exhausting the local mesh with fresh attempts, escalate.
@@ -438,6 +459,29 @@ func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, nod
 		}
 		log := WithContext(ctx)
 		log.Info("telemetry payload attached", slog.String("node_id", node.ID))
+
+		// Phase 3: rich propagation + LogAgentReasoning for every gateway LLM hop (planning/intake especially).
+		// Feeds UI popout, Logloom, and "why slow" analysis. Includes node for mesh attribution.
+		dur := 0
+		if resp.Usage.TotalDurationNs > 0 {
+			dur = int(resp.Usage.TotalDurationNs / 1e6)
+		}
+		flumelogger.LogAgentReasoning(ctx, req.PlanSessionID, "gateway-llm-hop",
+			fmt.Sprintf("routed planning/llm call to local mesh node %s (%s) model=%s", node.ID, node.Host, node.ModelTag),
+			"node_id", node.ID,
+			"node_host", node.Host,
+			"model", node.ModelTag,
+			"task_type", req.TaskType,
+			"duration_ms", dur,
+			"prompt_tokens", resp.Usage.PromptTokens,
+			"completion_tokens", resp.Usage.CompletionTokens,
+			"plan_session_id", req.PlanSessionID,
+			"agent_role", req.AgentRole,
+		)
+	} else if err != nil {
+		flumelogger.LogAgentReasoning(ctx, req.PlanSessionID, "gateway-llm-hop",
+			fmt.Sprintf("LLM hop to node %s failed: %v", node.ID, err),
+			"node_id", node.ID, "error", err.Error(), "plan_session_id", req.PlanSessionID)
 	}
 	return resp, err
 }

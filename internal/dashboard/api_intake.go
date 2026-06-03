@@ -710,8 +710,28 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	}
 
 	chatMsgs := buildLLMMessages(sessDoc)
-	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier)
-	if rag := s.fetchPlannerRAGContext(ctx, repo, prompt); rag != "" {
+	// Contract #3 + Phase 3: pre-fetch RAG using executors and inject (before LLM, for local+frontier).
+	// Phase 3: optional fast-path RAG skip for pure "doc" prompts (e.g. "ensure all CLI commands are detailed in the documentation",
+	// "update the README with help text"). These benefit less from AST graph than code changes; skipping saves pre-latency + tokens
+	// on the critical planner path for simple requests. Heuristic: doc keywords + absence of code-change verbs.
+	rag := ""
+	pLower := strings.ToLower(strings.TrimSpace(prompt))
+	isPureDoc := strings.Contains(pLower, "document") || strings.Contains(pLower, "documentation") ||
+		strings.Contains(pLower, "readme") || strings.Contains(pLower, "cli command") ||
+		strings.Contains(pLower, "help text") || strings.Contains(pLower, "describe the") || strings.Contains(pLower, "list the commands")
+	if isPureDoc {
+		// crude anti-false-positive: if prompt also says implement/fix/add code, still do RAG
+		if !strings.Contains(pLower, "implement") && !strings.Contains(pLower, "fix ") && !strings.Contains(pLower, "add ") && !strings.Contains(pLower, "refactor") {
+			s.logReasoning(ctx, "plan-rag-skip-"+repo, "intake-planner",
+				"RAG skipped for pure-doc prompt (Phase 3 fast path optimization; saves latency/tokens for doc-style Plan New Work)",
+				map[string]any{"prompt_preview": plannerTruncate(prompt, 80), "repo": repo})
+		} else {
+			rag = s.fetchPlannerRAGContext(ctx, repo, prompt)
+		}
+	} else {
+		rag = s.fetchPlannerRAGContext(ctx, repo, prompt)
+	}
+	if rag != "" {
 		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
 	}
 	startReq := time.Now()
@@ -758,6 +778,21 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		} else {
 			planSrc = "llm"
 		}
+	}
+
+	// Phase 4: surface "why slow" for planner via reasoning (visible in UI popout + Logloom).
+	// If >60s on a local mesh node, log rich context (node from telemetry, duration) so user
+	// can correlate with conn stats, node load, health latency in dashboard/gateway-metrics.
+	if elapsedSec > 60 {
+		tele := map[string]any{"elapsed_sec": elapsedSec}
+		if resp != nil && resp.Telemetry != nil {
+			tele["node_id"] = resp.Telemetry.NodeID
+			tele["node_host"] = resp.Telemetry.NodeHost
+			tele["model"] = resp.Telemetry.Model
+		}
+		s.logReasoning(ctx, "plan-slow-"+sessionID, "intake-planner",
+			fmt.Sprintf("Plan New Work LLM >60s (Phase 4 why-slow UX); inspect gateway node conn stats, health, and per-hop reasoning for root cause. Target <120s end-to-end on local for simple requests."),
+			map[string]any{"plan_session_id": sessionID, "telemetry": tele, "phase": "planner_slow_surface"})
 	}
 
 	status.Stage = "ready"

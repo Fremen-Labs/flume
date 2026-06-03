@@ -67,21 +67,23 @@
 **Timeline:** Complete as part of initial 2 phases (small focused changes).
 
 ### Phase 3: Planner-Specific Fast Path & Propagation (Target <120s Local Success)
-**Scope:** "Routing/Planning Specific (for <120s simple local success)"; "Propagate more"; "Model selection".
-- Fast local path for intake planner: top-node only (or parallel quick race within 60s budget) in resilience logic; avoid full mesh exhaust for breakdown.
-- Optional RAG skip for pure-doc prompts (detect low complexity + keywords).
-- Ensure propagation: every gateway LLM call (planning) emits structured + LogAgentReasoning (node_id, duration, tokens, etc.). Dashboard intake logs RAG/LLM steps.
-- Per-role preferred local model bias in SelectNode/config.
-- Non-breaking.
+**Implemented:** 
+- Fast local path in executePlanningWithMeshResilience: top selected node + at most 1 secondary (limited vs full healthy loop exhaust). Added explicit LogAgentReasoning for the decision. (Top-only or limited keeps wall time under the 120s caller budget for simple local plans.)
+- Optional RAG skip in handleIntake* for pure-doc prompts (heuristic on keywords like "document"/"cli"/"readme" + no code verbs; emits logReasoning + skips fetch to save 8s+tokens).
+- Propagation: added flumelogger.LogAgentReasoning in routeToNode (and planning) for every LLM hop (node_id, host, model, tokens, dur, plan_session, role). Dashboard intake now surfaces slow>60s with telemetry + reasoning (Phase4 tie-in).
+- Per-role bias: in SelectNode, extra *1.15 boost for planning/intake on qwen/32b/72b models.
+- Non-breaking, gated to planning paths, comments with "Phase 3".
+**Scope (rest per original):** Model selection refinements, full parallel race option as follow-up.
 
 ### Phase 4: Observability, Tracing & UX
-**Scope:** "Observability & Usefulness"; "Per-node conn stats"; "Why slow" UX; "Distributed tracing"; "Metrics"; "ensemble local".
-- Wrap node calls in spans or hop logs (request_id + llm_hop with node details).
-- Expose conn stats in health/metrics.
-- Surface node/gen latency in planningStatus + reasoning if >60s.
-- Node-specific p99 latency metrics.
-- Behind-policy local ensemble (query 2-3 nodes, pick best).
-- Update UI/telemetry.
+**Implemented:**
+- Hop logs: LogAgentReasoning(ctx, ..., "gateway-llm-hop", msg with node+dur+tokens) on every routeToNode success/fail (plus in planning-router for fast path choice).
+- Conn stats exposed: wired Server.connMgr -> ProviderRouter; BuildLiveGatewayMetrics now accepts+uses it (or package fallback); added FlumeNodeConnStats to LiveGatewayMetrics + populated in /api/gateway-metrics JSON (used by dashboard telemetry bridge). Stats include per-node idle/keepalive from manager (Phase4 TODO in manager for real in-use later).
+- "Why slow" UX: in intake after LLM, if elapsed>60s emit rich logReasoning with node telemetry from resp (node_id/host/model/elapsed); visible in popout/Logloom. Also "slow surface" note.
+- Ensemble: existing behind policy for complex (local jury); noted as satisfying.
+- No p99 yet (future from metrics), no spans (use Log* + request_id as simple tracing).
+- UI/telemetry: the /gateway-metrics now carries conn stats for Analytics/Node cards.
+**Scope (rest):** Add node p99, deeper tracing, health reuse of conns for probes.
 
 ### Phase 5: Security Hardening (mTLS etc.)
 **Scope:** "Security Hardening (no frontier impact)".
@@ -105,6 +107,8 @@
 
 **Success Criteria (from report):** Local simple plans reliably <60-90s end-to-end on mesh; measurable conn reuse; full auth for local; better obs; secure mTLS option; follows SKILLs.
 
-Next steps: Implement Phase 1 (start with conn manager skeleton + transport refactor in tool_stream/providers).
+**Status update (after initial phases + next 2):** Phase 1 core (conn mgr + always-stream for local + partial wiring) + Phase 2 (opt-in auth completion, health, manual portal, Log* on auth, full conditional injection) completed (with user clarification that auth is strictly optional). Phase 1 wiring completed as prereq (Server owns + passes connMgr; stats exposed; better keying). Phase 3 (fast planner path: top+1 secondary only to avoid exhaust for <120s; optional RAG skip heuristic for pure-doc prompts; per-role model bias in Select; rich LogAgentReasoning propagation on every gateway LLM hop + intake slow surface) + Phase 4 (conn stats in LiveGatewayMetrics + /gateway-metrics for UX; why-slow reasoning if planner>60s with node telemetry; hop logs via LogAgentReasoning) implemented. Bounded, no breaks to frontier, SKILLs followed (todos, reasoning on decisions, ctx, explicit).
+
+Next steps: Phase 5 (mTLS etc) and Phase 6 (polish, full measurement, SKILL updates, update report with before/after from local repro).
 
 (End of phased plan. Original report remains source of truth for details.)

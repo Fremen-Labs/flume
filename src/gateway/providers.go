@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -36,14 +37,20 @@ type ProviderRouter struct {
 	config  *Config
 	secrets *SecretStore
 	client  *http.Client
+	connMgr *NodeConnManager // Phase 1: owned connection manager for local Ollama reuse/HTTP2 (wired from Server)
 }
 
-// NewProviderRouter creates a router wired to config and secrets.
-func NewProviderRouter(config *Config, secrets *SecretStore) *ProviderRouter {
+// NewProviderRouter creates a router wired to config, secrets, and optional connMgr (Phase 1).
+// If connMgr is nil, creates one internally (for tests/backcompat). Server owns the primary instance.
+func NewProviderRouter(config *Config, secrets *SecretStore, connMgr *NodeConnManager) *ProviderRouter {
+	if connMgr == nil {
+		connMgr = NewNodeConnManager()
+	}
 	return &ProviderRouter{
 		config:  config,
 		secrets: secrets,
 		client:  &http.Client{Timeout: 300 * time.Second}, // Match gateway WriteTimeout (300s)
+		connMgr: connMgr,
 	}
 }
 
@@ -247,12 +254,21 @@ func isLocalOllamaPath(req *ChatRequest) bool {
 
 // getManagedOllamaClient is Phase 1 bridge (see node_conn_manager.go + phases doc).
 // Returns client using shared Transport for reuse/HTTP2 on local nodes.
-func getManagedOllamaClient(baseURL string, timeout time.Duration) *http.Client {
+// Now uses the router's connMgr when wired (from Server); falls back to package helper.
+func (r *ProviderRouter) getManagedOllamaClient(baseURL string, timeout time.Duration) *http.Client {
 	if baseURL == "" {
 		return &http.Client{Timeout: timeout}
 	}
-	// Delegate to the manager exposed via tool_stream helper (same pkg, Phase 1 skeleton).
-	// Real wiring will pass *Node for accurate per-node keying.
+	if r != nil && r.connMgr != nil {
+		// Better keying than pure base: use host-derived ID (real node.ID passed in future refactor of stream paths).
+		host := "default"
+		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+			host = u.Host
+		}
+		synthNode := &Node{ID: "ollama-" + host, Host: host}
+		return r.connMgr.GetClientForNode(synthNode, timeout)
+	}
+	// Fallback to package skeleton (used by stream paths until full threading of *Node to StreamOllama*).
 	return getOllamaStreamClientForBase(baseURL)
 }
 
@@ -722,7 +738,7 @@ func (r *ProviderRouter) doPost(
 
 	// Phase 1: Use managed client from conn manager (keyed by the target url/host).
 	// Provides keepalives + ForceAttemptHTTP2 for local mesh efficiency.
-	client := getManagedOllamaClient(url, timeout)
+	client := r.getManagedOllamaClient(url, timeout)
 	var lastErr error
 
 	for attempt := 0; attempt < 4; attempt++ {
