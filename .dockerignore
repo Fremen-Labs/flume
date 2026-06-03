@@ -48,7 +48,6 @@ test_*.py
 *.md
 docs/
 scripts/          # (our new check-direct-logs.sh is source-only)
-vendor-local/logloom-go/   # only the Go side needs certain vendor bits; the root COPY will still pick what go build needs
 
 # OS / temp
 tmp/

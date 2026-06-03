@@ -458,11 +458,16 @@ func (s *Server) fetchPlannerRAGContext(ctx context.Context, repo, prompt string
 		return ""
 	}
 
+	// Planner RAG is best-effort and time-bounded so it never delays the main LLM call.
+	// Target: Plan New Work breakdown <120s even on local LLMs. Slow RAG => skip (fall back to minimal plan per prompt rules).
+	ragCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
 	var parts []string
-	if c := s.queryElastroForPlanner(ctx, repo, q); c != "" {
+	if c := s.queryElastroForPlanner(ragCtx, repo, q); c != "" {
 		parts = append(parts, c)
 	}
-	if c := s.queryLogloomForPlanner(ctx, repo, q); c != "" {
+	if c := s.queryLogloomForPlanner(ragCtx, repo, q); c != "" {
 		parts = append(parts, c)
 	}
 	if len(parts) == 0 {
@@ -521,6 +526,11 @@ func (s *Server) queryElastroForPlanner(ctx context.Context, repo, prompt string
 		len(strings.TrimSpace(res)) < 30 {
 		return ""
 	}
+	// Limit RAG payload for the planner itself (initial Plan New Work must stay <120s on local).
+	// Full AST docs from executor are great for implementer tools but bloat planner context (and slow 35b gens).
+	if len(res) > 2200 {
+		res = res[:2000] + "\n... [planner RAG truncated for speed; see implementer for full AST]"
+	}
 	return res
 }
 
@@ -540,6 +550,10 @@ func (s *Server) queryLogloomForPlanner(ctx context.Context, repo, prompt string
 	if strings.Contains(low, "no structural matches") ||
 		len(strings.TrimSpace(res)) < 30 {
 		return ""
+	}
+	// Limit RAG payload for the planner itself (initial Plan New Work must stay <120s on local).
+	if len(res) > 2200 {
+		res = res[:2000] + "\n... [planner RAG truncated for speed; see implementer for full AST]"
 	}
 	return res
 }
@@ -702,11 +716,13 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
-		Messages:    chatMsgs,
-		Temperature: 0.3,
-		MaxTokens:   8192,
-		AgentRole:   "intake",
-		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
+		Messages:       chatMsgs,
+		Temperature:    0.3,
+		MaxTokens:      4096, // sufficient for structured plan JSON; smaller context = faster local generation for <120s target
+		AgentRole:      "intake",
+		TaskType:       "planning",
+		PlanSessionID:  sessionID,
+		TimeoutSeconds: 120, // <120s end-to-end target for local LLMs on Plan New Work (historical Python reliable window; slim prompt + bounded RAG + streaming inner). Real draft, not placeholder.
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -901,11 +917,13 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
-		Messages:    chatMsgs,
-		Temperature: 0.3,
-		MaxTokens:   8192,
-		AgentRole:   "intake",
-		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
+		Messages:       chatMsgs,
+		Temperature:    0.3,
+		MaxTokens:      4096, // sufficient for structured plan JSON; smaller context = faster local generation for <120s target
+		AgentRole:      "intake",
+		TaskType:       "planning",
+		PlanSessionID:  sessionID,
+		TimeoutSeconds: 120, // <120s end-to-end target for local LLMs on Plan New Work (historical Python reliable window; slim prompt + bounded RAG + streaming inner). Real draft, not placeholder.
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 

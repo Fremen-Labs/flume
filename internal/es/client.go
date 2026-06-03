@@ -441,12 +441,30 @@ func (c *Client) Search(ctx context.Context, index string, query interface{}, si
 // Count returns the document count matching a query.
 // Derived from Python: count_available_by_status() in worker-manager/es/queries.py.
 func (c *Client) Count(ctx context.Context, index string, query interface{}) (int, error) {
-	data, err := json.Marshal(map[string]interface{}{"query": query})
-	if err != nil {
-		return 0, fmt.Errorf("es: count marshal failed: %w", err)
+	var body io.Reader
+	if query != nil {
+		isEmpty := false
+		switch q := query.(type) {
+		case map[string]interface{}:
+			if len(q) == 0 {
+				isEmpty = true
+			}
+		case string:
+			if q == "" {
+				isEmpty = true
+			}
+		}
+
+		if !isEmpty {
+			data, err := json.Marshal(map[string]interface{}{"query": query})
+			if err != nil {
+				return 0, fmt.Errorf("es: count marshal failed: %w", err)
+			}
+			body = bytes.NewReader(data)
+		}
 	}
 
-	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/_count", index), bytes.NewReader(data))
+	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/_count", index), body)
 	if err != nil {
 		return 0, fmt.Errorf("es: count %s failed: %w", index, err)
 	}
@@ -464,6 +482,7 @@ func (c *Client) Count(ctx context.Context, index string, query interface{}) (in
 	}
 	return countResp.Count, nil
 }
+
 
 // ─── Index Management ───────────────────────────────────────────────────────
 

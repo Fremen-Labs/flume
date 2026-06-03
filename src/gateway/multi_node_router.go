@@ -335,6 +335,14 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 //   (prevents a slow primary from poisoning the entire request context).
 // - Exhausts the healthy local mesh more thoroughly for planning tasks.
 func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context, req *ChatRequest, taskType string, withTools bool, log *slog.Logger) (*ChatResponse, error) {
+	// Budget for planner (the Plan New Work breakdown LLM call). Now targeting <120s
+	// end-to-end on local LLMs for common cases (e.g. "document the CLI"). With slim
+	// bounded RAG + streaming inner path + 120s caller timeout, primary should succeed
+	// well inside. We still use a modest overall + *per-attempt* cap so a single slow
+	// node cannot burn the whole window before we try another or escalate.
+	planningCtx, cancelPlanning := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancelPlanning()
+
 	// Still use the normal selection for the initial attempt (respects ReasoningScore, load, etc.)
 	node := m.registry.SelectNode(taskType, 5, false, withTools)
 	if node == nil {
@@ -342,7 +350,7 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 			slog.String("task_type", taskType),
 		)
 		Metrics.RecordRoutingDecision("frontier_planning_no_nodes", taskType)
-		return m.routeFrontierFallback(ctx, req, withTools)
+		return m.routeFrontierFallback(planningCtx, req, withTools)
 	}
 
 	log.Info("planning_router: attempting primary node for planning task",
@@ -351,7 +359,12 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 		slog.String("model", node.ModelTag),
 	)
 
-	resp, err := m.routeToNode(ctx, req, node, withTools)
+	// Per-attempt bound: prevents any one (slow) node from consuming the entire budget.
+	// With other fixes (RAG limit, streaming), primary should finish well under 90s for
+	// typical Plan New Work (e.g. doc updates). If it doesn't, we move on quickly.
+	primaryAttemptCtx, cancelPrimary := context.WithTimeout(planningCtx, 90*time.Second)
+	resp, err := m.routeToNode(primaryAttemptCtx, req, node, withTools)
+	cancelPrimary()
 	if err == nil {
 		return resp, nil
 	}
@@ -361,13 +374,7 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 		slog.String("error", err.Error()),
 	)
 
-	// === Planning-specific resilience: fresh context for fallbacks ===
-	// Give planning calls a generous independent budget for the mesh fallback phase.
-	// This is the key fix for "one slow node burns the whole planning request".
-	fallbackCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
-
-	// Try all other healthy nodes using the fresh context.
+	// Try all other healthy nodes (each with its own 90s cap so total wall time stays reasonable).
 	healthy := m.registry.HealthyNodes()
 	for _, n := range healthy {
 		if n.ID == node.ID {
@@ -380,7 +387,9 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 		)
 
 		Metrics.RecordNodeRequest(n.ID, n.ModelTag)
-		fbResp, fbErr := m.routeToNode(fallbackCtx, req, n, withTools)
+		secondaryAttemptCtx, cancelSec := context.WithTimeout(planningCtx, 90*time.Second)
+		fbResp, fbErr := m.routeToNode(secondaryAttemptCtx, req, n, withTools)
+		cancelSec()
 		if fbErr == nil {
 			log.Info("planning_router: planning task recovered on secondary mesh node",
 				slog.String("node_id", n.ID),
@@ -399,7 +408,7 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 		slog.String("task_type", taskType),
 	)
 	Metrics.RecordRoutingDecision("frontier_planning_exhausted_mesh", taskType)
-	return m.routeFrontierFallback(ctx, req, withTools)
+	return m.routeFrontierFallback(planningCtx, req, withTools)
 }
 
 // routeToNode routes a request to a specific Ollama node by overriding the base URL.

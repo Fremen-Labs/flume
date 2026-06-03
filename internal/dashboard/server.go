@@ -156,7 +156,7 @@ func (s *Server) ListenAndServe() error {
 		Addr:         addr,
 		Handler:      s.withMiddleware(s.mux),
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 300 * time.Second, // allow Plan New Work intake planner (target <120s local LLM + RAG + status ES writes + response write)
 		IdleTimeout:  120 * time.Second,
 	}
 	s.logger.Info("Dashboard API starting",

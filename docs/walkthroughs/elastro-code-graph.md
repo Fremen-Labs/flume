@@ -39,7 +39,7 @@ elastro doc index fremen_codebase_rag --dir ./src/
 
 Inside the Flume AI container, Agent Workers (e.g., `Implementer`, `Project Manager`) are strictly bound by the `elastro_query_ast` function tool payload. 
 
-**Note on installation (Elastro/LogLoom contract):** Both `elastro` and `logloom` CLIs are now installed by default in the worker image (Dockerfile defaults ELASTR0_INSTALL=public + LOGLOOM_INSTALL=public; explicit in docker-compose.yml worker/dashboard builds). Runtime verification at worker startup (internal/worker/handlers.go) FATALS with clear remediation if either is missing. The Dockerfile build still hard-fails on requested-but-absent binaries.
+**Note on installation (Elastro/LogLoom contract):** Both `elastro` and `logloom` CLIs are now installed by default in the worker image (Dockerfile defaults ELASTR0_INSTALL=public + LOGLOOM_INSTALL=public; explicit in docker-compose.yml worker/dashboard builds). For logloom, "public" auto-downloads the release wheel (no "logloom" package on PyPI). Runtime verification at worker startup (internal/worker/handlers.go) FATALS with clear remediation if either is missing. The Dockerfile build still hard-fails on requested-but-absent binaries.
 
 When your `Implementer` agent is instructed to refactor the `.env` generation system, it will autonomously invoke:
 ```json

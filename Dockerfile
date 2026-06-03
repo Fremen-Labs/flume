@@ -25,7 +25,6 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 COPY go.mod go.sum ./
-COPY vendor-local/ vendor-local/
 RUN go mod download
 
 COPY . .
@@ -91,14 +90,18 @@ RUN mkdir -p /app && chown -R flume:flume /app
 #
 # Private index or wheel also supported. The build HARD FAILS if requested
 # but the resulting /opt/venv/bin/elastro (or logloom) is missing or non-functional.
-# Defaults: both ELASTR0_INSTALL=public and LOGLOOM_INSTALL=public so workers have them.
+# Defaults: both ELASTR0_INSTALL=public and LOGLOOM_INSTALL=public (for logloom,
+# "public" auto-fetches the GitHub wheel since no suitable PyPI package exists).
 ARG ELASTR0_INSTALL=public
 ARG ELASTR0_PIP_INDEX_URL=""
 
 # LogLoom CLI for dashboard-side project AST graph generation + ES shipping
 # during "Plan New Work" / project creation + clone.
-# Default "public" installs via pip from PyPI (package "logloom").
-# For reproducible: use wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7
+# NOTE: There is no "logloom" package published on PyPI under that name (the
+# public path therefore downloads the wheel from the GitHub release for
+# convenience and reproducibility). 
+# For a specific/local wheel: use --build-arg LOGLOOM_INSTALL=wheel after placing
+# logloom-*.whl in the build context (see GitHub release v0.3.7).
 ARG LOGLOOM_INSTALL=public
 
 # Create isolated venv (even on python-slim base) so we control exact packages
@@ -112,10 +115,11 @@ RUN python3 -m venv /opt/venv && \
 #
 # Installation is controlled by LOGLOOM_INSTALL (modeled after ELASTR0_INSTALL).
 #
-# Default (public PyPI, now enabled by default for workers):
+# Default (public): auto-downloads the wheel from the GitHub release (no PyPI
+# package named "logloom" exists for `pip install logloom`).
 #   docker build -t flume .
 #
-# Recommended (reproducible wheel):
+# For a specific version / airgapped / reproducible (recommended for CI):
 #   curl -L -o logloom-0.3.7-py3-none-any.whl \
 #     https://github.com/Fremen-Labs/logloom/releases/download/v0.3.7/logloom-0.3.7-py3-none-any.whl
 #   docker build --build-arg LOGLOOM_INSTALL=wheel -t flume .
@@ -167,11 +171,15 @@ RUN set -eux; \
     case "${LOGLOOM_INSTALL}" in \
       wheel) \
         echo "Installing LogLoom from local wheel (https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7)..."; \
-        /opt/venv/bin/pip install --no-cache-dir /tmp/logloom-*.whl; \
+        pip_logloom_whl=$(ls /tmp/logloom-*.whl 2>/dev/null | head -1 || true); \
+        if [ -z "$pip_logloom_whl" ]; then echo "ERROR: expected logloom-*.whl in /tmp for LOGLOOM_INSTALL=wheel"; ls -l /tmp/ || true; exit 1; fi; \
+        /opt/venv/bin/pip install --no-cache-dir "${pip_logloom_whl}[build]"; \
         ;; \
       public|auto) \
-        echo "Installing LogLoom from public PyPI (logloom)..."; \
-        /opt/venv/bin/pip install --no-cache-dir logloom; \
+        echo "Installing LogLoom from GitHub release wheel (public PyPI package does not exist under 'logloom' name; CLI requires [build] extra for click etc)..."; \
+        curl -fL -o /tmp/logloom-0.3.7-py3-none-any.whl https://github.com/Fremen-Labs/logloom/releases/download/v0.3.7/logloom-0.3.7-py3-none-any.whl; \
+        /opt/venv/bin/pip install --no-cache-dir "/tmp/logloom-0.3.7-py3-none-any.whl[build]"; \
+        rm -f /tmp/logloom-0.3.7-py3-none-any.whl; \
         ;; \
       skip) \
         echo "Skipping LogLoom installation (LOGLOOM_INSTALL=skip) — LogLoom AST ingest unavailable in container mode"; \
@@ -204,7 +212,7 @@ RUN set -eux; \
     if [ "${LOGLOOM_INSTALL}" != "skip" ]; then \
       if [ ! -x /opt/venv/bin/logloom ]; then \
         echo "FATAL: logloom binary not found at /opt/venv/bin/logloom after installation step."; \
-        echo "       For public: --build-arg LOGLOOM_INSTALL=public ; or wheel: download from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7 and use =wheel (place logloom-*.whl in build context)."; \
+        echo "       Public (default) auto-downloads the wheel from the release. For custom: --build-arg LOGLOOM_INSTALL=wheel after placing logloom-*.whl in build context (from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7)."; \
         ls -la /opt/venv/bin/ || true; \
         exit 1; \
       fi; \
@@ -220,13 +228,9 @@ COPY --from=builder /flume /usr/local/bin/flume
 # Copy pre-built frontend dist for dashboard serving
 COPY --from=frontend --chown=flume:flume /dist/ /app/frontend/dist/
 
-# LogLoom graph for runtime enrichment (optional — zero-overhead if missing)
-COPY --from=builder --chown=flume:flume /src/logloom-graph.json /app/logloom-graph.json
-
 # Agent system prompts consumed by the worker manager's LLM subsystem
 COPY --from=builder --chown=flume:flume /src/src/agents/ /app/agents/
 
-ENV LOGLOOM_GRAPH_PATH=/app/logloom-graph.json
 ENV FLUME_AGENTS_DIR=/app/agents
 ENV FLUME_STATIC_ROOT=/app/frontend/dist
 

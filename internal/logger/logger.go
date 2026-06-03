@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
-	"github.com/Fremen-Labs/logloom-go/logloom"
 )
 
 // sensitiveFragments are substrings that trigger automatic redaction.
@@ -176,8 +175,8 @@ func InitLogger() *slog.Logger {
 			baseHandler = &ConsoleHandler{inner: baseHandler}
 		}
 
-		// Handler chain: secureHandler → logloom → baseHandler
-		defaultLogger = slog.New(&secureHandler{inner: logloom.NewHandler(baseHandler)})
+		// Handler chain: secureHandler → baseHandler
+		defaultLogger = slog.New(&secureHandler{inner: baseHandler})
 		slog.SetDefault(defaultLogger)
 	})
 	return defaultLogger
