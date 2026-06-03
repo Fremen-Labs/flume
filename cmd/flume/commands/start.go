@@ -423,9 +423,10 @@ var StartCmd = &cobra.Command{
 		if len(envCfg.Nodes) > 0 {
 			for _, n := range envCfg.Nodes {
 				entry := orchestrator.NodeSeedEntry{
-					ID:       n.ID,
-					Host:     fmt.Sprintf("%s:%s", n.Host, n.Port),
-					ModelTag: n.ModelTag,
+					ID:             n.ID,
+					Host:           fmt.Sprintf("%s:%s", n.Host, n.Port),
+					ModelTag:       n.ModelTag,
+					AuthSecretPath: n.AuthSecretPath,
 				}
 				if n.MemoryGB > 0 {
 					entry.Capabilities.MemoryGB = n.MemoryGB

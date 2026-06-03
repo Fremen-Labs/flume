@@ -40,6 +40,12 @@ func (s *Server) handleNodesList(w http.ResponseWriter, r *http.Request) {
 
 // handleNodesAdd adds a new Ollama node to the mesh.
 // Derived from Python: api/nodes.py api_nodes_add().
+//
+// Supports Phase 2 opt-in local auth: the body can include "auth_secret_path".
+// The raw JSON is forwarded to the gateway; no transformation. Users who want
+// per-node Bearer for secured Ollama manually populate OpenBao then include
+// the path here (or via portal node form when the UI adds the field).
+
 func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var body json.RawMessage

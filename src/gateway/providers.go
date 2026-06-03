@@ -185,7 +185,10 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	// (no 300s doPost header timeout) + ctx bound. Critical for primary node to finish
 	// the breakdown inside 120s on local without exhausting to frontier.
 	if req.TaskType == "planning" || req.AgentRole == "intake" {
-		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, "")
+		// Phase 2 (opt-in auth): forward the authToken received from mesh routing so
+		// nodes with AuthSecretPath get Bearer on the actual inference call (was
+		// previously hardcoded "" even though param existed and health used it).
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, authToken)
 		if err != nil {
 			return nil, err
 		}
@@ -205,7 +208,8 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	}
 
 	if withTools && len(req.Tools) > 0 {
-		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options)
+		// Phase 2: pass authToken through to tool call path (will support after sig update).
+		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options, authToken)
 	}
 
 	// Phase 1: Force always-stream for local Ollama (planning + exec) per optimization plan.
@@ -214,7 +218,9 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	// Uses the conn manager client from tool_stream helper (Phase 1 skeleton).
 	if isLocalOllamaPath(req) || suppressThink {
 		// Phase 2: pass authToken for Bearer injection in StreamOllamaChat (completes local auth).
-		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, "")
+		// Only nodes with a configured AuthSecretPath will have a non-empty token here
+		// (see resolve in registry + GetNodeAuthToken). Unauthed = "", header omitted.
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, authToken)
 		if err != nil {
 			return nil, err
 		}
@@ -375,8 +381,9 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 	}
 
 	if withTools && len(req.Tools) > 0 {
-		// THE CORE FIX: Use streaming for tool calls to prevent timeout
-		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options)
+		// THE CORE FIX: Use streaming for tool calls to prevent timeout.
+		// Direct/legacy path has no per-node authToken ("" is correct).
+		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options, "")
 	}
 
 	if suppressThink {

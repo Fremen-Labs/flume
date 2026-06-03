@@ -161,6 +161,73 @@ func (s *SecretStore) GetGlobalValue(ctx context.Context, key string) string {
 	return ""
 }
 
+// GetNodeAuthToken retrieves an optional bearer token for a secured local Ollama
+// mesh node from OpenBao.
+//
+// secretPath may be a full path (secret/data/...) or short form (flume/nodes/foo).
+// The KV secret is expected to contain one of these string fields (checked in order):
+//   "token", "bearer_token", "auth_token", "value", "bearer"
+//
+// Returns "" on any error, missing secret, or missing field (graceful fallback to
+// unauthenticated calls for that node). The result is cached with the store's TTL.
+//
+// THIS IS STRICTLY OPT-IN:
+//   - Nodes without AuthSecretPath (the default for 99%+ of local LAN Ollama users)
+//     never call this and send no Authorization header.
+//   - Users who secure specific Ollama instances manually create the secret in
+//     OpenBao (bao CLI, portal secret manager, etc.), then reference the path
+//     when adding the node in the Flume portal (the /api/nodes POST accepts
+//     "auth_secret_path"). The gateway lazy-loads + injects only for those nodes.
+//   - Token is never persisted to ES, never logged, redacted on all API responses.
+//
+// See Phase 2 in docs/designs/local-llm-optimization-phases.md and the
+// optimization report. Matches flume-go (rich reasoning on load decisions) and
+// reliable-go (explicit, bounded, no silent fail).
+func (s *SecretStore) GetNodeAuthToken(ctx context.Context, secretPath string) string {
+	if secretPath == "" {
+		return ""
+	}
+	cacheKey := "node_auth:" + secretPath
+	if v, ok := s.getCached(cacheKey); ok {
+		return v
+	}
+
+	log := WithContext(ctx)
+
+	// Normalize to full secret/data/ path for readKV (which does the bao HTTP).
+	path := secretPath
+	if !strings.HasPrefix(path, "secret/") {
+		path = "secret/data/" + strings.TrimLeft(path, "/")
+	}
+
+	data, err := s.readKV(ctx, path)
+	if err != nil {
+		log.Warn("node_auth: failed to read secret from OpenBao (will use no-auth for this node)",
+			slog.String("secret_path", secretPath),
+			slog.String("error", err.Error()),
+		)
+		return ""
+	}
+
+	for _, k := range []string{"token", "bearer_token", "auth_token", "value", "bearer"} {
+		if v, ok := data[k].(string); ok && v != "" {
+			s.setCache(cacheKey, v)
+			s.auditAccess(ctx, secretPath, map[string]interface{}{
+				"type": "node_bearer_token",
+				"key":  k,
+			})
+			log.Debug("node_auth: loaded bearer token for local node (opt-in)",
+				slog.String("secret_path", secretPath))
+			return v
+		}
+	}
+
+	log.Warn("node_auth: secret existed at path but contained none of the expected token fields (token/bearer_token/value); using no-auth for node. Check your OpenBao secret contents.",
+		slog.String("secret_path", secretPath),
+	)
+	return ""
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────

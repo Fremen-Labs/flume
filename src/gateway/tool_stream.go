@@ -108,6 +108,7 @@ func StreamOllamaToolCall(
 	tools []Tool,
 	model string,
 	options map[string]interface{},
+	authToken string, // Phase 2: for local node Bearer auth (from node.AuthToken); opt-in only
 ) (*ChatResponse, error) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "ollama_tool_stream")()
@@ -133,15 +134,15 @@ func StreamOllamaToolCall(
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Phase 2: auth injection is in the chat StreamOllamaChat path (tool calls use separate if needed later).
-
-	client := &http.Client{
-		// Phase 1 (conn manager): replaced bare client with managed one below for keepalives/HTTP2.
-		// No timeout here — streaming keeps the connection alive.
-		// Context cancellation handles the abort case.
+	// Phase 2: Bearer injection for local nodes (from authToken passed by caller).
+	// Strictly conditional — if "", no header (default for vast majority of local Ollama users).
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
-	// Use manager for this call (baseURL is used to key, but real impl keys by node.ID).
-	_ = getOllamaStreamClientForBase(baseURL) // placeholder to exercise manager in Phase 1 skeleton
+
+	// Phase 1: Use NodeConnManager for shared per-node Transport (keepalives, ForceAttemptHTTP2).
+	// (Previously a bare client + placeholder call; now actually uses the managed client.)
+	client := getOllamaStreamClientForBase(baseURL)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ollama request: %w", err)

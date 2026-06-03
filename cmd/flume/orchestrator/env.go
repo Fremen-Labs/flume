@@ -18,11 +18,12 @@ import (
 
 // NodeConfigEntry is a node collected during the CLI interactive wizard.
 type NodeConfigEntry struct {
-	ID       string
-	Host     string  // IP or DNS name (without port)
-	Port     string  // default "11434"
-	ModelTag string
-	MemoryGB float64
+	ID               string
+	Host             string  // IP or DNS name (without port)
+	Port             string  // default "11434"
+	ModelTag         string
+	MemoryGB         float64
+	AuthSecretPath   string // opt-in only (Phase 2); see NodeSeedEntry + docs for manual portal/bao flow for secured Ollama
 }
 
 // CloudProviderEntry represents a native unified Cloud API provider binding
@@ -152,10 +153,11 @@ func GenerateEnv(config EnvConfig) []string {
 
 // NodeSeedEntry represents a node to register with the Gateway API.
 type NodeSeedEntry struct {
-	ID       string  `json:"id"`
-	Host     string  `json:"host"`
-	ModelTag string  `json:"model_tag"`
-	Capabilities struct {
+	ID             string `json:"id"`
+	Host           string `json:"host"`
+	ModelTag       string `json:"model_tag"`
+	AuthSecretPath string `json:"auth_secret_path,omitempty"` // Phase 2: opt-in only; users manually configure via portal for secured nodes
+	Capabilities   struct {
 		MemoryGB       float64 `json:"memory_gb"`
 		ReasoningScore int     `json:"reasoning_score"`
 		MaxContext     int     `json:"max_context"`

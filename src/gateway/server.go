@@ -51,6 +51,9 @@ type Server struct {
 	skills *skills.SkillRegistry
 	// nodeRegistry manages the distributed Ollama node mesh.
 	nodeRegistry *NodeRegistry
+	// secrets holds the OpenBao client for lazy node auth token loading (Phase 2 opt-in).
+	// May be nil in some test paths; handleAddNode guards on it.
+	secrets *SecretStore
 	// planPMRateLimiter (Phase 2 task 4): basic in-memory fixed-window guard (3/min per plan for role=pm).
 	// Integrated early in dispatch before expensive work. Clean for Redis upgrade later.
 	planPMRateLimiter *PlanPMRateLimiter
@@ -94,6 +97,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		globalSem: make(chan struct{}, globalMaxConcurrent()),
 		frontierQ:           NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
 		planPMRateLimiter:   NewPlanPMRateLimiter(3), // 3 PM decomp attempts per plan per minute (tunable)
+		secrets:             secrets,
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -737,7 +741,7 @@ func StartGateway(addr string) error {
 	if esURL == "" {
 		esURL = "http://elasticsearch:9200"
 	}
-	server.nodeRegistry = NewNodeRegistry(esURL)
+	server.nodeRegistry = NewNodeRegistry(esURL, secrets)
 
 	// Ensure the node registry ES index exists.
 	if err := server.nodeRegistry.EnsureIndex(ctx); err != nil {
@@ -887,6 +891,13 @@ func (s *Server) handleGatewayMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAddNode registers a new Ollama node in the mesh.
+//
+// Auth is opt-in only (Phase 2): include "auth_secret_path" in the JSON body
+// (after you have manually placed the bearer token in OpenBao at that path).
+// Nodes without the field (or with empty value) are treated as unauthenticated
+// — the expected default for local Ollama. The portal supports this directly
+// (it posts whatever the user supplies).
+
 func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 	log := WithContext(r.Context())
 
@@ -921,6 +932,15 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 	node.Health = NodeHealth{
 		Status:   NodeStatusOffline,
 		LastSeen: time.Now(),
+	}
+
+	// Phase 2 (opt-in): if the POST included auth_secret_path, resolve the token
+	// right now (using server's SecretStore) so the immediate registration probe
+	// exercises auth. (The node is not yet in the registry map, so we can't rely
+	// on registry.resolve here; direct load is fine and matches the "manual setup"
+	// contract.)
+	if node.AuthSecretPath != "" && node.AuthToken == "" && s.secrets != nil {
+		node.AuthToken = s.secrets.GetNodeAuthToken(r.Context(), node.AuthSecretPath)
 	}
 
 	// AP-14: Immediate health probe on registration so UI updates instantly
@@ -960,6 +980,13 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to persist node"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Phase 2 (opt-in auth): trigger a refresh so the newly added node (which may
+	// have had auth_secret_path in the POST body) is loaded into the registry map
+	// and its token resolved from OpenBao (if path was supplied). This makes the
+	// immediate /test and subsequent GET /api/nodes see a live authed node.
+	// For nodes without auth_secret_path this is a cheap no-op.
+	s.nodeRegistry.RefreshFromES(r.Context())
 
 	log.Info("node_api: node registered",
 		slog.String("node_id", node.ID),

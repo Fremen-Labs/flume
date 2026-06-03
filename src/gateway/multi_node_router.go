@@ -413,6 +413,13 @@ func (m *MultiNodeRouter) executePlanningWithMeshResilience(ctx context.Context,
 
 // routeToNode routes a request to a specific Ollama node by overriding the base URL.
 func (m *MultiNodeRouter) routeToNode(ctx context.Context, req *ChatRequest, node *Node, withTools bool) (*ChatResponse, error) {
+	// Phase 2 (opt-in auth): resolve before reading node.AuthToken so that
+	// a node registered with auth_secret_path actually gets its token for
+	// the inference call (not just health). No-op + fast path for unauthed.
+	if m.registry != nil {
+		m.registry.resolveAuthTokenIfNeeded(ctx, node)
+	}
+
 	// Build node-specific URL.
 	nodeURL := "http://" + node.Host
 

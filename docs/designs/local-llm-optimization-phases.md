@@ -34,28 +34,37 @@
 **Timeline:** 1-2 days (small, focused PR).
 
 ### Phase 2: Local Auth Completion & Health Probe Enhancements (Security & Reliability)
-**Goal:** Make "secure coding platform" real for protected local nodes. Complete the declared-but-incomplete auth story for inference (not just probes). Improve health for auth-aware nodes.
-**Scope (report refs):** "Make auth complete for local"; "Enhance node health to also probe auth"; part of Security in §5; ties to "Auth for Local (security gap)" in §4.
+**CRITICAL CLARIFICATION (user query):** Phase 2 does **NOT** mean users must (or should) authenticate with their local Ollama models. This would be a lot of overhead — most people do not (and should not have to) do this for LAN/local dev setups. Auth for local nodes is **strictly optional and opt-in only**.
+
+- Default behavior for all existing and new meshes is **unauthenticated** (no Authorization header, zero config or overhead). This matches stock Ollama on `host.docker.internal`, `192.168.x`, localhost, etc.
+- Users who intentionally secure their Ollama instances (e.g. behind nginx auth_request, a reverse proxy enforcing Bearer, or corporate firewall rules) can **manually set up auth**:
+  1. Put the bearer token into OpenBao at a path of their choice (e.g. `bao kv put secret/flume/nodes/secure-ollama-1 token=...` or equivalent).
+  2. When adding/registering the node in the **portal** (or via direct `POST /api/nodes`), include `"auth_secret_path": "secret/data/flume/nodes/secure-ollama-1"` (or the relative form).
+  3. The gateway will lazily load the token (in-memory only, never logged or to ES) and inject `Authorization: Bearer ...` **only** for that node on health probes + inference calls.
+- The portal already supports this today because `handleNodesAdd` proxies the raw body (including `auth_secret_path`) to the gateway. No special UI fields needed for basic manual use; future polish can add a "secured node" toggle + secret value helper.
+- YAML mesh config (advanced) also accepts the field for `flume start` seeding.
+- All changes are conditional: `if authToken != "" { set header }`. No require, no default paths, no wizard forcing.
+
+**Goal:** Make "secure coding platform" real *for those who opt into protected local nodes*. Complete the declared-but-incomplete auth story for inference (not just probes; it was only on health before). Improve health for auth-aware nodes. Preserve the phenomenal zero-config experience for everyone else.
+**Scope (report refs):** "Make auth complete for local"; "Enhance node health to also probe auth"; part of Security in §5; ties to "Auth for Local (security gap)" in §4. Explicitly addresses "auth ... optional ... manually setup within the portal".
 **Deliverables:**
-- Inject Bearer in inference paths: in `ollamaWithNode`, StreamOllama* funcs (and nonstream if still used for local), if `authToken != ""` set `req.Header.Set("Authorization", "Bearer "+authToken)` (match health_checker pattern).
-- Implement AuthToken population from OpenBao:
-  - In `node_registry.go:RefreshFromES` or new recon, if `AuthSecretPath` set, use `SecretStore` (existing pattern in secrets.go) to load token into `node.AuthToken` (in-memory only, never to ES/logs).
-  - Lazy load on first use in health or route if not present.
-- Enhance `health_checker.go`: 
-  - Dedicated auth probe (e.g. /api/version or tags with auth test on registration/probe).
-  - Record auth success/failure in health/capabilities.
-  - Emit `LogAgentReasoning` (and LogStateTransition) on auth events/decisions (per flume-go SKILL).
-- Update node add/upsert (server.go handleAddNode, registry) to validate/persist AuthSecretPath.
-- Update node test API (/api/nodes/{id}/test) to exercise auth.
-- Expose in UI/docs (e.g. node registration supports secret_path).
-- Update `flume-go/SKILL.md` + report checklist: "LLM local calls use ... + full auth injection + reasoning emitted".
-- Tests: auth injection tests, mock OpenBao load, health with/without token, no regression on unauth nodes (header omitted if empty).
-- Non-breaking: Conditional (if token present); unauth nodes work as before. Frontier unchanged (they use different cred resolution).
-**Verification:** todo sub-tasks; reasoning on every auth decision; ctx/err discipline; tests with -race; update SKILL; verification against original report + prior monitors.
-**Dependencies:** Phase 1 (for transport reuse in auth'd paths? optional); existing SecretStore/OpenBao.
-**Risks:** Token fetch failures (graceful, log + fall to no-auth); secret path mismatches (document + test API).
-**Expected:** Protected nodes now fully secure for chat (not just health); better "dependable" UX.
-**Timeline:** 1-2 days (after Phase 1).
+- Inject Bearer in inference paths: in `ollamaWithNode`, StreamOllama* funcs (and nonstream if still used for local), if `authToken != ""` set `req.Header.Set("Authorization", "Bearer "+authToken)` (match health_checker pattern). Fix prior skeleton where callers passed "" even when token was available.
+- Implement AuthToken population from OpenBao (lazy, opt-in):
+  - Add `SecretStore.GetNodeAuthToken` (graceful "", supports common keys like "token"/"bearer_token"/"value").
+  - In `node_registry.go`: `NewNodeRegistry` takes `*SecretStore`; `resolveAuthTokenIfNeeded` (lazy on Get/refresh/route/health; brief lock only on set; never on unauth nodes).
+  - Called from RefreshFromES (post-unlock), GetNode, health probes, routers before RouteToNode. Token lives in-mem only (stripped on all ES/API).
+- Enhance `health_checker.go`: call resolve before probes; record auth success/failure distinctly; emit `LogAgentReasoning` (node-*, "node-auth", ...) on load attempts + probe auth outcomes (per flume-go + reliable-go SKILLs).
+- Update node add/upsert (server.go handleAddNode) + post-upsert Refresh so newly registered authed nodes get token resolved immediately for test probe + UI.
+- Update node test API (/api/nodes/{id}/test) — already exercises via registry node (now with token).
+- Expose/document in UI/CLI/docs (node registration accepts secret_path; add godoc + comments everywhere).
+- Update `flume-go/SKILL.md` + report + this doc: "local LLM auth is opt-in only; conditional injection + rich reasoning on every auth decision/load".
+- Tests: existing unauth tests continue to pass with no header; add/keep coverage for conditional (mock store).
+- Non-breaking + zero overhead: Conditional (if token present); unauth nodes (AuthSecretPath=="") work exactly as before (and as last-night working baseline). Frontier paths untouched.
+**Verification:** todo sub-tasks; reasoning emitted on every auth decision (success/fail/attempt); ctx/err discipline; tests with -race; rebuild + (optional) 250s monitor on simple plan using unauth local mesh to prove no regression; verification against original report + user explicit constraint.
+**Dependencies:** Phase 1 conn manager (auth'd streams reuse too); existing SecretStore/OpenBao (no new infra).
+**Risks/Mitigation:** Token fetch fails → graceful (log + reason + fall to no-auth for that node, never hard fail a call); secret path typos (user sees via /test + reasoning); doc the manual bao step.
+**Expected:** Users who *want* secured nodes now get full end-to-end auth for both health + actual chat/inference (was incomplete). Everyone else: identical UX and perf to pre-Phase2, zero extra steps.
+**Timeline:** Complete as part of initial 2 phases (small focused changes).
 
 ### Phase 3: Planner-Specific Fast Path & Propagation (Target <120s Local Success)
 **Scope:** "Routing/Planning Specific (for <120s simple local success)"; "Propagate more"; "Model selection".

@@ -305,6 +305,14 @@ type tagsProbeResult struct {
 // probeTags calls GET /api/tags on the node and returns model names plus
 // metadata details (quantization, etc.) for the primary assigned model.
 func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *Node) (tagsProbeResult, error) {
+	// Phase 2 (opt-in): ensure token is loaded from OpenBao if this node
+	// declared an auth_secret_path. No-op for unauthed nodes (vast majority).
+	// This is what makes health probes actually work for secured nodes
+	// (previously only the passed node.AuthToken was used, which was never populated).
+	if hc.registry != nil {
+		hc.registry.resolveAuthTokenIfNeeded(ctx, node)
+	}
+
 	url := strings.TrimRight(baseURL, "/") + "/api/tags"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -380,6 +388,12 @@ func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *No
 //   - VRAM = 0     → CPU-only inference (no GPU)
 func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *Node) (float64, int64, int64) {
 	log := WithContext(ctx)
+
+	// Phase 2 (opt-in): ensure token loaded before using .AuthToken (see probeTags).
+	if hc.registry != nil {
+		hc.registry.resolveAuthTokenIfNeeded(ctx, node)
+	}
+
 	url := strings.TrimRight(baseURL, "/") + "/api/ps"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -506,6 +520,12 @@ type showProbeResult struct {
 // If the configured model_tag is not found, it falls back to the first
 // available model discovered from /api/tags.
 func (hc *HealthChecker) probeShow(ctx context.Context, baseURL string, node *Node, availableModels []string) (showProbeResult, error) {
+	// Phase 2 (opt-in): resolve before reading .AuthToken so secured nodes get
+	// a fresh token for the show probe (and for the fallbacks below).
+	if hc.registry != nil {
+		hc.registry.resolveAuthTokenIfNeeded(ctx, node)
+	}
+
 	// Try the configured model_tag first.
 	if node.ModelTag != "" {
 		result, err := hc.callShowAPI(ctx, baseURL, node.AuthToken, node.ModelTag)

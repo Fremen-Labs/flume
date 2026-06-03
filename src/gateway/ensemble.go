@@ -172,6 +172,11 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 					slog.String("node_id", node.ID),
 					slog.String("host", node.Host),
 				)
+				// Phase 2 (opt-in): resolve token for this jury node before using .AuthToken.
+				// (This path bypasses MultiNodeRouter.routeToNode.)
+				if s.nodeRegistry != nil {
+					s.nodeRegistry.resolveAuthTokenIfNeeded(gCtx, node)
+				}
 				Metrics.RecordNodeRequest(node.ID, cloneReq.Model)
 				resp, err = s.router.RouteToNode(gCtx, cloneReq, nodeURL, node.AuthToken, withTools)
 			} else {
