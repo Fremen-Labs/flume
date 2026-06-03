@@ -645,12 +645,16 @@ func (c *Client) SearchRaw(ctx context.Context, index string, body interface{}) 
 // Post sends a POST request to the specified ES path with a JSON body.
 // Used for _update, _doc, and other POST-based ES APIs.
 func (c *Client) Post(ctx context.Context, path string, body interface{}) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("es: post marshal failed: %w", err)
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("es: post marshal failed: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
 	}
 
-	resp, err := c.do(ctx, http.MethodPost, path, bytes.NewReader(data))
+	resp, err := c.do(ctx, http.MethodPost, path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("es: post %s failed: %w", path, err)
 	}

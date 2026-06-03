@@ -110,3 +110,25 @@ func TestSecretStoreTokenResolution(t *testing.T) {
 		}
 	})
 }
+
+func TestParseParamFromTag(t *testing.T) {
+	tests := []struct {
+		tag  string
+		want string
+	}{
+		{"qwen3.5:35b-a3b", "35B"},
+		{"qwen3.6-35b:latest", "35B"},
+		{"llama3:8b", "8B"},
+		{"phi3.5:3.8b-mini-instruct", "3.8B"},
+		{"no-params", ""},
+		{"qwen3-72b", "72B"},
+	}
+
+	for _, tt := range tests {
+		got := parseParamFromTag(tt.tag)
+		if got != tt.want {
+			t.Errorf("parseParamFromTag(%q) = %q, want %q", tt.tag, got, tt.want)
+		}
+	}
+}
+

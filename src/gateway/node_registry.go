@@ -573,7 +573,7 @@ func (r *NodeRegistry) UpsertNodeToES(ctx context.Context, node *Node) error {
 		return fmt.Errorf("marshal node: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/%s/_doc/%s", r.esURL, nodeRegistryIndex, node.ID)
+	url := fmt.Sprintf("%s/%s/_doc/%s?refresh=true", r.esURL, nodeRegistryIndex, node.ID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -610,7 +610,7 @@ func (r *NodeRegistry) UpsertNodeToES(ctx context.Context, node *Node) error {
 func (r *NodeRegistry) DeleteNodeFromES(ctx context.Context, nodeID string) error {
 	log := WithContext(ctx)
 
-	url := fmt.Sprintf("%s/%s/_doc/%s", r.esURL, nodeRegistryIndex, nodeID)
+	url := fmt.Sprintf("%s/%s/_doc/%s?refresh=true", r.esURL, nodeRegistryIndex, nodeID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)

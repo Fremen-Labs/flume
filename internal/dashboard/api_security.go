@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Fremen-Labs/flume/internal/secrets"
 )
 
 // ─── GET /api/security ──────────────────────────────────────────────────────
@@ -246,3 +248,184 @@ func (s *Server) verifyAdminAccess(r *http.Request) bool {
 
 	return headerToken == token
 }
+
+// ─── POST /api/security/secrets/reveal ──────────────────────────────────────
+
+// handleSecuritySecretsReveal retrieves the plaintext value of a secret key from OpenBao.
+// Request body: {"key": "..."}
+// Requires admin access (verifyAdminAccess).
+func (s *Server) handleSecuritySecretsReveal(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAccess(r) {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	ctx := r.Context()
+	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
+	vaultToken := envOr("OPENBAO_TOKEN", envOr("VAULT_TOKEN", ""))
+
+	if vaultAddr == "" || vaultToken == "" {
+		writeError(w, http.StatusInternalServerError, "OpenBao/Vault is not configured or offline")
+		return
+	}
+
+	// Fetch current keys from secret/data/flume/keys
+	client := secrets.NewOpenBaoClient(vaultAddr, vaultToken, s.logger)
+	data, err := client.KVGet(ctx, "flume/keys")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch from Vault: %v", err))
+		return
+	}
+
+	if data == nil {
+		writeError(w, http.StatusNotFound, "secret key not found")
+		return
+	}
+
+	val, exists := data[key]
+	if !exists {
+		writeError(w, http.StatusNotFound, "secret key not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"key":   key,
+		"value": fmt.Sprintf("%v", val),
+	})
+}
+
+// ─── POST /api/security/secrets/update ──────────────────────────────────────
+
+// handleSecuritySecretsUpdate adds or edits a secret key-value pair in OpenBao.
+// Request body: {"key": "...", "value": "..."}
+// Requires admin access (verifyAdminAccess).
+func (s *Server) handleSecuritySecretsUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAccess(r) {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	var req struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	key := strings.TrimSpace(req.Key)
+	val := strings.TrimSpace(req.Value)
+	if key == "" || val == "" {
+		writeError(w, http.StatusBadRequest, "key and value are required")
+		return
+	}
+
+	ctx := r.Context()
+	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
+	vaultToken := envOr("OPENBAO_TOKEN", envOr("VAULT_TOKEN", ""))
+
+	if vaultAddr == "" || vaultToken == "" {
+		writeError(w, http.StatusInternalServerError, "OpenBao/Vault is not configured or offline")
+		return
+	}
+
+	client := secrets.NewOpenBaoClient(vaultAddr, vaultToken, s.logger)
+	
+	// Fetch existing keys first to merge them (KV-V2 overwrites everything at the path unless merged)
+	data, err := client.KVGet(ctx, "flume/keys")
+	if err != nil {
+		data = make(map[string]interface{})
+	}
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+
+	data[key] = val
+
+	if err := client.KVPut(ctx, "flume/keys", data); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save to Vault: %v", err))
+		return
+	}
+
+	s.logger.Info("secret updated in OpenBao", slog.String("key", key))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+	})
+}
+
+// ─── POST /api/security/secrets/delete ──────────────────────────────────────
+
+// handleSecuritySecretsDelete removes a secret key from OpenBao.
+// Request body: {"key": "..."}
+// Requires admin access (verifyAdminAccess).
+func (s *Server) handleSecuritySecretsDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAccess(r) {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	ctx := r.Context()
+	vaultAddr := envOr("OPENBAO_ADDR", envOr("VAULT_ADDR", ""))
+	vaultToken := envOr("OPENBAO_TOKEN", envOr("VAULT_TOKEN", ""))
+
+	if vaultAddr == "" || vaultToken == "" {
+		writeError(w, http.StatusInternalServerError, "OpenBao/Vault is not configured or offline")
+		return
+	}
+
+	client := secrets.NewOpenBaoClient(vaultAddr, vaultToken, s.logger)
+	
+	// Fetch existing keys to check/delete
+	data, err := client.KVGet(ctx, "flume/keys")
+	if err != nil || data == nil {
+		writeError(w, http.StatusNotFound, "no secrets found")
+		return
+	}
+
+	if _, exists := data[key]; !exists {
+		writeError(w, http.StatusNotFound, "secret key not found")
+		return
+	}
+
+	delete(data, key)
+
+	if err := client.KVPut(ctx, "flume/keys", data); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update Vault: %v", err))
+		return
+	}
+
+	s.logger.Info("secret deleted from OpenBao", slog.String("key", key))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+	})
+}
+

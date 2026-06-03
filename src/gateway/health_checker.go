@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,6 +219,16 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		discovered.ReasoningScore = estimateReasoningScore(
 			node.ModelTag, showResult.family, showResult.parameterSize,
 		)
+	} else {
+		// Fallback estimation directly from node.ModelTag if /api/show failed/timed out.
+		// This ensures we do not lose capabilities and filter out the node from routing
+		// when Ollama is slow to load/reply.
+		paramSizeStr := parseParamFromTag(node.ModelTag)
+		if paramSizeStr != "" {
+			discovered.ReasoningScore = estimateReasoningScore(
+				node.ModelTag, "", paramSizeStr,
+			)
+		}
 	}
 
 	// Hardware Architecture: real underlying family reported by Ollama.
@@ -775,3 +786,15 @@ func modelSupportsTools(modelTag string, architecture string) bool {
 
 	return false
 }
+
+var tagParamRegex = regexp.MustCompile(`(?i)(?:^|:|-|_)(\d+(?:\.\d+)?)b`)
+
+// parseParamFromTag extracts the parameter size from the model tag (e.g. "qwen3.5:35b-a3b" -> "35B").
+func parseParamFromTag(modelTag string) string {
+	matches := tagParamRegex.FindStringSubmatch(modelTag)
+	if len(matches) > 1 {
+		return matches[1] + "B"
+	}
+	return ""
+}
+

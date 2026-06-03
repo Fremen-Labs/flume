@@ -1395,9 +1395,21 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 	}
 
 	// Check if local clone exists. If not, clone it dynamically.
-	if _, err := os.Stat(filepath.Join(repoPath, ".git")); os.IsNotExist(err) {
+	gitDir := filepath.Join(repoPath, ".git")
+	gitDirInfo, statErr := os.Stat(gitDir)
+	gitDirExists := statErr == nil && gitDirInfo.IsDir()
+
+	if !gitDirExists {
 		if project.RepoURL == "" {
 			return "", "", fmt.Errorf("project %s has no local path and no remote repo_url", task.ProjectID)
+		}
+
+		// Proactively remove the existing corrupt/incomplete repo directory to prevent clone conflicts (e.g. files-backend ref bugs)
+		if _, err := os.Stat(repoPath); err == nil {
+			r.logger.Info("EnsureTaskBranch: repo path exists but has no valid .git; removing it to prevent clone conflicts", slog.String("path", repoPath))
+			if err := os.RemoveAll(repoPath); err != nil {
+				r.logger.Warn("EnsureTaskBranch: failed to remove repo path before clone", slog.String("path", repoPath), slog.String("error", err.Error()))
+			}
 		}
 
 		// Ensure parent directory exists

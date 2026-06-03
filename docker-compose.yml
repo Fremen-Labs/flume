@@ -91,6 +91,7 @@ services:
       - GATEWAY_URL=http://gateway:8090
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
+      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
     command: ["dashboard"]
@@ -168,6 +169,7 @@ services:
       - DASHBOARD_URL=http://dashboard:8765
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
+      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     command: ["worker-manager"]
     deploy:
       replicas: ${FLUME_WORKER_COUNT:-2}

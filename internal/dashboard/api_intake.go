@@ -255,6 +255,23 @@ func randomHex(n int) string {
 	return fmt.Sprintf("%x", b)
 }
 
+func getPlannerTimeoutSeconds(cfg *config.Config) int {
+	defaultTimeout := 300
+	if v := os.Getenv("FLUME_PLANNER_TIMEOUT_SECONDS"); v != "" {
+		if val, err := strconv.Atoi(v); err == nil && val > 0 {
+			defaultTimeout = val
+		}
+	}
+	provider := strings.TrimSpace(strings.ToLower(cfg.LLMProvider))
+	baseURL := strings.ToLower(cfg.LLMBaseURL)
+	if provider == "ollama" || strings.Contains(baseURL, "11434") || strings.Contains(baseURL, "ollama") {
+		if defaultTimeout < 300 {
+			return 300
+		}
+	}
+	return defaultTimeout
+}
+
 func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) (bool, string) {
 	provider := strings.TrimSpace(strings.ToLower(cfg.LLMProvider))
 	baseURL := strings.TrimRight(cfg.LLMBaseURL, "/")
@@ -630,7 +647,7 @@ func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
 		Host:           hostFromBaseURL(cfg.LLMBaseURL),
-		TimeoutSeconds: 120,
+		TimeoutSeconds: getPlannerTimeoutSeconds(cfg),
 		LastUpdatedAt:  now,
 	}
 
@@ -670,13 +687,14 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 
 	// 1. Update status to testing_connection
 	cfg := config.Get()
+	timeoutSec := getPlannerTimeoutSeconds(cfg)
 	status := PlanningStatus{
 		Stage:          "testing_connection",
 		Provider:       cfg.LLMProvider,
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
 		Host:           hostFromBaseURL(cfg.LLMBaseURL),
-		TimeoutSeconds: 120,
+		TimeoutSeconds: timeoutSec,
 		LastUpdatedAt:  now,
 	}
 	startedStr := now
@@ -756,7 +774,7 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		AgentRole:      "intake",
 		TaskType:       "planning",
 		PlanSessionID:  sessionID,
-		TimeoutSeconds: 120, // <120s end-to-end target for local LLMs on Plan New Work (historical Python reliable window; slim prompt + bounded RAG + streaming inner). Real draft, not placeholder.
+		TimeoutSeconds: timeoutSec, // Use resolved timeout
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -946,6 +964,8 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Connection test
 	cfg := config.Get()
+	timeoutSec := getPlannerTimeoutSeconds(cfg)
+	session.PlanningStatus.TimeoutSeconds = timeoutSec
 	session.PlanningStatus.Stage = "testing_connection"
 	startedStr := now
 	session.PlanningStatus.ConnectionTestStartedAt = &startedStr
@@ -990,7 +1010,7 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		AgentRole:      "intake",
 		TaskType:       "planning",
 		PlanSessionID:  sessionID,
-		TimeoutSeconds: 120, // <120s end-to-end target for local LLMs on Plan New Work (historical Python reliable window; slim prompt + bounded RAG + streaming inner). Real draft, not placeholder.
+		TimeoutSeconds: timeoutSec, // Use resolved timeout
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 

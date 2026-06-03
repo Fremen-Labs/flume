@@ -207,6 +207,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/vault/status", s.handleVaultStatus)
 	s.mux.HandleFunc("POST /api/tasks/stop-all", s.handleTasksStopAll)
 	s.mux.HandleFunc("POST /api/tasks/resume-all", s.handleTasksResumeAll)
+	s.mux.HandleFunc("POST /api/security/secrets/reveal", s.handleSecuritySecretsReveal)
+	s.mux.HandleFunc("POST /api/security/secrets/update", s.handleSecuritySecretsUpdate)
+	s.mux.HandleFunc("POST /api/security/secrets/delete", s.handleSecuritySecretsDelete)
 
 	// Projects (api/projects.py — 6 nodes)
 	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
