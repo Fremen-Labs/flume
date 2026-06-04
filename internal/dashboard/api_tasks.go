@@ -369,6 +369,71 @@ func (s *Server) handleTaskThoughts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"thoughts": thoughts})
 }
 
+// ─── GET /api/tasks/{task_id}/thoughts/stream ───────────────────────────────
+
+func (s *Server) handleTaskThoughtsStream(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("task_id")
+	if taskID == "" {
+		http.Error(w, "Missing task_id", http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// 1. Fetch and write existing thoughts from ES first
+	_, src, err := s.findTaskByLogicalID(r.Context(), taskID)
+	if err == nil && src != nil {
+		if thoughts, ok := src["execution_thoughts"].([]interface{}); ok {
+			for _, th := range thoughts {
+				data, err := json.Marshal(th)
+				if err == nil {
+					fmt.Fprintf(w, "data: %s\n\n", data)
+				}
+			}
+			flusher.Flush()
+		}
+	}
+
+	// 2. Subscribe to broker for new thoughts
+	ch := flumelogger.Broker.Subscribe(taskID)
+	defer flumelogger.Broker.Unsubscribe(taskID, ch)
+
+	// Keep-alive ticker
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case entry, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(entry)
+			if err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		case <-ticker.C:
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
 // ─── GET /api/tasks/{task_id}/diff ──────────────────────────────────────────
 
 func (s *Server) handleTaskDiff(w http.ResponseWriter, r *http.Request) {

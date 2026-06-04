@@ -187,7 +187,30 @@ func StreamOllamaToolCall(
 
 		// Feed content through the think mill
 		if chunk.Message.Content != "" {
-			mill.Process([]byte(chunk.Message.Content))
+			content := chunk.Message.Content
+			stopIdx := -1
+			var foundStop string
+			for _, stop := range defaultOllamaStopTokensList {
+				if idx := strings.Index(content, stop); idx != -1 {
+					if stopIdx == -1 || idx < stopIdx {
+						stopIdx = idx
+						foundStop = stop
+					}
+				}
+			}
+
+			if stopIdx != -1 {
+				log.Info("stream scanner encountered stop token",
+					slog.String("stop_token", foundStop),
+					slog.Int("index", stopIdx),
+				)
+				if stopIdx > 0 {
+					mill.Process([]byte(content[:stopIdx]))
+				}
+				break
+			}
+
+			mill.Process([]byte(content))
 		}
 
 		// Capture tool calls from the final chunk
@@ -233,10 +256,13 @@ func StreamOllamaToolCall(
 		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
+	visible := mill.Visible()
+	visible = truncateAtStopTokens(visible)
+
 	return &ChatResponse{
 		Message: ResponseMessage{
 			Role:      "assistant",
-			Content:   mill.Visible(),
+			Content:   visible,
 			ToolCalls: toolCalls,
 			Thoughts:  mill.Thoughts(),
 		},
@@ -321,7 +347,30 @@ func StreamOllamaChat(
 		}
 
 		if chunk.Message.Content != "" {
-			mill.Process([]byte(chunk.Message.Content))
+			content := chunk.Message.Content
+			stopIdx := -1
+			var foundStop string
+			for _, stop := range defaultOllamaStopTokensList {
+				if idx := strings.Index(content, stop); idx != -1 {
+					if stopIdx == -1 || idx < stopIdx {
+						stopIdx = idx
+						foundStop = stop
+					}
+				}
+			}
+
+			if stopIdx != -1 {
+				log.Info("stream scanner encountered stop token",
+					slog.String("stop_token", foundStop),
+					slog.Int("index", stopIdx),
+				)
+				if stopIdx > 0 {
+					mill.Process([]byte(content[:stopIdx]))
+				}
+				break
+			}
+
+			mill.Process([]byte(content))
 		}
 
 		if chunk.PromptEvalCount > 0 {
@@ -362,7 +411,10 @@ func StreamOllamaChat(
 		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
-	return CleanJSONResponse(mill.Visible()), mill.Thoughts(), usage, nil
+	visible := mill.Visible()
+	visible = truncateAtStopTokens(visible)
+
+	return CleanJSONResponse(visible), mill.Thoughts(), usage, nil
 }
 
 // === Phase 1: NodeConnManager integration helpers (skeleton) ===
@@ -419,4 +471,31 @@ func OllamaConnStats() map[string]map[string]int {
 		return nil
 	}
 	return ollamaConnMgr.Stats()
+}
+
+var defaultOllamaStopTokensList = []string{
+	"<|endoftext|>",
+	"<|im_start|>",
+	"<|im_end|>",
+	"<im_start>",
+	"<im_end>",
+	"<|eot_id|>",
+	"<|start_header_id|>",
+	"assistant\n\n<tool_call",
+	"assistant\n<tool_call",
+}
+
+func truncateAtStopTokens(content string) string {
+	stopIdx := -1
+	for _, stop := range defaultOllamaStopTokensList {
+		if idx := strings.Index(content, stop); idx != -1 {
+			if stopIdx == -1 || idx < stopIdx {
+				stopIdx = idx
+			}
+		}
+	}
+	if stopIdx != -1 {
+		return content[:stopIdx]
+	}
+	return content
 }

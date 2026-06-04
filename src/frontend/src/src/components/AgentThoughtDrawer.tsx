@@ -31,6 +31,9 @@ import {
   Minimize2,
   Clock,
   Activity,
+  Copy,
+  Check,
+  Braces,
 } from "lucide-react";
 import { createLogger } from '@/utils/logger';
 
@@ -220,69 +223,119 @@ function ThoughtMarkdown({ content }: { content: string }) {
 
 // ─── Single Thought Entry Component ──────────────────────────────────────────
 
-function ThoughtCard({ parsed, index, isLatest }: { parsed: ParsedThought; index: number; isLatest: boolean }) {
-  const [collapsed, setCollapsed] = useState(parsed.cleanText.length > 400);
-  const config = categoryConfig[parsed.category];
-  const toolAction = parsed.toolAction;
-  const isLongText = parsed.cleanText.length > 400;
+const ThoughtCard = React.memo(
+  function ThoughtCard({ parsed, index, isLatest }: { parsed: ParsedThought; index: number; isLatest: boolean }) {
+    const [collapsed, setCollapsed] = useState(parsed.cleanText.length > 400);
+    const [showMeta, setShowMeta] = useState(false);
+    const [copied, setCopied] = useState(false);
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 12, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.25, delay: isLatest ? 0.05 : 0, ease: "easeOut" }}
-      className={`relative rounded-lg border ${config.border} ${config.bg} overflow-hidden transition-colors duration-200`}
-    >
-      {/* Header Bar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border/20">
-        <div className="flex items-center gap-2">
-          <span className={`${config.accent} flex items-center gap-1`}>
-            {config.icon}
-            <span className="text-[10px] font-semibold uppercase tracking-wider">{config.label}</span>
-          </span>
-          {toolAction && (
-            <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md border ${toolBadgeColors[toolAction] || "bg-muted/10 text-muted-foreground border-border/30"}`}>
-              {toolIcons[toolAction]}
-              {toolAction}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {parsed.elapsedMs !== undefined && parsed.elapsedMs > 0 && (
-            <span className="text-[10px] text-muted-foreground/60 font-mono">
-              {formatElapsed(parsed.elapsedMs)}
-            </span>
-          )}
-          <span className="text-[10px] text-muted-foreground/50 font-mono">
-            {new Date(parsed.raw.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-          </span>
-        </div>
-      </div>
+    const config = categoryConfig[parsed.category];
+    const toolAction = parsed.toolAction;
+    const isLongText = parsed.cleanText.length > 400;
+    const hasMeta = parsed.raw.meta && Object.keys(parsed.raw.meta).length > 0;
 
-      {/* Content */}
-      <div className="px-3 py-2.5">
-        <div className={`prose prose-sm dark:prose-invert max-w-none text-muted-foreground ${isLongText && collapsed ? "max-h-24 overflow-hidden relative" : ""}`}>
-          <ThoughtMarkdown content={isLongText && collapsed ? parsed.cleanText.slice(0, 380) + "…" : parsed.cleanText} />
-          {isLongText && collapsed && (
-            <div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-background/80 to-transparent" />
+    const handleCopy = () => {
+      navigator.clipboard.writeText(parsed.cleanText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 12, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.22, delay: isLatest ? 0.05 : 0, ease: "easeOut" }}
+        className={`relative rounded-lg border ${config.border} ${config.bg} overflow-hidden transition-all duration-200 hover:border-border/60`}
+      >
+        {/* Header Bar */}
+        <div className="flex items-center justify-between px-3 py-2 border-b border-border/20 bg-muted/5">
+          <div className="flex items-center gap-2">
+            <span className={`${config.accent} flex items-center gap-1`}>
+              {config.icon}
+              <span className="text-[10px] font-semibold uppercase tracking-wider">{config.label}</span>
+            </span>
+            {toolAction && (
+              <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md border ${toolBadgeColors[toolAction] || "bg-muted/10 text-muted-foreground border-border/30"}`}>
+                {toolIcons[toolAction]}
+                {toolAction}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {hasMeta && (
+              <button
+                onClick={() => setShowMeta(!showMeta)}
+                className={`p-1 rounded hover:bg-muted/30 text-muted-foreground/60 hover:text-foreground transition-colors ${showMeta ? 'text-primary bg-primary/10' : ''}`}
+                title="Inspect metadata parameters"
+              >
+                <Braces className="w-3.5 h-3.5" />
+              </button>
+            )}
+            <button
+              onClick={handleCopy}
+              className="p-1 rounded hover:bg-muted/30 text-muted-foreground/60 hover:text-foreground transition-colors"
+              title="Copy thought text"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            <div className="w-px h-3 bg-border/20" />
+            <div className="flex items-center gap-1.5">
+              {parsed.elapsedMs !== undefined && parsed.elapsedMs > 0 && (
+                <span className="text-[10px] text-muted-foreground/60 font-mono">
+                  {formatElapsed(parsed.elapsedMs)}
+                </span>
+              )}
+              <span className="text-[10px] text-muted-foreground/50 font-mono">
+                {new Date(parsed.raw.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="px-3 py-2.5">
+          <div className={`prose prose-sm dark:prose-invert max-w-none text-muted-foreground/90 ${isLongText && collapsed ? "max-h-24 overflow-hidden relative" : ""}`}>
+            <ThoughtMarkdown content={isLongText && collapsed ? parsed.cleanText.slice(0, 380) + "…" : parsed.cleanText} />
+            {isLongText && collapsed && (
+              <div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-background/90 to-transparent" />
+            )}
+          </div>
+          {isLongText && (
+            <button
+              onClick={() => setCollapsed(!collapsed)}
+              className="flex items-center gap-1 mt-1.5 text-[11px] text-primary/70 hover:text-primary transition-colors font-medium"
+            >
+              {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {collapsed ? "Show full reasoning" : "Collapse"}
+            </button>
           )}
         </div>
-        {isLongText && (
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="flex items-center gap-1 mt-1.5 text-[11px] text-primary/70 hover:text-primary transition-colors"
-          >
-            {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            {collapsed ? "Show full reasoning" : "Collapse"}
-          </button>
+
+        {/* Metadata Inspect Panel */}
+        {showMeta && hasMeta && (
+          <div className="px-3 pb-3 border-t border-border/10 bg-black/20">
+            <p className="text-[9px] font-semibold text-muted-foreground/75 mt-2.5 mb-1.5 uppercase tracking-wider">Metadata Parameters</p>
+            <pre className="text-[10px] font-mono bg-black/40 p-2.5 rounded border border-border/10 overflow-x-auto text-cyan-400/90 leading-relaxed max-h-48">
+              {JSON.stringify(parsed.raw.meta, null, 2)}
+            </pre>
+          </div>
         )}
-      </div>
 
-      {/* Step indicator line */}
-      <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${config.accent.replace("text-", "bg-")} opacity-40`} />
-    </motion.div>
-  );
-}
+        {/* Step indicator line */}
+        <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${config.accent.replace("text-", "bg-")} opacity-40`} />
+      </motion.div>
+    );
+  },
+  (prevProps, nextProps) => {
+    return (
+      prevProps.parsed.cleanText === nextProps.parsed.cleanText &&
+      prevProps.parsed.elapsedMs === nextProps.parsed.elapsedMs &&
+      prevProps.isLatest === nextProps.isLatest &&
+      prevProps.index === nextProps.index &&
+      JSON.stringify(prevProps.parsed.raw.meta) === JSON.stringify(nextProps.parsed.raw.meta)
+    );
+  }
+);
 
 // ─── Thought Stream Content (shared between drawer and modal) ────────────────
 
@@ -296,13 +349,14 @@ function ThoughtStream({
 }: {
   thoughts: ParsedThought[];
   isLoading: boolean;
-  error: unknown;
+  error: string | null;
   taskId: string | null;
   taskStatus?: string;
   searchTerm: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
+  const [renderLimit, setRenderLimit] = useState(40);
 
   const filtered = useMemo(() => {
     if (!searchTerm) return thoughts;
@@ -315,15 +369,30 @@ function ThoughtStream({
     );
   }, [thoughts, searchTerm]);
 
+  // Reset limit when taskId or search changes
   useEffect(() => {
-    if (scrollRef.current && filtered.length > prevCountRef.current) {
+    setRenderLimit(40);
+  }, [taskId, searchTerm]);
+
+  const hasMore = filtered.length > renderLimit;
+  const visibleThoughts = useMemo(() => {
+    return hasMore ? filtered.slice(filtered.length - renderLimit) : filtered;
+  }, [filtered, renderLimit, hasMore]);
+
+  useEffect(() => {
+    if (scrollRef.current && visibleThoughts.length > prevCountRef.current) {
       const el = scrollRef.current;
       setTimeout(() => {
-        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-      }, 80);
+        const viewport = el.querySelector('[data-radix-scroll-area-viewport]');
+        if (viewport) {
+          viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+        } else {
+          el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+        }
+      }, 100);
     }
-    prevCountRef.current = filtered.length;
-  }, [filtered.length]);
+    prevCountRef.current = visibleThoughts.length;
+  }, [visibleThoughts.length]);
 
   const isActive = taskStatus === "running";
 
@@ -331,26 +400,36 @@ function ThoughtStream({
     <div className="flex-1 overflow-hidden relative">
       <ScrollArea className="h-full" ref={scrollRef}>
         <div className="p-4 space-y-2.5">
-          {isLoading ? (
+          {isLoading && filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-40 text-muted-foreground gap-3">
               <Loader2 className="w-5 h-5 animate-spin text-primary/60" />
-              <p className="text-xs">Syncing reasoning stream…</p>
+              <p className="text-xs">Connecting to reasoning stream…</p>
             </div>
-          ) : error ? (
-            <div className="text-destructive text-center text-sm mt-10 bg-destructive/10 p-4 rounded-lg border border-destructive/20">
-              Failed to fetch agent thoughts.
+          ) : error && filtered.length === 0 ? (
+            <div className="text-destructive text-center text-sm mt-10 bg-destructive/10 p-4 rounded-lg border border-destructive/20 font-medium">
+              {error}
             </div>
           ) : filtered.length > 0 ? (
-            <AnimatePresence mode="popLayout">
-              {filtered.map((entry, index) => (
-                <ThoughtCard
-                  key={`${entry.raw.ts}-${index}`}
-                  parsed={entry}
-                  index={index}
-                  isLatest={index === filtered.length - 1}
-                />
-              ))}
-            </AnimatePresence>
+            <>
+              {hasMore && (
+                <button
+                  onClick={() => setRenderLimit((prev) => prev + 50)}
+                  className="w-full py-2 mb-3 text-xs font-semibold text-center text-primary/80 border border-dashed border-primary/20 rounded-lg bg-primary/5 hover:bg-primary/10 hover:text-primary transition-all duration-200"
+                >
+                  Load older steps (+{filtered.length - renderLimit} remaining)
+                </button>
+              )}
+              <AnimatePresence mode="popLayout">
+                {visibleThoughts.map((entry, index) => (
+                  <ThoughtCard
+                    key={`${entry.raw.ts}-${index}`}
+                    parsed={entry}
+                    index={index}
+                    isLatest={index === visibleThoughts.length - 1}
+                  />
+                ))}
+              </AnimatePresence>
+            </>
           ) : (
             <div className="flex flex-col items-center justify-center h-40 text-muted-foreground gap-3">
               <Brain className="w-10 h-10 text-muted-foreground/15" />
@@ -365,12 +444,12 @@ function ThoughtStream({
       {/* Live Indicator */}
       {isActive && filtered.length > 0 && (
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background/90 border border-border/40 backdrop-blur-sm shadow-lg">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-background/95 border border-border/40 backdrop-blur-sm shadow-xl">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
             </span>
-            <span className="text-[10px] text-muted-foreground font-medium">Live — polling every 3s</span>
+            <span className="text-[10px] text-emerald-400 font-semibold uppercase tracking-wider text-glow-emerald">Live Stream Active</span>
           </div>
         </div>
       )}
@@ -433,25 +512,55 @@ function StatsBar({
 export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOpenChange }: AgentThoughtDrawerProps) {
   const [isFullPage, setIsFullPage] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [thoughts, setThoughts] = useState<ThoughtEntry[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const { data, isLoading, error } = useQuery<{ thoughts: ThoughtEntry[] }>({
-    queryKey: ["task-thoughts", taskId],
-    queryFn: async () => {
-      if (!taskId) return { thoughts: [] };
-      const res = await fetch(`/api/tasks/${taskId}/thoughts`);
-      if (!res.ok) {
-        log.error('queryFn', 'Failed to fetch agent thoughts', { taskId, status: res.status });
-        throw new Error("Failed to fetch thoughts");
+  useEffect(() => {
+    if (!taskId || !isOpen) {
+      setThoughts([]);
+      setError(null);
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setThoughts([]);
+
+    const eventSource = new EventSource(`/api/tasks/${taskId}/thoughts/stream`);
+
+    eventSource.onmessage = (event) => {
+      setIsLoading(false);
+      try {
+        const entry = JSON.parse(event.data) as ThoughtEntry;
+        setThoughts((prev) => {
+          // Deduplicate thoughts by checking timestamp and content
+          if (prev.some((p) => p.ts === entry.ts && p.thought === entry.thought)) {
+            return prev;
+          }
+          return [...prev, entry];
+        });
+      } catch (err) {
+        log.error("SSE parse error", err);
       }
-      return res.json();
-    },
-    enabled: !!taskId && isOpen,
-    refetchInterval: 3000,
-  });
+    };
+
+    eventSource.onerror = (err) => {
+      if (eventSource.readyState === EventSource.CLOSED) {
+        setIsLoading(false);
+        setError("Connection lost. Reconnecting...");
+      }
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [taskId, isOpen]);
 
   // Parse and enrich thought entries
   const parsedThoughts: ParsedThought[] = useMemo(() => {
-    const raw = data?.thoughts || [];
+    const raw = thoughts;
     return raw.map((entry, index) => {
       const { category, cleanText } = parseCategory(entry.thought);
       const toolAction = extractToolAction(cleanText);
@@ -464,7 +573,7 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
       }
       return { raw: entry, category, cleanText, toolAction, elapsedMs };
     });
-  }, [data?.thoughts]);
+  }, [thoughts]);
 
   const totalElapsedMs = useMemo(() => {
     if (parsedThoughts.length < 2) return 0;

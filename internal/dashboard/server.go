@@ -195,6 +195,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/history", s.handleTaskHistory)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/diff", s.handleTaskDiff)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts", s.handleTaskThoughts)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts/stream", s.handleTaskThoughtsStream)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/commits", s.handleTaskCommits)
 	s.mux.HandleFunc("POST /api/tasks/{task_id}/transition", s.handleTaskTransition)
 	s.mux.HandleFunc("POST /api/tasks/bulk-requeue", s.handleTasksBulkRequeue)
@@ -382,6 +383,12 @@ func (w *statusWriter) WriteHeader(status int) {
 		w.written = true
 	}
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // ─── Response Helpers ───────────────────────────────────────────────────────

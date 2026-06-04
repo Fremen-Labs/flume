@@ -182,6 +182,7 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 		"temperature": req.Temperature,
 		"num_predict": req.MaxTokens,
 		"num_ctx":     numCtx,
+		"stop":        defaultOllamaStopTokens(),
 	}
 
 	messages := messagesToSlice(req.Messages)
@@ -371,6 +372,7 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 		"temperature": req.Temperature,
 		"num_predict": req.MaxTokens,
 		"num_ctx":     numCtx,
+		"stop":        defaultOllamaStopTokens(),
 	}
 
 	messages := messagesToSlice(req.Messages)
@@ -425,6 +427,20 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 
 	// Non-thinking model, no tools: use standard non-streaming call
 	return r.ollamaNonStream(ctx, baseURL, messages, req.Model, options)
+}
+
+func defaultOllamaStopTokens() []string {
+	return []string{
+		"<|endoftext|>",
+		"<|im_start|>",
+		"<|im_end|>",
+		"<im_start>",
+		"<im_end>",
+		"<|eot_id|>",
+		"<|start_header_id|>",
+		"assistant\n\n<tool_call",
+		"assistant\n<tool_call",
+	}
 }
 
 func (r *ProviderRouter) ollamaNonStream(
