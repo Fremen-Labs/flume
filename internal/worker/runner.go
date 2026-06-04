@@ -15,6 +15,7 @@ import (
 
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
@@ -152,6 +153,28 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 	var task ftypes.Task
 	if err := json.Unmarshal(taskDoc, &task); err != nil {
 		return fmt.Errorf("unmarshal task %s: %w", taskID, err)
+	}
+
+	// 1.5. Acquire per-repository mutex lock to prevent concurrent Git/workspace operations.
+	// Only restrict roles that write/mutate the workspace filesystem or run tests (implementer, tester).
+	// PM and reviewer roles do not mutate the files or checkout branches, so they can run concurrently.
+	if task.ProjectID != "" && (worker.Role == "implementer" || worker.Role == "tester") {
+		repoPath, resolveErr := r.resolveRepoPath(ctx, task.ProjectID)
+		if resolveErr == nil && repoPath != "" {
+			r.logger.Info("worker: acquiring workspace lock",
+				slog.String("worker", worker.Name),
+				slog.String("task_id", taskID),
+				slog.String("repo_path", repoPath))
+			mu := getRepoLock(repoPath)
+			mu.Lock()
+			defer func() {
+				r.logger.Info("worker: releasing workspace lock",
+					slog.String("worker", worker.Name),
+					slog.String("task_id", taskID),
+					slog.String("repo_path", repoPath))
+				mu.Unlock()
+			}()
+		}
 	}
 
 	// 2. Execute based on role
@@ -2308,4 +2331,50 @@ func firstNChars(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+var (
+	repoLocks   = make(map[string]*sync.Mutex)
+	repoLocksMu sync.Mutex
+)
+
+func getRepoLock(repoPath string) *sync.Mutex {
+	repoLocksMu.Lock()
+	defer repoLocksMu.Unlock()
+	mu, exists := repoLocks[repoPath]
+	if !exists {
+		mu = &sync.Mutex{}
+		repoLocks[repoPath] = mu
+	}
+	return mu
+}
+
+func (r *Runner) resolveRepoPath(ctx context.Context, projectID string) (string, error) {
+	if projectID == "" {
+		return "", nil
+	}
+	projDoc, err := r.es.GetDoc(ctx, "flume-projects", projectID)
+	if err != nil || projDoc == nil {
+		return "", fmt.Errorf("project %s not found", projectID)
+	}
+	var project ftypes.Project
+	if err := json.Unmarshal(projDoc, &project); err != nil {
+		return "", err
+	}
+	workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
+	if workspace == "" {
+		if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+			workspace, _ = os.Getwd()
+			if workspace == "" {
+				workspace = "."
+			}
+		} else {
+			workspace = "/app/workspace"
+		}
+	}
+	repoPath := project.LocalPath
+	if repoPath == "" {
+		repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", project.ID))
+	}
+	return repoPath, nil
 }

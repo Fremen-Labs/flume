@@ -269,13 +269,15 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 // plannedTask is the internal candidate shape for promote (hoisted to package scope for test hook visibility + reliable-go testability).
 // RawHit kept for OCC path only.
 type plannedTask struct {
-	ID             string
-	ParentID       string
-	DependsOn      []string
-	HierarchyDepth int
-	PlanSessionID  string
-	ItemType       string // Phase 1: for explicit structural org item check (epic/feat/story/owner=system never promoted)
-	Owner          string // Phase 1: "system" marks org containers
+	ID                string
+	ParentID          string
+	DependsOn         []string
+	HierarchyDepth    int
+	PlanSessionID     string
+	ItemType          string // Phase 1: for explicit structural org item check (epic/feat/story/owner=system never promoted)
+	Owner             string // Phase 1: "system" marks org containers
+	WorkerRole        string
+	AssignedAgentRole string
 	// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
 	RawHit *es.SearchHit
 }
@@ -308,6 +310,18 @@ var DefaultHierarchyOrchestrator = &HierarchyOrchestrator{}
 // Enables unit testing of hierarchy sibling promotion (Phase 0/1) without full ES (reliable-go: testable small units, table tests).
 // Returns (okToPromote, skipReason). The Enforce + update is separate (OCC etc).
 func canPromoteSiblingsTestHook(pt plannedTask, statusCache map[string]string) (bool, string) {
+	// Skip PM tasks - they remain planned so they can be claimed by the PM worker
+	role := pt.WorkerRole
+	if role == "" {
+		role = pt.AssignedAgentRole
+	}
+	if role == "" {
+		role = pt.Owner
+	}
+	if role == "pm" {
+		return false, "pm_task"
+	}
+
 	// Phase 1: explicit structural org skip (epics etc created "done" at intake; never executable).
 	if DefaultHierarchyOrchestrator.IsStructuralOrgItem(pt.ItemType, pt.Owner) {
 		return false, "structural_org_item"
@@ -388,25 +402,29 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	for i, hit := range result.Hits {
 		var t struct {
-			ID             string   `json:"id"`
-			ParentID       string   `json:"parent_id"`
-			DependsOn      []string `json:"depends_on"`
-			HierarchyDepth int      `json:"hierarchy_depth"`
-			PlanSessionID  string   `json:"plan_session_id"`
-			ItemType       string   `json:"item_type"`
-			Owner          string   `json:"owner"`
+			ID                string   `json:"id"`
+			ParentID          string   `json:"parent_id"`
+			DependsOn         []string `json:"depends_on"`
+			HierarchyDepth    int      `json:"hierarchy_depth"`
+			PlanSessionID     string   `json:"plan_session_id"`
+			ItemType          string   `json:"item_type"`
+			Owner             string   `json:"owner"`
+			WorkerRole        string   `json:"worker_role"`
+			AssignedAgentRole string   `json:"assigned_agent_role"`
 		}
 		if json.Unmarshal(hit, &t) != nil {
 			continue
 		}
 		pt := plannedTask{
-			ID:             t.ID,
-			ParentID:       t.ParentID,
-			DependsOn:      t.DependsOn,
-			HierarchyDepth: t.HierarchyDepth,
-			PlanSessionID:  t.PlanSessionID,
-			ItemType:       t.ItemType,
-			Owner:          t.Owner,
+			ID:                t.ID,
+			ParentID:          t.ParentID,
+			DependsOn:         t.DependsOn,
+			HierarchyDepth:    t.HierarchyDepth,
+			PlanSessionID:     t.PlanSessionID,
+			ItemType:          t.ItemType,
+			Owner:             t.Owner,
+			WorkerRole:        t.WorkerRole,
+			AssignedAgentRole: t.AssignedAgentRole,
 		}
 		if i < len(result.RawHits) {
 			pt.RawHit = &result.RawHits[i]
@@ -594,10 +612,13 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 
 	for _, hit := range result.Hits {
 		var task struct {
-			ID           string `json:"id"`
-			ErrorMessage string `json:"error_message"`
-			Attempts     int    `json:"attempts"`
-			MaxAttempts  int    `json:"max_attempts"`
+			ID                string `json:"id"`
+			ErrorMessage      string `json:"error_message"`
+			Attempts          int    `json:"attempts"`
+			MaxAttempts       int    `json:"max_attempts"`
+			WorkerRole        string `json:"worker_role"`
+			AssignedAgentRole string `json:"assigned_agent_role"`
+			Owner             string `json:"owner"`
 		}
 		if json.Unmarshal(hit, &task) != nil {
 			continue
@@ -624,15 +645,32 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 			maxAttempts = 3
 		}
 		if task.Attempts < maxAttempts {
+			role := task.WorkerRole
+			if role == "" {
+				role = task.AssignedAgentRole
+			}
+			if role == "" {
+				role = task.Owner
+			}
+
+			status := "ready"
+			switch role {
+			case "pm":
+				status = "planned"
+			case "reviewer", "tester":
+				status = "review"
+			}
+
 			update := map[string]interface{}{
-				"status":        "ready",
+				"status":        status,
 				"error_message": "",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
 			_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
-	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Info("resume sweep: recovered blocked task",
-					slog.String("task_id", task.ID))
+					slog.String("task_id", task.ID),
+					slog.String("target_status", status))
 			}
 		}
 	}

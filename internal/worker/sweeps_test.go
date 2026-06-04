@@ -105,6 +105,19 @@ func TestPromoteHierarchySiblings(t *testing.T) {
 			wantOK:     false,
 			wantReason: "structural_org_item",
 		},
+		{
+			name: "PM task never promoted (keeps planned status)",
+			pt: plannedTask{
+				ID:             "task-pm-1",
+				ParentID:       "story-42",
+				DependsOn:      []string{},
+				HierarchyDepth: 3,
+				Owner:          "pm",
+			},
+			cache:      map[string]string{"story-42": "planned"},
+			wantOK:     false,
+			wantReason: "pm_task",
+		},
 	}
 
 	for _, c := range cases {

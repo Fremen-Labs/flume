@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	crypto_rand "crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -386,6 +387,7 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		// For now, force the simple direct Ollama path when streaming.
 		// Ensemble and mesh routing will be added in Phase 4.
 		chunkCh := make(chan ChatStreamChunk, 32)
+		workerName := r.Header.Get("X-Worker-Name")
 
 		go func() {
 			defer close(chunkCh)
@@ -419,6 +421,20 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 					Done:  true,
 				}
 				return
+			}
+
+			// Record worker tokens and persist telemetry for streaming path
+			if workerName != "" {
+				Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+				
+				workerRole := req.AgentRole
+				if workerRole == "" {
+					workerRole = agentRoleToTaskType(req.AgentRole)
+				}
+				if workerRole == "" {
+					workerRole = "unknown"
+				}
+				go s.persistTokenTelemetry(workerName, workerRole, string(provider), model, resp.Usage)
 			}
 
 			// Emit the final aggregated result as the terminal chunk for Phase 0.
@@ -1340,7 +1356,13 @@ func (s *Server) persistTokenTelemetry(workerName, workerRole, provider, model s
 		req.SetBasicAuth("elastic", esPass)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: tr,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		Log().Warn("telemetry: failed to index document in Elasticsearch", slog.String("error", err.Error()))

@@ -933,6 +933,16 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 				"must": []interface{}{
 					map[string]interface{}{"term": map[string]interface{}{"status": statusForRole}},
 					map[string]interface{}{"term": map[string]interface{}{"queue_state": "queued"}},
+					map[string]interface{}{
+						"bool": map[string]interface{}{
+							"should": []interface{}{
+								map[string]interface{}{"term": map[string]string{"worker_role": req.Role}},
+								map[string]interface{}{"term": map[string]string{"owner": req.Role}},
+								map[string]interface{}{"term": map[string]string{"assigned_agent_role": req.Role}},
+							},
+							"minimum_should_match": 1,
+						},
+					},
 				},
 			},
 		},

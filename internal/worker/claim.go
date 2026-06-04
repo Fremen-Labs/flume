@@ -68,6 +68,16 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 		"bool": map[string]interface{}{
 			"must": []interface{}{
 				map[string]interface{}{"term": map[string]string{"status": targetStatus}},
+				map[string]interface{}{
+					"bool": map[string]interface{}{
+						"should": []interface{}{
+							map[string]interface{}{"term": map[string]string{"worker_role": role}},
+							map[string]interface{}{"term": map[string]string{"owner": role}},
+							map[string]interface{}{"term": map[string]string{"assigned_agent_role": role}},
+						},
+						"minimum_should_match": 1,
+					},
+				},
 			},
 			"must_not": []interface{}{
 				map[string]interface{}{"exists": map[string]string{"field": "active_worker"}},
