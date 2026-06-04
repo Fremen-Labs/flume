@@ -137,7 +137,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		Addr:         addr,
 		Handler:      s,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second, // long writes for streaming responses
+		WriteTimeout: 1200 * time.Second, // long writes for streaming responses (extended to 20m to match agent loop and deep reasoning timeouts)
 		IdleTimeout:  120 * time.Second,
 	}
 

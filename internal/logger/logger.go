@@ -471,11 +471,7 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 		slog.String("agent_role", agentRole),
 		slog.String("reasoning", reasoning),
 	}
-	attrs = append(attrs, metadata...)
-	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
 
-	// Convert variadic metadata to map for the ES entry (best-effort).
-	// Callers pass either map[string]any (preferred) or key/value pairs.
 	meta := map[string]any{}
 	for _, m := range metadata {
 		switch v := m.(type) {
@@ -483,10 +479,18 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 			for k, val := range v {
 				meta[k] = val
 			}
+		case slog.Attr:
+			attrs = append(attrs, v)
 		default:
-			// Skip non-map entries (e.g. slog.Attr from legacy callers)
+			// Skip other non-map entries
 		}
 	}
+
+	for k, v := range meta {
+		attrs = append(attrs, slog.Any(k, v))
+	}
+
+	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
 	appendExecutionThoughtNonBlocking(ctx, taskID, agentRole, reasoning, meta)
 }
 
