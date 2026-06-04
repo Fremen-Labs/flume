@@ -109,6 +109,81 @@ function parseCategory(thought: string, agentRole?: string): { category: Thought
   return { category, cleanText };
 }
 
+// Standard HTML tags list to distinguish standard HTML from custom LLM tags (e.g. <antThinking>)
+const STANDARD_HTML_TAGS = new Set([
+  "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo", 
+  "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col", "colgroup", 
+  "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed", 
+  "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", 
+  "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input", "ins", "kbd", "label", 
+  "legend", "li", "link", "main", "map", "mark", "menu", "meta", "meter", "nav", "noscript", 
+  "object", "ol", "optgroup", "option", "output", "p", "picture", "pre", "progress", "q", "rp", 
+  "rt", "ruby", "s", "samp", "script", "section", "select", "slot", "small", "source", "span", 
+  "strong", "style", "sub", "summary", "sup", "table", "tbody", "td", "template", "textarea", 
+  "tfoot", "th", "thead", "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr"
+]);
+
+function preprocessThoughtText(text: string): string {
+  if (!text) return "";
+
+  // 1. Remove custom XML/HTML-like tags (e.g., <antThinking>, </antThinking>, <thought>, </thought>)
+  // while keeping their content intact.
+  let processed = text.replace(/<(\/?[a-zA-Z0-9:-]+)([^>]*)>/g, (match, tag, attrs) => {
+    const isClosing = tag.startsWith("/");
+    const tagName = (isClosing ? tag.substring(1) : tag).toLowerCase();
+    
+    if (!STANDARD_HTML_TAGS.has(tagName)) {
+      // Non-standard/custom tag: strip tag itself, leaving empty string
+      return "";
+    }
+    // Standard HTML tag: keep it for rendering/translation
+    return match;
+  });
+
+  // 2. Translate standard HTML tags to Markdown format so ReactMarkdown renders them
+  // without breaking the look and feel.
+  
+  // Bold / Strong
+  processed = processed.replace(/<(strong|b)>/gi, "**").replace(/<\/(strong|b)>/gi, "**");
+  
+  // Italics / Emphasis
+  processed = processed.replace(/<(em|i)>/gi, "*").replace(/<\/(em|i)>/gi, "*");
+  
+  // Inline Code
+  processed = processed.replace(/<code>/gi, "`").replace(/<\/code>/gi, "`");
+  
+  // Block Code (pre + code)
+  processed = processed.replace(/<pre><code>/gi, "\n```\n").replace(/<\/code><\/pre>/gi, "\n```\n");
+  processed = processed.replace(/<pre>/gi, "\n```\n").replace(/<\/pre>/gi, "\n```\n");
+  
+  // Paragraphs
+  processed = processed.replace(/<p>/gi, "\n\n").replace(/<\/p>/gi, "\n\n");
+  
+  // Line breaks
+  processed = processed.replace(/<br\s*\/?>/gi, "\n");
+  
+  // Headings
+  processed = processed.replace(/<h1>/gi, "\n# ").replace(/<\/h1>/gi, "\n");
+  processed = processed.replace(/<h2>/gi, "\n## ").replace(/<\/h2>/gi, "\n");
+  processed = processed.replace(/<h3>/gi, "\n### ").replace(/<\/h3>/gi, "\n");
+  processed = processed.replace(/<h4>/gi, "\n#### ").replace(/<\/h4>/gi, "\n");
+  processed = processed.replace(/<h5>/gi, "\n##### ").replace(/<\/h5>/gi, "\n");
+  processed = processed.replace(/<h6>/gi, "\n###### ").replace(/<\/h6>/gi, "\n");
+  
+  // Lists
+  processed = processed.replace(/<li>/gi, "\n- ").replace(/<\/li>/gi, "");
+  processed = processed.replace(/<ul\s*[^>]*>/gi, "\n").replace(/<\/ul>/gi, "\n");
+  processed = processed.replace(/<ol\s*[^>]*>/gi, "\n").replace(/<\/ol>/gi, "\n");
+  
+  // Links: <a href="url">text</a> -> [text](url)
+  processed = processed.replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "[$2]($1)");
+
+  // Strip remaining unsupported HTML tags (like <div>, <span>, etc.) to keep layout clean
+  processed = processed.replace(/<(\/?[a-zA-Z0-9:-]+)([^>]*)>/g, "");
+
+  return processed;
+}
+
 function extractToolAction(text: string): string | undefined {
   if (text.startsWith("Querying AST") || text.includes("query_ast")) return "AST Query";
   if (text.startsWith("Reading file:") || text.includes("view_file")) return "File Read";
@@ -895,7 +970,8 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
   const parsedThoughts: ParsedThought[] = useMemo(() => {
     const raw = thoughts;
     return raw.map((entry, index) => {
-      const { category, cleanText } = parseCategory(entry.thought, entry.agent_role);
+      const { category, cleanText: catCleanText } = parseCategory(entry.thought, entry.agent_role);
+      const cleanText = preprocessThoughtText(catCleanText);
       const toolAction = extractToolAction(cleanText);
       const targetFile = findFilePath(cleanText, entry.meta);
       const elapsedMs =
