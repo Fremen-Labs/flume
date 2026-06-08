@@ -67,7 +67,7 @@ func TestIsValidNodeHost(t *testing.T) {
 
 func TestHandleAddNode(t *testing.T) {
 	// Setup test environment
-	registry := NewNodeRegistry("")
+	registry := NewNodeRegistry("", nil)
 	srv := &Server{
 		nodeRegistry: registry,
 		mux:          http.NewServeMux(),
@@ -146,7 +146,7 @@ func TestHandleAddNode(t *testing.T) {
 }
 
 func TestHandleDeleteNode(t *testing.T) {
-	registry := NewNodeRegistry("")
+	registry := NewNodeRegistry("", nil)
 	srv := &Server{
 		nodeRegistry: registry,
 		mux:          http.NewServeMux(),
@@ -178,7 +178,7 @@ func TestHandleTestNodeTimeout(t *testing.T) {
 	}))
 	defer mockOllama.Close()
 
-	registry := NewNodeRegistry("")
+	registry := NewNodeRegistry("", nil)
 	// Insert a mock node pointing to the sleeping server
 	registry.mu.Lock()
 	registry.nodes["timeout-node"] = &Node{

@@ -64,6 +64,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     container_name: flume-dashboard
     depends_on:
       elasticsearch:
@@ -88,6 +91,7 @@ services:
       - GATEWAY_URL=http://gateway:8090
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
+      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     ports:
       - "${DASHBOARD_PORT:-8765}:8765"
     command: ["dashboard"]
@@ -102,6 +106,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     container_name: flume-gateway
     depends_on:
       elasticsearch:
@@ -137,6 +144,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ELASTR0_INSTALL: public
+        LOGLOOM_INSTALL: public
     depends_on:
       dashboard:
         condition: service_healthy
@@ -159,6 +169,7 @@ services:
       - DASHBOARD_URL=http://dashboard:8765
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
+      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     command: ["worker-manager"]
     deploy:
       replicas: ${FLUME_WORKER_COUNT:-2}

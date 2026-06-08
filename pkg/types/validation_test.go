@@ -7,9 +7,8 @@ func TestValidateTransition_Valid(t *testing.T) {
 		from TaskStatus
 		to   TaskStatus
 	}{
-		{TaskStatusInbox, TaskStatusPlanned},
-		{TaskStatusInbox, TaskStatusReady},
 		{TaskStatusPlanned, TaskStatusReady},
+		{TaskStatusPlanned, TaskStatusBlocked},
 		{TaskStatusReady, TaskStatusRunning},
 		{TaskStatusRunning, TaskStatusReview},
 		{TaskStatusRunning, TaskStatusDone},
@@ -35,8 +34,6 @@ func TestValidateTransition_Invalid(t *testing.T) {
 		from TaskStatus
 		to   TaskStatus
 	}{
-		{TaskStatusInbox, TaskStatusDone},
-		{TaskStatusInbox, TaskStatusRunning},
 		{TaskStatusPlanned, TaskStatusDone},
 		{TaskStatusReady, TaskStatusDone},
 		{TaskStatusDone, TaskStatusRunning},
@@ -70,7 +67,7 @@ func TestValidateTransition_EmptyTarget(t *testing.T) {
 }
 
 func TestValidateTransition_EmptyCurrent(t *testing.T) {
-	// Empty current defaults to inbox
+	// Empty current defaults to planned
 	if err := ValidateTransition("", TaskStatusPlanned); err != nil {
 		t.Errorf("empty current -> planned should be valid, got: %v", err)
 	}
@@ -102,7 +99,7 @@ func TestNormalizeProvider(t *testing.T) {
 
 func TestTaskStateMachine_EnforceTransition_Shadow(t *testing.T) {
 	sm := NewTaskStateMachine(true) // shadow
-	err := sm.EnforceTransition(TaskStatusInbox, TaskStatusDone)
+	err := sm.EnforceTransition(TaskStatusPlanned, TaskStatusDone)
 	if err == nil {
 		t.Error("expected violation error even in shadow")
 	}

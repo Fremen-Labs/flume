@@ -22,7 +22,6 @@ import { logger } from '@/lib/logger';
 const log = createLogger('pages.QueuePage');
 
 const stages: { id: string; label: string }[] = [
-  { id: 'inbox', label: 'Inbox' },
   { id: 'planned', label: 'Planned' },
   { id: 'ready', label: 'Ready' },
   { id: 'running', label: 'Running' },

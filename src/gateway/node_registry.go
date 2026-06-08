@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,6 +32,21 @@ import (
 //   - AuthToken is NEVER logged, serialized to metrics, or returned in API responses.
 //   - Node IDs are validated against ^[a-z0-9\-]+$ on registration.
 //   - All logging uses the gateway's slog-based structured logger.
+//
+// AUTH IS STRICTLY OPT-IN (direct response to user query on Phase 2):
+// "does this mean that users will need to authenticate with their local Ollama models?
+// If so that seems like a lot of overhead and most people do not do this. It should be
+// optional if this is the case, and allow users to manually setup auth with their
+// Ollama instances within the portal."
+//
+// Yes — it is optional. Default for new and existing nodes is unauthenticated
+// (AuthSecretPath=="", no header ever sent, zero extra work). This preserves the
+// "worked perfectly last night on local only" experience.
+//
+// Users who run protected Ollama set up manually in the portal:
+//   - Store token in OpenBao at a path you control.
+//   - POST /api/nodes (or use portal node add) with "auth_secret_path" field.
+// The rest is automatic + lazy (see resolveAuthTokenIfNeeded + GetNodeAuthToken).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
@@ -55,10 +72,14 @@ type Node struct {
 	Capabilities   NodeCapabilities `json:"capabilities"`
 	Health         NodeHealth       `json:"health"`
 	ConcurrencyCap int              `json:"concurrency_cap"`
-	// AuthToken is resolved from OpenBao at runtime — never persisted to ES or logged.
-	AuthToken string `json:"-"`
-	// AuthSecretPath is the OpenBao path for this node's bearer token.
+	// AuthSecretPath is the OpenBao path for this node's bearer token (opt-in only).
+	// See the package-level AUTH IS STRICTLY OPT-IN comment on why this must
+	// remain manual + optional.
 	AuthSecretPath string `json:"auth_secret_path,omitempty"`
+	// AuthToken is resolved from OpenBao at runtime using AuthSecretPath —
+	// never persisted to ES or logged. In-memory only for the lifetime of the
+	// gateway process (or until next full refresh + re-resolve).
+	AuthToken string `json:"-"`
 }
 
 // NodeCapabilities describes the hardware and model characteristics of a node.
@@ -87,16 +108,20 @@ type NodeRegistry struct {
 	nodes      map[string]*Node
 	esURL      string
 	httpClient *http.Client
+	secrets    *SecretStore // optional; when nil or node has no AuthSecretPath, auth is skipped (opt-in only)
 }
 
 // NewNodeRegistry creates an empty registry wired to Elasticsearch.
-func NewNodeRegistry(esURL string) *NodeRegistry {
+// secrets may be nil (auth load becomes a no-op for all nodes — the normal
+// path for unauthenticated local meshes).
+func NewNodeRegistry(esURL string, secrets *SecretStore) *NodeRegistry {
 	if esURL == "" {
 		esURL = "http://elasticsearch:9200"
 	}
 	return &NodeRegistry{
-		nodes: make(map[string]*Node),
-		esURL: strings.TrimRight(esURL, "/"),
+		nodes:   make(map[string]*Node),
+		esURL:   strings.TrimRight(esURL, "/"),
+		secrets: secrets,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -104,6 +129,69 @@ func NewNodeRegistry(esURL string) *NodeRegistry {
 			},
 		},
 	}
+}
+
+// resolveAuthTokenIfNeeded is the core of Phase 2 opt-in auth completion.
+//
+// It is a no-op (and very fast) unless ALL of:
+//   - node != nil
+//   - node.AuthSecretPath != ""
+//   - node.AuthToken == "" (not already resolved this lifetime)
+//   - r.secrets != nil (registry was constructed with a store)
+//
+// When it does load:
+//   - Calls SecretStore.GetNodeAuthToken (which does the bao HTTP + cache).
+//   - On success, briefly locks only to assign (idempotent re-check inside).
+//   - ALWAYS emits LogAgentReasoning (flume-go SKILL requirement) with
+//     node_id, success, path, etc. This feeds the UI popout + Logloom for
+//     any future "why did my secured node stop working?" debugging.
+//   - Structured log too (but reasoning is the auditable one).
+//
+// This design guarantees:
+//   - Zero overhead / zero bao calls for the default unauthenticated case.
+//   - Manual-only: nothing in wizard/start/portal auto-populates secret_path.
+//   - Graceful: missing secret or bao down → reasoning + warn + continue
+//     with no token (call will be unauthed; user sees the reasoning).
+func (r *NodeRegistry) resolveAuthTokenIfNeeded(ctx context.Context, node *Node) {
+	if node == nil || node.AuthSecretPath == "" || r.secrets == nil {
+		return
+	}
+
+	// Check under RLock to avoid unsynchronized read of AuthToken concurrent with writes.
+	r.mu.RLock()
+	alreadySet := node.AuthToken != ""
+	r.mu.RUnlock()
+	if alreadySet {
+		return
+	}
+
+	token := r.secrets.GetNodeAuthToken(ctx, node.AuthSecretPath)
+	if token != "" {
+		r.mu.Lock()
+		if node.AuthToken == "" { // re-check under lock (cheap)
+			node.AuthToken = token
+		}
+		r.mu.Unlock()
+
+		flumelogger.LogAgentReasoning(ctx, "node-"+node.ID, "node-auth",
+			"Successfully loaded bearer token for secured local Ollama node (opt-in auth path)",
+			"node_id", node.ID,
+			"host", node.Host,
+			"secret_path", node.AuthSecretPath,
+			"success", true,
+		)
+		return
+	}
+
+	// Failure path: still emit reasoning (never silent) so operators know
+	// why a node that "should" be authed is actually talking unauthed.
+	flumelogger.LogAgentReasoning(ctx, "node-"+node.ID, "node-auth",
+		"Failed to load bearer token for node with AuthSecretPath set — falling back to unauthenticated calls for this node. Verify the secret exists in OpenBao and that the path is correct. This is expected if you recently added the node but have not yet created the secret.",
+		"node_id", node.ID,
+		"host", node.Host,
+		"secret_path", node.AuthSecretPath,
+		"success", false,
+	)
 }
 
 // esSetAuth adds ES authentication headers to a request.
@@ -197,6 +285,14 @@ func (r *NodeRegistry) RefreshFromES(ctx context.Context) {
 	r.nodes = newNodes
 	r.mu.Unlock()
 
+	// Phase 2 (opt-in auth): after the map is visible, resolve any nodes that
+	// declared an AuthSecretPath but have no token yet. We do the resolve
+	// *outside* the lock to avoid holding it during potential bao HTTP.
+	// resolve itself only takes the lock briefly on successful assign.
+	for _, n := range newNodes {
+		r.resolveAuthTokenIfNeeded(ctx, n)
+	}
+
 	log.Info("node_registry: refreshed from ES",
 		slog.Int("node_count", len(newNodes)),
 	)
@@ -248,8 +344,34 @@ func (r *NodeRegistry) Count() int {
 // GetNode returns a node by ID, or nil if not found.
 func (r *NodeRegistry) GetNode(id string) *Node {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.nodes[id]
+	n := r.nodes[id]
+	r.mu.RUnlock()
+	if n != nil {
+		// Phase 2: lazy auth resolve on hot path access (GetNode is used by
+		// /test, health, and some routers). Safe because resolve only locks
+		// briefly on set and early-exits for unauthed nodes.
+		r.resolveAuthTokenIfNeeded(context.Background(), n)
+	}
+	return n
+}
+
+// AuthToken returns the auth token for the given node, ensuring any lazy load
+// from AuthSecretPath has occurred (via resolve), and reading the value under
+// the registry's mutex. This prevents data races on the AuthToken field when
+// concurrent goroutines (e.g. ensemble jury members, health probes, routing)
+// may trigger resolves or reads on the same shared *Node from HealthyNodes().
+//
+// Callers that previously did "if registry != nil { registry.resolve...(node) }; use node.AuthToken"
+// can now simply do "tok := registry.AuthToken(node)" (the resolve is included).
+func (r *NodeRegistry) AuthToken(node *Node) string {
+	if node == nil {
+		return ""
+	}
+	r.resolveAuthTokenIfNeeded(context.Background(), node)
+	r.mu.RLock()
+	tok := node.AuthToken
+	r.mu.RUnlock()
+	return tok
 }
 
 // UpdateHealth atomically updates the health state of a node.
@@ -371,6 +493,11 @@ func (r *NodeRegistry) SelectNode(taskType string, minReasoningScore int, requir
 			if strings.Contains(tagLower, "coder") || strings.Contains(tagLower, "code") {
 				modelFit = math.Min(1.0, modelFit*1.2)
 			}
+			// Phase 3: per-role preferred local model bias for planning/intake (fast path target).
+			// Boost strong reasoning/coder models commonly used for high-quality breakdown on local mesh.
+			if strings.Contains(tagLower, "qwen") || strings.Contains(tagLower, "32b") || strings.Contains(tagLower, "72b") {
+				modelFit = math.Min(1.0, modelFit*1.15)
+			}
 		case "review", "test", "fast", "evaluation":
 			// Prefer speed over reasoning power for lightweight analysis roles.
 			modelFit = math.Min(1.0, modelFit*0.8+float64(n.Capabilities.EstimatedTPS)/100.0*0.2)
@@ -446,7 +573,7 @@ func (r *NodeRegistry) UpsertNodeToES(ctx context.Context, node *Node) error {
 		return fmt.Errorf("marshal node: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/%s/_doc/%s", r.esURL, nodeRegistryIndex, node.ID)
+	url := fmt.Sprintf("%s/%s/_doc/%s?refresh=true", r.esURL, nodeRegistryIndex, node.ID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -483,7 +610,7 @@ func (r *NodeRegistry) UpsertNodeToES(ctx context.Context, node *Node) error {
 func (r *NodeRegistry) DeleteNodeFromES(ctx context.Context, nodeID string) error {
 	log := WithContext(ctx)
 
-	url := fmt.Sprintf("%s/%s/_doc/%s", r.esURL, nodeRegistryIndex, nodeID)
+	url := fmt.Sprintf("%s/%s/_doc/%s?refresh=true", r.esURL, nodeRegistryIndex, nodeID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)

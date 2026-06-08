@@ -1093,14 +1093,14 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 				"sum": map[string]interface{}{"field": "output_tokens"},
 			},
 			"by_model": map[string]interface{}{
-				"terms": map[string]interface{}{"field": "model.keyword", "size": 20},
+				"terms": map[string]interface{}{"field": "model", "size": 20},
 				"aggs": map[string]interface{}{
 					"input":  map[string]interface{}{"sum": map[string]interface{}{"field": "input_tokens"}},
 					"output": map[string]interface{}{"sum": map[string]interface{}{"field": "output_tokens"}},
 				},
 			},
 			"by_worker": map[string]interface{}{
-				"terms": map[string]interface{}{"field": "worker_name.keyword", "size": 50},
+				"terms": map[string]interface{}{"field": "worker_name", "size": 50},
 				"aggs": map[string]interface{}{
 					"input":  map[string]interface{}{"sum": map[string]interface{}{"field": "input_tokens"}},
 					"output": map[string]interface{}{"sum": map[string]interface{}{"field": "output_tokens"}},

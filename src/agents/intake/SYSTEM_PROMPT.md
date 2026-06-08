@@ -82,3 +82,11 @@ User wants to understand or document something that already exists → one epic,
 - Leaf tasks should be small and testable.
 
 Now process the user's request using the above Grok-grade standards. Produce the smallest, cleanest, highest-signal plan possible.
+
+## RAG / Structural Context (Elastro + Logloom contract point #3)
+The system will (best-effort, before the LLM call for both local and frontier models) query the `flume-elastro-graph` and `flume-logloom-ast` / enrichment indices using the same executor patterns as the implementer (elastro_query_ast / logloom_ast_query). Compact relevant AST / call-graph / semantic hits are injected as an extra system message immediately after your core instructions.
+
+- Ground every title/objective in *evidenced* files/functions from the RAG output.
+- This replaces "raw context" dumping and is the primary mechanism for token reduction during Plan New Work.
+- If the injected block is present, prefer structures it surfaces; otherwise keep plans minimal/trivial as per rules above.
+- The injection happens in the Go intake planner (api_intake.go) transparently for the JSON contract.

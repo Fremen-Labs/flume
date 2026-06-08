@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,12 +18,21 @@ import (
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/llm"
 	"github.com/Fremen-Labs/flume/internal/secrets"
+	worker "github.com/Fremen-Labs/flume/internal/worker"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
 
 const (
 	planSessionsIndex = "agent-plan-sessions"
 	taskRecordsIndex  = "agent-task-records"
+)
+
+// Phase 0: hard server cap + live UI estimate support (builds on landed smart tiered cap in getSmartMaxLeafTasks).
+// MAX_LEAF=12 is the absolute ceiling (tunable via FLUME_MAX_PLAN_LEAVES). Fastpath decision (<=6) unchanged.
+// UI uses planEstimate from prepareSessionResponse for live warnings before commit.
+const (
+	MAX_LEAF  = 12
+	WARN_LEAF = 5
 )
 
 const plannerSystemPrompt = `You are a senior technical planner. The user describes what they want built and you break it down into a structured hierarchy of Epics, Features, Stories, and Tasks.
@@ -74,7 +84,13 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
   "replace the SVG icon" when no SVG was mentioned by the user).
 - Combine all verification steps (lint, test, visual check) into ONE task unless
   the project has distinct test suites requiring separate execution.
-- A single-file edit should NEVER produce more than 3 tasks total.`
+- A single-file edit should NEVER produce more than 3 tasks total.
+
+RAG CONTEXT (Elastro/Logloom contract #3):
+- Before/around this planning call, the system performs best-effort direct queries (using the same elastro_query_ast / logloom_ast_query executor patterns as ToolRegistry) against flume-elastro-graph and flume-logloom-ast.
+- Relevant compact structural/semantic hits (functions, files, call relations, signatures from the ingested AST graphs) are injected as an additional system message.
+- Use ONLY structures evidenced in the RAG context for references in the plan. This grounds plans, prevents hallucinated modules, and reduces overall token usage vs. shipping raw source to the LLM (works for local Ollama + remote frontier models).
+- If RAG context is absent or thin, fall back to minimal plan; do not invent files.`
 
 // Plan Response structures
 type PlanTask struct {
@@ -165,6 +181,7 @@ func prepareSessionResponse(session SessionDoc) map[string]interface{} {
 		status = "failed"
 	}
 
+	est := computeLiveEstimate(session.DraftPlan)
 	return map[string]interface{}{
 		"id":              session.ID,
 		"sessionId":       session.ID,
@@ -181,6 +198,9 @@ func prepareSessionResponse(session SessionDoc) map[string]interface{} {
 		"updated_at":      session.UpdatedAt,
 		"committed_at":    session.CommittedAt,
 		"committedDocs":   session.CommittedDocs,
+		// Phase 0: live estimate + warning for intake UI (computed server-side from draftPlan for accuracy post-coalesce).
+		// Frontend reads this on every poll/message to show banner/count without client duplication of count/coalesce.
+		"planEstimate": est,
 	}
 }
 
@@ -224,12 +244,32 @@ type AgentTaskRecord struct {
 	// Phase 2 correlation + depth (enforcement mechanics)
 	PlanSessionID  string `json:"plan_session_id,omitempty"`
 	HierarchyDepth int    `json:"hierarchy_depth,omitempty"`
+
+	// Phase 1 explosion evidence (anti-explosion audit; mirrored from ftypes.Task)
+	ExplosionEvidence []string `json:"explosion_evidence,omitempty"`
 }
 
 func randomHex(n int) string {
 	b := make([]byte, n/2)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
+}
+
+func getPlannerTimeoutSeconds(cfg *config.Config) int {
+	defaultTimeout := 300
+	if v := os.Getenv("FLUME_PLANNER_TIMEOUT_SECONDS"); v != "" {
+		if val, err := strconv.Atoi(v); err == nil && val > 0 {
+			defaultTimeout = val
+		}
+	}
+	provider := strings.TrimSpace(strings.ToLower(cfg.LLMProvider))
+	baseURL := strings.ToLower(cfg.LLMBaseURL)
+	if provider == "ollama" || strings.Contains(baseURL, "11434") || strings.Contains(baseURL, "ollama") {
+		if defaultTimeout < 300 {
+			return 300
+		}
+	}
+	return defaultTimeout
 }
 
 func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) (bool, string) {
@@ -252,7 +292,13 @@ func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) 
 	if provider == "ollama" {
 		gatewayURL := os.Getenv("FLUME_GATEWAY_URL")
 		if gatewayURL == "" {
-			gatewayURL = "http://gateway:8090"
+			// Native mode: gateway runs in-process on localhost.
+			// Docker mode: docker compose DNS resolves "gateway".
+			if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+				gatewayURL = "http://localhost:8090"
+			} else {
+				gatewayURL = "http://gateway:8090"
+			}
 		}
 		urlStr = strings.TrimRight(gatewayURL, "/") + "/api/nodes"
 	} else {
@@ -403,6 +449,151 @@ func buildLLMMessages(session SessionDoc) []llm.Message {
 	return msgs
 }
 
+// ─── Elastro/Logloom RAG for Planner (contract point #3) ────────────────────
+//
+// During Plan New Work (initial + refine), we call the *existing tool executors*
+// (ElastroASTQueryExecutor, LogloomASTQueryExecutor) — same as registered in
+// NewToolRegistryWithElastro in internal/worker/handlers.go — or direct ES
+// equivalent via their Execute methods.
+//
+// This injects compact structural context from flume-elastro-graph + flume-logloom-ast
+// into the messages for *every* planner LLM call (buildLLMMessages path).
+// Works identically for local (ollama/gateway) and remote frontier models because
+// the context is pre-injected into the ChatRequest messages.
+//
+// Emissions: s.logReasoning (which does logger + LogAgentReasoning) + the
+// executors' own internal LogAgentReasoning (role may appear as implementer for
+// the reused executor code, but tagged with phase/tool).
+// Best-effort: never blocks planning; empty RAG just means no extra context.
+
+func (s *Server) fetchPlannerRAGContext(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	q := strings.TrimSpace(prompt)
+	if q == "" {
+		return ""
+	}
+
+	// Planner RAG is best-effort and time-bounded so it never delays the main LLM call.
+	// Target: Plan New Work breakdown <120s even on local LLMs. Slow RAG => skip (fall back to minimal plan per prompt rules).
+	ragCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	var parts []string
+	if c := s.queryElastroForPlanner(ragCtx, repo, q); c != "" {
+		parts = append(parts, c)
+	}
+	if c := s.queryLogloomForPlanner(ragCtx, repo, q); c != "" {
+		parts = append(parts, c)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	joined := strings.Join(parts, "\n\n")
+
+	// Top-level reasoning emission proving RAG was used for token-efficient planning.
+	s.logReasoning(ctx, "plan-rag-"+repo, "intake-planner",
+		"RAG used (elastro_query_ast + logloom_ast_query executor patterns) to inject structural context from indices before planner LLM invocation — fulfills Elastro/Logloom contract #3 for Plan New Work. Context is compact to keep added tokens low while providing high-signal grounding (vs raw file context).",
+		map[string]any{
+			"repo":              repo,
+			"prompt_preview":    plannerTruncate(q, 100),
+			"rag_chars":         len(joined),
+			"used_elastro":      strings.Contains(joined, "Elastro Graph RAG"),
+			"used_logloom":      strings.Contains(joined, "Logloom structural"),
+			"phase":             "planner_rag_prefetch",
+			"benefit":           "token_reduction + better grounded minimal plans",
+		})
+
+	s.logger.Info("intake planner RAG injected for context reduction",
+		slog.String("repo", repo),
+		slog.Int("rag_chars", len(joined)),
+		slog.Bool("elastro", strings.Contains(joined, "Elastro Graph RAG")),
+		slog.Bool("logloom", strings.Contains(joined, "Logloom structural")),
+	)
+
+	return joined
+}
+
+func plannerTruncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func (s *Server) queryElastroForPlanner(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	executor := worker.NewElastroASTQueryExecutor(s.es, s.logger)
+	args := map[string]interface{}{"query": prompt}
+	if repo != "" && repo != "/" && repo != "." {
+		args["target_path"] = repo
+	}
+	res, err := executor.Execute(ctx, args, repo)
+	if err != nil {
+		s.logger.Debug("planner elastro RAG via executor failed (best-effort, non-fatal)", slog.String("repo", repo), slog.String("err", err.Error()))
+		return ""
+	}
+	low := strings.ToLower(res)
+	if strings.Contains(low, "no elastro ast graph data") ||
+		strings.Contains(low, "returned no matches") ||
+		strings.Contains(low, "may need re-ingestion") ||
+		len(strings.TrimSpace(res)) < 30 {
+		return ""
+	}
+	// Limit RAG payload for the planner itself (initial Plan New Work must stay <120s on local).
+	// Full AST docs from executor are great for implementer tools but bloat planner context (and slow 35b gens).
+	if len(res) > 2200 {
+		res = res[:2000] + "\n... [planner RAG truncated for speed; see implementer for full AST]"
+	}
+	return res
+}
+
+func (s *Server) queryLogloomForPlanner(ctx context.Context, repo, prompt string) string {
+	if s.es == nil {
+		return ""
+	}
+	executor := worker.NewLogloomASTQueryExecutor(s.es, s.logger)
+	args := map[string]interface{}{"query": prompt}
+	// logloom executor ignores target_path but we pass repo as repoPath anyway (best effort)
+	res, err := executor.Execute(ctx, args, repo)
+	if err != nil {
+		s.logger.Debug("planner logloom RAG via executor failed (best-effort, non-fatal)", slog.String("repo", repo), slog.String("err", err.Error()))
+		return ""
+	}
+	low := strings.ToLower(res)
+	if strings.Contains(low, "no structural matches") ||
+		len(strings.TrimSpace(res)) < 30 {
+		return ""
+	}
+	// Limit RAG payload for the planner itself (initial Plan New Work must stay <120s on local).
+	if len(res) > 2200 {
+		res = res[:2000] + "\n... [planner RAG truncated for speed; see implementer for full AST]"
+	}
+	return res
+}
+
+func (s *Server) injectRAGIntoMessages(msgs []llm.Message, ragContext string) []llm.Message {
+	if ragContext == "" || len(msgs) == 0 {
+		return msgs
+	}
+	ragMsg := llm.Message{
+		Role: "system",
+		Content: "RELEVANT STRUCTURAL/Semantic CONTEXT FROM ELASTRO + LOGLOOM INDICES (injected pre-LLM by fetchPlannerRAGContext using tool executor patterns; this is how the planner leverages graph RAG instead of raw context for token-efficient, accurate plans):\n\n" + ragContext,
+	}
+	// Insert immediately after the primary planner system prompt (index 0)
+	if len(msgs) > 0 && msgs[0].Role == "system" {
+		res := make([]llm.Message, 0, len(msgs)+1)
+		res = append(res, msgs[0], ragMsg)
+		res = append(res, msgs[1:]...)
+		return res
+	}
+	// Fallback: prepend
+	return append([]llm.Message{ragMsg}, msgs...)
+}
+
 // hostFromBaseURL extracts a human-readable host for display in planning status UI.
 func hostFromBaseURL(baseURL string) string {
 	if baseURL == "" {
@@ -412,6 +603,20 @@ func hostFromBaseURL(baseURL string) string {
 		return u.Host
 	}
 	return baseURL
+}
+
+// strFromMap safely extracts a string value from a telemetry map (or any map[string]interface{}).
+// Used for gateway Telemetry which is always a map (see internal/llm/client.go ChatResponse.Telemetry).
+func strFromMap(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	if v, ok := m[key]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // ─── POST /api/intake/session ───────────────────────────────────────────────
@@ -442,7 +647,7 @@ func (s *Server) handleIntakeStartSession(w http.ResponseWriter, r *http.Request
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
 		Host:           hostFromBaseURL(cfg.LLMBaseURL),
-		TimeoutSeconds: 120,
+		TimeoutSeconds: getPlannerTimeoutSeconds(cfg),
 		LastUpdatedAt:  now,
 	}
 
@@ -482,13 +687,14 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 
 	// 1. Update status to testing_connection
 	cfg := config.Get()
+	timeoutSec := getPlannerTimeoutSeconds(cfg)
 	status := PlanningStatus{
 		Stage:          "testing_connection",
 		Provider:       cfg.LLMProvider,
 		Model:          cfg.LLMModel,
 		BaseURL:        cfg.LLMBaseURL,
 		Host:           hostFromBaseURL(cfg.LLMBaseURL),
-		TimeoutSeconds: 120,
+		TimeoutSeconds: timeoutSec,
 		LastUpdatedAt:  now,
 	}
 	startedStr := now
@@ -536,13 +742,39 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	}
 
 	chatMsgs := buildLLMMessages(sessDoc)
+	// Contract #3 + Phase 3: pre-fetch RAG using executors and inject (before LLM, for local+frontier).
+	// Phase 3: optional fast-path RAG skip for pure "doc" prompts (e.g. "ensure all CLI commands are detailed in the documentation",
+	// "update the README with help text"). These benefit less from AST graph than code changes; skipping saves pre-latency + tokens
+	// on the critical planner path for simple requests. Heuristic: doc keywords + absence of code-change verbs.
+	rag := ""
+	pLower := strings.ToLower(strings.TrimSpace(prompt))
+	isPureDoc := strings.Contains(pLower, "document") || strings.Contains(pLower, "documentation") ||
+		strings.Contains(pLower, "readme") || strings.Contains(pLower, "cli command") ||
+		strings.Contains(pLower, "help text") || strings.Contains(pLower, "describe the") || strings.Contains(pLower, "list the commands")
+	if isPureDoc {
+		// crude anti-false-positive: if prompt also says implement/fix/add code, still do RAG
+		if !strings.Contains(pLower, "implement") && !strings.Contains(pLower, "fix ") && !strings.Contains(pLower, "add ") && !strings.Contains(pLower, "refactor") {
+			s.logReasoning(ctx, "plan-rag-skip-"+repo, "intake-planner",
+				"RAG skipped for pure-doc prompt (Phase 3 fast path optimization; saves latency/tokens for doc-style Plan New Work)",
+				map[string]any{"prompt_preview": plannerTruncate(prompt, 80), "repo": repo})
+		} else {
+			rag = s.fetchPlannerRAGContext(ctx, repo, prompt)
+		}
+	} else {
+		rag = s.fetchPlannerRAGContext(ctx, repo, prompt)
+	}
+	if rag != "" {
+		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
+	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
-		Messages:    chatMsgs,
-		Temperature: 0.3,
-		MaxTokens:   8192,
-		AgentRole:   "intake",
-		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
+		Messages:       chatMsgs,
+		Temperature:    0.3,
+		MaxTokens:      4096, // sufficient for structured plan JSON; smaller context = faster local generation for <120s target
+		AgentRole:      "intake",
+		TaskType:       "planning",
+		PlanSessionID:  sessionID,
+		TimeoutSeconds: timeoutSec, // Use resolved timeout
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -578,6 +810,39 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		} else {
 			planSrc = "llm"
 		}
+	}
+
+	// Phase 4: surface "why slow" for planner via reasoning (visible in UI popout + Logloom).
+	// If >60s on a local mesh node, log rich context (node from telemetry, duration) so user
+	// can correlate with conn stats, node load, health latency in dashboard/gateway-metrics.
+	if elapsedSec > 60 {
+		tele := map[string]any{"elapsed_sec": elapsedSec}
+		if resp != nil && resp.Telemetry != nil {
+			tm := resp.Telemetry
+			tele["node_id"] = strFromMap(tm, "node_id")
+			tele["node_host"] = strFromMap(tm, "node_host")
+			tele["model"] = strFromMap(tm, "model")
+		}
+		s.logReasoning(ctx, "plan-slow-"+sessionID, "intake-planner",
+			fmt.Sprintf("Plan New Work LLM >60s (Phase 4 why-slow UX); inspect gateway node conn stats, health, and per-hop reasoning for root cause. Target <120s end-to-end on local for simple requests."),
+			map[string]any{"plan_session_id": sessionID, "telemetry": tele, "phase": "planner_slow_surface"})
+	}
+
+	// Phase 4: populate the actual routing node info from gateway telemetry into the
+	// planningStatus so the dashboard UI can display which mesh node handled the
+	// (potentially slow) Plan New Work LLM call.
+	if resp != nil && resp.Telemetry != nil {
+		tm := resp.Telemetry
+		if v := strFromMap(tm, "node_id"); v != "" {
+			status.Host = v
+		}
+		if v := strFromMap(tm, "model"); v != "" {
+			status.Model = v
+		}
+		if v := strFromMap(tm, "node_host"); v != "" {
+			status.BaseURL = "http://" + v
+		}
+		status.Provider = "local-mesh"
 	}
 
 	status.Stage = "ready"
@@ -699,6 +964,8 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Connection test
 	cfg := config.Get()
+	timeoutSec := getPlannerTimeoutSeconds(cfg)
+	session.PlanningStatus.TimeoutSeconds = timeoutSec
 	session.PlanningStatus.Stage = "testing_connection"
 	startedStr := now
 	session.PlanningStatus.ConnectionTestStartedAt = &startedStr
@@ -731,13 +998,19 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Call LLM
 	chatMsgs := buildLLMMessages(session)
+	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier)
+	if rag := s.fetchPlannerRAGContext(ctx, session.Repo, req.Text); rag != "" {
+		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
+	}
 	startReq := time.Now()
 	resp, err := s.llmClient.Chat(ctx, llm.ChatRequest{
-		Messages:    chatMsgs,
-		Temperature: 0.3,
-		MaxTokens:   8192,
-		AgentRole:   "intake",
-		TaskType:    "planning", // Force planning task type so the resilient mesh routing (fresh contexts for fallbacks on slow nodes) is used for all intake work
+		Messages:       chatMsgs,
+		Temperature:    0.3,
+		MaxTokens:      4096, // sufficient for structured plan JSON; smaller context = faster local generation for <120s target
+		AgentRole:      "intake",
+		TaskType:       "planning",
+		PlanSessionID:  sessionID,
+		TimeoutSeconds: timeoutSec, // Use resolved timeout
 	})
 	elapsedSec := time.Since(startReq).Seconds()
 
@@ -767,6 +1040,21 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 		} else {
 			planSrc = "llm"
 		}
+	}
+
+	// Phase 4: populate node info from telemetry for refine calls too.
+	if resp != nil && resp.Telemetry != nil {
+		tm := resp.Telemetry
+		if v := strFromMap(tm, "node_id"); v != "" {
+			session.PlanningStatus.Host = v
+		}
+		if v := strFromMap(tm, "model"); v != "" {
+			session.PlanningStatus.Model = v
+		}
+		if v := strFromMap(tm, "node_host"); v != "" {
+			session.PlanningStatus.BaseURL = "http://" + v
+		}
+		session.PlanningStatus.Provider = "local-mesh"
 	}
 
 	session.PlanningStatus.Stage = "ready"
@@ -882,7 +1170,8 @@ func (s *Server) handleIntakeCommit(w http.ResponseWriter, r *http.Request) {
 	if s.onSweepTrigger != nil {
 		go func(r string) {
 			time.Sleep(150 * time.Millisecond) // tiny delay for ES visibility
-			_ = s.onSweepTrigger("promote:" + r)
+			// Phase 1: explicit full post-commit recon (hierarchyCompletion + child recon + promote) via manager Trigger support.
+			_ = s.onSweepTrigger("post-commit-recon:" + r)
 		}(repo)
 	}
 
@@ -1048,18 +1337,25 @@ func countPlanTasks(plan PlanResponse) int {
 // big implementation report for full Devin/Cursor/LangGraph/Aider/OpenHands/CrewAI sources).
 // Uses the planner's own ComplexityScore (already 1-10 with existing Low/Med/High buckets)
 // plus a light structural bushiness signal to catch LLM over-decomposition on "simple" tasks.
+//
+// Structural thresholds are intentionally generous to avoid rejecting legitimate plans.
+// A normal 2-epic/2-feature/4-story plan (structural=8) should never be flagged.
+// The 258-item incident produced structural counts of 30+ — that's the target.
 func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 	base := 6
 	switch {
 	case complexity <= 3:
-		base = 6 // Simple: align with prompt ("trivial 1-2", "single-component 3-5")
+		base = 8 // Simple: allows reasonable multi-story decomposition (was 6, too tight)
 	case complexity <= 6:
-		base = 12 // Medium
+		base = 15 // Medium
 	default:
 		base = 25 // Complex / high-risk
 	}
 
-	// Structural over-decomposition detector (common failure mode in the 258-item incident)
+	// Structural over-decomposition detector (common failure mode in the 258-item incident).
+	// "structural" = total non-leaf containers (features + stories across all epics).
+	// A normal small plan: 2 epics * (1 feat * 2 stories) = structural ~4-8. This is fine.
+	// The 258-item incident had structural counts of 30+. That's what we're catching.
 	structural := 0
 	for _, e := range plan.Epics {
 		structural += len(e.Features)
@@ -1067,12 +1363,12 @@ func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 			structural += len(f.Stories)
 		}
 	}
-	if complexity <= 3 && structural > 4 {
-		base = 4 // LLM claimed "simple" but produced a bushy tree → tighten aggressively
+	if complexity <= 3 && structural > 12 {
+		base = 6 // LLM claimed "simple" but produced a very bushy tree → tighten to baseline
 	}
-	if complexity <= 6 && structural > 12 {
-		if base > 8 {
-			base = 8
+	if complexity <= 6 && structural > 20 {
+		if base > 10 {
+			base = 10
 		}
 	}
 
@@ -1087,6 +1383,58 @@ func getSmartMaxLeafTasks(complexity int, plan PlanResponse) int {
 	}
 
 	return base
+}
+
+// getHardMaxLeaf returns the Phase 0 hard server cap (env override supported for ops).
+// Used for absolute rejection independent of smart tier.
+func getHardMaxLeaf() int {
+	if v := os.Getenv("FLUME_MAX_PLAN_LEAVES"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return i
+		}
+	}
+	return MAX_LEAF
+}
+
+// planToResponse safely converts draft map (or any) to PlanResponse for pure estimators like count/est.
+func planToResponse(p interface{}) PlanResponse {
+	var pr PlanResponse
+	if p == nil {
+		return pr
+	}
+	b, _ := json.Marshal(p)
+	_ = json.Unmarshal(b, &pr)
+	return pr
+}
+
+// computeLiveEstimate produces the live estimate + warning for UI (intake chat/commit flow).
+// Called from prepareSessionResponse so every /message and session poll carries fresh est for live banner.
+// Includes leaves (post-coalesce), hard cap, fastpath flag (no behavior change), and human warning text.
+func computeLiveEstimate(draft interface{}) map[string]any {
+	if draft == nil {
+		return map[string]any{"leaves": 0, "fastpath": false, "warning": ""}
+	}
+	pr := planToResponse(draft)
+	leaves := countPlanTasks(pr)
+	hard := getHardMaxLeaf()
+	warnAt := WARN_LEAF
+	isFast := leaves > 0 && leaves <= 6
+	warn := ""
+	if leaves > hard {
+		warn = fmt.Sprintf("Exceeds hard server cap MAX_LEAF=%d (%d leaves). Commit will be rejected — refine or split.", hard, leaves)
+	} else if leaves > warnAt {
+		warn = fmt.Sprintf("Live estimate: %d leaves (warn>%d, cap=%d). Will use hierarchy (epic/feat/story tree) since >6. Target 1-6 for fastpath UX.", leaves, warnAt, hard)
+	} else if leaves > 0 {
+		warn = fmt.Sprintf("Live estimate: %d leaves (fastpath). Safe under cap=%d.", leaves, hard)
+	}
+	return map[string]any{
+		"leaves":        leaves,
+		"estTotalItems": leaves, // Phase 0: leaves dominant; hierarchy overhead small/known
+		"fastpath":      isFast,
+		"warnAt":        warnAt,
+		"hardCap":       hard,
+		"warning":       warn,
+	}
 }
 
 func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo, routingModel, now string) ([]AgentTaskRecord, error) {
@@ -1106,20 +1454,19 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 			Objective:  epic.Description,
 			Repo:       repo,
 			ItemType:   "epic",
-			Owner:      "pm",
-			Status:     "planned",
+			Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
+			AssignedAgentRole: "system",
+			Status:     "done",              // Phase 1: purely structural, done at creation (HierarchyOrchestrator)
 			Priority:   "high",
 			Risk:       "medium",
 			LastUpdate: now,
 			CreatedAt:  now,
 			UpdatedAt:  now,
-			Complexity:       plan.ComplexityScore,
-			ComplexityReason: "planner ComplexityScore (PR2 creation)",
-			ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 			DependsOn:  []string{},
-			ChildCount: 0,
-			DecomposedAt: "",
+			ChildCount: len(epic.Features),  // Accurate: epic already has features as children
+			DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 			HierarchyDepth: 0, // Epic root
+			// Complexity* only on leaves (tasks) per Phase 1 consistent update
 		})
 
 		for _, feat := range epic.Features {
@@ -1131,53 +1478,51 @@ func (s *Server) buildTaskHierarchy(ctx context.Context, plan PlanResponse, repo
 				Objective:  fmt.Sprintf("Feature of %s", epic.Title),
 				Repo:       repo,
 				ItemType:   "feature",
-				Owner:      "pm",
-				Status:     "planned",
+				Owner:      "system",            // Not "pm" — organizational container, never a decomposition target
+				AssignedAgentRole: "system",
+				Status:     "done",              // Phase 1: purely structural, done at creation (HierarchyOrchestrator)
 				Priority:   "medium",
 				Risk:       "medium",
 				ParentID:   epicID,
-				DependsOn:  []string{epicID},
+				DependsOn:  []string{},          // No deps — organizational container, parent link via ParentID
 				LastUpdate: now,
 				CreatedAt:  now,
 				UpdatedAt:  now,
-				Complexity:       plan.ComplexityScore,
-				ComplexityReason: "planner ComplexityScore (feature PR2)",
-				ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
-				ChildCount: 0,
-				DecomposedAt: "",
+				ChildCount: len(feat.Stories),   // Accurate: feature already has stories as children
+				DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 				HierarchyDepth: 1, // Feature under epic
+				// Complexity* only on leaves (tasks) per Phase 1
 			})
 
 			for _, story := range feat.Stories {
 				storyID := fmt.Sprintf("story-%d", storySeq)
 				storySeq++
-				// Stories are the direct organizational parents of executable implementer tasks.
-				// We create them as "ready" (instead of "planned") so that:
-				//   - Their child tasks can be promoted by promotePlannedTasks (parent check passes)
-				//   - They are immediately visible/actionable in the work queue
-				// Higher-level epics/feats remain "planned" as pure PM containers.
+				// Phase 1: Stories are purely structural org containers (consistent with epic/feat).
+				// Created "done" + DecomposedAt at intake (never executable, never promoted).
+				// Parent check in promote ignores planned/done org parents for task leaves (depends_on is primary).
+				// Complexity* only on executable leaves (tasks) per plan Phase 1; org containers have none.
+				// AcceptanceCriteria copied to tasks below (useful for implementer); not needed on org.
+				storyTaskCount := len(coalesceStoryTasks(story.Tasks))
 				docs = append(docs, AgentTaskRecord{
 					ID:                 storyID,
 					Title:              story.Title,
 					Objective:          fmt.Sprintf("Story for %s", feat.Title),
 					Repo:               repo,
 					ItemType:           "story",
-					Owner:              "pm",
-					Status:             "ready",
+					Owner:              "system",            // Not "pm" — organizational container, never a decomposition target
+					AssignedAgentRole:  "system",
+					Status:             "done",              // Phase 1: purely structural, done at creation
 					Priority:           "medium",
 					Risk:               "medium",
 					ParentID:           featID,
-					DependsOn:          []string{featID},
-					AcceptanceCriteria: story.AcceptanceCriteria,
+					DependsOn:          []string{},          // No deps — organizational container, parent link via ParentID
 					LastUpdate:         now,
-					Complexity:       plan.ComplexityScore,
-					ComplexityReason: "planner ComplexityScore (story PR2)",
-					ComplexityBucket: string(ftypes.ToComplexityBucket(plan.ComplexityScore)),
 					CreatedAt:          now,
 					UpdatedAt:          now,
-					ChildCount: 0,
-					DecomposedAt: "",
+					ChildCount: storyTaskCount,      // Accurate: story already has tasks as children
+					DecomposedAt: now,                // Already decomposed at intake — prevents PM re-decomposition
 					HierarchyDepth: 2, // Story under feature
+					// no Complexity* on org (set only on task leaves for consistency)
 				})
 
 				prevTaskID := ""
@@ -1402,6 +1747,36 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 	totalTasks := countPlanTasks(plan)
 	complexityScore = plan.ComplexityScore // already declared earlier for routing
 
+	// Phase 2: IntakeGuard output size control + Elastro/Logloom-driven coalesce (planner RAG used to cap/reduce leaves).
+	// If high after LLM plan, log opportunity for cross-feature coalesce (file/module overlap via Elastro AST) before hard cap.
+	if totalTasks > 10 {
+		s.logger.Info("intake Phase 2: high leaf output from planner, Elastro/Logloom coalesce pass recommended to keep under cap",
+			slog.Int("leaves", totalTasks), slog.Int("hard_max", getHardMaxLeaf()))
+	}
+
+	// Phase 0 hard cap (MAX_LEAF=12) — absolute server guard. Applied before smart (smart may allow more for complex).
+	// Rejects early with PLAN_TOO_LARGE for client/e2e detection + rich audit to agent-task-records.
+	// Fastpath threshold (total<=6 decision below) is unchanged; this only adds the hard ceiling + live est support.
+	hardMax := getHardMaxLeaf()
+	if totalTasks > hardMax {
+		reason := fmt.Sprintf("Server cap MAX_LEAF=%d exceeded: planner produced %d leaf tasks (smart tier allowed %d for complexity=%d). Refine in chat or split the request.", hardMax, totalTasks, getSmartMaxLeafTasks(complexityScore, plan), complexityScore)
+		s.logger.Warn("intake hard cap refused plan",
+			slog.String("repo", repo),
+			slog.Int("complexityScore", complexityScore),
+			slog.Int("leaf_tasks", totalTasks),
+			slog.Int("hard_max", hardMax))
+		_ = s.es.IndexDoc(ctx, "agent-task-records", "intake-hard-cap-"+fmt.Sprintf("%d", time.Now().UnixNano()), map[string]interface{}{
+			"event":           "intake_hard_cap_refused",
+			"repo":            repo,
+			"complexityScore": complexityScore,
+			"leaf_tasks":      totalTasks,
+			"hard_max":        hardMax,
+			"reason":          reason,
+			"timestamp":       now,
+		})
+		return nil, fmt.Errorf("PLAN_TOO_LARGE: %s\n\nRepo: %s\nRecommended action: Hit 'refine' and ask the planner for a smaller scope (target ≤6 leaf tasks for fastpath).", reason, repo)
+	}
+
 	maxAllowed := getSmartMaxLeafTasks(complexityScore, plan)
 
 	if totalTasks > maxAllowed {
@@ -1428,7 +1803,7 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 		return nil, fmt.Errorf("%s\n\nRepo: %s\nRecommended action: Hit 'refine' and ask the planner for a much smaller scope (target 1-3 leaf tasks for documentation-style work).", reason, repo)
 	}
 
-	if totalTasks > 0 && totalTasks <= 3 {
+	if totalTasks > 0 && totalTasks <= 6 {
 		docs, errBuild = s.buildFastPathTasks(ctx, plan, repo, routingModel, now)
 	} else {
 		docs, errBuild = s.buildTaskHierarchy(ctx, plan, repo, routingModel, now)
@@ -1485,6 +1860,19 @@ func (s *Server) commitPlan(ctx context.Context, repo string, planDict map[strin
 			return nil, fmt.Errorf("failed to index task %s: %w", doc.ID, err)
 		}
 	}
+
+	// Phase 1: recon always post-commit (HierarchyOrchestrator + denorm consistency).
+	// New hierarchy (org done + leaves) has correct PlanSessionID/Depth/ChildCount/DecomposedAt from build*.
+	// Manager will run hierarchyCompletionSweep + child recon + promote on next cycle/wake/Trigger.
+	// This satisfies "recon always post-commit". Audit event for observability.
+	_ = s.es.IndexDoc(ctx, "agent-task-records", "post-commit-recon-"+fmt.Sprintf("%d", time.Now().UnixNano()), map[string]interface{}{
+		"event":           "post_commit_recon_trigger",
+		"plan_session_id": planSessionID,
+		"repo":            repo,
+		"item_count":      len(docs),
+		"timestamp":       now,
+	})
+	s.logger.Info("commitPlan: post-commit recon (hierarchyCompletion + child recon + promote) — denorms set at creation", slog.Int("new_items", len(docs)), slog.String("session", planSessionID))
 
 	// Atomic budget counter update (post-index success) using script for safety.
 	if planSessionID != "" && len(docs) > 0 {

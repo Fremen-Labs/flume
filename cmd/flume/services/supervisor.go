@@ -82,6 +82,20 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 	// (dashboard proxies node/routing requests to gateway)
 	time.Sleep(500 * time.Millisecond)
 
+	// Export the gateway URL so LLM clients in workers can reach it.
+	// Without this, the LLM client defaults to "http://gateway:8090" (Docker DNS)
+	// which doesn't resolve in native mode, causing 404s on the legacy fallback path.
+	s.mu.Lock()
+	if s.gatewayAddr != "" {
+		gwURL := "http://localhost" + s.gatewayAddr
+		if s.gatewayAddr[0] != ':' {
+			gwURL = "http://" + s.gatewayAddr
+		}
+		os.Setenv("FLUME_GATEWAY_URL", gwURL)
+		s.logger.Info("exported FLUME_GATEWAY_URL for in-process workers", slog.String("url", gwURL))
+	}
+	s.mu.Unlock()
+
 	// 2. Dashboard
 	wg.Add(1)
 	go func() {

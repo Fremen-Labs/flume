@@ -16,11 +16,12 @@ type MeshConfigYaml struct {
 			Weight   float64 `yaml:"weight"`
 		} `yaml:"cloud_providers"`
 		LocalNodes []struct {
-			ID       string  `yaml:"id"`
-			Host     string  `yaml:"host"`
-			Port     string  `yaml:"port"`
-			Model    string  `yaml:"model"`
-			MemoryGB float64 `yaml:"memory_gb"`
+			ID               string  `yaml:"id"`
+			Host             string  `yaml:"host"`
+			Port             string  `yaml:"port"`
+			Model            string  `yaml:"model"`
+			MemoryGB         float64 `yaml:"memory_gb"`
+			AuthSecretPath   string  `yaml:"auth_secret_path,omitempty"` // Phase 2 opt-in: manual only, for users who secure specific Ollama nodes
 		} `yaml:"local_nodes"`
 	} `yaml:"mesh"`
 	Elastic struct {
@@ -64,11 +65,12 @@ func parseMeshConfig(path string) (orchestrator.EnvConfig, error) {
 
 	for _, ln := range m.Mesh.LocalNodes {
 		envCfg.Nodes = append(envCfg.Nodes, orchestrator.NodeConfigEntry{
-			ID:       ln.ID,
-			Host:     ln.Host,
-			Port:     ln.Port,
-			ModelTag: ln.Model,
-			MemoryGB: ln.MemoryGB,
+			ID:               ln.ID,
+			Host:             ln.Host,
+			Port:             ln.Port,
+			ModelTag:         ln.Model,
+			MemoryGB:         ln.MemoryGB,
+			AuthSecretPath:   ln.AuthSecretPath,
 		})
 	}
 

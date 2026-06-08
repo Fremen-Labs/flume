@@ -78,6 +78,13 @@ func EmbedCredentials(ctx context.Context, repoURL string, repoType string) stri
 
 	token := resolveToken(ctx, repoType)
 	if token == "" {
+		// Critical for workers: this is a common silent failure mode after migration.
+		// Emit structured warning so it appears in agent reasoning popout + Logloom.
+		logger.WithContext(ctx).Warn("EmbedCredentials: no token resolved for remote repo",
+			slog.String("repo_type", repoType),
+			slog.String("repo_url", StripCredentials(repoURL)),
+			slog.String("hint", "Check Settings → Repositories for active PAT, or OPENBAO_TOKEN / flume/keys in OpenBao"),
+		)
 		return repoURL
 	}
 
@@ -104,9 +111,23 @@ func StripCredentials(repoURL string) string {
 
 const delegatedSentinel = "OPENBAO_DELEGATED"
 
-// resolveToken resolves the PAT for a git provider.
-// Priority: OpenBao KV → environment variable fallback.
-// Derived from Python: _resolve_token().
+// resolveToken resolves the PAT for a git provider (github or ado).
+//
+// DESIGN CONTRACT (strictly enforced):
+//   - Elasticsearch (flume-ado-tokens / flume-github-tokens) stores ONLY metadata:
+//       * token IDs, labels, org URLs, activeTokenId pointer
+//       * The "token" field contains only the placeholder OpenbaoMask ("***OPENBAO_DELEGATED***")
+//         or is empty. Raw secrets are NEVER written to ES.
+//   - Real secret values live exclusively in OpenBao (KV-V2 paths under flume/ado_tokens/{id}
+//     or flume/github_tokens/{id}, or the legacy flume/keys bucket).
+//
+// Priority in this function:
+//   1. Structured ES metadata + per-secret OpenBao delegation (via ADOTokenStore / GHTokenStore).
+//      This is the correct, auditable path.
+//   2. Direct OpenBao read of the legacy "flume/keys" bucket (fallback).
+//   3. Environment variables (last resort).
+//
+// This function must never return (or allow to be used) a raw credential value that originated from ES.
 func resolveToken(ctx context.Context, repoType string) string {
 	log := logger.WithContext(ctx)
 
@@ -132,29 +153,45 @@ func resolveToken(ctx context.Context, repoType string) string {
 		}
 	}
 
+	// Note: We deliberately prefer the structured ES + OpenBao delegation path
+	// (via the *TokenStore) because it enforces the "ES holds only references" rule.
+	// The direct flume/keys reads below are legacy fallbacks.
+
 	if repoType == "ado" {
 		if esStore != nil {
 			store := secrets.NewADOTokenStore(esStore, baoClient, log)
 			token := store.GetActiveTokenPlain(ctx)
 			if token != "" {
+				log.Info("resolveToken: successfully obtained ADO token via ES + OpenBao store",
+					slog.String("repo_type", "ado"))
 				return token
 			}
 		}
 		if baoClient != nil {
 			if data, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && data != nil {
 				if t, ok := data["ADO_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					log.Info("resolveToken: successfully obtained ADO token via direct OpenBao flume/keys")
 					return strings.TrimSpace(t)
 				}
 				if t, ok := data["ADO_PERSONAL_ACCESS_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					log.Info("resolveToken: successfully obtained ADO token via direct OpenBao flume/keys")
 					return strings.TrimSpace(t)
 				}
+			} else if err != nil {
+				log.Warn("resolveToken: OpenBao KVGet flume/keys failed for ADO",
+					slog.String("error", err.Error()))
 			}
 		}
 		token := envOr("ADO_TOKEN", envOr("ADO_PERSONAL_ACCESS_TOKEN", ""))
 		if strings.Contains(token, delegatedSentinel) {
 			return ""
 		}
-		return token
+		if token != "" {
+			log.Info("resolveToken: falling back to environment ADO token")
+			return token
+		}
+		log.Warn("resolveToken: no ADO token found from any source (OpenBao, ES, env)")
+		return ""
 	}
 
 	if repoType == "github" {
@@ -162,24 +199,35 @@ func resolveToken(ctx context.Context, repoType string) string {
 			store := secrets.NewGHTokenStore(esStore, baoClient, log)
 			token := store.GetActiveTokenPlain(ctx)
 			if token != "" {
+				log.Info("resolveToken: successfully obtained GitHub token via ES + OpenBao store")
 				return token
 			}
 		}
 		if baoClient != nil {
 			if data, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && data != nil {
 				if t, ok := data["GITHUB_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					log.Info("resolveToken: successfully obtained GitHub token via direct OpenBao flume/keys")
 					return strings.TrimSpace(t)
 				}
 				if t, ok := data["GH_TOKEN"].(string); ok && strings.TrimSpace(t) != "" {
+					log.Info("resolveToken: successfully obtained GitHub token via direct OpenBao flume/keys")
 					return strings.TrimSpace(t)
 				}
+			} else if err != nil {
+				log.Warn("resolveToken: OpenBao KVGet flume/keys failed for GitHub",
+					slog.String("error", err.Error()))
 			}
 		}
 		token := envOr("GH_TOKEN", envOr("GITHUB_TOKEN", ""))
 		if strings.Contains(token, delegatedSentinel) {
 			return ""
 		}
-		return token
+		if token != "" {
+			log.Info("resolveToken: falling back to environment GitHub token")
+			return token
+		}
+		log.Warn("resolveToken: no GitHub token found from any source (OpenBao, ES, env)")
+		return ""
 	}
 
 	return ""

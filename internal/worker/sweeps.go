@@ -2,7 +2,7 @@ package worker
 
 // PR 2 NOTE: Every "status" update in this file now routes through
 // pkg/types DefaultTaskStateMachine.EnforceTransition (shadow mode).
-// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, parentCompletionSweep.
+// See requeueStuck..., promotePlannedTasks, Execute*Sweep, evaluateReviewConsensus, hierarchyCompletionSweep (Phase 1).
 
 import (
 	"context"
@@ -116,11 +116,12 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 		s.mu.Lock()
 	}
 
-	// Parent completion sweep
+	// Phase 1: hierarchy completion sweep (strengthened recursive, evidence clear, always recon after)
 	if now.Sub(s.lastRun["parent_comp"]) >= s.intervals["parent_comp"] {
 		s.lastRun["parent_comp"] = now
 		s.mu.Unlock()
-		s.parentCompletionSweep(ctx)
+		s.hierarchyCompletionSweep(ctx)
+		s.childCountReconciliationSweep(ctx) // recon always post
 		s.mu.Lock()
 	}
 
@@ -164,11 +165,20 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 		"bool": map[string]interface{}{
 			"must": []interface{}{
 				map[string]interface{}{"term": map[string]string{"status": "running"}},
+				// Only target implementer tasks — reviewer/tester stuck tasks are handled
+				// by requeueStuckReviewTasks with the correct reset status.
+				map[string]interface{}{"term": map[string]string{"worker_role": "implementer"}},
 				map[string]interface{}{
 					"range": map[string]interface{}{
 						"claimed_at": map[string]string{"lt": threshold},
 					},
 				},
+			},
+			// Fix 5: Exclude already-decomposed tasks. If decomposed_at is set,
+			// handlePM already completed this task's work. Resurrecting it would
+			// trigger a re-claim → re-decompose cycle (the death spiral).
+			"must_not": []interface{}{
+				map[string]interface{}{"exists": map[string]string{"field": "decomposed_at"}},
 			},
 		},
 	}
@@ -212,7 +222,12 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 	query := map[string]interface{}{
 		"bool": map[string]interface{}{
 			"must": []interface{}{
-				map[string]interface{}{"term": map[string]string{"status": "review"}},
+				// Match both "review" and "running" statuses — reviewer/tester tasks can get
+				// stuck in either state depending on when the crash occurred.
+				map[string]interface{}{"terms": map[string]interface{}{"status": []string{"review", "running"}}},
+				// Only target reviewer/tester roles — implementer stuck tasks are handled
+				// separately by requeueStuckImplementerTasks with the correct reset status.
+				map[string]interface{}{"terms": map[string]interface{}{"worker_role": []string{"reviewer", "tester"}}},
 				map[string]interface{}{
 					"range": map[string]interface{}{
 						"claimed_at": map[string]string{"lt": threshold},
@@ -249,6 +264,94 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 		}
 	}
 	return cleared
+}
+
+// plannedTask is the internal candidate shape for promote (hoisted to package scope for test hook visibility + reliable-go testability).
+// RawHit kept for OCC path only.
+type plannedTask struct {
+	ID                string
+	ParentID          string
+	DependsOn         []string
+	HierarchyDepth    int
+	PlanSessionID     string
+	ItemType          string // Phase 1: for explicit structural org item check (epic/feat/story/owner=system never promoted)
+	Owner             string // Phase 1: "system" marks org containers
+	WorkerRole        string
+	AssignedAgentRole string
+	// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
+	RawHit *es.SearchHit
+}
+
+// HierarchyOrchestrator (Phase 1 skeleton): encapsulates hierarchy semantics decisions.
+// - Structural org items (epic/feat/story or owner=="system") are purely structural, never promoted/executed by workers.
+// - promote for executable leaves (item_type=="task") ignores parent status (only depends + !blocked/archived + depth).
+// - Completion uses strengthened recursive descendant check.
+// Colocated in sweeps for minimal change / small units; Enforce/Log*/ctx/bounded used at call sites.
+// Can be extracted to dedicated type later (e.g. internal/worker/hierarchy.go) as orchestrator core grows.
+type HierarchyOrchestrator struct{}
+
+// IsStructuralOrgItem decides if item is non-executable org container (per design Option A, Phase 1).
+// Used in promote (skip), PM guards (already), completion, etc. Consistent with build* creating "done" + system owner.
+func (h *HierarchyOrchestrator) IsStructuralOrgItem(itemType, owner string) bool {
+	if itemType == "task" {
+		return false
+	}
+	if owner == "system" || itemType == "epic" || itemType == "feature" || itemType == "story" {
+		return true
+	}
+	return false
+}
+
+// DefaultHierarchyOrchestrator for use in sweeps/promote etc.
+var DefaultHierarchyOrchestrator = &HierarchyOrchestrator{}
+
+// canPromoteSiblingsTestHook extracts the pure sibling/parent/depends/depth decision for promotePlannedTasks.
+// Phase 1: now also skips structural org (explicit) + ignores planned parents for tasks (structural only).
+// Enables unit testing of hierarchy sibling promotion (Phase 0/1) without full ES (reliable-go: testable small units, table tests).
+// Returns (okToPromote, skipReason). The Enforce + update is separate (OCC etc).
+func canPromoteSiblingsTestHook(pt plannedTask, statusCache map[string]string) (bool, string) {
+	// Skip PM tasks - they remain planned so they can be claimed by the PM worker
+	role := pt.WorkerRole
+	if role == "" {
+		role = pt.AssignedAgentRole
+	}
+	if role == "" {
+		role = pt.Owner
+	}
+	if role == "pm" {
+		return false, "pm_task"
+	}
+
+	// Phase 1: explicit structural org skip (epics etc created "done" at intake; never executable).
+	if DefaultHierarchyOrchestrator.IsStructuralOrgItem(pt.ItemType, pt.Owner) {
+		return false, "structural_org_item"
+	}
+	if pt.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
+		return false, "depth_exceeded"
+	}
+	if pt.ParentID != "" {
+		pstatus := statusCache[pt.ParentID]
+		// Phase 1: for task leaves, ignore "planned" parent status (org containers are structural, stay done/planned in some paths).
+		// Only block on definitively inactive (empty, blocked, archived).
+		if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+			return false, "parent_inactive"
+		}
+	}
+	dependsOnMet := true
+	for _, depID := range pt.DependsOn {
+		if depID == "" {
+			continue
+		}
+		dstatus := statusCache[depID]
+		if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
+			dependsOnMet = false
+			break
+		}
+	}
+	if !dependsOnMet {
+		return false, "dep_unmet"
+	}
+	return true, ""
 }
 
 // promotePlannedTasks moves planned tasks to ready when dependencies (parent + depends_on) are met.
@@ -295,34 +398,33 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	// Collect needed parent + depends IDs for batch resolution (resilience for large/complex plans)
 	neededIDs := make(map[string]bool)
-	type plannedTask struct {
-		ID             string
-		ParentID       string
-		DependsOn      []string
-		HierarchyDepth int
-		PlanSessionID  string
-		// RawHit for OCC retry resilience (captured from search with seq_no_primary_term)
-		RawHit *es.SearchHit
-	}
 	var candidates []plannedTask
 
 	for i, hit := range result.Hits {
 		var t struct {
-			ID             string   `json:"id"`
-			ParentID       string   `json:"parent_id"`
-			DependsOn      []string `json:"depends_on"`
-			HierarchyDepth int      `json:"hierarchy_depth"`
-			PlanSessionID  string   `json:"plan_session_id"`
+			ID                string   `json:"id"`
+			ParentID          string   `json:"parent_id"`
+			DependsOn         []string `json:"depends_on"`
+			HierarchyDepth    int      `json:"hierarchy_depth"`
+			PlanSessionID     string   `json:"plan_session_id"`
+			ItemType          string   `json:"item_type"`
+			Owner             string   `json:"owner"`
+			WorkerRole        string   `json:"worker_role"`
+			AssignedAgentRole string   `json:"assigned_agent_role"`
 		}
 		if json.Unmarshal(hit, &t) != nil {
 			continue
 		}
 		pt := plannedTask{
-			ID:             t.ID,
-			ParentID:       t.ParentID,
-			DependsOn:      t.DependsOn,
-			HierarchyDepth: t.HierarchyDepth,
-			PlanSessionID:  t.PlanSessionID,
+			ID:                t.ID,
+			ParentID:          t.ParentID,
+			DependsOn:         t.DependsOn,
+			HierarchyDepth:    t.HierarchyDepth,
+			PlanSessionID:     t.PlanSessionID,
+			ItemType:          t.ItemType,
+			Owner:             t.Owner,
+			WorkerRole:        t.WorkerRole,
+			AssignedAgentRole: t.AssignedAgentRole,
 		}
 		if i < len(result.RawHits) {
 			pt.RawHit = &result.RawHits[i]
@@ -384,9 +486,8 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 
 	promoted := 0
 	for _, task := range candidates {
-		// === Phase 2 DEPTH ENFORCEMENT in promotePlannedTasks ===
-		// Skip (with rich LogAgentReasoning for UI/Logloom) any task whose depth already exceeds MAX.
-		// This prevents promotion of deeply nested items created by runaway PM decomp.
+		// Use extracted pure hook for depth/parent/depends (enables unit test of hierarchy siblings promotion).
+		// Depth still gets rich Log* on skip (kept for obs).
 		if task.HierarchyDepth > ftypes.MAX_HIERARCHY_DEPTH {
 			reason := fmt.Sprintf("promote blocked: hierarchy_depth=%d exceeds MAX_HIERARCHY_DEPTH=%d (anti-nesting explosion guard)", task.HierarchyDepth, ftypes.MAX_HIERARCHY_DEPTH)
 			flumelogger.LogAgentReasoning(ctx, task.ID, "system", reason, map[string]any{
@@ -398,58 +499,44 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 				slog.String("task_id", task.ID),
 				slog.Int("depth", task.HierarchyDepth),
 				slog.Int("max", ftypes.MAX_HIERARCHY_DEPTH))
+			// Phase 1: set explosion_evidence on path (for "all paths" + audit)
+			ev := []string{fmt.Sprintf("depth_exceeded:%d>%d", task.HierarchyDepth, ftypes.MAX_HIERARCHY_DEPTH)}
+			_ = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{"explosion_evidence": ev, "updated_at": time.Now().UTC().Format(time.RFC3339)})
 			continue
 		}
 
-		// Parent check (using cache)
-		//
-		// FIX for Hierarchy promotion deadlock (P0 from flume-queue-planning-reliability):
-		// Intake (buildTaskHierarchy) creates stories/feats/epics with status="planned".
-		// Previously we skipped *any* child whose parent was still "planned".
-		// This meant that in any story with 2+ tasks, only the first sibling (pre-created "ready")
-		// would ever run. All subsequent siblings stayed "planned" forever even after depends_on met.
-		//
-		// We now only block promotion when the parent is in a definitively bad terminal state.
-		// "planned" parents are normal for organizational hierarchy items created by Plan New Work.
-		// The depends_on check (below) is the primary ordering mechanism for siblings.
-		if task.ParentID != "" {
-			pstatus := statusCache[task.ParentID]
-			if pstatus == "" || pstatus == string(ftypes.TaskStatusBlocked) || pstatus == string(ftypes.TaskStatusArchived) {
+		ok, skipReason := canPromoteSiblingsTestHook(task, statusCache)
+		if !ok {
+			// Phase 1: structural skip (new explicit)
+			if skipReason == "structural_org_item" {
+				s.logger.Debug("promote skip (structural org item - never executable)",
+					slog.String("task_id", task.ID), slog.String("item_type", task.ItemType), slog.String("owner", task.Owner))
+				continue
+			}
+			// Preserve prior debug logs for parent/dep cases (for ops continuity)
+			if skipReason == "parent_inactive" {
+				pstatus := statusCache[task.ParentID]
 				s.logger.Debug("promote skip (parent inactive)",
 					slog.String("task_id", task.ID),
 					slog.String("parent_id", task.ParentID),
 					slog.String("parent_status", pstatus),
 					slog.String("repo", repoFilter))
-				continue
+			} else if skipReason == "dep_unmet" {
+				// (log would require re-walking; debug only on first fail in original, keep simple)
+				s.logger.Debug("promote skip (dep unmet)", slog.String("task_id", task.ID), slog.String("reason", skipReason))
 			}
-		}
-
-		// DependsOn sibling deps check (full logic; old ComputeReadyForRepo omitted this — bug)
-		dependsOnMet := true
-		for _, depID := range task.DependsOn {
-			if depID == "" {
-				continue
-			}
-			dstatus := statusCache[depID]
-			if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
-				dependsOnMet = false
-				s.logger.Debug("promote skip (dep unmet)",
-					slog.String("task_id", task.ID),
-					slog.String("dep_id", depID),
-					slog.String("dep_status", dstatus))
-				break
-			}
-		}
-		if !dependsOnMet {
 			continue
 		}
 
 		// PR2 Enforcer (central TaskStateMachine from PR2)
-		_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
+		if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
 			ftypes.TaskStatusPlanned,
 			ftypes.TaskStatusReady,
 			s.logger.Warn,
-		)
+		); enforceErr != nil {
+			// Phase 0: instrument every violation to ES/metrics via logger (feeds audit, Logloom, violation rate).
+			flumelogger.LogTaskStateViolation(ctx, task.ID, string(ftypes.TaskStatusPlanned), string(ftypes.TaskStatusReady), enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode, map[string]any{"plan_session_id": task.PlanSessionID, "depth": task.HierarchyDepth})
+		}
 
 		// Resilient update (PR3): prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -508,14 +595,47 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 		return
 	}
 
+	// Fix 4: PM circuit-breaker error messages that indicate INTENTIONAL blocks.
+	// These tasks were deliberately blocked by handlePM and should NOT be auto-recovered
+	// by the resume sweep. The logs showed task-3 being blocked by PM budget at 22:55:04
+	// and unblocked by resume sweep at 22:55:05 — ONE SECOND later — feeding the death spiral.
+	pmBlockPatterns := []string{
+		"PM decomp blocked",
+		"PM failed to produce",
+		"plan budget",
+		"PM decomposition refused",
+		"depth limit exceeded",
+		"blocked_to_prevent_storm",
+		"blocked_pre_llm_budget",
+		"blocked_exact_budget",
+	}
+
 	for _, hit := range result.Hits {
 		var task struct {
-			ID           string `json:"id"`
-			ErrorMessage string `json:"error_message"`
-			Attempts     int    `json:"attempts"`
-			MaxAttempts  int    `json:"max_attempts"`
+			ID                string `json:"id"`
+			ErrorMessage      string `json:"error_message"`
+			Attempts          int    `json:"attempts"`
+			MaxAttempts       int    `json:"max_attempts"`
+			WorkerRole        string `json:"worker_role"`
+			AssignedAgentRole string `json:"assigned_agent_role"`
+			Owner             string `json:"owner"`
 		}
 		if json.Unmarshal(hit, &task) != nil {
+			continue
+		}
+
+		// Skip PM-blocked tasks — these were intentionally blocked by circuit breakers
+		isPMBlock := false
+		for _, pattern := range pmBlockPatterns {
+			if strings.Contains(task.ErrorMessage, pattern) {
+				isPMBlock = true
+				break
+			}
+		}
+		if isPMBlock {
+			s.logger.Debug("resume sweep: skipping PM-blocked task (intentional circuit breaker)",
+				slog.String("task_id", task.ID),
+				slog.String("error_message", task.ErrorMessage))
 			continue
 		}
 
@@ -525,15 +645,32 @@ func (s *Sweeper) ExecuteResumeSweep(ctx context.Context) {
 			maxAttempts = 3
 		}
 		if task.Attempts < maxAttempts {
+			role := task.WorkerRole
+			if role == "" {
+				role = task.AssignedAgentRole
+			}
+			if role == "" {
+				role = task.Owner
+			}
+
+			status := "ready"
+			switch role {
+			case "pm":
+				status = "planned"
+			case "reviewer", "tester":
+				status = "review"
+			}
+
 			update := map[string]interface{}{
-				"status":        "ready",
+				"status":        status,
 				"error_message": "",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
 			_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", ftypes.TaskStatus(update["status"].(string)), s.logger.Warn)
-	if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
+			if err := s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update); err == nil {
 				s.logger.Info("resume sweep: recovered blocked task",
-					slog.String("task_id", task.ID))
+					slog.String("task_id", task.ID),
+					slog.String("target_status", status))
 			}
 		}
 	}
@@ -612,7 +749,7 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 		childQuery := map[string]interface{}{
 			"bool": map[string]interface{}{
 				"must": []interface{}{
-					map[string]interface{}{"term": map[string]string{"parent_id": task.ID}},
+					map[string]interface{}{"term": map[string]string{"parent_id.keyword": task.ID}},
 					map[string]interface{}{"terms": map[string]interface{}{"worker_role": []string{"reviewer", "tester"}}},
 				},
 			},
@@ -677,14 +814,38 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 					{Role: "system", Content: consensusSystemPrompt},
 					{Role: "user", Content: fmt.Sprintf("Parent Task: %s\n%s", task.Title, explanation.String())},
 				},
-				Model:     task.Model,
-				Provider:  task.Provider,
-				AgentRole: "critic",
-				TaskID:    task.ID,
+				Model:      task.Model,
+				Provider:   task.Provider,
+				AgentRole:  "critic",
+				TaskID:     task.ID,
+				WorkerName: "critic",
 			}
-			resp, chatErr := s.llm.Chat(ctx, req)
+			// Wire streaming for the critic synthesis too, so partial reasoning from the
+			// consensus LLM is emitted (for observability), and mesh node is visible.
+			streamCh, chatErr := s.llm.ChatStream(ctx, req)
 			if chatErr == nil {
-				explanation.WriteString(fmt.Sprintf("\nConsensus Critic Synthesis:\n%s", resp.Content))
+				var synth string
+				for ch := range streamCh {
+					if ch.Error != "" {
+						break
+					}
+					if ch.DeltaContent != "" {
+						synth += ch.DeltaContent
+						// Emit as system-level reasoning (not per-task agent, but useful for logs/Logloom)
+						flumelogger.LogAgentReasoning(ctx, task.ID, "critic", ch.DeltaContent, map[string]any{
+							"phase": "consensus_stream", "partial": true,
+						})
+					}
+					if ch.Done {
+						if synth == "" && ch.DeltaContent != "" {
+							synth = ch.DeltaContent
+						}
+						break
+					}
+				}
+				if synth != "" {
+					explanation.WriteString(fmt.Sprintf("\nConsensus Critic Synthesis:\n%s", synth))
+				}
 			}
 		}
 
@@ -771,7 +932,13 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 	}
 }
 
-func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
+func (s *Sweeper) hierarchyCompletionSweep(ctx context.Context) {
+	// Phase 1: strengthened 2-pass recursive hierarchyCompletionSweep (core of PR1).
+	// Uses full descendants (getAllDescendants, bounded) not just direct children, so deep trees
+	// (epic->...->task) correctly mark all org levels done only when *all* leaves terminal.
+	// Clears explosion_evidence on success. Always followed by child recon.
+	// Replaces/strengthens parentCompletionSweep.
+	//
 	// FIX for Hierarchy promotion deadlock (P0):
 	// Previously this only considered top-level items (no parent_id) that were *already*
 	// in active states (running/ready/review-consensus). Intake-created epics/feats/stories
@@ -779,8 +946,9 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 	//
 	// We now do two passes:
 	// 1. Original top-level active parents (kept for compatibility).
-	// 2. General pass: any item that has children where *all* direct children are terminal
-	//    (done or archived) gets marked done. This walks the full epic→feat→story→task tree.
+	// 2. General pass: any non-terminal item that has descendants where *ALL* (recursive) are terminal
+	//    (done or archived) gets marked done + evidence cleared. Structural org + leaves covered.
+
 
 	// Pass 1: Original top-level logic (items with no parent_id already in active states)
 	{
@@ -807,11 +975,11 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 		}
 	}
 
-	// Pass 2: General hierarchy completion — any parent whose direct children are all terminal
-	// This catches epics (no parent_id but start "planned"), feats, and stories created by intake.
+	// Pass 2: General hierarchy completion — any parent whose *all recursive descendants* are terminal.
+	// Phase 1 strengthened: uses getAllDescendants (bounded iterative) so deep org trees mark correctly.
+	// This catches epics (no parent_id but start "planned"/"done"), feats, and stories created by intake.
 	{
-		// Find candidates that have at least one child (we'll check their status inside the helper)
-		// To keep it simple and correct we scan a broader set of non-terminal parents.
+		// Find candidates that are non-terminal.
 		query := map[string]interface{}{
 			"bool": map[string]interface{}{
 				"must_not": []interface{}{
@@ -833,24 +1001,51 @@ func (s *Sweeper) parentCompletionSweep(ctx context.Context) {
 				continue
 			}
 
-			// Only consider items that actually have children
+			// Phase 1: check has descendants (use cheap direct child probe first)
 			childQuery := map[string]interface{}{
-				"term": map[string]string{"parent_id": potentialParent.ID},
+				"term": map[string]string{"parent_id.keyword": potentialParent.ID},
 			}
 			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQuery, 1)
 			if cerr != nil || len(childRes.Hits) == 0 {
 				continue
 			}
 
-			s.tryMarkParentDoneIfAllChildrenTerminal(ctx, potentialParent)
+			// Use full recursive for terminal check (strengthened)
+			desc := s.getAllDescendants(ctx, potentialParent.ID)
+			if len(desc) == 0 {
+				continue
+			}
+			allTerminal := true
+			for _, d := range desc {
+				if d.Status != ftypes.TaskStatusDone && d.Status != ftypes.TaskStatusArchived {
+					allTerminal = false
+					break
+				}
+			}
+			if allTerminal {
+				s.logger.Info("hierarchyCompletionSweep: marking parent done — all descendants terminal",
+					slog.String("parent_id", potentialParent.ID),
+					slog.String("title", potentialParent.Title),
+					slog.String("item_type", potentialParent.ItemType),
+					slog.Int("descendant_count", len(desc)))
+
+				update := map[string]interface{}{
+					"status":             string(ftypes.TaskStatusDone),
+					"completed_at":       time.Now().UTC().Format(time.RFC3339),
+					"updated_at":         time.Now().UTC().Format(time.RFC3339),
+					"explosion_evidence": nil, // clear on hierarchy success
+				}
+				_ = s.es.UpdateDoc(ctx, "agent-task-records", potentialParent.ID, update)
+				flumelogger.LogAgentReasoning(ctx, potentialParent.ID, "sweeper", "hierarchy parent marked done (all descendants terminal; evidence cleared per HierarchyOrchestrator)", map[string]any{"plan_session_id": potentialParent.PlanSessionID, "desc_count": len(desc)})
+			}
 		}
 	}
 }
 
-// tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by parentCompletionSweep.
+// tryMarkParentDoneIfAllChildrenTerminal is the shared helper used by hierarchyCompletionSweep (Pass 1 legacy path).
 func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, parent ftypes.Task) {
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": parent.ID},
+		"term": map[string]string{"parent_id.keyword": parent.ID},
 	}
 
 	childRes, err := s.es.Search(ctx, "agent-task-records", childQuery, 100)
@@ -873,18 +1068,54 @@ func (s *Sweeper) tryMarkParentDoneIfAllChildrenTerminal(ctx context.Context, pa
 	}
 
 	if hasChildren && allChildrenDone {
-		s.logger.Info("parentCompletionSweep: marking parent done — all children terminal",
+		s.logger.Info("hierarchyCompletionSweep: marking parent done — all children terminal",
 			slog.String("parent_id", parent.ID),
 			slog.String("title", parent.Title),
 			slog.String("item_type", parent.ItemType))
 
 		update := map[string]interface{}{
-			"status":       string(ftypes.TaskStatusDone),
-			"completed_at": time.Now().UTC().Format(time.RFC3339),
-			"updated_at":   time.Now().UTC().Format(time.RFC3339),
+			"status":             string(ftypes.TaskStatusDone),
+			"completed_at":       time.Now().UTC().Format(time.RFC3339),
+			"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			"explosion_evidence": nil, // Phase 1: clear on successful terminal (hierarchy complete)
 		}
 		_ = s.es.UpdateDoc(ctx, "agent-task-records", parent.ID, update)
+		// rich reasoning
+		flumelogger.LogAgentReasoning(ctx, parent.ID, "sweeper", "parent marked done (all direct children terminal; evidence cleared per HierarchyOrchestrator)", map[string]any{"item_type": parent.ItemType})
 	}
+}
+
+// getAllDescendants (Phase 1, bounded): iterative BFS collect full subtree (not just direct children).
+// Prevents deep hierarchy from having parents marked done prematurely if grandchildren not terminal.
+// Bounded by MAX_HIERARCHY_DEPTH to satisfy reliable-go (no unbounded recursion/loops).
+func (s *Sweeper) getAllDescendants(ctx context.Context, rootID string) []ftypes.Task {
+	var all []ftypes.Task
+	seen := map[string]bool{rootID: true}
+	queue := []string{rootID}
+	depth := 0
+	for len(queue) > 0 && depth < ftypes.MAX_HIERARCHY_DEPTH+2 {
+		next := []string{}
+		for _, pid := range queue {
+			q := map[string]interface{}{"term": map[string]string{"parent_id.keyword": pid}}
+			res, err := s.es.Search(ctx, "agent-task-records", q, 200)
+			if err != nil {
+				continue
+			}
+			for _, h := range res.Hits {
+				var c ftypes.Task
+				if json.Unmarshal(h, &c) == nil {
+					if !seen[c.ID] {
+						seen[c.ID] = true
+						all = append(all, c)
+						next = append(next, c.ID)
+					}
+				}
+			}
+		}
+		queue = next
+		depth++
+	}
+	return all
 }
 
 // childCountReconciliationSweep (Phase 2 task 3): periodically recomputes true child_count
@@ -921,7 +1152,7 @@ func (s *Sweeper) childCountReconciliationSweep(ctx context.Context) {
 		}
 		if json.Unmarshal(hit, &parent) == nil && parent.ID != "" {
 			// Compute authoritative live count
-			childQ := map[string]interface{}{"term": map[string]string{"parent_id": parent.ID}}
+			childQ := map[string]interface{}{"term": map[string]string{"parent_id.keyword": parent.ID}}
 			childRes, cerr := s.es.Search(ctx, "agent-task-records", childQ, 1000)
 			if cerr != nil {
 				continue

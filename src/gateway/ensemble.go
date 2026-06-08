@@ -173,7 +173,11 @@ func (s *Server) ExecuteEnsemble(ctx context.Context, req *ChatRequest, withTool
 					slog.String("host", node.Host),
 				)
 				Metrics.RecordNodeRequest(node.ID, cloneReq.Model)
-				resp, err = s.router.RouteToNode(gCtx, cloneReq, nodeURL, node.AuthToken, withTools)
+				authTok := ""
+				if s.nodeRegistry != nil {
+					authTok = s.nodeRegistry.AuthToken(node) // safe read + lazy resolve (Phase 2/4)
+				}
+				resp, err = s.router.RouteToNode(gCtx, cloneReq, nodeURL, authTok, withTools)
 			} else {
 				// ── Legacy path: single Ollama with temperature diversity ──
 				resp, err = s.router.Route(gCtx, cloneReq, withTools)

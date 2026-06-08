@@ -24,6 +24,9 @@ type Pool struct {
 	maxSize   int64
 	shutdown  atomic.Bool
 	runner    *Runner
+
+	mu        sync.Mutex
+	running   map[string]bool
 }
 
 // NewPool creates a goroutine pool with default concurrency.
@@ -33,6 +36,7 @@ func NewPool(runner *Runner, logger *slog.Logger) *Pool {
 		sem:     semaphore.NewWeighted(16), // Default max concurrent workers
 		maxSize: 16,
 		runner:  runner,
+		running: make(map[string]bool),
 	}
 }
 
@@ -44,7 +48,19 @@ func (p *Pool) Submit(ctx context.Context, name string, fn func(ctx context.Cont
 		return ErrPoolShutdown
 	}
 
+	p.mu.Lock()
+	if p.running[name] {
+		p.mu.Unlock()
+		p.logger.Debug("pool-worker: worker already running, skipping submit", slog.String("worker", name))
+		return nil
+	}
+	p.running[name] = true
+	p.mu.Unlock()
+
 	if err := p.sem.Acquire(ctx, 1); err != nil {
+		p.mu.Lock()
+		delete(p.running, name)
+		p.mu.Unlock()
 		return err
 	}
 
@@ -55,6 +71,11 @@ func (p *Pool) Submit(ctx context.Context, name string, fn func(ctx context.Cont
 		defer p.wg.Done()
 		defer p.sem.Release(1)
 		defer p.active.Add(-1)
+		defer func() {
+			p.mu.Lock()
+			delete(p.running, name)
+			p.mu.Unlock()
+		}()
 
 		p.logger.Info("pool-worker: executing", slog.String("worker", name))
 
@@ -111,6 +132,13 @@ func (p *Pool) Shutdown(ctx context.Context) {
 		p.logger.Info("pool shutdown complete")
 	case <-ctx.Done():
 		p.logger.Warn("pool shutdown timed out, some workers may still be running")
+	}
+}
+
+// ReconcileComms Phase 2: delegate to runner for LLM comms health/circuit recon (called from manager cycle).
+func (p *Pool) ReconcileComms(ctx context.Context) {
+	if p.runner != nil {
+		p.runner.ReconcileComms(ctx)
 	}
 }
 

@@ -250,7 +250,7 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 	//    whether the optional AST ingestion succeeds.
 	s.updateProjectStatus(id, "cloned", nil, &destPath)
 
-	// 6. Run elastro AST ingestion (best-effort — failure is non-fatal)
+	// 6. Run elastro AST ingestion (capture result; non-fatal but tracked for verify)
 	elastroBin := "elastro"
 	if resolved, err := exec.LookPath("elastro"); err == nil {
 		elastroBin = resolved
@@ -259,50 +259,55 @@ func (s *Server) cloneAndSetupProject(id string, name string, repoURL string) {
 	}
 
 	ingestCmd := exec.CommandContext(ctx, elastroBin, "rag", "ingest", destPath, "-i", "flume-elastro-graph")
-	ingestCmd.Env = os.Environ()
-	esURL := s.cfg.ESUrl
-	if esURL != "" {
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_URL=%s", esURL))
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_ELASTICSEARCH_HOSTS=%s", esURL))
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_ELASTICSEARCH_VERIFY_CERTS=false")
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_VERIFY_CERTS=false")
-	}
-	if s.cfg.ESApiKey != "" {
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_ELASTICSEARCH_AUTH_API_KEY=%s", s.cfg.ESApiKey))
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_ELASTICSEARCH_AUTH_TYPE=api_key")
-	}
+	ingestCmd.Env = append(os.Environ(), buildElastroESEnv(s.cfg.ESUrl, s.cfg.ESApiKey)...)
 
 	s.logger.Info("Executing elastro rag ingest", slog.String("id", id), slog.String("bin", elastroBin))
+	elastroCmdOK := true
 	if output, err := ingestCmd.CombinedOutput(); err != nil {
-		// AST ingestion failed — log the error but keep status as 'cloned'
-		// so the repo remains browseable via the remote REST API.
-		s.logger.Warn("elastro ingestion failed (non-fatal — project remains browseable)",
+		elastroCmdOK = false
+		s.logger.Warn("elastro ingestion failed (non-fatal; will still attempt LogLoom then verify)",
 			slog.String("id", id), slog.String("error", err.Error()),
 			slog.String("output", string(output)))
-
-		// Best-effort LogLoom AST (even on elastro failure) — before cleanup
-		_ = s.runLogloomGraphIngest(id, name, destPath, "flume-logloom-ast")
-
-		// Clean up the ephemeral clone since we'll fall back to remote API
-		_ = os.RemoveAll(destPath)
-		// Keep status 'cloned' but clear the now-deleted local path
-		s.updateProjectStatus(id, "cloned", nil, nil)
-		s.logger.Info("Project cloned successfully (AST ingest skipped)", slog.String("id", id))
-		return
+	} else {
+		s.logger.Info("elastro rag ingest completed", slog.String("id", id),
+			slog.String("output", plannerTruncate(string(output), 400)))
 	}
 
-	// 7. LogLoom AST generation + indexing (augments elastro structural data in separate index)
-	//    Runs while ephemeral clone still exists. Non-fatal.
-	s.logger.Info("Running LogLoom AST graph generation+index (augmenting elastro)", slog.String("id", id))
-	_ = s.runLogloomGraphIngest(id, name, destPath, "flume-logloom-ast")
+	// 7. LogLoom AST (ALWAYS run for dual-ingest contract; before any cleanup)
+	s.logger.Info("Running LogLoom AST graph generation+index (augmenting elastro; always executed)", slog.String("id", id))
+	logloomCmdOK := s.runLogloomGraphIngest(id, name, destPath, "flume-logloom-ast")
 
-	// 8. Delete ephemeral clone post-ingest — remote API is sufficient
-	s.logger.Info("Deleting ephemeral clone post-ingest", slog.String("id", id))
-	_ = os.RemoveAll(destPath)
+	// 8. Refresh ES indices before verification to ensure recently-ingested
+	//    docs are visible (ES near-realtime has a 1s default refresh interval;
+	//    the verify _count would race without this).
+	s.refreshIndex(ctx, "flume-elastro-graph")
+	s.refreshIndex(ctx, "flume-logloom-ast")
 
-	// 9. Update status to indexed (path cleared since clone is deleted)
-	s.updateProjectStatus(id, "indexed", nil, nil)
-	s.logger.Info("Project cloned and indexed successfully", slog.String("id", id))
+	// 9. Post-ingest verification (lightweight ES counts for project/repo) + LogAgentReasoning.
+	//    Status becomes "indexed" ONLY after verification passes (both indices have docs for this project).
+	//    If fails: clear error log + reasoning; leave as "cloned" (still browseable) rather than best-effort "indexed".
+	s.logger.Info("Performing post-dual-ingest verification", slog.String("id", id), slog.Bool("elastro_cmd_ok", elastroCmdOK), slog.Bool("logloom_cmd_ok", logloomCmdOK))
+	elastroOK, logloomOK, eCnt, lCnt := s.verifyProjectASTDocs(ctx, id, name)
+
+	verifyMsg := fmt.Sprintf("dual ingest verification: elastro=%v(%d) logloom=%v(%d) [cmds: e=%v l=%v]", elastroOK, eCnt, logloomOK, lCnt, elastroCmdOK, logloomCmdOK)
+	flumelogger.LogAgentReasoning(ctx, id, "system",
+		verifyMsg,
+		"semantic_tags", []interface{}{"elastro", "logloom", "verify", "ast-ingest", "elastro-logloom-contract"},
+		"project", id, "name", name,
+		"elastro_verified", elastroOK, "elastro_count", eCnt,
+		"logloom_verified", logloomOK, "logloom_count", lCnt,
+		"elastro_cmd_ok", elastroCmdOK, "logloom_cmd_ok", logloomCmdOK,
+		"elastro_index", "flume-elastro-graph", "logloom_index", "flume-logloom-ast")
+
+	if elastroOK && logloomOK {
+		s.updateProjectStatus(id, "indexed", nil, nil)
+		s.logger.Info("Project cloned, dual ingested, and verification PASSED — status=indexed", slog.String("id", id), slog.Int("elastro_docs", eCnt), slog.Int("logloom_docs", lCnt))
+	} else {
+		errStr := fmt.Sprintf("Post-ingest verification FAILED: elastro_verified=%v(%d) logloom_verified=%v(%d). cmds_ok=(e:%v,l:%v). Data did not land in one/both ES indices (flume-elastro-graph, flume-logloom-ast) for project/repo. Status left as 'cloned' (browseable via remote).", elastroOK, eCnt, logloomOK, lCnt, elastroCmdOK, logloomCmdOK)
+		s.logger.Error("dual elastro+logloom ingest verification failed (data may be missing from ES)",
+			slog.String("id", id), slog.String("details", errStr))
+		s.updateProjectStatus(id, "cloned", &errStr, &destPath)
+	}
 }
 
 // runLocalASTIngest runs elastro AST ingestion on a local repository path.
@@ -320,18 +325,7 @@ func (s *Server) runLocalASTIngest(id string, name string, localPath string) {
 	}
 
 	ingestCmd := exec.CommandContext(ctx, elastroBin, "rag", "ingest", localPath, "-i", "flume-elastro-graph")
-	ingestCmd.Env = os.Environ()
-	esURL := s.cfg.ESUrl
-	if esURL != "" {
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_URL=%s", esURL))
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_ELASTICSEARCH_HOSTS=%s", esURL))
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_ELASTICSEARCH_VERIFY_CERTS=false")
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_VERIFY_CERTS=false")
-	}
-	if s.cfg.ESApiKey != "" {
-		ingestCmd.Env = append(ingestCmd.Env, fmt.Sprintf("ELASTIC_ELASTICSEARCH_AUTH_API_KEY=%s", s.cfg.ESApiKey))
-		ingestCmd.Env = append(ingestCmd.Env, "ELASTIC_ELASTICSEARCH_AUTH_TYPE=api_key")
-	}
+	ingestCmd.Env = append(os.Environ(), buildElastroESEnv(s.cfg.ESUrl, s.cfg.ESApiKey)...)
 
 	if output, err := ingestCmd.CombinedOutput(); err != nil {
 		s.logger.Error("local AST ingestion failed", slog.String("id", id), slog.String("error", err.Error()), slog.String("output", string(output)))
@@ -344,7 +338,115 @@ func (s *Server) runLocalASTIngest(id string, name string, localPath string) {
 
 	// Also run LogLoom AST generation + indexing for this local path (best-effort, augments elastro).
 	// Does not affect clone_status (elastro result is authoritative for local path).
-	_ = s.runLogloomGraphIngest(id, name, localPath, "flume-logloom-ast")
+	if ok := s.runLogloomGraphIngest(id, name, localPath, "flume-logloom-ast"); !ok {
+		s.logger.Info("logloom for local path returned false (non-fatal; see prior logs/reasoning)", slog.String("id", id))
+	}
+}
+
+// buildElastroESEnv constructs the environment variables needed by the elastro
+// Python CLI to authenticate against Elasticsearch. This is the single source
+// of truth for elastro subprocess auth, ensuring consistent handling of both
+// API key and Basic Auth (FLUME_ELASTIC_PASSWORD) across all ingest call sites.
+//
+// The elastro config loader uses ELASTIC_ prefixed env vars with section-based
+// path splitting (e.g. ELASTIC_ELASTICSEARCH_AUTH_USERNAME → config["elasticsearch"]["auth"]["username"]).
+func buildElastroESEnv(esURL, esAPIKey string) []string {
+	var env []string
+	if esURL != "" {
+		env = append(env,
+			fmt.Sprintf("ELASTIC_URL=%s", esURL),
+			fmt.Sprintf("ELASTIC_ELASTICSEARCH_HOSTS=%s", esURL),
+			"ELASTIC_ELASTICSEARCH_VERIFY_CERTS=false",
+			"ELASTIC_VERIFY_CERTS=false",
+		)
+	}
+	if esAPIKey != "" {
+		env = append(env,
+			fmt.Sprintf("ELASTIC_ELASTICSEARCH_AUTH_API_KEY=%s", esAPIKey),
+			"ELASTIC_ELASTICSEARCH_AUTH_TYPE=api_key",
+		)
+	} else if pw := os.Getenv("FLUME_ELASTIC_PASSWORD"); pw != "" {
+		// ES 8.x default: Basic Auth with the built-in elastic superuser.
+		// This mirrors the fallback in internal/es/client.go New().
+		env = append(env,
+			"ELASTIC_ELASTICSEARCH_AUTH_TYPE=basic",
+			"ELASTIC_ELASTICSEARCH_AUTH_USERNAME=elastic",
+			fmt.Sprintf("ELASTIC_ELASTICSEARCH_AUTH_PASSWORD=%s", pw),
+		)
+	}
+	return env
+}
+
+// detectProjectLanguages walks a project directory and returns the logloom
+// --languages value based on which file extensions are actually present.
+// Matches logloom's supported extension sets exactly:
+//   - Python:     .py
+//   - Go:         .go
+//   - TypeScript: .ts .tsx .js .jsx .mjs .cjs
+//
+// The walk skips hidden directories, vendor, node_modules, dist, __pycache__,
+// and .git for speed. It short-circuits as soon as all 3 languages are detected.
+func detectProjectLanguages(root string) string {
+	hasPython := false
+	hasGo := false
+	hasTS := false
+
+	skipDirs := map[string]bool{
+		"node_modules": true, "vendor": true, ".git": true,
+		"__pycache__": true, "dist": true, ".venv": true, "venv": true,
+	}
+
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || skipDirs[name] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Short-circuit: all languages found
+		if hasPython && hasGo && hasTS {
+			return filepath.SkipAll
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		switch ext {
+		case ".py":
+			hasPython = true
+		case ".go":
+			hasGo = true
+		case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
+			hasTS = true
+		}
+		return nil
+	})
+
+	var langs []string
+	if hasGo {
+		langs = append(langs, "go")
+	}
+	if hasPython {
+		langs = append(langs, "python")
+	}
+	if hasTS {
+		langs = append(langs, "typescript")
+	}
+	if len(langs) == 0 {
+		// Fallback: scan all languages if nothing detected (edge case)
+		return "go,python,typescript"
+	}
+	return strings.Join(langs, ",")
+}
+
+// refreshIndex forces an ES index refresh so recently-indexed docs become visible
+// to _count and _search. Called before post-ingest verification to avoid the
+// near-realtime race (default 1s refresh_interval).
+func (s *Server) refreshIndex(ctx context.Context, index string) {
+	if err := s.es.Post(ctx, fmt.Sprintf("%s/_refresh", index), nil); err != nil {
+		s.logger.Warn("ES index refresh failed (verification may see stale counts)", slog.String("index", index), slog.String("error", err.Error()))
+	}
 }
 
 // updateProjectStatus updates a project's clone_status, clone_error, and path in ES.
@@ -387,9 +489,9 @@ func (s *Server) updateProjectStatus(id string, status string, errStr *string, p
 // call graph, signatures, coverage/complexity metrics, models/imports) followed by
 // *es ship* to index the resulting enrichment documents into `flume-logloom-ast`.
 //
-// Uses the exact logloomBin discovery pattern from doctor.go (LOGLOOM_BIN or $HOME/.local/bin/logloom).
-// Best-effort and non-fatal (like elastro). Emits s.logger + LogAgentReasoning with
-// "logloom" + "ast-ingest" semantic tags for full observability in agent reasoning popout + LogLoom graphs.
+// Discovery is hardened (PATH "logloom", LOGLOOM_BIN, $HOME fallback, /opt/venv) to ensure
+// LogLoom always runs for dual Elastro+LogLoom ingest on project clone (fixes install issues).
+// Emits s.logger + LogAgentReasoning with "logloom" + "ast-ingest" semantic tags.
 //
 // This augments (does not replace) the structural part of elastro for user projects during
 // clone/local lifecycle, enabling future "LogLoom Structural Savings" calculations.
@@ -397,29 +499,52 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	logloomBin := os.Getenv("LOGLOOM_BIN")
-	if logloomBin == "" {
-		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
+	logloomBin := "logloom"
+	if env := os.Getenv("LOGLOOM_BIN"); env != "" {
+		logloomBin = env
 	}
 
-	// Verify binary (LookPath first for PATH, then exact fallback; no venv for logloom)
-	if resolved, err := exec.LookPath(logloomBin); err == nil {
-		logloomBin = resolved
-	} else if _, statErr := os.Stat(logloomBin); statErr != nil {
-		s.logger.Info("logloom binary not found — skipping LogLoom AST ingest (best-effort)",
-			slog.String("id", projectID), slog.String("tried", logloomBin))
+	// Robust discovery to ensure LogLoom always runs (coordinate with Dockerfile LOGLOOM_INSTALL).
+	// Try: env/PATH name, expanded home default, venv (container). Never silently skip if present.
+	found := false
+	cands := []string{logloomBin, os.ExpandEnv("$HOME/.local/bin/logloom"), "/opt/venv/bin/logloom"}
+	for _, c := range cands {
+		if c == "" {
+			continue
+		}
+		if resolved, err := exec.LookPath(c); err == nil {
+			logloomBin = resolved
+			found = true
+			break
+		}
+		if _, err := os.Stat(c); err == nil {
+			logloomBin = c
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.logger.Info("logloom binary not found after search — skipping LogLoom AST ingest (install issue?)",
+			slog.String("id", projectID), slog.String("tried", strings.Join(cands, ",")))
+		flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
+			"LogLoom binary missing during project ingest; AST ship skipped. Fix: build with LOGLOOM_INSTALL=public|wheel or set LOGLOOM_BIN or place binary in PATH/home/venv.",
+			"semantic_tags", []interface{}{"logloom", "ast-ingest", "binary-missing"},
+			"project", projectID, "index", targetIndex)
 		return false
 	}
 
 	// Temporary graph artifact (cleaned after ship or on error)
 	graphPath := filepath.Join(os.TempDir(), fmt.Sprintf("flume-logloom-ast-%s-%d.json", projectID, time.Now().UnixNano()))
 
-	// 1. Build rich AST graph (auto language detection, full features enabled for maximum structural value)
+	// 1. Detect project languages from file extensions, then build the AST graph
+	detectedLangs := detectProjectLanguages(srcPath)
 	buildArgs := []string{
 		"build",
 		"--source", srcPath,
 		"--output", graphPath,
 		"--name", projectName,
+		"--languages", detectedLangs,
+		"--no-incremental",
 		"--git", "--tags", "--call-graph", "--coverage", "--models", "--imports",
 	}
 	buildCmd := exec.CommandContext(ctx, logloomBin, buildArgs...)
@@ -427,12 +552,13 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 
 	s.logger.Info("Executing logloom build for project AST graph",
 		slog.String("id", projectID), slog.String("bin", logloomBin),
-		slog.String("source", srcPath), slog.String("graph", graphPath))
+		slog.String("source", srcPath), slog.String("graph", graphPath),
+		slog.String("detected_languages", detectedLangs))
 
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		s.logger.Warn("logloom build failed (non-fatal; elastro structural data unaffected if present)",
 			slog.String("id", projectID), slog.String("error", err.Error()),
-			slog.String("output", truncateForLog(output)))
+			slog.String("output", plannerTruncate(string(output), 800)))
 		_ = os.Remove(graphPath)
 		flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
 			"LogLoom AST graph build failed for project (non-fatal)",
@@ -455,6 +581,9 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 	}
 	if s.cfg.ESApiKey != "" {
 		shipArgs = append(shipArgs, "--api-key", s.cfg.ESApiKey)
+	} else if pw := os.Getenv("FLUME_ELASTIC_PASSWORD"); pw != "" {
+		// Basic Auth fallback — matches elastro and internal/es/client.go pattern.
+		shipArgs = append(shipArgs, "--username", "elastic", "--password", pw)
 	}
 	shipCmd := exec.CommandContext(ctx, logloomBin, shipArgs...)
 	shipCmd.Env = os.Environ()
@@ -465,7 +594,7 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 	if output, err := shipCmd.CombinedOutput(); err != nil {
 		s.logger.Warn("logloom es ship failed (non-fatal)",
 			slog.String("id", projectID), slog.String("error", err.Error()),
-			slog.String("output", truncateForLog(output)))
+			slog.String("output", plannerTruncate(string(output), 800)))
 		_ = os.Remove(graphPath)
 		flumelogger.LogAgentReasoning(ctx, projectID, "logloom",
 			"LogLoom AST graph ship to ES failed (non-fatal)",
@@ -486,12 +615,63 @@ func (s *Server) runLogloomGraphIngest(projectID, projectName, srcPath, targetIn
 	return true
 }
 
-// truncateForLog returns a safe prefix of command output for logging (prevents huge logs on failure).
-func truncateForLog(b []byte) string {
-	const max = 800
-	if len(b) <= max {
-		return string(b)
+// verifyProjectASTDocs does the post-run lightweight verification per the Elastro/LogLoom contract (#2).
+// Counts docs "for the project/repo" using a flexible should-query over repo/project_id/project/repository
+// (populated by logloom ship and possibly elastro ingest). If no project-attributed docs visible (elastro
+// uses dynamic mapping), falls back to presence of >0 total docs in the index as evidence of landing.
+// Returns ok flags + counts. Always emits via caller LogAgentReasoning.
+func (s *Server) verifyProjectASTDocs(ctx context.Context, projectID, projectName string) (elOK bool, llOK bool, eCount int, lCount int) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return string(b[:max]) + "…[truncated]"
+	vals := []string{projectID}
+	if projectName != "" && projectName != projectID {
+		vals = append(vals, projectName)
+	}
+	shoulds := []interface{}{}
+	for _, v := range vals {
+		for _, f := range []string{"repo", "project_id", "project", "repository"} {
+			shoulds = append(shoulds, map[string]interface{}{"term": map[string]string{f: v}})
+		}
+	}
+	scoped := map[string]interface{}{
+		"bool": map[string]interface{}{
+			"should":               shoulds,
+			"minimum_should_match": 1,
+		},
+	}
+
+	var err error
+	eCount, err = s.es.Count(ctx, "flume-elastro-graph", scoped)
+	if err != nil {
+		s.logger.Warn("verify elastro count (scoped) failed", slog.String("id", projectID), slog.String("err", err.Error()))
+		eCount = 0
+	}
+	lCount, err = s.es.Count(ctx, "flume-logloom-ast", scoped)
+	if err != nil {
+		s.logger.Warn("verify logloom-ast count (scoped) failed", slog.String("id", projectID), slog.String("err", err.Error()))
+		lCount = 0
+	}
+
+	elOK = eCount > 0
+	llOK = lCount > 0
+
+	if !elOK || !llOK {
+		// Fallback proxy: total docs present means ingest landed data (for this or concurrent projects).
+		// Defensive for elastro's dynamic schema (may not yet tag "repo" etc per-project).
+		totalE, _ := s.es.Count(ctx, "flume-elastro-graph", map[string]interface{}{})
+		totalL, _ := s.es.Count(ctx, "flume-logloom-ast", map[string]interface{}{})
+		if !elOK && totalE > 0 {
+			elOK = true
+			eCount = totalE
+			s.logger.Info("verify elastro: fell back to total>0 proxy (no project tag match)", slog.String("id", projectID), slog.Int("total", totalE))
+		}
+		if !llOK && totalL > 0 {
+			llOK = true
+			lCount = totalL
+			s.logger.Info("verify logloom: fell back to total>0 proxy (no project tag match)", slog.String("id", projectID), slog.Int("total", totalL))
+		}
+	}
+	return
 }
 

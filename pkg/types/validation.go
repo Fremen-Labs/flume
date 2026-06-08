@@ -35,7 +35,7 @@ func ValidateTransition(current, target TaskStatus) error {
 		return nil // no change requested
 	}
 	if current == "" {
-		current = TaskStatusInbox
+		current = TaskStatusPlanned // inbox collapsed into planned
 	}
 	if current == target {
 		return nil // self-transition is always valid

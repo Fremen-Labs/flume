@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	crypto_rand "crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -49,6 +52,12 @@ type Server struct {
 	skills *skills.SkillRegistry
 	// nodeRegistry manages the distributed Ollama node mesh.
 	nodeRegistry *NodeRegistry
+	// secrets holds the OpenBao client for lazy node auth token loading (Phase 2 opt-in).
+	// May be nil in some test paths; handleAddNode guards on it.
+	secrets *SecretStore
+	// connMgr is the Phase 1 per-node connection manager for local Ollama (reuse, HTTP2 attempt).
+	// Owned here for lifecycle, stats (Phase 4), and health integration. Passed to ProviderRouter.
+	connMgr *NodeConnManager
 	// planPMRateLimiter (Phase 2 task 4): basic in-memory fixed-window guard (3/min per plan for role=pm).
 	// Integrated early in dispatch before expensive work. Clean for Redis upgrade later.
 	planPMRateLimiter *PlanPMRateLimiter
@@ -80,7 +89,10 @@ func globalMaxConcurrent() int {
 
 // NewServer creates a fully wired gateway server.
 func NewServer(config *Config, secrets *SecretStore) *Server {
-	router := NewProviderRouter(config, secrets)
+	// Phase 1 completion + Phase 4 prep: Server explicitly owns the NodeConnManager (reliable-go: no hidden globals).
+	// Passed down to ProviderRouter (and available for health, metrics, lifecycle).
+	connMgr := NewNodeConnManager()
+	router := NewProviderRouter(config, secrets, connMgr)
 	// Detect Ollama capacity and create adaptive semaphore
 	ollamaURL := config.GetOllamaBaseURL()
 	maxConcurrent := DetectOllamaCapacity(ollamaURL)
@@ -92,6 +104,8 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		globalSem: make(chan struct{}, globalMaxConcurrent()),
 		frontierQ:           NewFrontierQueue(FrontierMaxConcurrentFromEnv()),
 		planPMRateLimiter:   NewPlanPMRateLimiter(3), // 3 PM decomp attempts per plan per minute (tunable)
+		secrets:             secrets,
+		connMgr:             connMgr,
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -123,7 +137,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		Addr:         addr,
 		Handler:      s,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second, // long writes for streaming responses
+		WriteTimeout: 1200 * time.Second, // long writes for streaming responses (extended to 20m to match agent loop and deep reasoning timeouts)
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -281,16 +295,25 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	ctx := ContextWithLogger(r.Context(), log)
 
 	// === Phase 2 per-plan-pm rate limiter (early, before any frontier or mesh calls) ===
-	// Keyed on plan_session_id + role=="pm". 3 attempts/min default. Rich log on hit.
-	// Returns 429 for callers (worker LLM path treats as transient failure + backoff).
+	// Keyed on plan_session_id + role=="pm". 3 attempts/min default.
+	// Always emit rich decision log (plan_id, current_count, cap, backoff, decision)
+	// for observability + agent reasoning trails. Includes jitter on deny.
 	if s.planPMRateLimiter != nil {
-		if allowed, reason := s.planPMRateLimiter.Allow(req.PlanSessionID, req.AgentRole); !allowed {
-			log.Warn("per-plan-pm rate limit hit",
-				slog.String("plan_session_id", req.PlanSessionID),
-				slog.String("agent_role", req.AgentRole),
-				slog.String("reason", reason),
-				slog.String("request_id", requestID),
-			)
+		allowed, reason, currentCount, suggestedBackoff := s.planPMRateLimiter.Allow(req.PlanSessionID, req.AgentRole)
+
+		// Rich decision log on every call (allow or deny) — highest-leverage observability win from monitoring.
+		log.Info("per-plan-pm rate limit decision",
+			slog.String("plan_session_id", req.PlanSessionID),
+			slog.String("agent_role", req.AgentRole),
+			slog.Bool("allowed", allowed),
+			slog.String("reason", reason),
+			slog.Int("current_count", currentCount),
+			slog.Int("cap", 3), // matches NewPlanPMRateLimiter default
+			slog.Duration("suggested_backoff", suggestedBackoff),
+			slog.String("request_id", requestID),
+		)
+
+		if !allowed {
 			// Graceful degradation: 429 tells worker to back off (existing decomp failure path handles it)
 			s.writeError(w, http.StatusTooManyRequests, "rate limit: too many PM decompositions for this plan; backing off", requestID)
 			return
@@ -298,14 +321,22 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 	}
 
 	// Apply request-level timeout if provided by the client
+	// For long-running agent roles (pm, implementer), be generous by default.
+	baseTimeout := 300 * time.Second
+	if req.AgentRole == "pm" || req.AgentRole == "implementer" {
+		baseTimeout = 1200 * time.Second // 20 minutes for deep thinking + tool use on local models
+	}
+
 	if timeoutStr := r.Header.Get("X-Timeout-Seconds"); timeoutStr != "" {
 		var timeoutSecs int
 		if _, err := fmt.Sscanf(timeoutStr, "%d", &timeoutSecs); err == nil && timeoutSecs > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
-			defer cancel()
+			baseTimeout = time.Duration(timeoutSecs) * time.Second
 		}
 	}
+
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, baseTimeout)
+	defer cancel()
 
 	s.config.Refresh(ctx)
 
@@ -313,6 +344,15 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		slog.Int("messages", len(req.Messages)),
 		slog.Int("tools", len(req.Tools)),
 	)
+
+	// === Tier 1 observability: surface when code-intel tools are missing for roles that benefit ===
+	// This makes the "tools:0" gap from monitoring visible in logs until full server-side injection lands.
+	if (req.AgentRole == "pm" || req.AgentRole == "reviewer" || req.AgentRole == "implementer" || req.AgentRole == "tester") && len(req.Tools) == 0 {
+		log.Warn("code-intel tools missing for role that should use them (elastro_query_ast + logloom_ast_query recommended)",
+			slog.String("agent_role", req.AgentRole),
+			slog.String("request_id", requestID),
+		)
+	}
 
 	// Resolve model/provider before choosing code path.
 	model, provider, _ := s.config.ResolveModel(&req)
@@ -338,7 +378,86 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		defer s.ollamaSem.Release()
 	}
 
-	// ── Route to the correct execution path ─────────────────────────────
+	// ── Streaming path (Phase 0 foundations) ────────────────────────────
+	// Opt-in via ChatRequest.Stream or headers. For the initial rollout we only
+	// support the direct router.Route path (no ensemble/multi-router yet — see plan).
+	// This is the critical change that lets long Ollama generations (especially
+	// PM + thinking models) keep the connection alive and emit reasoning deltas.
+	if wantsStream(&req, r.Header) && !withTools {
+		// For now, force the simple direct Ollama path when streaming.
+		// Ensemble and mesh routing will be added in Phase 4.
+		chunkCh := make(chan ChatStreamChunk, 32)
+		workerName := r.Header.Get("X-Worker-Name")
+
+		go func() {
+			defer close(chunkCh)
+
+			// Replicate the routing decision from the non-stream path so that
+			// mesh nodes (multiRouter) and ensemble are still used for streaming
+			// requests. This ensures "agents making calls to the ollama nodes in the mesh"
+			// continue to be logged and telemetry (node_id/host) is attached.
+			// Phase 0 still emits a single terminal chunk; incremental deltas come later.
+			taskType := req.TaskType
+			if taskType == "" {
+				taskType = agentRoleToTaskType(req.AgentRole)
+			}
+			isComplexTask := taskType == "planning" || taskType == "pm" || taskType == "reasoning"
+
+			var resp *ChatResponse
+			var routeErr error
+			if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 && isComplexTask {
+				resp, routeErr = s.ExecuteEnsemble(ctx, &req, withTools)
+			} else if s.multiRouter != nil && s.nodeRegistry != nil {
+				resp, routeErr = s.multiRouter.ExecuteSmartRoute(ctx, &req, taskType, withTools)
+			} else if provider == ProviderOllama && s.config.EnsembleEnabled && s.config.EnsembleSize > 1 {
+				resp, routeErr = s.ExecuteEnsemble(ctx, &req, withTools)
+			} else {
+				resp, routeErr = s.router.Route(ctx, &req, withTools)
+			}
+
+			if routeErr != nil {
+				chunkCh <- ChatStreamChunk{
+					Error: routeErr.Error(),
+					Done:  true,
+				}
+				return
+			}
+
+			// Record worker tokens and persist telemetry for streaming path
+			if workerName != "" {
+				Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+				
+				workerRole := req.AgentRole
+				if workerRole == "" {
+					workerRole = agentRoleToTaskType(req.AgentRole)
+				}
+				if workerRole == "" {
+					workerRole = "unknown"
+				}
+				go s.persistTokenTelemetry(workerName, workerRole, string(provider), model, resp.Usage)
+			}
+
+			// Emit the final aggregated result as the terminal chunk for Phase 0.
+			// In later phases we will refactor to true incremental chunk production
+			// from the Ollama NDJSON + ThinkMill stream (so partial reasoning is visible live).
+			chunkCh <- ChatStreamChunk{
+				DeltaContent: resp.Message.Content,
+				Thoughts:     resp.Message.Thoughts,
+				ToolCalls:    resp.Message.ToolCalls,
+				Usage:        resp.Usage,
+				Telemetry:    resp.Telemetry,
+				Done:         true,
+			}
+		}()
+
+		s.writeStreamingChat(w, ctx, requestID, chunkCh)
+		// Record as success for now (the chunk itself carries any routeErr).
+		// Full error classification for streaming can be enhanced later.
+		Metrics.RecordRequest(string(provider), true, time.Since(start))
+		return
+	}
+
+	// ── Route to the correct execution path (non-streaming, unchanged) ────
 	var resp *ChatResponse
 	var err error
 
@@ -383,9 +502,28 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		slog.Float64("duration_ms", msElapsed(start)),
 	)
 
+	// Rich tool usage context for observability (supports Item 3 goal of visible tool reasoning).
+	if withTools || len(resp.Message.ToolCalls) > 0 {
+		log.Info("tool usage context",
+			slog.String("agent_role", req.AgentRole),
+			slog.Int("tools_in_request", len(req.Tools)),
+			slog.Int("tool_calls_returned", len(resp.Message.ToolCalls)),
+			slog.String("request_id", requestID),
+		)
+	}
+
 	workerName := r.Header.Get("X-Worker-Name")
 	if workerName != "" {
 		Metrics.RecordWorkerTokensBatch(workerName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		
+		workerRole := req.AgentRole
+		if workerRole == "" {
+			workerRole = agentRoleToTaskType(req.AgentRole)
+		}
+		if workerRole == "" {
+			workerRole = "unknown"
+		}
+		go s.persistTokenTelemetry(workerName, workerRole, string(provider), model, resp.Usage)
 	}
 
 	s.writeJSON(w, http.StatusOK, resp)
@@ -516,6 +654,78 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message, requestI
 	})
 }
 
+// wantsStream returns true if the request opts into incremental NDJSON streaming.
+// Supports the existing ChatRequest.Stream field plus common header signals
+// for robustness during the rollout.
+func wantsStream(req *ChatRequest, h http.Header) bool {
+	if req != nil && req.Stream {
+		return true
+	}
+	if h.Get("Accept") == "application/x-ndjson" {
+		return true
+	}
+	if h.Get("X-Stream") == "true" {
+		return true
+	}
+	return false
+}
+
+// writeStreamingChat writes ChatStreamChunk values as NDJSON (one object per line)
+// and flushes after each write so the client sees data as soon as it is produced
+// by the Ollama stream + ThinkMill.
+//
+// This is the core of restoring real-time agent reasoning visibility.
+// The caller is responsible for closing the channel when the generation is complete
+// (or on error). Context cancellation aborts writing.
+func (s *Server) writeStreamingChat(w http.ResponseWriter, ctx context.Context, requestID string, chunkCh <-chan ChatStreamChunk) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+
+	enc := json.NewEncoder(w)
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Best-effort terminal error chunk on cancellation
+			_ = enc.Encode(ChatStreamChunk{
+				RequestID: requestID,
+				Error:     "stream cancelled by client or gateway",
+				Done:      true,
+			})
+			if canFlush {
+				flusher.Flush()
+			}
+			return
+
+		case ch, ok := <-chunkCh:
+			if !ok {
+				// Channel closed without an explicit done chunk — emit one
+				_ = enc.Encode(ChatStreamChunk{RequestID: requestID, Done: true})
+				if canFlush {
+					flusher.Flush()
+				}
+				return
+			}
+
+			ch.RequestID = requestID // ensure correlation
+			if err := enc.Encode(ch); err != nil {
+				Log().Error("streaming write failed", slog.String("error", err.Error()), slog.String("request_id", requestID))
+				return
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+
+			if ch.Done || ch.Error != "" {
+				return
+			}
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Startup
 // ─────────────────────────────────────────────────────────────────────────────
@@ -554,7 +764,7 @@ func StartGateway(addr string) error {
 	if esURL == "" {
 		esURL = "http://elasticsearch:9200"
 	}
-	server.nodeRegistry = NewNodeRegistry(esURL)
+	server.nodeRegistry = NewNodeRegistry(esURL, secrets)
 
 	// Ensure the node registry ES index exists.
 	if err := server.nodeRegistry.EnsureIndex(ctx); err != nil {
@@ -568,6 +778,16 @@ func StartGateway(addr string) error {
 	nodeCount := server.nodeRegistry.Count()
 	log.Info("node mesh initialized",
 		slog.Int("registered_nodes", nodeCount),
+	)
+
+	// Log configured embedding model (critical for RAG / code intelligence paths).
+	// Default is nomic-embed-text; can be overridden with FLUME_OLLAMA_EMBED_MODEL.
+	embedModel := os.Getenv("FLUME_OLLAMA_EMBED_MODEL")
+	if embedModel == "" {
+		embedModel = "nomic-embed-text (default)"
+	}
+	log.Info("embedding model configured",
+		slog.String("ollama_embed_model", embedModel),
 	)
 
 	// Start background health checker.
@@ -689,11 +909,18 @@ func (s *Server) handleGatewayMetrics(w http.ResponseWriter, r *http.Request) {
 	log := WithContext(r.Context())
 	log.Debug("handling GET /api/gateway-metrics (live telemetry for dashboard)")
 
-	live := BuildLiveGatewayMetrics(s.nodeRegistry)
+	live := BuildLiveGatewayMetrics(s.nodeRegistry, s.connMgr)
 	s.writeJSON(w, http.StatusOK, live)
 }
 
 // handleAddNode registers a new Ollama node in the mesh.
+//
+// Auth is opt-in only (Phase 2): include "auth_secret_path" in the JSON body
+// (after you have manually placed the bearer token in OpenBao at that path).
+// Nodes without the field (or with empty value) are treated as unauthenticated
+// — the expected default for local Ollama. The portal supports this directly
+// (it posts whatever the user supplies).
+
 func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 	log := WithContext(r.Context())
 
@@ -728,6 +955,15 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 	node.Health = NodeHealth{
 		Status:   NodeStatusOffline,
 		LastSeen: time.Now(),
+	}
+
+	// Phase 2 (opt-in): if the POST included auth_secret_path, resolve the token
+	// right now (using server's SecretStore) so the immediate registration probe
+	// exercises auth. (The node is not yet in the registry map, so we can't rely
+	// on registry.resolve here; direct load is fine and matches the "manual setup"
+	// contract.)
+	if node.AuthSecretPath != "" && node.AuthToken == "" && s.secrets != nil {
+		node.AuthToken = s.secrets.GetNodeAuthToken(r.Context(), node.AuthSecretPath)
 	}
 
 	// AP-14: Immediate health probe on registration so UI updates instantly
@@ -767,6 +1003,13 @@ func (s *Server) handleAddNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to persist node"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Phase 2 (opt-in auth): trigger a refresh so the newly added node (which may
+	// have had auth_secret_path in the POST body) is loaded into the registry map
+	// and its token resolved from OpenBao (if path was supplied). This makes the
+	// immediate /test and subsequent GET /api/nodes see a live authed node.
+	// For nodes without auth_secret_path this is a cheap no-op.
+	s.nodeRegistry.RefreshFromES(r.Context())
 
 	log.Info("node_api: node registered",
 		slog.String("node_id", node.ID),
@@ -1062,3 +1305,77 @@ func (s *Server) handleGetFrontierModels(w http.ResponseWriter, r *http.Request)
 		)
 	}
 }
+
+// persistTokenTelemetry indexes a token usage telemetry record to Elasticsearch background.
+func (s *Server) persistTokenTelemetry(workerName, workerRole, provider, model string, usage Usage) {
+	payload := map[string]interface{}{
+		"worker_name":                  workerName,
+		"worker_role":                  workerRole,
+		"provider":                     provider,
+		"model":                        model,
+		"input_tokens":                 usage.PromptTokens,
+		"output_tokens":                usage.CompletionTokens,
+		"actual_tokens_sent":           usage.PromptTokens + usage.CompletionTokens,
+		"baseline_tokens":              usage.PromptTokens + usage.CompletionTokens,
+		"baseline_full_context_tokens": 0,
+		"savings":                      0,
+		"created_at":                   time.Now().UTC().Format(time.RFC3339),
+		"timestamp":                    time.Now().UTC().Format(time.RFC3339),
+		"total_duration_ns":            usage.TotalDurationNs,
+		"load_duration_ns":             usage.LoadDurationNs,
+		"prompt_eval_duration_ns":      usage.PromptEvalDurationNs,
+		"eval_duration_ns":             usage.EvalDurationNs,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		Log().Error("telemetry: failed to marshal document", slog.String("error", err.Error()))
+		return
+	}
+
+	esURL := s.config.esURL
+	if esURL == "" {
+		esURL = "http://elasticsearch:9200"
+	}
+	url := strings.TrimRight(esURL, "/") + "/agent-token-telemetry/_doc"
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		Log().Error("telemetry: failed to build request", slog.String("error", err.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	apiKey := os.Getenv("ES_API_KEY")
+	if apiKey != "" && !strings.Contains(apiKey, "bypass") {
+		req.Header.Set("Authorization", "ApiKey "+apiKey)
+	} else if esPass := os.Getenv("FLUME_ELASTIC_PASSWORD"); esPass != "" {
+		req.SetBasicAuth("elastic", esPass)
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: tr,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		Log().Warn("telemetry: failed to index document in Elasticsearch", slog.String("error", err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		Log().Warn("telemetry: index request rejected by Elasticsearch",
+			slog.Int("status", resp.StatusCode),
+			slog.String("body", string(body)),
+		)
+	}
+}
+

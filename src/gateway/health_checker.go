@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,6 +219,16 @@ func (hc *HealthChecker) probeNode(ctx context.Context, node *Node) {
 		discovered.ReasoningScore = estimateReasoningScore(
 			node.ModelTag, showResult.family, showResult.parameterSize,
 		)
+	} else {
+		// Fallback estimation directly from node.ModelTag if /api/show failed/timed out.
+		// This ensures we do not lose capabilities and filter out the node from routing
+		// when Ollama is slow to load/reply.
+		paramSizeStr := parseParamFromTag(node.ModelTag)
+		if paramSizeStr != "" {
+			discovered.ReasoningScore = estimateReasoningScore(
+				node.ModelTag, "", paramSizeStr,
+			)
+		}
 	}
 
 	// Hardware Architecture: real underlying family reported by Ollama.
@@ -305,13 +316,21 @@ type tagsProbeResult struct {
 // probeTags calls GET /api/tags on the node and returns model names plus
 // metadata details (quantization, etc.) for the primary assigned model.
 func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *Node) (tagsProbeResult, error) {
+	// Phase 2 (opt-in): ensure token is loaded from OpenBao if this node
+	// declared an auth_secret_path. No-op for unauthed nodes (vast majority).
+	// This is what makes health probes actually work for secured nodes
+	// (previously only the passed node.AuthToken was used, which was never populated).
 	url := strings.TrimRight(baseURL, "/") + "/api/tags"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return tagsProbeResult{}, fmt.Errorf("build tags request: %w", err)
 	}
-	if node.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+node.AuthToken)
+	authTok := ""
+	if hc.registry != nil {
+		authTok = hc.registry.AuthToken(node) // safe (resolves + RLocked read to avoid races on AuthToken field)
+	}
+	if authTok != "" {
+		req.Header.Set("Authorization", "Bearer "+authTok)
 	}
 
 	resp, err := hc.httpClient.Do(req)
@@ -380,14 +399,19 @@ func (hc *HealthChecker) probeTags(ctx context.Context, baseURL string, node *No
 //   - VRAM = 0     → CPU-only inference (no GPU)
 func (hc *HealthChecker) probeLoad(ctx context.Context, baseURL string, node *Node) (float64, int64, int64) {
 	log := WithContext(ctx)
+
 	url := strings.TrimRight(baseURL, "/") + "/api/ps"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		log.Warn("load probe failed: build request", slog.String("node_id", node.ID), slog.String("error", err.Error()))
 		return 0, 0, 0
 	}
-	if node.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+node.AuthToken)
+	authTok := ""
+	if hc.registry != nil {
+		authTok = hc.registry.AuthToken(node)
+	}
+	if authTok != "" {
+		req.Header.Set("Authorization", "Bearer "+authTok)
 	}
 
 	resp, err := hc.httpClient.Do(req)
@@ -506,9 +530,14 @@ type showProbeResult struct {
 // If the configured model_tag is not found, it falls back to the first
 // available model discovered from /api/tags.
 func (hc *HealthChecker) probeShow(ctx context.Context, baseURL string, node *Node, availableModels []string) (showProbeResult, error) {
+	authTok := ""
+	if hc.registry != nil {
+		authTok = hc.registry.AuthToken(node)
+	}
+
 	// Try the configured model_tag first.
 	if node.ModelTag != "" {
-		result, err := hc.callShowAPI(ctx, baseURL, node.AuthToken, node.ModelTag)
+		result, err := hc.callShowAPI(ctx, baseURL, authTok, node.ModelTag)
 		if err == nil {
 			return result, nil
 		}
@@ -519,7 +548,7 @@ func (hc *HealthChecker) probeShow(ctx context.Context, baseURL string, node *No
 		if model == node.ModelTag {
 			continue // already tried
 		}
-		result, err := hc.callShowAPI(ctx, baseURL, node.AuthToken, model)
+		result, err := hc.callShowAPI(ctx, baseURL, authTok, model)
 		if err == nil {
 			return result, nil
 		}
@@ -757,3 +786,15 @@ func modelSupportsTools(modelTag string, architecture string) bool {
 
 	return false
 }
+
+var tagParamRegex = regexp.MustCompile(`(?i)(?:^|:|-|_)(\d+(?:\.\d+)?)b`)
+
+// parseParamFromTag extracts the parameter size from the model tag (e.g. "qwen3.5:35b-a3b" -> "35B").
+func parseParamFromTag(modelTag string) string {
+	matches := tagParamRegex.FindStringSubmatch(modelTag)
+	if len(matches) > 1 {
+		return matches[1] + "B"
+	}
+	return ""
+}
+

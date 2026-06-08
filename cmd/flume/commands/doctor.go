@@ -431,6 +431,14 @@ func runLogloomDiagnostics(jsonOutput bool, report *DiagnosticsReport) {
 	if logloomBin == "" {
 		logloomBin = os.ExpandEnv("$HOME/.local/bin/logloom")
 	}
+	// Also check container venv (present by default now; built with LOGLOOM_INSTALL=public
+	// (pip install logloom) or =wheel using wheel from https://github.com/Fremen-Labs/logloom/releases/tag/v0.3.7).
+	// Mirrors the dual-binary (elastro+logloom) runtime check added to worker startup in handlers.go.
+	if _, err := os.Stat(logloomBin); err != nil {
+		if _, venvErr := os.Stat("/opt/venv/bin/logloom"); venvErr == nil {
+			logloomBin = "/opt/venv/bin/logloom"
+		}
+	}
 	graphPath := "flume-robust-ast-graph.json"
 
 	if !jsonOutput {
@@ -558,5 +566,5 @@ func init() {
 	DoctorCmd.Flags().StringP("gateway-url", "g", "http://localhost:8090", "Flume Gateway Endpoint (used by --deep)")
 	DoctorCmd.Flags().BoolP("json", "j", false, "Output explicit raw JSON payload without any rendering")
 	DoctorCmd.Flags().Bool("deep", false, "Run a timed LLM inference probe to measure model speed")
-	DoctorCmd.Flags().Bool("logloom", false, "Run Logloom graph diagnostics on worker/dashboard packages (Phase 0 baseline + coverage gate)")
+	DoctorCmd.Flags().Bool("logloom", false, "Run Logloom graph diagnostics on worker/dashboard packages (Phase 0 baseline + coverage gate); also verifies elastro+logloom binary presence via native + /opt/venv paths for container worker consistency")
 }

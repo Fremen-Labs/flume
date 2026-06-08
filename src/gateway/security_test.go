@@ -221,7 +221,7 @@ func TestSanitizeAppliedBeforeHandlerReturn(t *testing.T) {
 	config.DefaultProvider = ProviderOpenAICompat
 	config.DefaultBaseURL = ts.URL
 	secrets := NewSecretStore("dummy", "dummy", "dummy", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 	router.client = ts.Client()
 
 	req := &ChatRequest{
@@ -248,7 +248,7 @@ func TestSanitizeAppliedBeforeHandlerReturn(t *testing.T) {
 func TestResolveAPIKey_OpenAICompatGetsDummyKey(t *testing.T) {
 	config := NewConfig("", time.Minute)
 	secrets := NewSecretStore("", "", "", time.Minute) // no OpenBao
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 
 	key, err := router.resolveAPIKey(context.Background(), ProviderOpenAICompat, "")
 	if err != nil {
@@ -263,7 +263,7 @@ func TestResolveAPIKey_OpenAICompatGetsDummyKey(t *testing.T) {
 func TestResolveAPIKey_OllamaReturnsEmpty(t *testing.T) {
 	config := NewConfig("", time.Minute)
 	secrets := NewSecretStore("", "", "", time.Minute)
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 
 	key, err := router.resolveAPIKey(context.Background(), ProviderOllama, "")
 	if err != nil {
@@ -282,7 +282,7 @@ func TestResolveAPIKey_ManagedProviderFailsClosed(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			config := NewConfig("", time.Minute)
 			secrets := NewSecretStore("", "", "", time.Minute) // no OpenBao, no env
-			router := NewProviderRouter(config, secrets)
+			router := NewProviderRouter(config, secrets, nil)
 
 			// Ensure env is not set for this test
 			t.Setenv("LLM_API_KEY", "")
@@ -301,7 +301,7 @@ func TestResolveAPIKey_EnvFallback(t *testing.T) {
 
 	config := NewConfig("", time.Minute)
 	secrets := NewSecretStore("", "", "", time.Minute) // no OpenBao
-	router := NewProviderRouter(config, secrets)
+	router := NewProviderRouter(config, secrets, nil)
 
 	key, err := router.resolveAPIKey(context.Background(), ProviderOpenAI, "")
 	if err != nil {

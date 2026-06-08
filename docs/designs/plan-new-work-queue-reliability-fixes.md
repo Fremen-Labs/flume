@@ -1,5 +1,7 @@
 # Implementation Plan: Plan New Work + Work Queue Reliability Fixes
 
+**Note (2026-06 update)**: As part of ongoing simplification, the `inbox` state has been fully collapsed into `planned`. New work now enters the queue directly as `planned` (or `ready` for leaf tasks). The separate "Inbox" column was removed from the UI. Legacy references to `inbox` have been cleaned from types, validation, API, and frontend filters. This reduces state machine complexity and UI surface area.
+
 **Observed (2026-05-27 session `plan-f7a621ca894e` for "centralized logging in CLI")**:
 - Complexity 4 (medium), 1 epic / 1 feat / 1 story / 2 tasks in LLM plan.
 - `countPlanTasks=2 <=3` → fastpath path taken on commit (only 2 `item_type=task` records, no hierarchy bloat).

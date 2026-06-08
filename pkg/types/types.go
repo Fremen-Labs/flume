@@ -25,7 +25,6 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusInbox           TaskStatus = "inbox"
 	TaskStatusPlanned         TaskStatus = "planned"
 	TaskStatusReady           TaskStatus = "ready"
 	TaskStatusRunning         TaskStatus = "running"
@@ -38,12 +37,10 @@ const (
 
 // ValidTransitions defines the FSM for task state changes.
 // Direct port from Python: TaskStateMachine.TRANSITIONS.
+//
+// Note: The "inbox" state has been collapsed into "planned". New work enters the system
+// as "planned" (or directly "ready" for first tasks in a chain).
 var ValidTransitions = map[TaskStatus][]TaskStatus{
-	// Expanded inbox transitions to match real claimer/reset flows observed in production
-	// (inbox → running on direct claim after reset-to-ready or intake; also review-* states
-	// during certain recovery paths). This eliminates the most common shadow violations
-	// while keeping the rest of the DAG strict.
-	TaskStatusInbox:           {TaskStatusPlanned, TaskStatusReady, TaskStatusRunning, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusArchived},
 	TaskStatusPlanned:         {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusReady:           {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusRunning:         {TaskStatusReview, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
@@ -145,6 +142,12 @@ type Task struct {
 	// Each level of PM decomposition increments by 1. Enforced at creation (intake + handlePM)
 	// and at promote/claim time against MAX_HIERARCHY_DEPTH to eliminate nesting explosions.
 	HierarchyDepth int `json:"hierarchy_depth,omitempty"`
+
+	// ExplosionEvidence (Phase 1): captures anti-explosion decision evidence for this item
+	// (e.g. "intake_hard_cap:13>12", "depth_exceeded:8>6", "pm_budget_block"). Set on refuse/block paths
+	// at intake/PM/promote/claim. Cleared on successful hierarchy terminal (done) by completion sweep.
+	// Enables debugging "why stuck" and audit for Logloom/Elastro + dashboard.
+	ExplosionEvidence []string `json:"explosion_evidence,omitempty"`
 }
 
 // Phase 2 constants (enforcement mechanics)
@@ -392,9 +395,9 @@ func defaultShadowMode() bool {
 // EnforceTransition is the primary entrypoint called by 100% of status writers.
 //
 // It invokes ValidateTransition (preserving all existing behavior and error types).
-// In shadow mode a violation error is still surfaced to the caller so the call site
-// can emit a structured log line containing "shadow_violation" (treated as metric
-// source for now) while allowing the subsequent ES write.
+// Phase 0: violations are audited at call sites via logger (instrument to ES/metrics via
+// LogTaskStateViolation or LogAgentReasoning + index to agent-task-records). ShadowMode only
+// gates whether the *write proceeds* after audit; the violation is always observable.
 //
 // Returns:
 //   - nil for valid (including no-op/empty/self)
@@ -417,26 +420,33 @@ func (sm *TaskStateMachine) EnforceTransition(current, target TaskStatus) error 
 }
 
 // EnforceTransitionOrLog is a convenience for sites that have a logger.
+// Phase 0 update: violations are *always* audited via logFn (with explicit "shadow" flag) for
+// instrumentation to ES/metrics (even in strict mode the attempt is logged for audit trail).
+// ShadowMode only controls whether the write is allowed to proceed on violation.
 func (sm *TaskStateMachine) EnforceTransitionOrLog(current, target TaskStatus, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransition(current, target)
-	if err != nil && sm.ShadowMode && logFn != nil {
-		logFn("SHADOW MODE: TaskStateMachine.EnforceTransition violation allowed (write proceeds for rollout safety)",
+	if err != nil && logFn != nil {
+		// Always emit for audit (instrument to structured logs + downstream ES via Log* at call sites).
+		// "shadow" flag tells consumer whether write will proceed.
+		logFn("TaskStateMachine.EnforceTransition violation (audit)",
 			"error", err.Error(),
 			"from", current,
 			"to", target,
-			"shadow", true,
+			"shadow", sm.ShadowMode,
 			"violation", true,
+			"audit", true,
 		)
 	}
 	return err
 }
 
 // EnforceWithEvidenceOrLog is the Phase 1+ convenience with evidence.
+// Phase 0: always audit violations (see EnforceTransitionOrLog).
 func (sm *TaskStateMachine) EnforceWithEvidenceOrLog(current, target TaskStatus, ev Evidence, logFn func(msg string, args ...any)) error {
 	err := sm.EnforceTransitionWithEvidence(current, target, ev)
-	if err != nil && sm.ShadowMode && logFn != nil {
-		logFn("SHADOW MODE: evidence gate violation (write proceeds)",
-			"error", err.Error(), "from", current, "to", target, "evidence", ev, "shadow", true)
+	if err != nil && logFn != nil {
+		logFn("TaskStateMachine.EnforceWithEvidence violation (audit)",
+			"error", err.Error(), "from", current, "to", target, "evidence", ev, "shadow", sm.ShadowMode, "violation", true, "audit", true)
 	}
 	return err
 }

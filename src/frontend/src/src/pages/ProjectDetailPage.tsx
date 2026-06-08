@@ -561,7 +561,7 @@ export default function ProjectDetailPage() {
   // Stats
   const running = projectTasks.filter(t => t.status === 'running').length;
   const inReview = projectTasks.filter(t => t.status === 'review').length;
-  const planned = projectTasks.filter(t => t.status === 'planned' || t.status === 'ready' || t.status === 'inbox').length;
+  const planned = projectTasks.filter(t => t.status === 'planned' || t.status === 'ready').length;
   const done = projectTasks.filter(t => t.status === 'done').length;
   const blocked = projectTasks.filter(t => t.status === 'blocked').length;
   const activeAgents = workers.filter(w =>

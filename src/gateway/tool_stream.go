@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 )
 
 // CleanJSONResponse heuristically strips conversational wrapper text or markdown
@@ -87,10 +89,14 @@ type ollamaStreamChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done            bool   `json:"done"`
-	Error           string `json:"error,omitempty"`
-	PromptEvalCount int    `json:"prompt_eval_count,omitempty"`
-	EvalCount       int    `json:"eval_count,omitempty"`
+	Done               bool   `json:"done"`
+	Error              string `json:"error,omitempty"`
+	PromptEvalCount    int    `json:"prompt_eval_count,omitempty"`
+	EvalCount          int    `json:"eval_count,omitempty"`
+	TotalDuration      int64  `json:"total_duration,omitempty"`
+	LoadDuration       int64  `json:"load_duration,omitempty"`
+	PromptEvalDuration int64  `json:"prompt_eval_duration,omitempty"`
+	EvalDuration       int64  `json:"eval_duration,omitempty"`
 }
 
 // StreamOllamaToolCall sends a tool-call request to Ollama using stream:true
@@ -102,6 +108,7 @@ func StreamOllamaToolCall(
 	tools []Tool,
 	model string,
 	options map[string]interface{},
+	authToken string, // Phase 2: for local node Bearer auth (from node.AuthToken); opt-in only
 ) (*ChatResponse, error) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "ollama_tool_stream")()
@@ -127,10 +134,15 @@ func StreamOllamaToolCall(
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{
-		// No timeout here — streaming keeps the connection alive.
-		// Context cancellation handles the abort case.
+	// Phase 2: Bearer injection for local nodes (from authToken passed by caller).
+	// Strictly conditional — if "", no header (default for vast majority of local Ollama users).
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
+
+	// Phase 1: Use NodeConnManager for shared per-node Transport (keepalives, ForceAttemptHTTP2).
+	// (Previously a bare client + placeholder call; now actually uses the managed client.)
+	client := getOllamaStreamClientForBase(baseURL)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ollama request: %w", err)
@@ -175,7 +187,30 @@ func StreamOllamaToolCall(
 
 		// Feed content through the think mill
 		if chunk.Message.Content != "" {
-			mill.Process([]byte(chunk.Message.Content))
+			content := chunk.Message.Content
+			stopIdx := -1
+			var foundStop string
+			for _, stop := range defaultOllamaStopTokensList {
+				if idx := strings.Index(content, stop); idx != -1 {
+					if stopIdx == -1 || idx < stopIdx {
+						stopIdx = idx
+						foundStop = stop
+					}
+				}
+			}
+
+			if stopIdx != -1 {
+				log.Info("stream scanner encountered stop token",
+					slog.String("stop_token", foundStop),
+					slog.Int("index", stopIdx),
+				)
+				if stopIdx > 0 {
+					mill.Process([]byte(content[:stopIdx]))
+				}
+				break
+			}
+
+			mill.Process([]byte(content))
 		}
 
 		// Capture tool calls from the final chunk
@@ -188,6 +223,18 @@ func StreamOllamaToolCall(
 		}
 		if chunk.EvalCount > 0 {
 			usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.TotalDuration > 0 {
+			usage.TotalDurationNs = chunk.TotalDuration
+		}
+		if chunk.LoadDuration > 0 {
+			usage.LoadDurationNs = chunk.LoadDuration
+		}
+		if chunk.PromptEvalDuration > 0 {
+			usage.PromptEvalDurationNs = chunk.PromptEvalDuration
+		}
+		if chunk.EvalDuration > 0 {
+			usage.EvalDurationNs = chunk.EvalDuration
 		}
 
 		if chunk.Done {
@@ -209,10 +256,13 @@ func StreamOllamaToolCall(
 		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
+	visible := mill.Visible()
+	visible = truncateAtStopTokens(visible)
+
 	return &ChatResponse{
 		Message: ResponseMessage{
 			Role:      "assistant",
-			Content:   mill.Visible(),
+			Content:   visible,
 			ToolCalls: toolCalls,
 			Thoughts:  mill.Thoughts(),
 		},
@@ -228,6 +278,7 @@ func StreamOllamaChat(
 	messages []Message,
 	model string,
 	options map[string]interface{},
+	authToken string, // Phase 2: for local node Bearer auth (from node.AuthToken)
 ) (string, string, Usage, error) {
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "ollama_chat_stream")()
@@ -251,7 +302,16 @@ func StreamOllamaChat(
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	// Phase 2: Bearer injection for local nodes (from authToken passed by caller).
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+
+	// Phase 1: Use NodeConnManager for shared per-node Transport (keepalives, ForceAttemptHTTP2).
+	// This eliminates repeated handshakes for the distributed mesh (core of the optimization report).
+	// TODO(Phase 1 wiring): wire a real manager instance from server/router instead of package singleton.
+	// For skeleton we use a package-level one (explicit construction in real server init).
+	client := getOllamaStreamClientForBase(baseURL) // uses conn manager under the hood
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", Usage{}, fmt.Errorf("ollama request: %w", err)
@@ -287,7 +347,30 @@ func StreamOllamaChat(
 		}
 
 		if chunk.Message.Content != "" {
-			mill.Process([]byte(chunk.Message.Content))
+			content := chunk.Message.Content
+			stopIdx := -1
+			var foundStop string
+			for _, stop := range defaultOllamaStopTokensList {
+				if idx := strings.Index(content, stop); idx != -1 {
+					if stopIdx == -1 || idx < stopIdx {
+						stopIdx = idx
+						foundStop = stop
+					}
+				}
+			}
+
+			if stopIdx != -1 {
+				log.Info("stream scanner encountered stop token",
+					slog.String("stop_token", foundStop),
+					slog.Int("index", stopIdx),
+				)
+				if stopIdx > 0 {
+					mill.Process([]byte(content[:stopIdx]))
+				}
+				break
+			}
+
+			mill.Process([]byte(content))
 		}
 
 		if chunk.PromptEvalCount > 0 {
@@ -295,6 +378,18 @@ func StreamOllamaChat(
 		}
 		if chunk.EvalCount > 0 {
 			usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.TotalDuration > 0 {
+			usage.TotalDurationNs = chunk.TotalDuration
+		}
+		if chunk.LoadDuration > 0 {
+			usage.LoadDurationNs = chunk.LoadDuration
+		}
+		if chunk.PromptEvalDuration > 0 {
+			usage.PromptEvalDurationNs = chunk.PromptEvalDuration
+		}
+		if chunk.EvalDuration > 0 {
+			usage.EvalDurationNs = chunk.EvalDuration
 		}
 
 		if chunk.Done {
@@ -316,5 +411,91 @@ func StreamOllamaChat(
 		slog.Int("completion_tokens", usage.CompletionTokens),
 	)
 
-	return CleanJSONResponse(mill.Visible()), mill.Thoughts(), usage, nil
+	visible := mill.Visible()
+	visible = truncateAtStopTokens(visible)
+
+	return CleanJSONResponse(visible), mill.Thoughts(), usage, nil
+}
+
+// === Phase 1: NodeConnManager integration helpers (skeleton) ===
+//
+// These bridge the existing stream paths to the new per-node conn manager
+// (see node_conn_manager.go and phases doc).
+//
+// In full Phase 1 wiring (next edits): pass a *NodeConnManager from the
+// gateway Server / ProviderRouter (explicit, per SKILLs) instead of package var.
+// For now, a singleton lets us start refactoring without big wiring changes.
+
+var (
+	ollamaConnMgr     = NewNodeConnManager()
+	ollamaConnMgrOnce sync.Once
+)
+
+// getOllamaStreamClientForBase returns a client that reuses a managed Transport
+// for the given base (in real use, we'll key by node.ID after SelectNode).
+// This is the entry point exercised by StreamOllama* after Phase 1 edits.
+func getOllamaStreamClientForBase(baseURL string) *http.Client {
+	ollamaConnMgrOnce.Do(func() {
+		// Ensure initialized (safe).
+		_ = ollamaConnMgr
+	})
+
+	// For skeleton: use a synthetic node keyed by host part of URL.
+	// Real impl (Phase 1 continuation): pass *Node from routeToNode / ollamaWithNode.
+	host := "default"
+	if baseURL != "" {
+		// crude parse for demo; real code uses node.Host
+		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+			host = u.Host
+		}
+	}
+	synthNode := &Node{ID: "ollama-" + host, Host: host}
+
+	// Use 0 timeout - rely on ctx (Phase 1 unification goal).
+	return ollamaConnMgr.GetClientForNode(synthNode, 0)
+}
+
+// Note: import "net/url" and "sync" may be needed at top if not present.
+// (We will clean in compile check.)
+
+// End of Phase 1 skeleton in tool_stream.go. Continue integration in providers.go
+// and server init. See todo for remaining Phase 1 steps (always-stream force,
+// ctx timeout unification, stats exposure, tests).
+
+// OllamaConnStats exposes the (package) NodeConnManager stats for Phase 4 observability
+// (used by BuildLiveGatewayMetrics + /api/gateway-metrics to surface conn reuse in dashboard).
+// In full explicit wiring the Server's connMgr.Stats() would be preferred, but this keeps
+// the skeleton working without changing all call sites yet. Stats include config + (future) counters.
+func OllamaConnStats() map[string]map[string]int {
+	if ollamaConnMgr == nil {
+		return nil
+	}
+	return ollamaConnMgr.Stats()
+}
+
+var defaultOllamaStopTokensList = []string{
+	"<|endoftext|>",
+	"<|im_start|>",
+	"<|im_end|>",
+	"<im_start>",
+	"<im_end>",
+	"<|eot_id|>",
+	"<|start_header_id|>",
+	"assistant\n\n<tool_call",
+	"assistant\n<tool_call",
+}
+
+func truncateAtStopTokens(content string) string {
+	stopIdx := -1
+	for _, stop := range defaultOllamaStopTokensList {
+		if idx := strings.Index(content, stop); idx != -1 {
+			if stopIdx == -1 || idx < stopIdx {
+				stopIdx = idx
+			}
+		}
+	}
+	if stopIdx != -1 {
+		return content[:stopIdx]
+	}
+	return content
 }

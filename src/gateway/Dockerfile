@@ -14,7 +14,6 @@ WORKDIR /build
 
 # Cache module downloads separately from source
 COPY go.mod go.sum ./
-COPY vendor-local/ ./vendor-local/
 RUN go mod download
 
 # Copy gateway source

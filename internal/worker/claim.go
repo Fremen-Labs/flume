@@ -60,13 +60,28 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 	targetStatus := roleToTargetStatus(role)
 
 	// Search for a claimable task
+	// Fix 6 extension: exclude any task that carries decomposition markers (decomposed_at).
+	// Such tasks were already processed by handlePM (or equivalent); claiming them again
+	// would feed the death spiral even if their status was left in a claimable bucket by a race.
+	// This is the ES-level filter; the post-fetch raw/struct check in the loop is belt-and-suspenders.
 	query := map[string]interface{}{
 		"bool": map[string]interface{}{
 			"must": []interface{}{
 				map[string]interface{}{"term": map[string]string{"status": targetStatus}},
+				map[string]interface{}{
+					"bool": map[string]interface{}{
+						"should": []interface{}{
+							map[string]interface{}{"term": map[string]string{"worker_role": role}},
+							map[string]interface{}{"term": map[string]string{"owner": role}},
+							map[string]interface{}{"term": map[string]string{"assigned_agent_role": role}},
+						},
+						"minimum_should_match": 1,
+					},
+				},
 			},
 			"must_not": []interface{}{
 				map[string]interface{}{"exists": map[string]string{"field": "active_worker"}},
+				map[string]interface{}{"exists": map[string]string{"field": "decomposed_at"}},
 			},
 		},
 	}
@@ -89,6 +104,21 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 		}
 		if task.ID == "" {
 			c.logger.Warn("claim: task document has no ID, skipping", slog.String("hit", string(rawHit.Source)))
+			continue
+		}
+
+		// === Fix 6 (PM decomp death spiral): reject tasks carrying decomposition markers ===
+		// The claimer snapshot may see a "planned" (or ready) task whose handlePM already wrote
+		// decomposed_at/child_count (via the atomic combined update) but whose status write raced
+		// or was left claimable. Checking BOTH the populated struct AND the raw source JSON
+		// catches deserialization edge cases for *time.Time and any schema drift.
+		// This is defense-in-depth alongside the primary ES-child-search guard inside handlePM.
+		if task.DecomposedAt != nil || task.ChildCount > 0 || hasDecompMarkers(rawHit.Source) {
+			c.logger.Info("claim: skipping already-decomposed task (Fix 6 denorm/raw guard)",
+				slog.String("task_id", task.ID),
+				slog.String("status", string(task.Status)),
+				slog.Int("child_count", task.ChildCount),
+				slog.String("title", task.Title))
 			continue
 		}
 
@@ -289,7 +319,10 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 	}
 
 	// PR 2: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(""), "running", c.logger.Warn)
+	if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(""), "running", c.logger.Warn); enforceErr != nil {
+		// Phase 0 instrument
+		flumelogger.LogTaskStateViolation(ctx, taskID, "", "running", enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode)
+	}
 	err := c.es.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seqNo, primaryTerm)
 	if err != nil {
 		if err == es.ErrConflict {
@@ -434,6 +467,32 @@ func roleToTargetStatus(role string) string {
 	default:
 		return "ready"
 	}
+}
+
+// hasDecompMarkers inspects the raw ES source JSON for decomposition markers.
+// Used by Fix 6 guard to catch cases where the struct unmarshal may not have
+// populated DecomposedAt (e.g. parse edge on *time.Time, bad timestamp format,
+// or future field casing changes) even though the document in ES has the data.
+func hasDecompMarkers(source []byte) bool {
+	if len(source) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(source, &m) != nil {
+		return false
+	}
+	// decomposed_at present with a non-null value
+	if v, ok := m["decomposed_at"]; ok && string(v) != "null" && len(v) > 2 {
+		return true
+	}
+	// child_count present and > 0
+	if v, ok := m["child_count"]; ok {
+		var cnt int
+		if json.Unmarshal(v, &cnt) == nil && cnt > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Claimer) branchName(task ftypes.Task) string {

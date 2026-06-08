@@ -94,9 +94,35 @@ type ToolCallFunction struct {
 
 // Usage tracks token consumption.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens         int   `json:"prompt_tokens"`
+	CompletionTokens     int   `json:"completion_tokens"`
+	TotalTokens          int   `json:"total_tokens"`
+	TotalDurationNs      int64 `json:"total_duration_ns,omitempty"`
+	LoadDurationNs       int64 `json:"load_duration_ns,omitempty"`
+	PromptEvalDurationNs int64 `json:"prompt_eval_duration_ns,omitempty"`
+	EvalDurationNs       int64 `json:"eval_duration_ns,omitempty"`
+}
+
+// ChatStreamChunk is the incremental NDJSON chunk emitted when a client
+// requests streaming (ChatRequest.Stream == true or Accept: application/x-ndjson).
+//
+// This restores the historical "agent reasoning was streamed" behavior so that
+// long-running local Ollama generations (especially PM decomposition with
+// thinking models) no longer appear as black-box wall-clock operations.
+// Each chunk contains the latest visible delta (after think milling) plus
+// accumulated thoughts and any tool call state seen so far.
+//
+// Protocol: application/x-ndjson, one JSON object per line, terminated by
+// a chunk with Done:true (or Error set).
+type ChatStreamChunk struct {
+	RequestID    string     `json:"request_id,omitempty"`
+	DeltaContent string     `json:"delta_content,omitempty"` // newly visible text since last chunk (post think-milling)
+	Thoughts     string     `json:"thoughts,omitempty"`      // accumulated thoughts so far (or delta; full is simpler for consumers)
+	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`    // full set or deltas; typically complete on final chunk
+	Usage        Usage       `json:"usage,omitempty"`
+	Telemetry    *Telemetry  `json:"telemetry,omitempty"`
+	Done         bool        `json:"done"`
+	Error        string      `json:"error,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

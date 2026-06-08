@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
@@ -22,6 +24,79 @@ import (
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	ftypes "github.com/Fremen-Labs/flume/pkg/types"
 )
+
+// errSpawnGuardFired is a sentinel error returned by spawnReviewTasks when the
+// idempotency guard prevents spawning because reviewer/tester children already
+// exist for this parent. The caller uses this to distinguish "guard fired" from
+// "actual spawn failure" and can skip re-review instead of looping.
+var errSpawnGuardFired = fmt.Errorf("spawn guard: reviewer/tester children already exist")
+
+// updateTaskLeaseState is the single choke point for mutating the core lease
+// columns of the Work Queue (status, active_worker, queue_state, claimed_at,
+// error_message, etc.).
+//
+// It enforces the TaskStateMachine, emits the mandatory dual Log* observability
+// required by the flume-go SKILL, and prefers OCC when seq/prim are supplied.
+//
+// This implements the "Cross-cutting Writer Rule" from the Phase 3 column
+// design document and directly mitigates bare UpdateDoc races on contended
+// claim/lease state (a major contributor to thundering herd and status fights
+// identified in the 2026-05-30 review).
+//
+// All future mutations of these columns (in runner, sweeps, claimer, and
+// dashboard paths where possible) should route through this helper.
+func updateTaskLeaseState(
+	ctx context.Context,
+	esClient *es.Client,
+	logger *slog.Logger,
+	taskID string,
+	update map[string]interface{},
+	seq, prim int64,
+	prevStatus ftypes.TaskStatus,
+	targetStatus ftypes.TaskStatus,
+	workerRole string,
+	reason string,
+) error {
+	// 1. State machine enforcement (shadow mode supported)
+	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(prevStatus, targetStatus, logger.Warn)
+
+	// 2. Write with OCC preference when we have seq/prim from a prior search
+	var err error
+	if seq > 0 && prim > 0 {
+		err = esClient.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seq, prim)
+	} else {
+		err = esClient.UpdateDoc(ctx, "agent-task-records", taskID, update)
+	}
+
+	if err != nil {
+		logger.Warn("lease state update failed",
+			slog.String("task_id", taskID),
+			slog.String("target_status", string(targetStatus)),
+			slog.String("error", err.Error()),
+			slog.String("reason", reason))
+		return err
+	}
+
+	// 3. Mandatory rich observability for popout + Logloom (flume-go SKILL)
+	flumelogger.LogStateTransition(ctx, taskID, string(prevStatus), string(targetStatus), reason)
+
+	flumelogger.LogAgentReasoning(ctx, taskID, workerRole, reason, map[string]any{
+		"previous_status": string(prevStatus),
+		"target_status":   string(targetStatus),
+		"worker_role":     workerRole,
+		"reason":          reason,
+		"columns_mutated": "status,active_worker,queue_state",
+	})
+
+	logger.Info("lease state updated",
+		slog.String("task_id", taskID),
+		slog.String("from", string(prevStatus)),
+		slog.String("to", string(targetStatus)),
+		slog.String("role", workerRole),
+		slog.String("reason", reason))
+
+	return nil
+}
 
 // Runner contains the core agent execution loop.
 // Derived from Python: worker_handlers.py (2410 LOC, 112 AST nodes) —
@@ -48,7 +123,14 @@ func NewRunner(esClient *es.Client, llmClient *llm.Client, logger *slog.Logger) 
 		llm:      llmClient,
 		logger:   logger.With(slog.String("component", "runner")),
 		registry: NewProviderRegistry(logger),
-		tools:    NewToolRegistry(logger),
+		tools:    NewToolRegistryWithElastro(esClient, logger), // Phase 3.1: first real code-intelligence tool wired
+	}
+}
+
+// ReconcileComms (Phase 2): health/circuit recon for LLM comms (call from manager cycle before claims).
+func (r *Runner) ReconcileComms(ctx context.Context) {
+	if r.llm != nil {
+		r.llm.ReconcileComms(ctx)
 	}
 }
 
@@ -73,25 +155,37 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 		return fmt.Errorf("unmarshal task %s: %w", taskID, err)
 	}
 
+	// 1.5. Acquire per-repository mutex lock to prevent concurrent Git/workspace operations.
+	// Only restrict roles that write/mutate the workspace filesystem or run tests (implementer, tester).
+	// PM and reviewer roles do not mutate the files or checkout branches, so they can run concurrently.
+	if task.ProjectID != "" && (worker.Role == "implementer" || worker.Role == "tester") {
+		repoPath, resolveErr := r.resolveRepoPath(ctx, task.ProjectID)
+		if resolveErr == nil && repoPath != "" {
+			r.logger.Info("worker: acquiring workspace lock",
+				slog.String("worker", worker.Name),
+				slog.String("task_id", taskID),
+				slog.String("repo_path", repoPath))
+			mu := getRepoLock(repoPath)
+			mu.Lock()
+			defer func() {
+				r.logger.Info("worker: releasing workspace lock",
+					slog.String("worker", worker.Name),
+					slog.String("task_id", taskID),
+					slog.String("repo_path", repoPath))
+				mu.Unlock()
+			}()
+		}
+	}
+
 	// 2. Execute based on role
 	var result ftypes.AgentResult
 	switch worker.Role {
 	case "implementer":
 		result, err = r.handleImplementer(ctx, task, worker)
-		if err == nil && result.Success && result.NextStatus == ftypes.TaskStatusReview {
-			// Quick pre-filter to avoid even calling spawn on tasks that are already review/test items
-			lower := strings.ToLower(task.Title)
-			if !strings.Contains(lower, "review") && !strings.Contains(lower, "test") {
-				result.NextStatus = ftypes.TaskStatusReviewConsensus
-				if spawnErr := r.spawnReviewTasks(ctx, task); spawnErr != nil {
-					r.logger.Error("failed to spawn review tasks", slog.String("error", spawnErr.Error()))
-					result.NextStatus = ftypes.TaskStatusReview
-				}
-			} else {
-				// Already a review/test-flavored task; do not spawn more
-				result.NextStatus = ftypes.TaskStatusReviewConsensus
-			}
-		}
+		// Python model (v0.1.126): implementer completes → task transitions to
+		// "review" status → reviewer worker claims the SAME task (role rotation).
+		// No child task spawning. This keeps 1 task as 1 task throughout its lifecycle.
+		// result.NextStatus is already "review" from handleImplementer — let it pass through.
 	case "reviewer":
 		result, err = r.handleReviewer(ctx, task, worker)
 	case "tester":
@@ -119,8 +213,41 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 				"error":  err.Error(),
 			})
 
+		// Detect persistent LLM config errors (404, DNS failures) that won't self-heal.
+		// Escalate immediately to "blocked" instead of allowing infinite retry loops
+		// (the dominant failure mode in the post-migration field test).
+		// Per reliable-go-systems + flume-go SKILLs: use typed sentinel (ErrPersistentConfig)
+		// + errors.Is instead of brittle strings (see llm/client.go).
+		errStr := err.Error()
+		isPersistentConfigError := errors.Is(err, llm.ErrPersistentConfig) ||
+			strings.Contains(errStr, "404") ||
+			strings.Contains(errStr, "no such host")
+
+		if isPersistentConfigError {
+			reason := fmt.Sprintf("Worker %s (role=%s) hit persistent config error (will not self-heal): %s",
+				worker.Name, worker.Role, errStr)
+
+			update := map[string]interface{}{
+				"status":        "blocked",
+				"error_message": reason,
+				"active_worker": nil,
+				"queue_state":   "available",
+				"updated_at":    time.Now().UTC().Format(time.RFC3339),
+			}
+
+			// Use the central lease state helper (Phase 3a-2).
+			// This removes a bare UpdateDoc on the critical lease columns (status/active_worker/queue_state)
+			// and guarantees Enforce + dual Log* emission.
+			_ = updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+				0, 0, // no OCC seq/prim available in this error path yet
+				task.Status, ftypes.TaskStatusBlocked,
+				worker.Role, reason)
+
+			return err
+		}
+
 		// Clear stale claim (now also emits LogStateTransition + LogAgentReasoning via helper)
-		r.clearStaleClaim(ctx, taskID, task.Status)
+		r.clearStaleClaim(ctx, taskID, task.Status, worker.Role)
 		return err
 	}
 
@@ -147,10 +274,17 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		slog.String("task_id", task.ID),
 		slog.String("title", task.Title))
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Starting implementation of task: %s", task.Title),
+		map[string]any{"phase": "start", "worker": worker.Name})
+
 	// Check if task requires code
 	if !TaskRequiresCode(task) {
 		r.logger.Info("implementer: non-code task, completing",
 			slog.String("task_id", task.ID))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			"Task does not require code changes. Marking as done.",
+			map[string]any{"phase": "complete", "reason": "non_code_task"})
 		return ftypes.AgentResult{
 			Success:    true,
 			NextStatus: ftypes.TaskStatusDone,
@@ -160,26 +294,226 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 	// 1. Ensure task branch exists
 	repoPath, branch, err := r.EnsureTaskBranch(ctx, task)
 	if err != nil {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Failed to set up task branch: %s", err.Error()),
+			map[string]any{"phase": "branch_setup", "error": err.Error()})
 		return ftypes.AgentResult{
 			Success: false,
 			Errors:  []string{err.Error()},
 		}, err
 	}
 
-	// 2. Build LLM context and execute agent loop
-	// (This will be fully fleshed out when internal/llm is implemented in Phase 3)
-	r.logger.Info("implementer: executing agent loop",
-		slog.String("task_id", task.ID),
-		slog.String("repo_path", repoPath),
-		slog.String("branch", branch))
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Branch ready: %s. Executing agent loop against repository.", branch),
+		map[string]any{"phase": "branch_ready", "branch": branch, "repo_path": repoPath})
 
-	// 3. Auto-commit and push changes
+	// === Real (non-skeleton) Implementer Agent Loop ===
+	//
+	// This is a functional multi-turn ReAct-style loop that drives the LLM via
+	// ChatStream (for live reasoning visibility into the mesh node) while
+	// respecting the rich rules in src/agents/implementer/SYSTEM_PROMPT.md.
+	//
+	// It uses the registered tools (elastro_query_ast querying ElastroGraphIndex,
+	// logloom_ast_query querying Logloom*Index, plus file ops: list_directory/read_file/write_file/run_shell)
+	// and continues until the LLM signals completion or the turn limit is reached.
+	// Per contract #4: MANDATORY AST verification (elastro or logloom query success) tracked
+	// before any write/edit is allowed.
+
+	r.logger.Info("implementer: starting real multi-turn agent loop",
+		slog.String("task_id", task.ID),
+		slog.String("repo_path", repoPath))
+
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		"Starting real multi-turn LLM + tool agent loop (non-skeleton)",
+		map[string]any{
+			"phase":     "agent_loop_real",
+			"objective": task.Description,
+		})
+
+	systemPrompt := readSystemPrompt("implementer")
+
+	// Conversation history for the LLM (we keep it as messages)
+	messages := []llm.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: fmt.Sprintf("Task: %s\n\nObjective: %s\n\nRepo path: %s\nBranch: %s\n\nYou have access to tools via function calls. Use them to explore, edit, test, and complete the task. When done, call implementation_complete with a clear summary.",
+			task.Title, task.Description, repoPath, branch)},
+	}
+
+	const maxTurns = 12
+	turns := 0
+	// MANDATORY state for Elastro/Logloom contract #4 (point 4):
+	// Track whether the worker has successfully invoked elastro_query_ast or
+	// logloom_ast_query in *this task context*. Simple in-memory bool (no external
+	// memory tool needed for the enforcement). Writes/edits are rejected until true.
+	astVerified := false
+
+	for turns < maxTurns {
+		turns++
+
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Implementer LLM turn %d/%d (streaming for visibility)", turns, maxTurns),
+			map[string]any{"phase": "llm_turn", "turn": turns})
+
+		// Phase 2: acquire backpressure WIP before LLM (per plan/hierarchy; prevents herd on local LLM).
+		level := task.HierarchyDepth
+		if ok, reason := r.llm.AcquireCommsWIP(ctx, task.PlanSessionID, "implementer", level); !ok {
+			reason = "comms backpressure: " + reason
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", reason, map[string]any{"plan_session_id": task.PlanSessionID, "level": level})
+			_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+				"status":             "blocked",
+				"error_message":      reason,
+				"explosion_evidence": []string{"llm_wip_backpressure:" + task.PlanSessionID},
+				"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			})
+			break
+		}
+
+		streamReq := llm.ChatRequest{
+			Messages:       messages,
+			Model:          worker.Model,
+			Provider:       worker.Provider,
+			AgentRole:      "implementer",
+			TaskID:         task.ID,
+			WorkerName:     worker.Name,
+			TimeoutSeconds: 600, // generous per turn; overall bounded by maxTurns
+		}
+
+		streamCh, err := r.llm.ChatStream(ctx, streamReq)
+		if err != nil {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "LLM call failed in agent loop", map[string]any{"error": err.Error()})
+			r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level)
+			break
+		}
+
+		var llmResponse strings.Builder
+		var pendingToolCalls []llm.ToolCall
+
+		for ch := range streamCh {
+			if ch.Error != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "Stream error in agent loop", map[string]any{"error": ch.Error})
+				break
+			}
+			if ch.DeltaContent != "" {
+				llmResponse.WriteString(ch.DeltaContent)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", ch.DeltaContent, map[string]any{
+					"phase": "implementer_thought", "turn": turns, "from_stream": true,
+				})
+			}
+			if len(ch.ToolCalls) > 0 {
+				pendingToolCalls = append(pendingToolCalls, ch.ToolCalls...)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+					fmt.Sprintf("Received %d tool call(s) from LLM", len(ch.ToolCalls)),
+					map[string]any{"phase": "tool_call_received", "turn": turns, "tools": ch.ToolCalls})
+			}
+			if ch.Done {
+				break
+			}
+		}
+
+		r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level) // release after stream
+
+		responseText := strings.TrimSpace(llmResponse.String())
+
+		// Hardened tool call consumption (Task 1): always construct assistant message
+		// containing the ToolCalls from ChatStreamChunk (proper protocol; previously
+		// only naive text content was appended even on tool paths).
+		assistantMsg := llm.Message{
+			Role:      "assistant",
+			Content:   responseText,
+			ToolCalls: pendingToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+
+		// Handle explicit tool calls received in the stream chunks (preferred + hardened path)
+		if len(pendingToolCalls) > 0 {
+			for _, tc := range pendingToolCalls {
+				name := tc.Function.Name
+				if name == "implementation_complete" {
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"LLM called implementation_complete (structured tool call)",
+						map[string]any{"phase": "completion_signal", "turn": turns, "summary": tc.Function.Arguments})
+					goto afterLoop
+				}
+
+				// === Explicit enforcement of MANDATORY AST VERIFICATION (Task 2, contract #4) ===
+				// Before any write/edit, require successful prior call to elastro or logloom query
+				// in this task's agent loop context. Tracked via simple astVerified state.
+				if isWriteTool(name) && !astVerified {
+					errMsg := fmt.Sprintf("ERROR: MANDATORY AST VERIFICATION required before %s. "+
+						"Per the Elastro/Logloom contract #4 for work queue implementer workers: you MUST successfully call "+
+						"elastro_query_ast (queries exact index %s) or logloom_ast_query (queries exact indices %s or %s) "+
+						"at least once in the current task before any write_file / edit operation. "+
+						"Call one of the AST tools now to verify codebase structure and unblock edits.", name, ElastroGraphIndex, LogloomEnrichmentIndex, LogloomASTIndex)
+					messages = append(messages, llm.Message{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    errMsg,
+					})
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"Write tool blocked: AST verification not yet performed",
+						map[string]any{"phase": "ast_enforcement", "tool": name, "turn": turns})
+					continue
+				}
+
+				result, execErr := r.tools.Execute(ctx, name, normalizeToolArgs(tc.Function.Arguments), repoPath)
+				if execErr != nil {
+					result = fmt.Sprintf("ERROR executing %s: %v", name, execErr)
+				}
+
+				// Record successful AST verification for enforcement state
+				if (name == "elastro_query_ast" || name == "logloom_ast_query") && execErr == nil {
+					astVerified = true
+					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+						"AST verification recorded (elastro/logloom query succeeded) — writes now permitted for this task",
+						map[string]any{"phase": "ast_verified", "tool": name, "turn": turns})
+				}
+
+				// Hardened: append proper tool-role result message (with ToolCallID) instead of
+				// naive text "Tool results:" user message. This improves multi-turn fidelity (Task 3).
+				messages = append(messages, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    result,
+				})
+
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+					fmt.Sprintf("Executed tool %s", name),
+					map[string]any{"phase": "tool_execution", "tool": name, "result_preview": truncateForLog(result, 300), "ast_verified": astVerified})
+			}
+			continue // next turn; history now contains assistant + tool messages per proper protocol
+		}
+
+		// Fallback text-based detection for completion (kept for compatibility with models that
+		// emit natural language instead of structured tool calls)
+		lower := strings.ToLower(responseText)
+		if strings.Contains(lower, "implementation_complete") || strings.Contains(lower, "task complete") {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+				"LLM signaled completion (text fallback): "+firstNChars(responseText, 300),
+				map[string]any{"phase": "completion_signal", "turn": turns})
+			goto afterLoop
+		}
+
+		// Safety: if we've done several turns with no edits, give the model one more chance then finish
+		if turns >= maxTurns-2 {
+			break
+		}
+	}
+
+afterLoop:
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Implementer agent loop finished after %d turns", turns),
+		map[string]any{"phase": "loop_end", "turns": turns})
+
+	// 3. Auto-commit and push changes (real changes if the loop produced any)
 	commitSHA, err := r.AutoCommitAndPush(ctx, repoPath, branch,
 		fmt.Sprintf("[Flume] %s", task.Title), task.ID)
 	if err != nil {
 		r.logger.Error("auto_commit: failed",
 			slog.String("task_id", task.ID),
 			slog.String("error", err.Error()))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Auto-commit failed: %s. Proceeding to review.", err.Error()),
+			map[string]any{"phase": "commit", "error": err.Error()})
 	}
 
 	// 4. Create PR if branch has new commits
@@ -187,12 +521,62 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		r.logger.Info("implementer: committed and pushed",
 			slog.String("task_id", task.ID),
 			slog.String("sha", commitSHA))
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			fmt.Sprintf("Changes committed and pushed (SHA: %s). Transitioning to review.", commitSHA[:min(len(commitSHA), 8)]),
+			map[string]any{"phase": "complete", "commit_sha": commitSHA})
+	} else {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing).",
+			map[string]any{"phase": "complete", "had_commits": false})
+
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
 	}
 
 	return ftypes.AgentResult{
 		Success:    true,
 		NextStatus: ftypes.TaskStatusReview,
 	}, nil
+}
+
+// truncateForLog is a tiny helper for safe reasoning payloads (Phase 3.1).
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
+}
+
+// normalizeToolArgs converts various argument shapes into map[string]interface{} for tools.
+func normalizeToolArgs(args interface{}) map[string]interface{} {
+	if args == nil {
+		return map[string]interface{}{}
+	}
+	if m, ok := args.(map[string]interface{}); ok {
+		return m
+	}
+	if s, ok := args.(string); ok {
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(s), &m) == nil {
+			return m
+		}
+		return map[string]interface{}{"raw": s}
+	}
+	return map[string]interface{}{"raw": args}
+}
+
+// isWriteTool returns true for any tool that performs file modifications or shell
+// commands that could mutate the repo. Used for MANDATORY AST VERIFICATION gate
+// (Elastro/Logloom contract enforcement in the implementer loop).
+func isWriteTool(name string) bool {
+	switch name {
+	case "write_file", "edit_file", "multi_replace_file_content", "patch_file", "run_shell":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleReviewer runs the reviewer agent.
@@ -222,7 +606,15 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 				if repoPath == "" {
 					workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
 					if workspace == "" {
-						workspace = "/app/workspace"
+						if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+							// Native mode: use current directory, not Docker path.
+							workspace, _ = os.Getwd()
+							if workspace == "" {
+								workspace = "."
+							}
+						} else {
+							workspace = "/app/workspace"
+						}
 					}
 					repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", proj.ID))
 				}
@@ -242,19 +634,81 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 	}
 
 	reviewerSystemPrompt := readSystemPrompt("reviewer")
+
+	diffLen := len(diffOut)
+	flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+		fmt.Sprintf("Reviewing implementation for task: %s. Diff size: %d chars. Sending to LLM for analysis.", parent.Title, diffLen),
+		map[string]any{"phase": "llm_review", "diff_size": diffLen, "parent_task": parent.ID})
+
 	req := llm.ChatRequest{
 		Messages: []llm.Message{
 			{Role: "system", Content: reviewerSystemPrompt},
 			{Role: "user", Content: fmt.Sprintf("Please review this implementation:\nTask: %s\nDiff:\n%s", parent.Title, diffOut)},
 		},
-		Model:     worker.Model,
-		Provider:  worker.Provider,
-		AgentRole: "reviewer",
-		TaskID:    task.ID,
+		Model:      worker.Model,
+		Provider:   worker.Provider,
+		AgentRole:  "reviewer",
+		TaskID:     task.ID,
+		WorkerName: worker.Name,
 	}
 
-	resp, err := r.llm.Chat(ctx, req)
+	// Use streaming for reviewer too, so the model's review analysis/thoughts (and
+	// which mesh node was used) are emitted live into agent reasoning.
+	streamCh, err := r.llm.ChatStream(ctx, req)
 	if err != nil {
+		// Use shared LLM failure handler with retry-cap instead of raw error return
+		// (prevents infinite retry loops when gateway/Ollama is misconfigured)
+		r.handleRoleLLMFailure(ctx, task.ID, task, worker.Role)
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	var finalContent string
+	for ch := range streamCh {
+		if ch.Error != "" {
+			err = fmt.Errorf("reviewer stream error: %s", ch.Error)
+			break
+		}
+		if ch.DeltaContent != "" {
+			finalContent += ch.DeltaContent
+			flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer", ch.DeltaContent, map[string]any{
+				"phase":       "review_stream",
+				"partial":     true,
+				"from_stream": true,
+				"diff_size":   diffLen,
+			})
+		}
+		if ch.Thoughts != "" {
+			// Surface reviewer's internal thoughts (may include analysis before the JSON verdict)
+			flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+				"Reviewer thoughts: "+firstNChars(ch.Thoughts, 400),
+				map[string]any{"phase": "review_thoughts", "partial": true})
+		}
+		if ch.Telemetry != nil {
+			nodeID := ""
+			if v, ok := ch.Telemetry["node_id"].(string); ok {
+				nodeID = v
+			}
+			nodeHost := ""
+			if v, ok := ch.Telemetry["node_host"].(string); ok {
+				nodeHost = v
+			}
+			if nodeID != "" || nodeHost != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+					fmt.Sprintf("Reviewer routed to ollama mesh node %s (%s)", nodeID, nodeHost),
+					map[string]any{"node_id": nodeID, "node_host": nodeHost, "via": "stream"})
+			}
+			flumelogger.WithContext(ctx).Info("gateway telemetry retrieved (reviewer stream)",
+				slog.String("node_id", nodeID), slog.String("node_host", nodeHost))
+		}
+		if ch.Done {
+			if finalContent == "" && ch.DeltaContent != "" {
+				finalContent = ch.DeltaContent
+			}
+			break
+		}
+	}
+	if err != nil {
+		r.handleRoleLLMFailure(ctx, task.ID, task, worker.Role)
 		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
 	}
 
@@ -262,13 +716,13 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 	var reviewResult struct {
 		Approved bool `json:"approved"`
 	}
-	content := cleanJSONContent(resp.Content)
+	content := cleanJSONContent(finalContent)
 	if json.Unmarshal([]byte(content), &reviewResult) == nil {
 		approved = reviewResult.Approved
 	} else {
 		// Fallback check
-		if strings.Contains(strings.ToLower(resp.Content), `"approved": false`) ||
-			strings.Contains(strings.ToLower(resp.Content), `approved: false`) {
+		if strings.Contains(strings.ToLower(finalContent), `"approved": false`) ||
+			strings.Contains(strings.ToLower(finalContent), `approved: false`) {
 			approved = false
 		}
 	}
@@ -278,9 +732,13 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 		verdict = "rejected"
 	}
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+		fmt.Sprintf("Code review complete. Verdict: %s. Analyzed diff for task: %s", verdict, parent.Title),
+		map[string]any{"phase": "complete", "verdict": verdict, "parent_task": parent.ID})
+
 	update := map[string]interface{}{
 		"review_verdict": verdict,
-		"feedback":       resp.Content,
+		"feedback":       finalContent,
 		"updated_at":     time.Now().UTC().Format(time.RFC3339),
 	}
 	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
@@ -294,6 +752,10 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 // handleTester runs the tester agent.
 func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("tester: starting", slog.String("task_id", task.ID))
+
+	flumelogger.LogAgentReasoning(ctx, task.ID, "tester",
+		"Starting test execution. Checking out branch and running test suite.",
+		map[string]any{"phase": "start", "worker": worker.Name})
 
 	// Fetch parent task
 	var parent ftypes.Task
@@ -347,6 +809,11 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 		}
 	}
 
+	flumelogger.LogAgentReasoning(ctx, task.ID, "tester",
+		fmt.Sprintf("Test execution complete. Verdict: %s.", verdict),
+		map[string]any{"phase": "complete", "verdict": verdict, "parent_task": parent.ID,
+			"feedback_preview": firstNChars(feedback, 200)})
+
 	update := map[string]interface{}{
 		"review_verdict": verdict,
 		"feedback":       feedback,
@@ -374,6 +841,28 @@ func (r *Runner) handleTester(ctx context.Context, task ftypes.Task, worker ftyp
 func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.Worker) (ftypes.AgentResult, error) {
 	r.logger.Info("pm: decomposing", slog.String("task_id", task.ID))
 
+	// === Hard status guard: never re-decompose a task that has already left planned/ready ===
+	// This catches race conditions where a done/blocked task ends up back in the claim pool.
+	if task.Status == ftypes.TaskStatusDone || task.Status == ftypes.TaskStatusArchived || task.Status == ftypes.TaskStatusBlocked {
+		r.logger.Info("pm: skipping — task already in terminal/blocked status",
+			slog.String("task_id", task.ID),
+			slog.String("status", string(task.Status)))
+		return ftypes.AgentResult{Success: true, NextStatus: task.Status}, nil
+	}
+
+	// === Anti-explosion guard: skip decomposition for intake-created hierarchy nodes ===
+	// Phase 1: use HierarchyOrchestrator.IsStructuralOrgItem for consistent decision (epic/feat/story or system owner = structural, never decomp target).
+	// Epics, features, and stories are organizational containers created by buildTaskHierarchy() as "done".
+	// Only items with ItemType "task" (or empty, for legacy) are valid PM targets.
+	if DefaultHierarchyOrchestrator.IsStructuralOrgItem(task.ItemType, "system") || task.ItemType == "epic" || task.ItemType == "feature" || task.ItemType == "story" {
+		reason := fmt.Sprintf("PM decomposition skipped: %q is an intake-created hierarchy node (item_type=%s), not a decomposition target", task.Title, task.ItemType)
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"item_type": task.ItemType})
+		r.logger.Info("pm: skipping decomposition — intake-created hierarchy node",
+			slog.String("task_id", task.ID),
+			slog.String("item_type", task.ItemType),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusDone}, nil
+	}
 	// === HARD emergency stop guard (the missing piece when user hit "halt the swarm") ===
 	if r.isWorkPaused(ctx, task.ProjectID) {
 		reason := "PM decomposition blocked: project work is paused (emergency halt)"
@@ -383,42 +872,21 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 	}
 
 	// === Anti-re-decomposition guard (core fix for workitem explosion) ===
-	// Prefer the cheap denormalized ChildCount / DecomposedAt (populated by previous decompositions
-	// and by intake creation). Fall back to a small child search if the denorm fields are not yet set.
 	//
-	// Hardened (post 74-task incident): also treat a recent failed decomp attempt (even if no children
-	// were created because the LLM call failed early) as a reason to back off. This breaks the
-	// "gateway down → error → clearStaleClaim → re-claim → repeat decomp attempt" storm.
-	if task.ChildCount > 0 || task.DecomposedAt != nil {
-		r.logger.Info("pm: skipping re-decomposition — denorm fields indicate children exist (cheap guard)",
-			slog.String("task_id", task.ID),
-			slog.Int("child_count", task.ChildCount),
-			slog.String("title", task.Title))
-		return ftypes.AgentResult{
-			Success:    true,
-			NextStatus: ftypes.TaskStatusDone,
-		}, nil
-	}
+	// Guard ordering rationale (Fix 3, death spiral root cause):
+	//   1. ES child search (AUTHORITATIVE) — always runs first. The denorm fields
+	//      (ChildCount, DecomposedAt) on the task struct may be stale because the
+	//      task was fetched by the claimer BEFORE handlePM wrote them.
+	//   2. Denorm fields (CHEAP FALLBACK) — catches cases where ES search fails.
+	//   3. Recent failure backoff — prevents retry storms after LLM/gateway errors.
 
-	// New backoff for recent failed attempts (recorded on every early LLM failure path)
-	if task.DecompLastAttemptAt != nil {
-		age := time.Since(*task.DecompLastAttemptAt)
-		if age < 2*time.Minute {  // conservative backoff window while LLM/gateway is unhealthy
-			reason := fmt.Sprintf("recent PM decomp attempt failed %s ago (gateway or LLM issue) — backing off to prevent retry storm", age.Round(time.Second))
-			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"age": age.String()})
-			r.logger.Info("pm: skipping — recent failed decomp attempt, backing off",
-				slog.String("task_id", task.ID),
-				slog.Duration("attempt_age", age))
-			return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusReady}, nil
-		}
-	}
-
+	// PRIMARY guard: ES child existence search (authoritative, survives stale reads)
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": task.ID},
+		"term": map[string]string{"parent_id.keyword": task.ID},
 	}
 	childRes, cerr := r.es.Search(ctx, "agent-task-records", childQuery, 1)
 	if cerr == nil && len(childRes.Hits) > 0 {
-		r.logger.Info("pm: skipping re-decomposition — task already has children (anti-explosion guard)",
+		r.logger.Info("pm: skipping re-decomposition — task already has children (ES search, authoritative guard)",
 			slog.String("task_id", task.ID),
 			slog.Int("existing_child_count", len(childRes.Hits)),
 			slog.String("title", task.Title))
@@ -428,9 +896,34 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		}, nil
 	}
 	if cerr != nil {
-		r.logger.Warn("pm: child-existence check failed (proceeding conservatively)",
+		r.logger.Warn("pm: ES child-existence check failed (falling through to denorm guard)",
 			slog.String("task_id", task.ID),
 			slog.String("error", cerr.Error()))
+	}
+
+	// SECONDARY guard: denorm fields (cheap, may be stale at claim time but catches most cases)
+	if task.ChildCount > 0 || task.DecomposedAt != nil {
+		r.logger.Info("pm: skipping re-decomposition — denorm fields indicate children exist (cheap fallback guard)",
+			slog.String("task_id", task.ID),
+			slog.Int("child_count", task.ChildCount),
+			slog.String("title", task.Title))
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
+	}
+
+	// TERTIARY guard: recent failed attempt backoff (breaks gateway-down retry storms)
+	if task.DecompLastAttemptAt != nil {
+		age := time.Since(*task.DecompLastAttemptAt)
+		if age < 2*time.Minute {
+			reason := fmt.Sprintf("recent PM decomp attempt failed %s ago (gateway or LLM issue) — backing off to prevent retry storm", age.Round(time.Second))
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{"age": age.String()})
+			r.logger.Info("pm: skipping — recent failed decomp attempt, backing off",
+				slog.String("task_id", task.ID),
+				slog.Duration("attempt_age", age))
+			return ftypes.AgentResult{Success: true, NextStatus: ftypes.TaskStatusReady}, nil
+		}
 	}
 
 	// === Phase 2 BUDGET ENFORCEMENT in handlePM (before expensive LLM call) ===
@@ -462,11 +955,18 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 					r.logger.Warn("handlePM: plan budget would be exceeded — blocking parent pre-LLM (fail closed)",
 						slog.String("task_id", task.ID), slog.String("plan_session", task.PlanSessionID), slog.String("reason", reason))
 					_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-						"status":        "blocked",
-						"error_message": reason,
-						"updated_at":    time.Now().UTC().Format(time.RFC3339),
+						"status":             "blocked",
+						"error_message":      reason,
+						"updated_at":         time.Now().UTC().Format(time.RFC3339),
+						"explosion_evidence": []string{"pm_budget_block:" + sess.ID},
 					})
-					return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+					// Return blocked as NextStatus with nil error so RunWorker does NOT call clearStaleClaim.
+					// This prevents the PM re-decomposition loop (GAP-3 / Phase 1).
+					return ftypes.AgentResult{
+						Success:    false,
+						Errors:     []string{reason},
+						NextStatus: ftypes.TaskStatusBlocked,
+					}, nil
 				}
 			}
 		}
@@ -483,9 +983,18 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		AgentRole:     "pm",
 		TaskID:        task.ID,
 		PlanSessionID: task.PlanSessionID, // Phase 2: enables gateway per-plan-pm rate limiter + budget context
+		WorkerName:    worker.Name,
 	}
 
-	resp, err := r.llm.Chat(ctx, req)
+	// Use streaming for the main decomp call. This keeps the HTTP connection to the
+	// gateway (and thus to the chosen Ollama mesh node) open for the entire generation.
+	// Partial visible content and thoughts from the model (after think-milling) are
+	// emitted as agent reasoning in real time. This provides the visibility needed
+	// to diagnose what the PM agent is actually doing / failing on, instead of
+	// opaque timeouts or single final JSON.
+	// Mesh node selection still happens (we call through the normal routing), and
+	// node telemetry is logged + turned into reasoning entries.
+	streamCh, err := r.llm.ChatStream(ctx, req)
 	if err != nil {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "PM LLM call to gateway/mesh failed during decomposition", map[string]any{
 			"error": err.Error(),
@@ -506,6 +1015,87 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
 	}
 
+	// Accumulate final content from stream (for JSON parse), while emitting live
+	// reasoning for every delta. This is what makes "agent reasoning" show the
+	// actual model output and which mesh node was used.
+	var finalContent string
+	var finalThoughts string
+	for ch := range streamCh {
+		if ch.Error != "" {
+			err = fmt.Errorf("pm stream error: %s", ch.Error)
+			break
+		}
+		if ch.DeltaContent != "" {
+			finalContent += ch.DeltaContent
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", ch.DeltaContent, map[string]any{
+				"phase":       "decomp_stream",
+				"partial":     true,
+				"from_stream": true,
+			})
+		}
+		if ch.Thoughts != "" {
+			finalThoughts = ch.Thoughts
+		}
+		if ch.Telemetry != nil {
+			nodeID := ""
+			if v, ok := ch.Telemetry["node_id"].(string); ok {
+				nodeID = v
+			}
+			nodeHost := ""
+			if v, ok := ch.Telemetry["node_host"].(string); ok {
+				nodeHost = v
+			}
+			if nodeID != "" || nodeHost != "" {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+					fmt.Sprintf("routed to ollama mesh node %s (%s) for decomposition", nodeID, nodeHost),
+					map[string]any{
+						"node_id":   nodeID,
+						"node_host": nodeHost,
+						"via":       "stream",
+					})
+			}
+			// Also the generic telemetry log (as non-stream path does)
+			flumelogger.WithContext(ctx).Info("gateway telemetry retrieved (pm stream)",
+				slog.String("node_id", nodeID),
+				slog.String("node_host", nodeHost),
+			)
+		}
+		if ch.Done {
+			if finalContent == "" && ch.DeltaContent != "" {
+				finalContent = ch.DeltaContent
+			}
+			break
+		}
+	}
+	if err != nil {
+		// Same failure recording as before
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "PM LLM call to gateway/mesh failed during decomposition", map[string]any{
+			"error": err.Error(),
+			"model": worker.Model,
+		})
+		now := time.Now().UTC()
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+			"decomp_last_attempt_at": now.Format(time.RFC3339),
+			"decomp_failures":        (task.ChildCount + 1),
+			"error_message":          "PM LLM failure (stream) - decomp attempt recorded for backoff",
+			"updated_at":             now.Format(time.RFC3339),
+		})
+		return ftypes.AgentResult{Success: false, Errors: []string{err.Error()}}, err
+	}
+
+	// Log accumulated thoughts once (the "internal monologue" of the PM before the JSON).
+	// This (plus the per-delta visible content and the node routing entry above) is what
+	// populates agent reasoning with what the model actually emitted while talking to
+	// the specific ollama mesh node.
+	if finalThoughts != "" {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+			"PM decomp thoughts (from mesh node): "+firstNChars(finalThoughts, 800),
+			map[string]any{
+				"thoughts_len": len(finalThoughts),
+				"via":          "stream",
+			})
+	}
+
 	type SubtaskPlan struct {
 		ID        string   `json:"id"`
 		Title     string   `json:"title"`
@@ -516,72 +1106,97 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		Tasks []SubtaskPlan `json:"tasks"`
 	}
 
-	content := cleanJSONContent(resp.Content)
+	content := cleanJSONContent(finalContent)
 	if err := json.Unmarshal([]byte(content), &plan); err != nil {
 		// === PM JSON resilience (highest-leverage local-LLM fix) ===
 		// Local models (even qwen3.5 35b) frequently emit leading text, ".", or markdown
 		// before the JSON. This single path was responsible for the entire 40+ minute
 		// death-spiral storm in the field test (75-120s calls, gateway collapse, repeated
 		// stale-claim resets, shadow violations).
-		r.logger.Warn("pm: initial JSON parse failed, attempting one repair LLM call",
-			slog.String("task_id", task.ID),
-			slog.String("error", err.Error()),
-			slog.Int("raw_len", len(resp.Content)))
 
-		flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
-			"Initial subtask plan JSON parse failed (LLM output did not start with valid JSON). Attempting automatic repair with strict JSON-only instruction.",
-			map[string]any{
-				"raw_prefix":     firstNChars(resp.Content, 200),
-				"parse_error":    err.Error(),
-				"repair_attempt": 1,
-			})
-
-		// One repair attempt with a very strict prompt (re-uses same model for simplicity).
-		repairReq := llm.ChatRequest{
-			Messages: []llm.Message{
-				{Role: "system", Content: "You are a JSON repair assistant. Output ONLY a single valid JSON object. No markdown, no explanations, no leading or trailing text."},
-				{Role: "user", Content: fmt.Sprintf("The following text is supposed to be a JSON object with a top-level 'tasks' array matching this schema exactly:\n{\n  \"tasks\": [ {\"id\": \"task_1\", \"title\": \"...\", \"objective\": \"...\", \"depends_on\": [] } ]\n}\n\nPrevious model output (first 800 chars):\n%s\n\nRe-emit ONLY the corrected JSON object. Start with '{' and end with '}'.", firstNChars(resp.Content, 800))},
-			},
-			Model:         worker.Model,
-			Provider:      worker.Provider,
-			AgentRole:     "pm",
-			TaskID:        task.ID,
-			PlanSessionID: task.PlanSessionID,
+		// Cheap local/heuristic repair FIRST, before the expensive second LLM call.
+		heuristic := finalContent
+		heuristic = removeTrailingCommas(heuristic)
+		heuristic = cleanJSONContent(heuristic)
+		var hplan struct {
+			Tasks []SubtaskPlan `json:"tasks"`
 		}
-		repairResp, repairErr := r.llm.Chat(ctx, repairReq)
-		repairSucceeded := false
-		if repairErr == nil {
-			repairContent := cleanJSONContent(repairResp.Content)
-			if uerr := json.Unmarshal([]byte(repairContent), &plan); uerr == nil && len(plan.Tasks) > 0 {
-				repairSucceeded = true
-				r.logger.Info("pm: repair LLM call succeeded", slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
-				flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "Repair LLM call produced valid subtask plan JSON after initial failure.", map[string]any{"tasks": len(plan.Tasks)})
+		if uerr := json.Unmarshal([]byte(heuristic), &hplan); uerr == nil && len(hplan.Tasks) > 0 {
+			plan = hplan
+			r.logger.Info("pm: cheap local heuristic JSON repair succeeded (avoided LLM repair call)",
+				slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+				"Local heuristic repair (trailing commas + clean) produced valid subtask plan JSON before expensive LLM repair.",
+				map[string]any{"tasks": len(plan.Tasks), "heuristic": true})
+			// fallthrough to use the plan, skip LLM repair
+		} else {
+			r.logger.Warn("pm: initial JSON parse failed, attempting one repair LLM call",
+				slog.String("task_id", task.ID),
+				slog.String("error", err.Error()),
+				slog.Int("raw_len", len(finalContent)))
+
+			flumelogger.LogAgentReasoning(ctx, task.ID, "pm",
+				"Initial subtask plan JSON parse failed (LLM output did not start with valid JSON). Attempting automatic repair with strict JSON-only instruction.",
+				map[string]any{
+					"raw_prefix":     firstNChars(finalContent, 200),
+					"parse_error":    err.Error(),
+					"repair_attempt": 1,
+				})
+
+			// One repair attempt with a very strict prompt (re-uses same model for simplicity).
+			repairReq := llm.ChatRequest{
+				Messages: []llm.Message{
+					{Role: "system", Content: "You are a JSON repair assistant. Output ONLY a single valid JSON object. No markdown, no explanations, no leading or trailing text."},
+					{Role: "user", Content: fmt.Sprintf("The following text is supposed to be a JSON object with a top-level 'tasks' array matching this schema exactly:\n{\n  \"tasks\": [ {\"id\": \"task_1\", \"title\": \"...\", \"objective\": \"...\", \"depends_on\": [] } ]\n}\n\nPrevious model output (first 800 chars):\n%s\n\nRe-emit ONLY the corrected JSON object. Start with '{' and end with '}'.", firstNChars(finalContent, 800))},
+				},
+				Model:         worker.Model,
+				Provider:      worker.Provider,
+				AgentRole:     "pm",
+				TaskID:        task.ID,
+				PlanSessionID: task.PlanSessionID,
+				WorkerName:    worker.Name,
 			}
-		}
-		if !repairSucceeded {
-			// Circuit breaker: hard failure after repair attempt. Block to stop the retry storm.
-			reason := "PM failed to produce parseable subtask JSON even after one repair attempt (local LLM output format issue)"
-			flumelogger.LogStateTransition(ctx, task.ID, string(task.Status), "blocked", reason)
-			flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{
-				"raw_prefix":       firstNChars(resp.Content, 300),
-				"repair_attempted": true,
-				"repair_error":     repairErr,
-				"model":            worker.Model,
-				"provider":         worker.Provider,
-				"action":           "blocked_to_prevent_storm",
-			})
-			r.logger.Error("pm: JSON parse failed after repair — blocking task to prevent retry storm",
-				slog.String("task_id", task.ID), slog.String("raw_prefix", firstNChars(resp.Content, 120)))
+			repairResp, repairErr := r.llm.Chat(ctx, repairReq)
+			repairSucceeded := false
+			if repairErr == nil {
+				repairContent := cleanJSONContent(repairResp.Content)
+				if uerr := json.Unmarshal([]byte(repairContent), &plan); uerr == nil && len(plan.Tasks) > 0 {
+					repairSucceeded = true
+					r.logger.Info("pm: repair LLM call succeeded", slog.String("task_id", task.ID), slog.Int("tasks", len(plan.Tasks)))
+					flumelogger.LogAgentReasoning(ctx, task.ID, "pm", "Repair LLM call produced valid subtask plan JSON after initial failure.", map[string]any{"tasks": len(plan.Tasks)})
+				}
+			}
+			if !repairSucceeded {
+				// Circuit breaker: hard failure after repair attempt. Block to stop the retry storm.
+				reason := "PM failed to produce parseable subtask JSON even after one repair attempt (local LLM output format issue)"
+				flumelogger.LogStateTransition(ctx, task.ID, string(task.Status), "blocked", reason)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "pm", reason, map[string]any{
+					"raw_prefix":       firstNChars(finalContent, 300),
+					"repair_attempted": true,
+					"repair_error":     repairErr,
+					"model":            worker.Model,
+					"provider":         worker.Provider,
+					"action":           "blocked_to_prevent_storm",
+				})
+				r.logger.Error("pm: JSON parse failed after repair — blocking task to prevent retry storm",
+					slog.String("task_id", task.ID), slog.String("raw_prefix", firstNChars(finalContent, 120)))
 
-			// Persist the block (best effort)
-			_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-				"status":        "blocked",
-				"error_message": reason,
-				"updated_at":    time.Now().UTC().Format(time.RFC3339),
-			})
-			return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+				// Persist the block (best effort)
+				_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+					"status":        "blocked",
+					"error_message": reason,
+					"updated_at":    time.Now().UTC().Format(time.RFC3339),
+				})
+				// Return blocked as NextStatus with nil error (GAP-3 / Phase 1).
+				// Prevents clearStaleClaim from resetting a permanently failed PM back to planned.
+				return ftypes.AgentResult{
+					Success:    false,
+					Errors:     []string{reason},
+					NextStatus: ftypes.TaskStatusBlocked,
+				}, nil
+			}
+			// If we reach here, plan was populated by the repair response — fall through to creation.
 		}
-		// If we reach here, plan was populated by the repair response — fall through to creation.
 	}
 
 	// === HARD per-parent child cap (prevents one bad decomposition from creating 50+ items) ===
@@ -634,7 +1249,12 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 						"error_message": reason,
 						"updated_at":    time.Now().UTC().Format(time.RFC3339),
 					})
-					return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
+					// Return blocked + nil error (GAP-3 consistency).
+					return ftypes.AgentResult{
+						Success:    false,
+						Errors:     []string{reason},
+						NextStatus: ftypes.TaskStatusBlocked,
+					}, nil
 				}
 			}
 		}
@@ -653,9 +1273,10 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		r.logger.Error("pm: depth limit exceeded — blocking parent to prevent nesting explosion",
 			slog.String("task_id", task.ID), slog.Int("depth", task.HierarchyDepth))
 		_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
-			"status":        "blocked",
-			"error_message": reason,
-			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+			"status":             "blocked",
+			"error_message":      reason,
+			"updated_at":         time.Now().UTC().Format(time.RFC3339),
+			"explosion_evidence": []string{fmt.Sprintf("pm_depth_exceeded:%d>%d", task.HierarchyDepth+1, ftypes.MAX_HIERARCHY_DEPTH)},
 		})
 		return ftypes.AgentResult{Success: false, Errors: []string{reason}}, fmt.Errorf("%s", reason)
 	}
@@ -707,11 +1328,25 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 			"parent_title":  task.Title,
 		})
 
-	// Authoritative ChildCount via atomic ES inline script (task 3).
-	// Replaces previous best-effort absolute set which could race under concurrent PM claims.
+	// Fix 2: ATOMIC combined update — set child_count + decomposed_at + status=done
+	// + clear active_worker in ONE ES write. This eliminates the HTTP 409 version
+	// conflict that occurred when handlePM bumped the seq_no (via separate UpdateDoc
+	// calls) and then RunWorker's updateTaskStatus(done) tried to write with the
+	// stale seq_no. The 409 left the task stuck in 'running', triggering the death
+	// spiral via clearStaleClaim → re-claim → re-decompose.
 	nowISO := time.Now().UTC().Format(time.RFC3339)
+	_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, map[string]interface{}{
+		"child_count":   len(plan.Tasks),
+		"decomposed_at": nowISO,
+		"status":        "done",
+		"active_worker": nil,
+		"queue_state":   "available",
+		"updated_at":    nowISO,
+	})
+
+	// Secondary reinforcement via atomic inline script (survives concurrent claim races)
 	delta := len(plan.Tasks)
-	scriptSrc := `ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta; ctx._source.decomposed_at = params.now; ctx._source.updated_at = params.now;`
+	scriptSrc := `ctx._source.child_count = (ctx._source.child_count != null ? ctx._source.child_count : 0) + params.delta; ctx._source.decomposed_at = params.now; ctx._source.status = "done"; ctx._source.active_worker = null; ctx._source.queue_state = "available"; ctx._source.updated_at = params.now;`
 	_ = r.es.UpdateDocWithInlineScript(ctx, "agent-task-records", task.ID, scriptSrc, map[string]interface{}{
 		"delta": delta,
 		"now":   nowISO,
@@ -732,9 +1367,12 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		})
 	}
 
+	// Return empty NextStatus so RunWorker does NOT call updateTaskStatus(done) —
+	// we already set status=done in the combined update above. A second update
+	// would race with a stale seq_no and cause HTTP 409.
 	return ftypes.AgentResult{
 		Success:    true,
-		NextStatus: ftypes.TaskStatusDone, // Decomposition complete; subtasks + sweep drive completion. Prevents lingering PM org items.
+		NextStatus: "", // handlePM already wrote status=done atomically
 	}, nil
 }
 
@@ -760,17 +1398,41 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 	workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
 	if workspace == "" {
-		workspace = "/app/workspace"
+		if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+			// Native mode: use current directory, not Docker path.
+			workspace, _ = os.Getwd()
+			if workspace == "" {
+				workspace = "."
+			}
+		} else {
+			workspace = "/app/workspace"
+		}
 	}
 	repoPath := project.LocalPath
 	if repoPath == "" {
 		repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", project.ID))
+		r.logger.Info("EnsureTaskBranch: resolved workspace (project.LocalPath was empty)",
+			slog.String("project_id", task.ProjectID),
+			slog.String("workspace", workspace),
+			slog.String("repo_path", repoPath))
 	}
 
 	// Check if local clone exists. If not, clone it dynamically.
-	if _, err := os.Stat(filepath.Join(repoPath, ".git")); os.IsNotExist(err) {
+	gitDir := filepath.Join(repoPath, ".git")
+	gitDirInfo, statErr := os.Stat(gitDir)
+	gitDirExists := statErr == nil && gitDirInfo.IsDir()
+
+	if !gitDirExists {
 		if project.RepoURL == "" {
 			return "", "", fmt.Errorf("project %s has no local path and no remote repo_url", task.ProjectID)
+		}
+
+		// Proactively remove the existing corrupt/incomplete repo directory to prevent clone conflicts (e.g. files-backend ref bugs)
+		if _, err := os.Stat(repoPath); err == nil {
+			r.logger.Info("EnsureTaskBranch: repo path exists but has no valid .git; removing it to prevent clone conflicts", slog.String("path", repoPath))
+			if err := os.RemoveAll(repoPath); err != nil {
+				r.logger.Warn("EnsureTaskBranch: failed to remove repo path before clone", slog.String("path", repoPath), slog.String("error", err.Error()))
+			}
 		}
 
 		// Ensure parent directory exists
@@ -794,13 +1456,41 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 		if isRemote {
 			cloneURL = git.EmbedCredentials(ctx, project.RepoURL, "")
+
+			// Explicit validation + reasoning for OpenBao credential flow (user request).
+			// If this is still a bare URL for a remote repo, credential resolution from
+			// OpenBao (via ES metadata + KV or direct flume/keys) failed.
+			if cloneURL == project.RepoURL {
+				repoType := git.DetectRepoType(project.RepoURL)
+				reason := fmt.Sprintf(
+					"Worker could not obtain credentials from OpenBao for repo type '%s'. "+
+						"Clone/checkout will likely fail with auth or ref errors. "+
+						"Verify: Settings → Repositories has an active PAT for this provider, "+
+						"OpenBao 'flume/keys' or per-token paths are populated, and OPENBAO_TOKEN is available to workers.",
+					repoType,
+				)
+				flumelogger.LogAgentReasoning(ctx, task.ID, "system", reason, map[string]any{
+					"repo":            task.ProjectID,
+					"repo_url":        git.StripCredentials(project.RepoURL),
+					"detected_type":   repoType,
+					"credential_path": "OpenBao (ES-backed ADO/GH stores or flume/keys)",
+				})
+				r.logger.Error("EnsureTaskBranch: no OpenBao credentials resolved",
+					slog.String("task_id", task.ID),
+					slog.String("repo_type", repoType),
+					slog.String("repo", task.ProjectID))
+			}
 		}
 
-		// Execute git clone
-		cmd := exec.CommandContext(ctx, "git", "clone", "--", cloneURL, repoPath)
+		// Execute git clone with explicit long timeout (GAP-1)
+		cloneTimeout := 120 * time.Second // clones can be slow for large repos
+		cloneCtx, cancel := context.WithTimeout(ctx, cloneTimeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(cloneCtx, "git", "clone", "--", cloneURL, repoPath)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			_ = os.RemoveAll(repoPath)
-			return "", "", fmt.Errorf("git clone failed: %s: %w", string(output), err)
+			return "", "", fmt.Errorf("git clone failed after %v: %s: %w", cloneTimeout, string(output), err)
 		}
 		r.logger.Info("EnsureTaskBranch: cloned successfully", slog.String("project_id", project.ID))
 	}
@@ -810,7 +1500,25 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 
 	// Create/checkout branch
 	if err := gitCheckoutBranch(repoPath, branch); err != nil {
-		return "", "", fmt.Errorf("checkout branch %s: %w", branch, err)
+		class := classifyGitError(err, "")
+		r.logger.Error("EnsureTaskBranch: git checkout failed",
+			slog.String("task_id", task.ID),
+			slog.String("branch", branch),
+			slog.String("classified_error", class),
+			slog.String("error", err.Error()))
+
+		// Rich reasoning for the agent popout / Logloom (critical for diagnosing these exact post-migration git storms)
+		flumelogger.LogAgentReasoning(context.Background(), task.ID, "system",
+			fmt.Sprintf("Failed to set up task branch %s (classified: %s): %v", branch, class, err),
+			map[string]any{
+				"branch":          branch,
+				"repo":            task.ProjectID,
+				"classified":      class,
+				"error":           err.Error(),
+				"recovery_action": "see gitCheckoutBranch + classifyGitError for details",
+			})
+
+		return "", "", fmt.Errorf("checkout branch %s (classified %s): %w", branch, class, err)
 	}
 
 	return repoPath, branch, nil
@@ -819,9 +1527,13 @@ func (r *Runner) EnsureTaskBranch(ctx context.Context, task ftypes.Task) (string
 // AutoCommitAndPush stages, commits, and pushes changes.
 // Derived from Python: auto_commit_and_push() (L1918-2023, 11 parents, 3 children)
 func (r *Runner) AutoCommitAndPush(ctx context.Context, repoPath, branch, message, taskID string) (string, error) {
-	// Check if there are changes
-	out, err := gitCmd(repoPath, "status", "--porcelain")
+	// Check if there are changes (short timeout)
+	out, err := gitCmdWithTimeout(repoPath, 15*time.Second, "status", "--porcelain")
 	if err != nil {
+		class := classifyGitError(err, out)
+		r.logger.Warn("auto_commit: git status failed",
+			slog.String("task_id", taskID),
+			slog.String("classified_as", class))
 		return "", fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(out) == "" {
@@ -835,32 +1547,41 @@ func (r *Runner) AutoCommitAndPush(ctx context.Context, repoPath, branch, messag
 		return "", fmt.Errorf("git add: %w", err)
 	}
 
-	// Commit
-	if _, err := gitCmd(repoPath, "commit", "-m", message); err != nil {
+	// Commit (with classification on failure)
+	if out, err := gitCmdWithTimeout(repoPath, 30*time.Second, "commit", "-m", message); err != nil {
+		class := classifyGitError(err, out)
+		r.logger.Error("auto_commit: commit failed",
+			slog.String("task_id", taskID),
+			slog.String("classified_as", class),
+			slog.String("error", err.Error()))
 		return "", fmt.Errorf("git commit: %w", err)
 	}
 
-	// Rebase before push
-	if _, err := gitCmd(repoPath, "pull", "--rebase", "origin", branch); err != nil {
+	// Rebase before push (use longer timeout + classification)
+	if _, err := gitCmdWithTimeout(repoPath, 60*time.Second, "pull", "--rebase", "origin", branch); err != nil {
+		class := classifyGitError(err, "")
 		// Check for rebase conflict
-		if strings.Contains(err.Error(), "CONFLICT") || strings.Contains(err.Error(), "conflict") {
+		if strings.Contains(err.Error(), "CONFLICT") || strings.Contains(err.Error(), "conflict") || class == "conflict" {
 			r.logger.Error("auto_commit: rebase conflict detected",
 				slog.String("task_id", taskID),
 				slog.String("branch", branch))
-			_, _ = gitCmd(repoPath, "rebase", "--abort")
+			_, _ = gitCmdWithTimeout(repoPath, 15*time.Second, "rebase", "--abort")
 			return "", fmt.Errorf("rebase conflict on %s", branch)
 		}
 		r.logger.Warn("auto_commit: pre-push rebase error",
 			slog.String("task_id", taskID),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.String("classified_as", class))
 	}
 
-	// Push
-	if _, err := gitCmd(repoPath, "push", "origin", branch); err != nil {
+	// Push (explicit timeout)
+	if _, err := gitCmdWithTimeout(repoPath, 60*time.Second, "push", "origin", branch); err != nil {
+		class := classifyGitError(err, "")
 		r.logger.Error("auto_commit: push failed",
 			slog.String("task_id", taskID),
 			slog.String("branch", branch),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.String("classified_as", class))
 		return "", fmt.Errorf("git push: %w", err)
 	}
 
@@ -909,10 +1630,34 @@ func (r *Runner) ComputeReadyForRepo(ctx context.Context, repoID string) int {
 
 // clearStaleClaim resets a task after a worker crash.
 // Derived from Python: run_worker() error handling (L2215-2227)
-func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStatus ftypes.TaskStatus) {
+func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStatus ftypes.TaskStatus, workerRole string) {
+	// Determine the correct reset target based on both the worker role and
+	// current status. Reviewer/tester tasks should reset to "review" so they
+	// can be re-claimed by the same role. Implementers reset to "ready".
+	// PM tasks reset to "planned" so the promote sweep can re-evaluate them.
 	targetStatus := "ready"
-	if currentStatus == ftypes.TaskStatusReview {
+	switch workerRole {
+	case "reviewer", "tester":
 		targetStatus = "review"
+	case "pm":
+		targetStatus = "planned"
+
+		// GAP-7 / Phase 1 hardening:
+		// If this PM task already successfully decomposed (child_count > 0 or decomposed_at set),
+		// do NOT reset it back to "planned". That would cause duplicate decomposition attempts
+		// and feed the explosion loop. Instead treat it as completed decomposition.
+		if doc, err := r.es.GetDoc(ctx, "agent-task-records", taskID); err == nil && doc != nil {
+			var t ftypes.Task
+			if json.Unmarshal(doc, &t) == nil {
+				if t.ChildCount > 0 || t.DecomposedAt != nil {
+					targetStatus = "done"
+				}
+			}
+		}
+	default:
+		if currentStatus == ftypes.TaskStatusReview {
+			targetStatus = "review"
+		}
 	}
 
 	update := map[string]interface{}{
@@ -922,31 +1667,30 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// PR2 Enforce
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(currentStatus, ftypes.TaskStatus(targetStatus), r.logger.Warn)
-	if err := r.es.UpdateDoc(ctx, "agent-task-records", taskID, update); err == nil {
+	reason := fmt.Sprintf("stale claim cleared after worker crash or LLM/gateway failure (reset to %s for re-claim)", targetStatus)
+
+	// Phase 3a-2: Route through the central lease state helper.
+	// This guarantees consistent Enforce + dual Log* + reasoning on all claim/lease column mutations.
+	// (Previously this path had its own direct UpdateDoc + duplicated logging.)
+	if err := updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+		0, 0, // no OCC information at reset time in this path
+		currentStatus, ftypes.TaskStatus(targetStatus),
+		workerRole, reason); err == nil {
 		r.logger.Info("cleared stale claim on task after worker crash",
 			slog.String("task_id", taskID),
+			slog.String("worker_role", workerRole),
 			slog.String("reset_to", targetStatus))
-
-		// Centralized structured logging for the agent reasoning popout + Logloom graphs.
-		// This is the exact path exercised on every LLM/gateway crash during the local-mesh stress test.
-		flumelogger.LogStateTransition(ctx, taskID, string(currentStatus), targetStatus,
-			"stale claim cleared after worker crash or LLM/gateway failure (reset for re-claim)")
-		flumelogger.LogAgentReasoning(ctx, taskID, "system",
-			fmt.Sprintf("Worker (%s) crashed or LLM call failed; stale claim cleared and task reset to %s to allow recovery.",
-				"unknown-role", targetStatus),
-			map[string]any{
-				"previous_status": string(currentStatus),
-				"reset_to":        targetStatus,
-				"reason":          "worker_crash_or_llm_failure",
-			})
 	}
 }
 
 func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status ftypes.TaskStatus) {
-	// PR 2: all via Enforcer
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog("", status, r.logger.Warn) // prev unknown here; future pass current
+	// All status changes after handlers must go through the central guarded path
+	// (flume-go SKILL + Cross-cutting Writer Rule). This provides OCC (when seq/prim
+	// available), state machine Enforce, and mandatory dual logging.
+	//
+	// Note: For the common "post-handler" case we don't always have fresh seq/prim
+	// from the original claim. The wrapper will fall back to non-OCC UpdateDoc but
+	// still does the Enforce + rich Log* calls. Sweeps/Claimer use the OCC path.
 	update := map[string]interface{}{
 		"status":        string(status),
 		"active_worker": nil,
@@ -957,58 +1701,214 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 		now := time.Now().UTC().Format(time.RFC3339)
 		update["completed_at"] = now
 	}
-	_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
+
+	// Use the guarded wrapper. prevStatus unknown here (future improvement: pass it in).
+	// workerRole is left empty; the important thing is that we stop doing bare UpdateDoc
+	// on the lease columns from the runner.
+	_ = updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
+		0, 0, // no seq/prim in this legacy path
+		"", status, // prev unknown
+		"", // role not known at this callsite yet
+		fmt.Sprintf("post-handler transition to %s", status))
 }
 
 // ─── Git Helpers ────────────────────────────────────────────────────────────
 
 func gitCmd(repoPath string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	// Default safe timeout for most git operations (status, diff, symbolic-ref, etc.)
+	return gitCmdWithTimeout(repoPath, 30*time.Second, args...)
+}
+
+// gitCmdWithTimeout executes a git command with an explicit timeout.
+// This addresses GAP-1 (per-command git timeouts) from the Python→Go migration review.
+func gitCmdWithTimeout(repoPath string, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("git %s timed out after %v: %w", strings.Join(args, " "), timeout, err)
+	}
 	return string(out), err
 }
 
+// classifyGitError provides basic classification of common git exit 128 / error patterns.
+// This addresses GAP-2 (error classification for exit code 128).
+func classifyGitError(err error, output string) string {
+	if err == nil {
+		return ""
+	}
+	combined := strings.ToLower(output + " " + err.Error())
+
+	switch {
+	case strings.Contains(combined, "authentication failed"),
+		strings.Contains(combined, "could not read username"),
+		strings.Contains(combined, "permission denied (publickey)"):
+		return "auth"
+	case strings.Contains(combined, "index.lock"):
+		return "lock"
+	case strings.Contains(combined, "conflict"):
+		return "conflict"
+	case strings.Contains(combined, "not a git repository"):
+		return "not_repo"
+	case strings.Contains(combined, "does not match any"):
+		return "branch_not_found"
+	case strings.Contains(combined, "network") || strings.Contains(combined, "connection") || strings.Contains(combined, "timeout"):
+		return "network"
+	// New cases for the exact failures seen post-migration (origin/main not present, unborn branches)
+	case strings.Contains(combined, "not a commit"),
+		strings.Contains(combined, "could not resolve"),
+		strings.Contains(combined, "ref does not exist"),
+		strings.Contains(combined, "unrelated histories"):
+		return "missing_ref"
+	case strings.Contains(combined, "yet to be born"),
+		strings.Contains(combined, "unborn"):
+		return "unborn_branch"
+	case strings.Contains(combined, "128"): // generic git fatal often means the above
+		return "git_fatal_128"
+	default:
+		return "unknown"
+	}
+}
+
 func gitCheckoutBranch(repoPath, branch string) error {
-	// Always try to refresh refs first — this prevents the "main is not a commit" and similar races
-	// after crashes, resets, or dynamic clones that left the local state inconsistent.
-	_, _ = gitCmd(repoPath, "fetch", "--all", "--prune", "--quiet")
+	// Clean stale git locks from crashed processes before any operation.
+	// This prevents the "Unable to create index.lock: File exists" error.
+	cleanStaleLocks(repoPath)
+
+	// Robust fetch (not quiet) so we can classify failures. This is the #1 source of
+	// "origin/main is not a commit" and "branch yet to be born" after crashes/resets.
+	fetchOut, fetchErr := gitCmdWithTimeout(repoPath, 60*time.Second, "fetch", "--all", "--prune")
+	if fetchErr != nil {
+		class := classifyGitError(fetchErr, fetchOut)
+		slog.Warn("gitCheckoutBranch: fetch failed (will attempt recovery)",
+			slog.String("repo", repoPath),
+			slog.String("classified", class),
+			slog.String("error", fetchErr.Error()))
+		// Continue — recovery may still succeed or we surface a better error later.
+	}
 
 	// Try checkout existing branch (fast path)
-	if out, err := gitCmd(repoPath, "checkout", branch); err == nil {
+	if _, err := gitCmd(repoPath, "checkout", branch); err == nil {
 		return nil
-	} else {
-		// Existing branch checkout failed — try to recover the default branch state
-		defaultBranch, _ := resolveDefaultBranch(repoPath)
+	}
 
-		// Hard reset + clean to get to a known clean state on the default branch
-		_, _ = gitCmd(repoPath, "checkout", "-B", defaultBranch, "origin/"+defaultBranch) // force track origin
-		_, _ = gitCmd(repoPath, "reset", "--hard", "origin/"+defaultBranch)
-		_, _ = gitCmd(repoPath, "clean", "-fd")
+	// Existing branch checkout failed — enter recovery.
+	defaultBranch, _ := resolveDefaultBranch(repoPath)
 
-		// Now attempt the feature branch creation from a known-good base
-		if out2, err2 := gitCmd(repoPath, "checkout", "-b", branch, "origin/"+defaultBranch); err2 != nil {
-			// Last resort: try creating from local HEAD if origin ref was also bad
-			if out3, err3 := gitCmd(repoPath, "checkout", "-b", branch); err3 != nil {
-				return fmt.Errorf("git checkout branch %s failed after recovery. Existing: %s (%v). From origin/%s: %s (%v). Last resort: %s (%v)",
-					branch, strings.TrimSpace(out), err, defaultBranch, strings.TrimSpace(out2), err2, strings.TrimSpace(out3), err3)
-			}
+	// Try to get a clean base on the default/integration branch.
+	// First attempt the common case.
+	baseRef := "origin/" + defaultBranch
+	_, resetErr := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, baseRef)
+	if resetErr != nil {
+		// The origin ref is missing or bad — this is the exact class of failure reported by the user.
+		// Try an explicit fetch of just that ref.
+		explicitFetchOut, explicitErr := gitCmdWithTimeout(repoPath, 45*time.Second,
+			"fetch", "origin", defaultBranch+":"+defaultBranch)
+		if explicitErr == nil {
+			// Retry the force checkout
+			_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", defaultBranch, baseRef)
+		} else {
+			slog.Warn("gitCheckoutBranch: explicit fetch of default branch also failed",
+				slog.String("default", defaultBranch),
+				slog.String("classified", classifyGitError(explicitErr, explicitFetchOut)))
 		}
 	}
+
+	// Regardless, do a hard reset + clean to get to a known (hopefully) good state.
+	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "reset", "--hard", baseRef)
+	_, _ = gitCmdWithTimeout(repoPath, 30*time.Second, "clean", "-fd")
+
+	// Now create the task branch from the (hopefully repaired) base.
+	out2, err2 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch, baseRef)
+	if err2 != nil {
+		class2 := classifyGitError(err2, out2)
+
+		// Last resort: create from whatever HEAD we have now (even if unborn).
+		out3, err3 := gitCmdWithTimeout(repoPath, 30*time.Second, "checkout", "-B", branch)
+		if err3 != nil {
+			class3 := classifyGitError(err3, out3)
+			// Note: the initial checkout error is no longer in scope here; we surface the recovery failures which are what matter
+			return fmt.Errorf("git checkout branch %s failed after recovery (classified: %s/%s). "+
+				"From %s: %s (%v, class=%s). Last resort: %s (%v, class=%s). "+
+				"Consider: the clone may be in a bad state — delete the repo dir and let it re-clone, or check gitflow integrationBranch on the project.",
+				branch, class2, class3,
+				baseRef, strings.TrimSpace(out2), err2, class2,
+				strings.TrimSpace(out3), err3, class3)
+		}
+	}
+
 	return nil
 }
 
-// resolveDefaultBranch determines the repo's default branch.
-// Derived from Python: resolve_default_branch() (L814-840)
+// cleanStaleLocks removes stale .git/index.lock files left by crashed git processes.
+// Only removes locks older than 30 seconds to avoid interfering with active operations.
+func cleanStaleLocks(repoPath string) {
+	lockFile := fmt.Sprintf("%s/.git/index.lock", strings.TrimRight(repoPath, "/"))
+	info, err := os.Stat(lockFile)
+	if err != nil {
+		return // No lock file — nothing to clean
+	}
+
+	// Only remove if the lock is stale (older than 30 seconds)
+	if time.Since(info.ModTime()) > 30*time.Second {
+		if removeErr := os.Remove(lockFile); removeErr == nil {
+			slog.Warn("git: removed stale index.lock",
+				slog.String("repo", repoPath),
+				slog.Duration("age", time.Since(info.ModTime())),
+			)
+		}
+	}
+}
+
+// resolveDefaultBranch determines the repo's default branch with multiple fallbacks.
+// Matches the robustness in the pre-migration Python ensure_task_branch (v0.1.126).
 func resolveDefaultBranch(repoPath string) (string, error) {
 	if override := os.Getenv("FLUME_DEFAULT_BRANCH"); override != "" {
 		return override, nil
 	}
-	out, err := gitCmd(repoPath, "symbolic-ref", "--short", "HEAD")
-	if err != nil {
-		return "main", nil // safe default
+
+	// Best: ask the remote what its HEAD points to (works even if local refs are broken)
+	out, err := gitCmdWithTimeout(repoPath, 20*time.Second, "ls-remote", "--symref", "origin", "HEAD")
+	if err == nil {
+		// Output looks like: "ref: refs/heads/main\tHEAD"
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "ref:") && strings.Contains(line, "refs/heads/") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					ref := parts[1]
+					if strings.HasPrefix(ref, "refs/heads/") {
+						return strings.TrimPrefix(ref, "refs/heads/"), nil
+					}
+				}
+			}
+		}
 	}
-	return strings.TrimSpace(out), nil
+
+	// Next: try local symbolic-ref (may fail in unborn or broken states)
+	out, err = gitCmd(repoPath, "symbolic-ref", "--short", "HEAD")
+	if err == nil {
+		name := strings.TrimSpace(out)
+		if name != "" && name != "HEAD" {
+			return name, nil
+		}
+	}
+
+	// Fallback: inspect remote branches for common names, prefer integration branch if known
+	out, err = gitCmd(repoPath, "branch", "-r")
+	if err == nil {
+		remotes := out
+		for _, candidate := range []string{"develop", "main", "master", "trunk"} {
+			if strings.Contains(remotes, "origin/"+candidate) {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "main", nil // ultimate safe default
 }
 
 var branchSanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9._/-]+`)
@@ -1132,6 +2032,43 @@ func implementerMaxLLMFailuresCap() int {
 	return cap
 }
 
+// handleRoleLLMFailure is a shared retry-cap handler for reviewer/tester roles.
+// Mirrors ImplementerHandleLLMFailure: after N failures, escalates to "blocked" instead
+// of allowing the infinite retry loop that was the dominant post-migration failure mode.
+func (r *Runner) handleRoleLLMFailure(ctx context.Context, taskID string, task ftypes.Task, role string) {
+	failureCount := task.Attempts + 1
+	maxCap := 3 // reviewer/tester are lightweight; 3 retries is generous
+
+	if failureCount >= maxCap {
+		reason := fmt.Sprintf("%s blocked after %d LLM failures (cap=%d)", role, failureCount, maxCap)
+		flumelogger.LogStateTransition(ctx, taskID, string(task.Status), "blocked", reason)
+		flumelogger.LogAgentReasoning(ctx, taskID, role, reason, map[string]any{
+			"failures": failureCount,
+			"cap":      maxCap,
+			"action":   "block",
+		})
+		r.logger.Error(role+": task blocked after LLM failures",
+			slog.String("task_id", taskID),
+			slog.Int("failures", failureCount),
+			slog.Int("cap", maxCap))
+		update := map[string]interface{}{
+			"status":        "blocked",
+			"attempts":      failureCount,
+			"error_message": reason,
+			"active_worker": nil,
+			"queue_state":   "available",
+			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, update)
+	} else {
+		// Increment attempts so the next claim cycle sees the counter
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", taskID, map[string]interface{}{
+			"attempts":   failureCount,
+			"updated_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+}
+
 // spawnReviewTasks creates a reviewer and tester subtask for review-consensus.
 // HARDENED against explosion (2026-05):
 // - Idempotent: skips if reviewer or tester children already exist for this parent.
@@ -1153,7 +2090,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 	// 2. Strong idempotency / anti-explosion guard (prevents reviewer/tester multiplication)
 	// We now count existing review/test children for this parent and refuse if we already have the expected pair.
 	childQuery := map[string]interface{}{
-		"term": map[string]string{"parent_id": parent.ID},
+		"term": map[string]string{"parent_id.keyword": parent.ID},
 	}
 	childRes, cerr := r.es.Search(ctx, "agent-task-records", childQuery, 100)
 	existingReviewOrTest := 0
@@ -1172,7 +2109,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 						flumelogger.LogAgentReasoning(ctx, parent.ID, "system",
 							"Refused to spawn additional reviewer/tester children — quota already met for this parent.",
 							map[string]any{"parent_id": parent.ID, "existing_count": existingReviewOrTest})
-						return nil
+						return errSpawnGuardFired
 					}
 				}
 			}
@@ -1188,7 +2125,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 		flumelogger.LogAgentReasoning(ctx, parent.ID, "system",
 			"Refused additional review/test spawn — children already present (concurrent reset/spawn race closed).",
 			map[string]any{"parent_id": parent.ID, "existing": existingReviewOrTest})
-		return nil
+		return errSpawnGuardFired
 	}
 
 	// Final atomic-ish recheck using fresh search before any Index to minimize dup window under high churn.
@@ -1207,7 +2144,7 @@ func (r *Runner) spawnReviewTasks(ctx context.Context, parent ftypes.Task) error
 			r.logger.Info("spawnReviewTasks skipped on final recheck — race detected and prevented",
 				slog.String("parent_id", parent.ID), slog.Int("recheck_count", recheckCount))
 			flumelogger.LogAgentReasoning(ctx, parent.ID, "system", "Final recheck prevented duplicate review/test spawn under failure loop.", map[string]any{"parent_id": parent.ID, "recheck": recheckCount})
-			return nil
+			return errSpawnGuardFired
 		}
 	}
 
@@ -1333,6 +2270,14 @@ func readSystemPrompt(role string) string {
 
 func cleanJSONContent(s string) string {
 	s = strings.TrimSpace(s)
+
+	// Strip <think>...</think> blocks (thinking models like qwen3.5 emit these).
+	// Must happen BEFORE any JSON extraction so the JSON finder sees clean text.
+	thinkRe := regexp.MustCompile(`(?s)<think>.*?</think>`)
+	s = thinkRe.ReplaceAllString(s, "")
+	s = strings.TrimSpace(s)
+
+	// Strip markdown code fences
 	if strings.HasPrefix(s, "```json") {
 		s = strings.TrimPrefix(s, "```json")
 		s = strings.TrimSuffix(s, "```")
@@ -1342,7 +2287,36 @@ func cleanJSONContent(s string) string {
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}
+
+	// If the result doesn't start with '{', try to find the first JSON object.
+	// LLMs frequently emit leading prose like "Here is the plan:" before the JSON.
+	if !strings.HasPrefix(s, "{") {
+		if idx := strings.Index(s, "{"); idx >= 0 {
+			s = s[idx:]
+			// Find the matching closing brace
+			depth := 0
+			for i, ch := range s {
+				if ch == '{' {
+					depth++
+				} else if ch == '}' {
+					depth--
+					if depth == 0 {
+						s = s[:i+1]
+						break
+					}
+				}
+			}
+		}
+	}
+
 	return s
+}
+
+// removeTrailingCommas is a cheap heuristic to fix common LLM JSON output errors
+// (trailing commas before } or ]) before falling back to expensive LLM repair.
+func removeTrailingCommas(s string) string {
+	re := regexp.MustCompile(`,(\s*[}\]])`)
+	return re.ReplaceAllString(s, "$1")
 }
 
 func generateShortID() string {
@@ -1357,4 +2331,50 @@ func firstNChars(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+var (
+	repoLocks   = make(map[string]*sync.Mutex)
+	repoLocksMu sync.Mutex
+)
+
+func getRepoLock(repoPath string) *sync.Mutex {
+	repoLocksMu.Lock()
+	defer repoLocksMu.Unlock()
+	mu, exists := repoLocks[repoPath]
+	if !exists {
+		mu = &sync.Mutex{}
+		repoLocks[repoPath] = mu
+	}
+	return mu
+}
+
+func (r *Runner) resolveRepoPath(ctx context.Context, projectID string) (string, error) {
+	if projectID == "" {
+		return "", nil
+	}
+	projDoc, err := r.es.GetDoc(ctx, "flume-projects", projectID)
+	if err != nil || projDoc == nil {
+		return "", fmt.Errorf("project %s not found", projectID)
+	}
+	var project ftypes.Project
+	if err := json.Unmarshal(projDoc, &project); err != nil {
+		return "", err
+	}
+	workspace := os.Getenv("FLUME_WORKSPACE_ROOT")
+	if workspace == "" {
+		if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+			workspace, _ = os.Getwd()
+			if workspace == "" {
+				workspace = "."
+			}
+		} else {
+			workspace = "/app/workspace"
+		}
+	}
+	repoPath := project.LocalPath
+	if repoPath == "" {
+		repoPath = filepath.Join(workspace, fmt.Sprintf("flume-reg-%s", project.ID))
+	}
+	return repoPath, nil
 }

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
 	"github.com/Fremen-Labs/flume/internal/es"
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
 	"github.com/Fremen-Labs/flume/internal/llm"
@@ -42,6 +44,9 @@ type Server struct {
 	onSweepTrigger   func(sweepName string) error
 	onSettingsReload func()
 	mu               sync.RWMutex
+
+	rateLimiter          *rateLimiter
+	rateLimitExemptions  []*net.IPNet // merged: private ranges + user config + dynamic Docker discovery
 }
 
 // RegisterSweepTrigger registers a callback for manual sweep triggering.
@@ -68,7 +73,8 @@ type Config struct {
 	CORSOrigins    []string
 	StaticRoot     string
 	NativeMode     bool
-	RateLimitPerMin int
+	RateLimitPerMin  int
+	InternalIPRanges []string // Additional CIDRs to exempt from rate limiting (merged with private ranges + Docker discovery)
 }
 
 // DefaultConfig returns production-safe defaults, overridden by env vars.
@@ -93,16 +99,28 @@ func DefaultConfig() *Config {
 		cors = []string{"http://localhost:8080", "http://localhost:8765", "http://127.0.0.1:8080"}
 	}
 
-	return &Config{
-		Host:           host,
-		Port:           port,
-		ESUrl:          esURL,
-		ESApiKey:       envOr("ES_API_KEY", ""),
-		CORSOrigins:    cors,
-		StaticRoot:     envOr("FLUME_STATIC_ROOT", ""),
-		NativeMode:     envOr("FLUME_NATIVE_MODE", "0") == "1",
+	cfg := &Config{
+		Host:            host,
+		Port:            port,
+		ESUrl:           esURL,
+		ESApiKey:        envOr("ES_API_KEY", ""),
+		CORSOrigins:     cors,
+		StaticRoot:      envOr("FLUME_STATIC_ROOT", ""),
+		NativeMode:      envOr("FLUME_NATIVE_MODE", "0") == "1",
 		RateLimitPerMin: envInt("FLUME_RATE_LIMIT", 2000),
 	}
+
+	internalRanges := envOr("FLUME_INTERNAL_IP_RANGES", "")
+	if internalRanges != "" {
+		for _, r := range strings.Split(internalRanges, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				cfg.InternalIPRanges = append(cfg.InternalIPRanges, r)
+			}
+		}
+	}
+
+	return cfg
 }
 
 // New creates a new Dashboard server.
@@ -112,13 +130,17 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 	}
 	esClient := es.New(cfg.ESUrl, cfg.ESApiKey, logger)
 	s := &Server{
-		mux:       http.NewServeMux(),
-		es:        esClient,
-		llmClient: llm.New(logger),
-		logger:    logger,
-		cfg:       cfg,
-		startTime: time.Now(),
+		mux:         http.NewServeMux(),
+		es:          esClient,
+		llmClient:   llm.New(logger),
+		logger:      logger,
+		cfg:         cfg,
+		startTime:   time.Now(),
+		rateLimiter: newRateLimiter(cfg.RateLimitPerMin),
 	}
+
+	// Build merged list of exempted CIDRs (user config + standard private + dynamic Docker discovery)
+	s.rateLimitExemptions = buildRateLimitExemptions(cfg.InternalIPRanges)
 	// Phase 0: Wire reasoning bridge for any Go-side Log* calls that reach the dashboard
 	// (primarily benefits future admin/recovery paths and consistency with worker).
 	flumelogger.SetESBridge(esClient)
@@ -134,7 +156,7 @@ func (s *Server) ListenAndServe() error {
 		Addr:         addr,
 		Handler:      s.withMiddleware(s.mux),
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 300 * time.Second, // allow Plan New Work intake planner (target <120s local LLM + RAG + status ES writes + response write)
 		IdleTimeout:  120 * time.Second,
 	}
 	s.logger.Info("Dashboard API starting",
@@ -173,6 +195,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/history", s.handleTaskHistory)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/diff", s.handleTaskDiff)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts", s.handleTaskThoughts)
+	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts/stream", s.handleTaskThoughtsStream)
 	s.mux.HandleFunc("GET /api/tasks/{task_id}/commits", s.handleTaskCommits)
 	s.mux.HandleFunc("POST /api/tasks/{task_id}/transition", s.handleTaskTransition)
 	s.mux.HandleFunc("POST /api/tasks/bulk-requeue", s.handleTasksBulkRequeue)
@@ -185,6 +208,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/vault/status", s.handleVaultStatus)
 	s.mux.HandleFunc("POST /api/tasks/stop-all", s.handleTasksStopAll)
 	s.mux.HandleFunc("POST /api/tasks/resume-all", s.handleTasksResumeAll)
+	s.mux.HandleFunc("POST /api/security/secrets/reveal", s.handleSecuritySecretsReveal)
+	s.mux.HandleFunc("POST /api/security/secrets/update", s.handleSecuritySecretsUpdate)
+	s.mux.HandleFunc("POST /api/security/secrets/delete", s.handleSecuritySecretsDelete)
 
 	// Projects (api/projects.py — 6 nodes)
 	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
@@ -275,6 +301,36 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", reqID)
 
+		// Rate limiting (Medium priority implementation)
+		// Internal/private IPs (Docker, Kubernetes pods, service mesh, localhost)
+		// are exempted using a combination of:
+		//   - Standard private ranges
+		//   - User-provided ranges (FLUME_INTERNAL_IP_RANGES)
+		//   - Dynamically discovered Docker/K8s bridge subnets at boot
+		if s.rateLimiter != nil {
+			ip := r.Header.Get("X-Forwarded-For")
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			// Take first IP if comma-separated (original client)
+			if idx := strings.Index(ip, ","); idx > 0 {
+				ip = strings.TrimSpace(ip[:idx])
+			}
+
+			if !isIPExempted(ip, s.rateLimitExemptions) {
+				if !s.rateLimiter.allow(ip) {
+					s.logger.Warn("rate limit exceeded", slog.String("ip", ip), slog.String("path", r.URL.Path))
+					writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+					return
+				}
+			} else {
+				// Debug visibility for internal traffic (very useful in container environments)
+				s.logger.Debug("bypassing rate limit for internal IP",
+					slog.String("ip", ip),
+					slog.String("path", r.URL.Path))
+			}
+		}
+
 		// Bypass statusWriter wrapping for WebSockets to allow http.Hijacker
 		if r.Header.Get("Upgrade") == "websocket" || strings.HasPrefix(r.URL.Path, "/ws") {
 			next.ServeHTTP(w, r)
@@ -329,14 +385,20 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func (w *statusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // ─── Response Helpers ───────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		// Best-effort: headers are already sent
-		_ = err
+		// Log at package level if possible; this is a last-resort after headers sent
+		slog.Default().Error("failed to encode JSON response", slog.String("error", err.Error()))
 	}
 }
 
@@ -344,9 +406,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeErrorWithLog logs the error at the appropriate level before responding.
+func writeErrorWithLog(w http.ResponseWriter, status int, msg string, logger *slog.Logger) {
+	if logger != nil {
+		if status >= 500 {
+			logger.Error("request error", slog.Int("status", status), slog.String("error", msg))
+		} else {
+			logger.Warn("request error", slog.Int("status", status), slog.String("error", msg))
+		}
+	}
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
 func decodeBody(r *http.Request, dst interface{}) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(dst)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
 }
 
 // ─── Env Helpers ────────────────────────────────────────────────────────────
@@ -395,6 +472,234 @@ func (s *Server) spaHandler(root string) http.Handler {
 
 func timeNowUnixMilli() int64 {
 	return time.Now().UnixMilli()
+}
+
+// withTimeout derives a child context with a reasonable deadline for dashboard operations.
+// This addresses reliable-go-systems context discipline for ES/LLM/git calls originating from APIs.
+func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = 15 * time.Second
+	}
+	return context.WithTimeout(parent, d)
+}
+
+// ─── Simple Rate Limiter (Medium priority) ──────────────────────────────────
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	visitors map[string]*visitor
+	limit    int
+	window   time.Duration
+}
+
+type visitor struct {
+	tokens    int
+	lastSeen  time.Time
+}
+
+func newRateLimiter(limitPerMin int) *rateLimiter {
+	if limitPerMin <= 0 {
+		limitPerMin = 2000 // sane default from config
+	}
+	rl := &rateLimiter{
+		visitors: make(map[string]*visitor),
+		limit:    limitPerMin,
+		window:   time.Minute,
+	}
+	// Background cleanup goroutine
+	go rl.cleanup()
+	return rl
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	v, ok := rl.visitors[ip]
+	now := time.Now()
+
+	if !ok || now.Sub(v.lastSeen) > rl.window {
+		rl.visitors[ip] = &visitor{tokens: rl.limit - 1, lastSeen: now}
+		return true
+	}
+
+	if v.tokens > 0 {
+		v.tokens--
+		v.lastSeen = now
+		return true
+	}
+	return false
+}
+
+func (rl *rateLimiter) cleanup() {
+	for {
+		time.Sleep(rl.window)
+		rl.mu.Lock()
+		for ip, v := range rl.visitors {
+			if time.Since(v.lastSeen) > rl.window*2 {
+				delete(rl.visitors, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// isInternalIP returns true for private, loopback, and link-local addresses.
+// This is used to exempt internal Docker/Kubernetes/service-to-service traffic
+// from rate limiting (per reliable-go-systems principle of not breaking internal reliability).
+func isInternalIP(ipStr string) bool {
+	// Strip port if present (e.g. "10.0.0.5:12345")
+	if host, _, err := net.SplitHostPort(ipStr); err == nil {
+		ipStr = host
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	// IsPrivate() covers RFC 1918 ranges + some others (Go 1.17+)
+	// We also explicitly check loopback and link-local for robustness in container environments.
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
+// discoverDockerNetworkCIDRs attempts to find additional internal subnets
+// by inspecting network interfaces that look like Docker/K8s bridges.
+// This runs at boot and is best-effort (never fails the application).
+func discoverDockerNetworkCIDRs() []string {
+	if os.Getenv("FLUME_NATIVE_MODE") == "1" {
+		return nil
+	}
+
+	var cidrs []string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		name := strings.ToLower(iface.Name)
+		// Common Docker / Compose / K8s bridge interface patterns
+		if strings.HasPrefix(name, "br-") ||
+			strings.Contains(name, "docker") ||
+			strings.HasPrefix(name, "veth") ||
+			strings.Contains(name, "flannel") ||
+			strings.Contains(name, "calico") {
+			addrs, _ := iface.Addrs()
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok {
+					// Prefer IPv4 for simplicity
+					if ipnet.IP.To4() != nil {
+						cidrs = append(cidrs, ipnet.String())
+					}
+				}
+			}
+		}
+	}
+	return cidrs
+}
+
+// buildRateLimitExemptions creates the final list of CIDRs that should bypass rate limiting.
+// Order of precedence (later overrides/extends):
+//   1. Hardcoded private + loopback + link-local ranges
+//   2. User-provided ranges from config (FLUME_INTERNAL_IP_RANGES)
+//   3. Dynamically discovered Docker/Kubernetes network subnets (best effort)
+func buildRateLimitExemptions(userRanges []string) []*net.IPNet {
+	standard := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+	}
+
+	all := append([]string{}, standard...)
+	all = append(all, userRanges...)
+	all = append(all, discoverDockerNetworkCIDRs()...)
+
+	var nets []*net.IPNet
+	seen := make(map[string]bool)
+	for _, cidr := range all {
+		if seen[cidr] {
+			continue
+		}
+		seen[cidr] = true
+
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			// Try treating it as a single IP
+			if ip := net.ParseIP(cidr); ip != nil {
+				if ip.To4() != nil {
+					ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+				} else {
+					ipnet = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+				}
+			} else {
+				continue // skip bad entry
+			}
+		}
+		nets = append(nets, ipnet)
+	}
+	return nets
+}
+
+// isIPExempted checks whether the given IP falls inside any of the exempted networks.
+func isIPExempted(ipStr string, exemptions []*net.IPNet) bool {
+	// Strip port
+	if host, _, err := net.SplitHostPort(ipStr); err == nil {
+		ipStr = host
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	for _, n := range exemptions {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// logReasoning is the standardized way to emit both regular structured logs
+// and rich LogAgentReasoning (for UI popouts + Logloom graphs).
+// This implements the flume-go requirement for consistent observability on
+// important decisions and state changes.
+func (s *Server) logReasoning(ctx context.Context, taskOrSystemID, role, message string, meta map[string]any) {
+	fields := []any{
+		slog.String("role", role),
+		slog.String("id", taskOrSystemID),
+	}
+	for k, v := range meta {
+		fields = append(fields, slog.Any(k, v))
+	}
+
+	s.logger.Info(message, fields...)
+	flumelogger.LogAgentReasoning(ctx, taskOrSystemID, role, message, meta)
+}
+
+// logDecision is a lighter variant for non-task events (e.g. config changes, node operations).
+func (s *Server) logDecision(ctx context.Context, component, action string, meta map[string]any) {
+	fields := []any{
+		slog.String("component", component),
+		slog.String("action", action),
+	}
+	for k, v := range meta {
+		fields = append(fields, slog.Any(k, v))
+	}
+	s.logger.Info("decision", fields...)
+
+	// Also emit reasoning for auditability when component is system-level
+	if component == "system" || component == "config" || component == "workflow" {
+		flumelogger.LogAgentReasoning(ctx, "system", component, action, meta)
+	}
 }
 
 // ─── Type aliases for request bodies ────────────────────────────────────────

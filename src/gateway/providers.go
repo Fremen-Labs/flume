@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -36,14 +37,20 @@ type ProviderRouter struct {
 	config  *Config
 	secrets *SecretStore
 	client  *http.Client
+	connMgr *NodeConnManager // Phase 1: owned connection manager for local Ollama reuse/HTTP2 (wired from Server)
 }
 
-// NewProviderRouter creates a router wired to config and secrets.
-func NewProviderRouter(config *Config, secrets *SecretStore) *ProviderRouter {
+// NewProviderRouter creates a router wired to config, secrets, and optional connMgr (Phase 1).
+// If connMgr is nil, creates one internally (for tests/backcompat). Server owns the primary instance.
+func NewProviderRouter(config *Config, secrets *SecretStore, connMgr *NodeConnManager) *ProviderRouter {
+	if connMgr == nil {
+		connMgr = NewNodeConnManager()
+	}
 	return &ProviderRouter{
 		config:  config,
 		secrets: secrets,
-		client:  &http.Client{Timeout: 180 * time.Second},
+		client:  &http.Client{Timeout: 300 * time.Second}, // Match gateway WriteTimeout (300s)
+		connMgr: connMgr,
 	}
 }
 
@@ -175,9 +182,33 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 		"temperature": req.Temperature,
 		"num_predict": req.MaxTokens,
 		"num_ctx":     numCtx,
+		"stop":        defaultOllamaStopTokens(),
 	}
 
 	messages := messagesToSlice(req.Messages)
+
+	// === Planner fast path for local LLMs (<120s target) ===
+	// Same as in ollama(): force StreamOllamaChat for intake planning so mesh/resilient
+	// path (still used because AgentRole=intake) benefits from streaming to Ollama
+	// (no 300s doPost header timeout) + ctx bound. Critical for primary node to finish
+	// the breakdown inside 120s on local without exhausting to frontier.
+	if req.TaskType == "planning" || req.AgentRole == "intake" {
+		// Phase 2 (opt-in auth): forward the authToken received from mesh routing so
+		// nodes with AuthSecretPath get Bearer on the actual inference call (was
+		// previously hardcoded "" even though param existed and health used it).
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, authToken)
+		if err != nil {
+			return nil, err
+		}
+		return &ChatResponse{
+			Message: ResponseMessage{
+				Role:     "assistant",
+				Content:  content,
+				Thoughts: thoughts,
+			},
+			Usage: usage,
+		}, nil
+	}
 
 	if suppressThink {
 		options["think"] = false
@@ -185,11 +216,19 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	}
 
 	if withTools && len(req.Tools) > 0 {
-		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options)
+		// Phase 2: pass authToken through to tool call path (will support after sig update).
+		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options, authToken)
 	}
 
-	if suppressThink {
-		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+	// Phase 1: Force always-stream for local Ollama (planning + exec) per optimization plan.
+	// Benefits: first tokens sooner, avoids full-buffer header timeouts on slow local gens (35b+),
+	// keeps conn alive. Non-stream only for frontier (no breaking change).
+	// Uses the conn manager client from tool_stream helper (Phase 1 skeleton).
+	if isLocalOllamaPath(req) || suppressThink {
+		// Phase 2: pass authToken for Bearer injection in StreamOllamaChat (completes local auth).
+		// Only nodes with a configured AuthSecretPath will have a non-empty token here
+		// (see resolve in registry + GetNodeAuthToken). Unauthed = "", header omitted.
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, authToken)
 		if err != nil {
 			return nil, err
 		}
@@ -204,6 +243,39 @@ func (r *ProviderRouter) ollamaWithNode(ctx context.Context, req *ChatRequest, b
 	}
 
 	return r.ollamaNonStream(ctx, baseURL, messages, req.Model, options)
+}
+
+// isLocalOllamaPath is a Phase 1 helper: treat ProviderOllama mesh calls as "local"
+// for always-stream forcing. (In full impl, key off provider or node presence.)
+func isLocalOllamaPath(req *ChatRequest) bool {
+	// Conservative: if we reached ollamaWithNode via mesh, it's local.
+	// For simplicity in skeleton, always prefer stream for ollama paths here.
+	return true // Phase 1: force for all local Ollama (refine later with node info).
+}
+
+// getManagedOllamaClient is Phase 1 bridge (see node_conn_manager.go + phases doc).
+// Returns client using shared Transport for reuse/HTTP2 on local nodes.
+// Now uses the router's connMgr when wired (from Server); falls back to package helper.
+func (r *ProviderRouter) getManagedOllamaClient(baseURL string, timeout time.Duration) *http.Client {
+	if baseURL == "" {
+		return &http.Client{Timeout: timeout}
+	}
+	if r != nil && r.connMgr != nil {
+		// Only use the persistent conn manager (intended for local Ollama mesh) for
+		// non-frontier hosts. Frontier calls (openai, anthropic etc) use the router's
+		// base client or their own pooling to avoid mixing concerns and large numbers
+		// of synth entries.
+		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+			h := strings.ToLower(u.Host)
+			if strings.Contains(h, "openai") || strings.Contains(h, "anthropic") || strings.Contains(h, "googleapis") || strings.Contains(h, "x.ai") || strings.HasPrefix(h, "api.") {
+				return &http.Client{Timeout: timeout}
+			}
+			synthNode := &Node{ID: "ollama-" + u.Host, Host: u.Host}
+			return r.connMgr.GetClientForNode(synthNode, timeout)
+		}
+	}
+	// Fallback to package skeleton (used by stream paths until full threading of *Node to StreamOllama*).
+	return getOllamaStreamClientForBase(baseURL)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -300,9 +372,31 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 		"temperature": req.Temperature,
 		"num_predict": req.MaxTokens,
 		"num_ctx":     numCtx,
+		"stop":        defaultOllamaStopTokens(),
 	}
 
 	messages := messagesToSlice(req.Messages)
+
+	// === Planner fast path for local LLMs (<120s target) ===
+	// Intake "planning" calls (the Plan New Work breakdown) must use streaming to Ollama
+	// even for non-thinking models (qwen etc). This avoids ollamaNonStream + doPost's
+	// hard 300s Client.Timeout ("awaiting headers") and lets tokens flow incrementally
+	// under the outer 120s ctx. Combined with slim RAG + 120s budget this makes local
+	// respond to doc tasks etc. inside the historical reliable window.
+	if req.TaskType == "planning" || req.AgentRole == "intake" {
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, "")
+		if err != nil {
+			return nil, err
+		}
+		return &ChatResponse{
+			Message: ResponseMessage{
+				Role:     "assistant",
+				Content:  content,
+				Thoughts: thoughts,
+			},
+			Usage: usage,
+		}, nil
+	}
 
 	if suppressThink {
 		options["think"] = false
@@ -310,13 +404,14 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 	}
 
 	if withTools && len(req.Tools) > 0 {
-		// THE CORE FIX: Use streaming for tool calls to prevent timeout
-		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options)
+		// THE CORE FIX: Use streaming for tool calls to prevent timeout.
+		// Direct/legacy path has no per-node authToken ("" is correct).
+		return StreamOllamaToolCall(ctx, baseURL, messages, req.Tools, req.Model, options, "")
 	}
 
 	if suppressThink {
 		// Use streaming + think milling for thinking models
-		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options)
+		content, thoughts, usage, err := StreamOllamaChat(ctx, baseURL, messages, req.Model, options, "")
 		if err != nil {
 			return nil, err
 		}
@@ -332,6 +427,20 @@ func (r *ProviderRouter) ollama(ctx context.Context, req *ChatRequest, suppressT
 
 	// Non-thinking model, no tools: use standard non-streaming call
 	return r.ollamaNonStream(ctx, baseURL, messages, req.Model, options)
+}
+
+func defaultOllamaStopTokens() []string {
+	return []string{
+		"<|endoftext|>",
+		"<|im_start|>",
+		"<|im_end|>",
+		"<im_start>",
+		"<im_end>",
+		"<|eot_id|>",
+		"<|start_header_id|>",
+		"assistant\n\n<tool_call",
+		"assistant\n<tool_call",
+	}
 }
 
 func (r *ProviderRouter) ollamaNonStream(
@@ -356,7 +465,7 @@ func (r *ProviderRouter) ollamaNonStream(
 	}
 
 	url := strings.TrimRight(baseURL, "/") + "/api/chat"
-	data, err := r.doPost(ctx, url, body, nil, 120*time.Second)
+	data, err := r.doPost(ctx, url, body, nil, 300*time.Second) // bumped from 120s for long-running intake planning (large ~1800-line plannerSystemPrompt + RAG injection + local 35b models can need 2-5+ min; old 120s caused repeated context deadline + mesh exhaustion + frontier fallback)
 	if err != nil {
 		return nil, err
 	}
@@ -385,6 +494,18 @@ func (r *ProviderRouter) ollamaNonStream(
 		usage.CompletionTokens = int(v)
 	}
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	if v, ok := data["total_duration"].(float64); ok {
+		usage.TotalDurationNs = int64(v)
+	}
+	if v, ok := data["load_duration"].(float64); ok {
+		usage.LoadDurationNs = int64(v)
+	}
+	if v, ok := data["prompt_eval_duration"].(float64); ok {
+		usage.PromptEvalDurationNs = int64(v)
+	}
+	if v, ok := data["eval_duration"].(float64); ok {
+		usage.EvalDurationNs = int64(v)
+	}
 
 	return &ChatResponse{
 		Message: ResponseMessage{
@@ -636,7 +757,9 @@ func (r *ProviderRouter) doPost(
 ) (map[string]interface{}, error) {
 	log := WithContext(ctx)
 
-	client := &http.Client{Timeout: timeout}
+	// Phase 1: Use managed client from conn manager (keyed by the target url/host).
+	// Provides keepalives + ForceAttemptHTTP2 for local mesh efficiency.
+	client := r.getManagedOllamaClient(url, timeout)
 	var lastErr error
 
 	for attempt := 0; attempt < 4; attempt++ {
@@ -911,7 +1034,10 @@ func (r *ProviderRouter) Embed(ctx context.Context, text string, provider, model
 func (r *ProviderRouter) ollamaEmbed(ctx context.Context, text, model string) ([]float64, error) {
 	baseURL := r.config.GetOllamaBaseURL()
 	if model == "" {
-		model = "nomic-embed-text"
+		model = os.Getenv("FLUME_OLLAMA_EMBED_MODEL")
+		if model == "" {
+			model = "nomic-embed-text"
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -939,7 +1065,11 @@ func (r *ProviderRouter) ollamaEmbed(ctx context.Context, text, model string) ([
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+		errMsg := fmt.Sprintf("ollama embed error HTTP %d: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode == 404 && strings.Contains(string(respBody), "not found") {
+			errMsg += " — try pulling the embedding model (e.g. `docker exec flume-gateway ollama pull " + model + "`) or set FLUME_OLLAMA_EMBED_MODEL"
+		}
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	var out struct {

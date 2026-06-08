@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Fremen-Labs/flume/internal/es"
-	"github.com/Fremen-Labs/logloom-go/logloom"
 )
 
 // sensitiveFragments are substrings that trigger automatic redaction.
@@ -176,8 +175,8 @@ func InitLogger() *slog.Logger {
 			baseHandler = &ConsoleHandler{inner: baseHandler}
 		}
 
-		// Handler chain: secureHandler → logloom → baseHandler
-		defaultLogger = slog.New(&secureHandler{inner: logloom.NewHandler(baseHandler)})
+		// Handler chain: secureHandler → baseHandler
+		defaultLogger = slog.New(&secureHandler{inner: baseHandler})
 		slog.SetDefault(defaultLogger)
 	})
 	return defaultLogger
@@ -270,64 +269,169 @@ func SetESBridge(c *es.Client) {
 	bridgeES = c
 }
 
-func appendExecutionThoughtNonBlocking(ctx context.Context, taskID, agentRole, text string, meta map[string]any) {
-	if bridgeES == nil || taskID == "" {
-		return
+type thoughtJob struct {
+	taskID    string
+	agentRole string
+	text      string
+	meta      map[string]any
+}
+
+var (
+	thoughtQueue chan thoughtJob
+	queueOnce    sync.Once
+)
+
+// ThoughtsBroker manages active streaming subscribers for Server-Sent Events (SSE).
+type ThoughtsBroker struct {
+	mu          sync.RWMutex
+	subscribers map[string]map[chan map[string]any]bool
+}
+
+// Broker is the global thoughts streaming hub.
+var Broker = &ThoughtsBroker{
+	subscribers: make(map[string]map[chan map[string]any]bool),
+}
+
+// Subscribe registers a new listener channel for a task's reasoning updates.
+func (b *ThoughtsBroker) Subscribe(taskID string) chan map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	ch := make(chan map[string]any, 100) // generous buffer for rapid updates
+	if b.subscribers[taskID] == nil {
+		b.subscribers[taskID] = make(map[chan map[string]any]bool)
 	}
+	b.subscribers[taskID][ch] = true
+	return ch
+}
 
-	// Launch in goroutine so the worker is never blocked (design: non-blocking).
-	go func() {
+// Unsubscribe de-registers a listener channel.
+func (b *ThoughtsBroker) Unsubscribe(taskID string, ch chan map[string]any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if subs, ok := b.subscribers[taskID]; ok {
+		delete(subs, ch)
+		close(ch)
+		if len(subs) == 0 {
+			delete(b.subscribers, taskID)
+		}
+	}
+}
+
+// Broadcast sends a new thought to all active subscribers for the task.
+func (b *ThoughtsBroker) Broadcast(taskID string, entry map[string]any) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if subs, ok := b.subscribers[taskID]; ok {
+		for ch := range subs {
+			select {
+			case ch <- entry:
+			default:
+				// Skip blocked/slow subscribers to protect broker flow
+			}
+		}
+	}
+}
+
+func initQueueAndWorkers() {
+	queueOnce.Do(func() {
+		thoughtQueue = make(chan thoughtJob, 2048)
+		for i := 0; i < 5; i++ {
+			go thoughtWorker()
+		}
+	})
+}
+
+func thoughtWorker() {
+	for job := range thoughtQueue {
 		bctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
+		
 		entry := map[string]interface{}{
 			"ts":         time.Now().UTC().Format(time.RFC3339),
-			"agent_role": agentRole,
-			"reasoning":  text,
-			"meta":       meta,
+			"agent_role": job.agentRole,
+			"thought":    job.text,
+			"meta":       job.meta,
 		}
 		params := map[string]interface{}{
 			"entry": entry,
 			"touch": time.Now().UTC().Format(time.RFC3339),
 		}
 
-		// Quick hardening (Phase 0+): client-side retry on conflict + server-side
-		// retry_on_conflict (via the ES client helper). This dramatically increases
-		// the chance that thoughts land even under heavy concurrent updates
-		// (sweeper + multiple workers + status transitions).
 		var lastErr error
 		const maxAttempts = 4
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			err := bridgeES.UpdateDocByScript(bctx, "agent-task-records", taskID, "flume-append-execution-thought", params)
+			if bridgeES == nil {
+				break
+			}
+			err := bridgeES.UpdateDocByScript(bctx, "agent-task-records", job.taskID, "flume-append-execution-thought", params)
 			if err == nil {
-				return // success
+				lastErr = nil
+				break // success
 			}
 			lastErr = err
 
-			// Only retry on version conflicts (the dominant case we saw in practice)
 			if strings.Contains(err.Error(), "version_conflict") || strings.Contains(err.Error(), "409") {
 				backoff := time.Duration(30*(attempt+1)) * time.Millisecond
 				time.Sleep(backoff)
 				continue
 			}
-			// Non-conflict errors (network, 404, etc.) — no point retrying hard
 			break
 		}
 
 		if lastErr != nil {
-			// Mandatory: never silent. Rich structured log feeds Logloom + dashboards.
 			Log().Warn("reasoning_bridge_failure",
-				slog.String("task_id", taskID),
-				slog.String("agent_role", agentRole),
+				slog.String("task_id", job.taskID),
+				slog.String("agent_role", job.agentRole),
 				slog.String("error", lastErr.Error()),
 				slog.String("script", "flume-append-execution-thought"),
-				slog.String("reasoning_preview", firstNChars(text, 120)),
+				slog.String("reasoning_preview", firstNChars(job.text, 120)),
 				slog.Int("attempts", maxAttempts),
 			)
-			// The original reasoning text is already present in the preceding
-			// slog.Info("agent reasoning"...) line (captured by Logloom handler).
 		}
-	}()
+		cancel()
+	}
+}
+
+func appendExecutionThoughtNonBlocking(ctx context.Context, taskID, agentRole, text string, meta map[string]any) {
+	if taskID == "" {
+		return
+	}
+
+	initQueueAndWorkers()
+
+	// Broadcast instantly to active UI subscribers (SSE)
+	entry := map[string]any{
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"agent_role": agentRole,
+		"thought":    text,
+		"meta":       meta,
+	}
+	Broker.Broadcast(taskID, entry)
+
+	if bridgeES == nil {
+		return
+	}
+
+	// Queue for persistence in Elasticsearch
+	job := thoughtJob{
+		taskID:    taskID,
+		agentRole: agentRole,
+		text:      text,
+		meta:      meta,
+	}
+
+	select {
+	case thoughtQueue <- job:
+	default:
+		// Queue full - drop to protect memory and avoid CPU bloat
+		Log().Warn("reasoning_queue_full",
+			slog.String("task_id", taskID),
+			slog.String("agent_role", agentRole),
+			slog.String("reasoning_preview", firstNChars(text, 120)),
+		)
+	}
 }
 
 func firstNChars(s string, n int) string {
@@ -367,17 +471,64 @@ func LogAgentReasoning(ctx context.Context, taskID, agentRole, reasoning string,
 		slog.String("agent_role", agentRole),
 		slog.String("reasoning", reasoning),
 	}
-	attrs = append(attrs, metadata...)
-	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
 
-	// Convert variadic metadata to map for the ES entry (best-effort).
 	meta := map[string]any{}
-	for i := 0; i+1 < len(metadata); i += 2 {
-		if key, ok := metadata[i].(string); ok {
-			meta[key] = metadata[i+1]
+	for _, m := range metadata {
+		switch v := m.(type) {
+		case map[string]any:
+			for k, val := range v {
+				meta[k] = val
+			}
+		case slog.Attr:
+			attrs = append(attrs, v)
+		default:
+			// Skip other non-map entries
 		}
 	}
+
+	for k, v := range meta {
+		attrs = append(attrs, slog.Any(k, v))
+	}
+
+	TaskLogger(ctx, taskID).Info("agent reasoning", attrs...)
 	appendExecutionThoughtNonBlocking(ctx, taskID, agentRole, reasoning, meta)
+}
+
+// LogTaskStateViolation instruments TaskStateMachine violations (Phase 0: flip shadow audit + instrument to ES/metrics).
+// Always emits (regardless of ShadowMode) via LogAgentReasoning (routes to slog + execution_thoughts[] + ES bridge for Logloom/Elastro/UI)
+// plus explicit WARN for "flume_task_state_violation" style aggregation (metric proxy).
+// Call sites (sweeps, claim, runner, intake) do: if err := ftypes.Default...OrLog(...); err != nil { LogTaskStateViolation(ctx, id, string(current), string(target), err, sm.ShadowMode) }
+func LogTaskStateViolation(ctx context.Context, taskID, from, to string, violationErr error, shadow bool, metadata ...any) {
+	reason := fmt.Sprintf("state machine violation: %s -> %s (shadow=%v)", from, to, shadow)
+	if violationErr != nil {
+		reason += " err=" + violationErr.Error()
+	}
+	meta := map[string]any{
+		"from":      from,
+		"to":        to,
+		"shadow":    shadow,
+		"violation": true,
+		"audit":     true,
+		"event":     "task_state_violation",
+	}
+	for _, m := range metadata {
+		if mm, ok := m.(map[string]any); ok {
+			for k, v := range mm {
+				meta[k] = v
+			}
+		}
+	}
+	LogAgentReasoning(ctx, taskID, "state-machine", reason, meta)
+
+	// Plain structured (easy to count for metrics; feeds "violation rate" dashboards).
+	TaskLogger(ctx, taskID).Warn("task state violation (audit instrumented)",
+		slog.String("task_id", taskID),
+		slog.String("from", from),
+		slog.String("to", to),
+		slog.Bool("shadow", shadow),
+		slog.Bool("violation", true),
+		slog.String("event", "task_state_violation"),
+	)
 }
 
 // LogLLMCall logs details of an LLM invocation with proper structure.
