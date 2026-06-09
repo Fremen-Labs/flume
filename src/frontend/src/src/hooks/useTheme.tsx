@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 
-export type Theme = 'dark' | 'light';
+export type Theme = 'dark';
 export type Skin = 'default' | 'retro';
 
 interface ThemeContextType {
@@ -18,10 +18,6 @@ const ThemeContext = createContext<ThemeContextType>({
 });
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => {
-    const stored = localStorage.getItem('theme');
-    return (stored === 'light' || stored === 'dark') ? stored : 'dark';
-  });
   const [skin, setSkinState] = useState<Skin>(() => {
     const stored = localStorage.getItem('skin');
     return (stored === 'retro' || stored === 'default') ? stored : 'default';
@@ -29,26 +25,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'light') {
-      root.classList.add('light');
-    } else {
-      root.classList.remove('light');
-    }
+    root.classList.remove('light');
     root.setAttribute('data-skin', skin);
-    localStorage.setItem('theme', theme);
-  }, [theme]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.setAttribute('data-skin', skin);
-    localStorage.setItem('skin', skin);
+    localStorage.setItem('theme', 'dark');
   }, [skin]);
 
-  const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  const toggleTheme = () => {
+    // No-op: light mode is deprecated and removed
+  };
   const setSkin = (s: Skin) => setSkinState(s);
 
   return (
-    <ThemeContext.Provider value={{ theme, skin, toggleTheme, setSkin }}>
+    <ThemeContext.Provider value={{ theme: 'dark', skin, toggleTheme, setSkin }}>
       {children}
     </ThemeContext.Provider>
   );

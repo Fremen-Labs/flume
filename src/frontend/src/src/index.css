@@ -83,67 +83,7 @@
     --mesh-base: 240 10% 2%;
   }
 
-  .light {
-    --background: 0 0% 98%;
-    --foreground: 220 15% 15%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 220 15% 15%;
-
-    --popover: 0 0% 100%;
-    --popover-foreground: 220 15% 15%;
-
-    --primary: 239 60% 52%;
-    --primary-foreground: 0 0% 100%;
-
-    --secondary: 220 12% 50%;
-    --secondary-foreground: 0 0% 100%;
-
-    --muted: 220 14% 94%;
-    --muted-foreground: 220 10% 45%;
-
-    --accent: 220 14% 96%;
-    --accent-foreground: 220 15% 15%;
-
-    --destructive: 0 65% 48%;
-    --destructive-foreground: 0 0% 100%;
-
-    --success: 160 60% 32%;
-    --success-foreground: 0 0% 100%;
-
-    --warning: 38 80% 48%;
-    --warning-foreground: 0 0% 0%;
-
-    --border: 220 13% 90%;
-    --input: 220 13% 90%;
-    --ring: 239 60% 52%;
-
-    --sidebar-background: 0 0% 99%;
-    --sidebar-foreground: 220 10% 45%;
-    --sidebar-primary: 239 60% 52%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 14% 96%;
-    --sidebar-accent-foreground: 220 15% 15%;
-    --sidebar-border: 220 13% 90%;
-    --sidebar-ring: 239 60% 52%;
-
-    --glass-bg: 0 0% 100%;
-    --glass-border: 220 13% 90%;
-    --glass-glow: 239 60% 52% / 0.08;
-
-    --glass-reflection: none;
-
-    --ribbon-gradient: none;
-
-    --glass-card-bg: rgba(255, 255, 255, 0.85);
-    --glass-card-border: rgba(0, 0, 0, 0.08);
-    --glass-card-shadow: rgba(0, 0, 0, 0.06);
-    --glass-card-inset: rgba(255, 255, 255, 0.6);
-    --glass-sidebar-bg: rgba(255, 255, 255, 0.85);
-    --glass-sidebar-border: rgba(0, 0, 0, 0.06);
-    --grid-line-color: rgba(0, 0, 0, 0.03);
-    --mesh-base: 0 0% 98%;
-  }
 
   /* ─── RETRO SKIN (dark) – OpenClaw-style: navy, #161625 panels, neon orange/purple/teal, gold nav ─── */
   [data-skin='retro'] {
@@ -219,72 +159,7 @@
     --radius: 0;
   }
 
-  /* ─── RETRO SKIN (light) – same vibe, paper terminal ─── */
-  [data-skin='retro'].light {
-    --retro-neon-1: #ea580c;
-    --retro-neon-2: #7c3aed;
-    --retro-neon-3: #0d9488;
-    --retro-gold: 45 100% 48%;
 
-    --background: 45 30% 96%;
-    --foreground: 240 30% 12%;
-
-    --card: 40 25% 99%;
-    --card-foreground: 240 30% 12%;
-
-    --popover: 40 25% 99%;
-    --popover-foreground: 240 30% 12%;
-
-    --primary: 28 95% 42%;
-    --primary-foreground: 0 0% 100%;
-
-    --secondary: 271 70% 45%;
-    --secondary-foreground: 0 0% 100%;
-
-    --muted: 40 20% 90%;
-    --muted-foreground: 240 15% 38%;
-
-    --accent: 40 22% 92%;
-    --accent-foreground: 240 30% 12%;
-
-    --destructive: 0 72% 48%;
-    --destructive-foreground: 0 0% 100%;
-
-    --success: 142 76% 28%;
-    --success-foreground: 0 0% 100%;
-
-    --warning: 35 92% 45%;
-    --warning-foreground: 240 30% 12%;
-
-    --border: 240 15% 82%;
-    --input: 240 12% 88%;
-    --ring: 45 100% 48%;
-
-    --sidebar-background: 40 25% 98%;
-    --sidebar-foreground: 240 20% 35%;
-    --sidebar-primary: 45 100% 48%;
-    --sidebar-primary-foreground: 240 30% 12%;
-    --sidebar-accent: 40 22% 92%;
-    --sidebar-accent-foreground: 240 30% 12%;
-    --sidebar-border: 271 40% 80%;
-    --sidebar-ring: 45 100% 48%;
-
-    --glass-bg: 40 25% 99%;
-    --glass-border: 240 15% 85%;
-    --glass-glow: 271 70% 45% / 0.2;
-
-    --glass-reflection: none;
-
-    --glass-card-bg: rgba(255, 252, 248, 0.96);
-    --glass-card-border: rgba(124, 58, 237, 0.2);
-    --glass-card-shadow: rgba(60, 40, 80, 0.08);
-    --glass-card-inset: rgba(255, 255, 255, 0.85);
-    --glass-sidebar-bg: rgba(255, 253, 250, 0.98);
-    --glass-sidebar-border: rgba(124, 58, 237, 0.18);
-    --grid-line-color: rgba(124, 58, 237, 0.1);
-    --mesh-base: 45 30% 96%;
-    --radius: 0;
-  }
 }
 
 @layer base {
@@ -367,11 +242,7 @@
     filter: drop-shadow(0 0 6px hsl(var(--retro-gold) / 0.7));
   }
 
-  [data-skin='retro'].light a[aria-current='page'] {
-    color: hsl(28 95% 35%) !important;
-    border-color: hsl(45 100% 42%) !important;
-    box-shadow: 0 0 10px hsl(45 100% 48% / 0.25);
-  }
+
 }
 
 @layer components {
@@ -581,29 +452,13 @@
     @apply text-slate-400;
   }
 
-  .light .status-active {
-    @apply text-emerald-600;
-  }
 
-  .light .status-queued {
-    @apply text-amber-600;
-  }
-
-  .light .status-blocked {
-    @apply text-rose-600;
-  }
-
-  .light .status-idle {
-    @apply text-slate-500;
-  }
 
   .gradient-text {
     @apply bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent;
   }
 
-  .light .gradient-text {
-    @apply from-indigo-600 via-purple-600 to-cyan-600;
-  }
+
 
   .mesh-gradient-bg {
     background:

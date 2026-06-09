@@ -2,13 +2,12 @@ import { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import {
   LayoutDashboard, FolderKanban, ListTodo, Bot, Activity, BarChart3,
-  Settings, ChevronLeft, ChevronRight, Zap, Radar, Sun, Moon, Shield, ServerCog, MessageSquareCode, Server
+  Settings, ChevronLeft, ChevronRight, Zap, Radar, Shield, ServerCog, MessageSquareCode, Server
 } from 'lucide-react';
 import { SidebarNavItem } from '@/components/SidebarNavItem';
 import { MeshBackground } from '@/components/MeshBackground';
 import { SnapshotErrorBanner } from '@/components/SnapshotErrorBanner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useTheme } from '@/hooks/useTheme';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
@@ -23,7 +22,6 @@ const navItems = [
 
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
-  const { theme, toggleTheme } = useTheme();
 
   return (
     <div className="flex min-h-screen w-full">
@@ -67,24 +65,6 @@ export function AppLayout() {
 
         {/* Bottom - always visible */}
         <div className="px-2 py-3 border-t border-border space-y-1 flex-shrink-0">
-          <button
-            onClick={toggleTheme}
-            className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4 flex-shrink-0" /> : <Moon className="w-4 h-4 flex-shrink-0" />}
-            <AnimatePresence>
-              {!collapsed && (
-                <motion.span
-                  initial={{ opacity: 0, width: 0 }}
-                  animate={{ opacity: 1, width: 'auto' }}
-                  exit={{ opacity: 0, width: 0 }}
-                  className="text-sm overflow-hidden whitespace-nowrap"
-                >
-                  {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </button>
           <SidebarNavItem to="/settings" icon={Settings} label="Settings" collapsed={collapsed} />
         </div>
 

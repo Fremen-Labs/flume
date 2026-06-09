@@ -205,6 +205,7 @@ func (s *Server) registerRoutes() {
 
 	// Security (api/security.py — 9 nodes)
 	s.mux.HandleFunc("GET /api/security", s.handleSecurity)
+	s.mux.HandleFunc("GET /api/security/validate", s.handleSecurityValidate)
 	s.mux.HandleFunc("GET /api/vault/status", s.handleVaultStatus)
 	s.mux.HandleFunc("POST /api/tasks/stop-all", s.handleTasksStopAll)
 	s.mux.HandleFunc("POST /api/tasks/resume-all", s.handleTasksResumeAll)
@@ -250,6 +251,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
 	s.mux.HandleFunc("POST /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
 	s.mux.HandleFunc("POST /api/settings/restart-services", s.handleSettingsRestartServices)
+	s.mux.HandleFunc("POST /api/settings/restart-dashboard", s.handleDashboardRestartForUI)
 
 	// Intake (api/intake.py — 4 nodes)
 	s.mux.HandleFunc("POST /api/intake/session", s.handleIntakeStartSession)
@@ -285,7 +287,7 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		if s.isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Flume-System-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Flume-Admin-Token, X-Flume-System-Token")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 

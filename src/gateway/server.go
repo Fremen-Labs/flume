@@ -228,6 +228,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	requestID := shortID()
 	log := RequestLogger(requestID, "", "", "")
 	ctx := ContextWithLogger(r.Context(), log)
+	ctx = context.WithValue(ctx, ctxWorkerName, r.Header.Get("X-Worker-Name"))
+	ctx = context.WithValue(ctx, ctxAgentRole, "")
 
 	var req EmbeddingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -293,6 +295,8 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 
 	log := RequestLogger(requestID, req.Provider, req.Model, req.AgentRole)
 	ctx := ContextWithLogger(r.Context(), log)
+	ctx = context.WithValue(ctx, ctxWorkerName, r.Header.Get("X-Worker-Name"))
+	ctx = context.WithValue(ctx, ctxAgentRole, req.AgentRole)
 
 	// === Phase 2 per-plan-pm rate limiter (early, before any frontier or mesh calls) ===
 	// Keyed on plan_session_id + role=="pm". 3 attempts/min default.

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Shield, Key, Lock, Eye, EyeOff, Activity, AlertCircle, Copy, Check, Plus, Trash2, Edit2, X } from 'lucide-react';
+import { Shield, Key, Lock, Unlock, Eye, EyeOff, Activity, AlertCircle, Copy, Check, Plus, Trash2, Edit2, X } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 
 import { createLogger } from '@/utils/logger';
@@ -27,6 +27,8 @@ export default function SecurityPage() {
 
   // Authorization token
   const [adminToken, setAdminToken] = useState(() => localStorage.getItem('flume-admin-token') || '');
+  const [tokenValid, setTokenValid] = useState<boolean | null>(null);
+  const [validatingToken, setValidatingToken] = useState(false);
 
   // Secret operation states
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, string>>({});
@@ -43,6 +45,26 @@ export default function SecurityPage() {
   const handleTokenChange = (val: string) => {
     setAdminToken(val);
     localStorage.setItem('flume-admin-token', val);
+    setTokenValid(null); // require explicit re-validation when token changes
+  };
+
+  const validateAdminToken = async () => {
+    if (!adminToken) {
+      setTokenValid(false);
+      return;
+    }
+    setValidatingToken(true);
+    try {
+      const res = await fetch('/api/security/validate', {
+        method: 'GET',
+        headers: getHeaders(),
+      });
+      setTokenValid(res.ok);
+    } catch {
+      setTokenValid(false);
+    } finally {
+      setValidatingToken(false);
+    }
   };
 
   const getHeaders = () => {
@@ -229,15 +251,36 @@ export default function SecurityPage() {
         </div>
 
         {/* Admin Token Field */}
-        <div className="flex items-center gap-2 bg-card/45 border border-border/50 rounded-xl p-3 backdrop-blur-md shadow-sm w-full md:w-auto md:min-w-[320px]">
-          <Lock className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          <input
-            type="password"
-            placeholder="Enter Admin Token..."
-            value={adminToken}
-            onChange={(e) => handleTokenChange(e.target.value)}
-            className="bg-transparent border-0 outline-none text-xs w-full text-foreground placeholder:text-muted-foreground/60"
-          />
+        <div className="flex flex-col gap-1.5 w-full md:w-auto md:min-w-[320px]">
+          <div className="text-[10px] font-semibold tracking-[0.5px] text-muted-foreground/80 pl-1">FLume Admin Token</div>
+          <div className="flex items-center gap-2 bg-card/45 border border-border/50 rounded-xl p-2.5 backdrop-blur-md shadow-sm">
+            <button
+              type="button"
+              onClick={validateAdminToken}
+              disabled={validatingToken || !adminToken}
+              title={tokenValid === true ? "Token is valid" : tokenValid === false ? "Token is invalid" : "Click to validate token"}
+              className={`p-1 rounded-md flex-shrink-0 transition-all active:scale-95 disabled:opacity-50 ${
+                validatingToken ? 'animate-pulse' : ''
+              } ${
+                tokenValid === true
+                  ? 'text-emerald-500 hover:bg-emerald-500/10'
+                  : tokenValid === false
+                    ? 'text-destructive hover:bg-destructive/10'
+                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+              }`}
+            >
+              {tokenValid === true ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+            </button>
+            <input
+              type="password"
+              placeholder="Enter Admin Token..."
+              value={adminToken}
+              onChange={(e) => handleTokenChange(e.target.value)}
+              className="bg-transparent border-0 outline-none text-xs w-full text-foreground placeholder:text-muted-foreground/60"
+            />
+            {tokenValid === true && <Check className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
+            {tokenValid === false && adminToken && <AlertCircle className="w-3.5 h-3.5 text-destructive flex-shrink-0" />}
+          </div>
         </div>
       </div>
 

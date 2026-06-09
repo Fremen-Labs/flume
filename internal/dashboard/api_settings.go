@@ -555,6 +555,35 @@ func (s *Server) handleSettingsRestartServices(w http.ResponseWriter, r *http.Re
 	})
 }
 
+// ─── POST /api/settings/restart-dashboard ───────────────────────────────────
+
+// handleDashboardRestartForUI is called by `flume config restart --ui` (or -u).
+// It gracefully shuts down the dashboard HTTP server (so the external CLI can
+// safely rebuild the frontend assets and relaunch the dashboard component).
+// The static SPA files are re-read from FLUME_STATIC_ROOT on next start, so
+// only a process restart is needed after `npm run build`.
+func (s *Server) handleDashboardRestartForUI(w http.ResponseWriter, r *http.Request) {
+	s.logger.Info("frontend UI rebuild restart requested — scheduling graceful shutdown")
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "dashboard is shutting down for UI rebuild",
+	})
+
+	// Give the response a moment to flush, then initiate shutdown.
+	// The cobra command / supervisor will see ListenAndServe return and exit.
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		if s.httpServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+				s.logger.Warn("dashboard graceful shutdown error", "error", err.Error())
+			}
+		}
+	}()
+}
+
 func (s *Server) triggerSettingsReload() {
 	s.logger.Info("triggering settings reload")
 	config.Reload(context.Background(), s.logger)

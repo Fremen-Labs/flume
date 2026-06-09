@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+type gatewayContextKey string
+
+const (
+	ctxWorkerName gatewayContextKey = "worker_name"
+	ctxAgentRole  gatewayContextKey = "agent_role"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,12 +64,18 @@ func NewSecretStore(addr, token, esURL string, cacheTTL time.Duration) *SecretSt
 	if cacheTTL == 0 {
 		cacheTTL = 60 * time.Second
 	}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
 	return &SecretStore{
 		cache:      make(map[string]cachedSecret),
 		addr:       strings.TrimRight(addr, "/"),
 		token:      token,
 		cacheTTL:   cacheTTL,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		httpClient: &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: tr,
+		},
 		esURL:      strings.TrimRight(esURL, "/"),
 	}
 }
@@ -305,12 +319,23 @@ func (s *SecretStore) auditAccess(ctx context.Context, secretPath string, data m
 		keys = append(keys, k)
 	}
 
+	workerName, _ := ctx.Value(ctxWorkerName).(string)
+	if workerName == "" {
+		workerName = "Orchestrator"
+	}
+	agentRole, _ := ctx.Value(ctxAgentRole).(string)
+	if agentRole == "" {
+		agentRole = "System"
+	}
+
 	doc := map[string]interface{}{
 		"@timestamp":     time.Now().UTC().Format(time.RFC3339),
 		"message":        fmt.Sprintf("OpenBao KV accessed at %s", secretPath),
 		"service":        "flume-gateway",
 		"secret_path":    secretPath,
 		"keys_retrieved": keys,
+		"worker_name":    workerName,
+		"agent_roles":    agentRole,
 	}
 
 	body, err := json.Marshal(doc)
@@ -334,8 +359,16 @@ func (s *SecretStore) auditAccess(ctx context.Context, secretPath string, data m
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		WithContext(ctx).Debug("audit log write failed", slog.String("error", err.Error()))
+		WithContext(ctx).Warn("audit log write failed", slog.String("error", err.Error()))
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		WithContext(ctx).Warn("audit log write rejected by Elasticsearch",
+			slog.Int("status", resp.StatusCode),
+			slog.String("body", string(respBody)),
+		)
+	}
 }

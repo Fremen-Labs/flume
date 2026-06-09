@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -204,6 +205,16 @@ func (s *Supervisor) startDashboard(ctx context.Context) error {
 	}
 	cfg.NativeMode = s.cfg.NativeMode
 
+	// For local `flume dashboard` (or after `flume config restart --ui`) make the
+	// production UI bundle available without requiring the user to manually set
+	// FLUME_STATIC_ROOT. This greatly improves the "edit UI → test at :8765" loop.
+	if cfg.StaticRoot == "" {
+		if d := discoverLocalFrontendDist(); d != "" {
+			cfg.StaticRoot = d
+			s.logger.Info("auto-discovered frontend static root", slog.String("path", d))
+		}
+	}
+
 	srv := dashboard.New(cfg, s.logger.With(slog.String("component", "dashboard")))
 
 	srv.RegisterSettingsReload(func() {
@@ -310,4 +321,36 @@ func splitFirst(s, sep string) []string {
 		}
 	}
 	return []string{s}
+}
+
+// discoverLocalFrontendDist attempts to find a pre-built (or `npm run build`
+// produced) React dist directory next to the source tree or the running binary.
+// Used to automatically enable the SPA when running `flume dashboard` locally
+// during frontend development.
+func discoverLocalFrontendDist() string {
+	candidates := []string{
+		"src/frontend/dist",
+		"../src/frontend/dist",
+		"../../src/frontend/dist",
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		base := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(base, "src", "frontend", "dist"),
+			filepath.Join(base, "..", "src", "frontend", "dist"),
+			filepath.Join(base, "..", "..", "src", "frontend", "dist"),
+		)
+	}
+
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			continue
+		}
+		if st, err := os.Stat(filepath.Join(abs, "index.html")); err == nil && !st.IsDir() {
+			return abs
+		}
+	}
+	return ""
 }

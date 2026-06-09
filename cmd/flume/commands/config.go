@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Fremen-Labs/flume/cmd/flume/ui"
 	"github.com/charmbracelet/log"
@@ -151,10 +155,26 @@ var configSetESURLCmd = &cobra.Command{
 	},
 }
 
+var restartUIFlag bool
+
 var configRestartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Restart Flume dashboard services",
+	Short: "Restart Flume services (or just the UI/dashboard with --ui)",
+	Long: `Restart services or perform a targeted frontend rebuild + dashboard restart.
+
+Use --ui / -u for fast frontend development:
+  flume config restart --ui
+
+This will:
+  1. Gracefully stop the dashboard (container or process).
+  2. Run "npm run build" for the React/Vite frontend.
+  3. (Docker) Copy fresh dist/ into the container.
+  4. Start the dashboard component again.
+The rest of the Flume stack (gateway, workers, ES, OpenBao) is left running.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if restartUIFlag {
+			return runFrontendUIRestart()
+		}
 		client := ui.NewFlumeClient()
 		if _, err := client.Post("/api/settings/restart-services", nil); err != nil {
 			return fmt.Errorf("failed to restart services: %w", err)
@@ -236,6 +256,188 @@ func printConfigField(label, value string) {
 	fmt.Printf("  %-12s: %s\n", label, value)
 }
 
+// ─── UI / Frontend Restart Implementation ───────────────────────────────────
+
+func runFrontendUIRestart() error {
+	fmt.Println(ui.CyberGradient("⚡ Flume frontend rebuild + dashboard restart"))
+
+	pkgDir, err := findFrontendPackageDir()
+	if err != nil {
+		return fmt.Errorf("could not locate frontend source (src/frontend/src/package.json): %w\nRun this command from inside the flume source checkout, or set FLUME_ROOT.", err)
+	}
+	distDir := filepath.Join(filepath.Dir(pkgDir), "dist")
+	distAbs, _ := filepath.Abs(distDir)
+
+	fmt.Printf("  Frontend source: %s\n", pkgDir)
+	fmt.Printf("  Target dist:     %s\n", distAbs)
+
+	// 1. Build the frontend (Vite produces hashed bundles + updated index.html)
+	fmt.Println(ui.WarningGold("Building frontend (npm run build)..."))
+	buildCmd := exec.Command("npm", "run", "build")
+	buildCmd.Dir = pkgDir
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("frontend build failed: %w", err)
+	}
+	fmt.Println(ui.SuccessBlue("✔ Frontend build complete."))
+
+	// 2. Decide environment and perform stop + (re)start of dashboard only.
+	client := ui.NewFlumeClient()
+	dockerMode := isDockerDashboardActive()
+
+	if dockerMode {
+		fmt.Println(ui.CyberGradient("Docker mode detected — stopping dashboard container..."))
+		// Best-effort stop (container may already be stopped).
+		stopCmd := exec.Command("docker", "compose", "stop", "dashboard")
+		stopCmd.Stdout = os.Stdout
+		stopCmd.Stderr = os.Stderr
+		_ = stopCmd.Run()
+
+		fmt.Println(ui.CyberGradient("Copying fresh dist/ into container..."))
+		cpCmd := exec.Command("docker", "cp", distAbs+"/.", "flume-dashboard:/app/frontend/dist/")
+		cpCmd.Stdout = os.Stdout
+		cpCmd.Stderr = os.Stderr
+		if err := cpCmd.Run(); err != nil {
+			fmt.Println(ui.WarningGold("docker cp warning (continuing): " + err.Error()))
+		}
+
+		fmt.Println(ui.CyberGradient("Starting dashboard container..."))
+		startCmd := exec.Command("docker", "compose", "start", "dashboard")
+		startCmd.Stdout = os.Stdout
+		startCmd.Stderr = os.Stderr
+		if err := startCmd.Run(); err != nil {
+			return fmt.Errorf("failed to start dashboard container: %w", err)
+		}
+	} else {
+		fmt.Println(ui.CyberGradient("Local/native mode — signaling running dashboard to stop..."))
+
+		// Ask the running dashboard (if any) to gracefully exit via its HTTP server.
+		// This uses the new /api/settings/restart-dashboard handler which calls Shutdown.
+		_, _ = client.Post("/api/settings/restart-dashboard", nil)
+
+		// Give it a moment to drain.
+		time.Sleep(400 * time.Millisecond)
+
+		fmt.Println(ui.CyberGradient("Starting dashboard with fresh UI assets..."))
+
+		// Launch `flume dashboard` as a background child with the correct StaticRoot
+		// so the SPA is served at the normal dashboard port.
+		dashCmd := exec.Command("flume", "dashboard")
+		dashCmd.Env = append(os.Environ(), "FLUME_STATIC_ROOT="+distAbs)
+		dashCmd.Stdout = os.Stdout
+		dashCmd.Stderr = os.Stderr
+
+		if err := dashCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start 'flume dashboard': %w (is 'flume' in your PATH?)", err)
+		}
+		if dashCmd.Process != nil {
+			fmt.Printf("  Dashboard launched (pid %d)\n", dashCmd.Process.Pid)
+		}
+	}
+
+	// 3. Wait for the dashboard to report healthy.
+	if err := waitForDashboardHealthy(25 * time.Second); err != nil {
+		return fmt.Errorf("dashboard did not become healthy in time: %w", err)
+	}
+
+	fmt.Println(ui.SuccessBlue("✅ Dashboard restarted with updated frontend."))
+	fmt.Println(ui.WarningGold("   If the browser shows stale JS/CSS, do a hard refresh (⌘/Ctrl + Shift + R)."))
+	return nil
+}
+
+// findFrontendPackageDir walks upward from the current working directory (and a
+// few other candidate locations) until it finds the Vite package.json that
+// contains the frontend build scripts.
+func findFrontendPackageDir() (string, error) {
+	candidates := []string{}
+
+	if root := strings.TrimSpace(os.Getenv("FLUME_ROOT")); root != "" {
+		candidates = append(candidates, root)
+	}
+
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, cwd)
+		// Walk up a few levels
+		dir := cwd
+		for i := 0; i < 6; i++ {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			candidates = append(candidates, parent)
+			dir = parent
+		}
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates, exeDir, filepath.Dir(exeDir))
+	}
+
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			continue
+		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+
+		// package.json lives at src/frontend/src/package.json
+		pkg := filepath.Join(abs, "src", "frontend", "src", "package.json")
+		if _, err := os.Stat(pkg); err == nil {
+			return filepath.Dir(pkg), nil // return the dir containing package.json
+		}
+	}
+	return "", fmt.Errorf("frontend package.json not found in search path")
+}
+
+// isDockerDashboardActive returns true when the compose-managed dashboard
+// appears to be reachable (via the internal DNS name the client also uses).
+func isDockerDashboardActive() bool {
+	probe := &http.Client{Timeout: 180 * time.Millisecond}
+	// Same probe the FlumeClient uses.
+	if resp, err := probe.Get("http://flume-dashboard:8765/api/health"); err == nil {
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	// Fallback: ask docker compose for the container
+	cmd := exec.Command("docker", "compose", "ps", "-q", "dashboard")
+	out, err := cmd.Output()
+	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		return true
+	}
+	return false
+}
+
+// waitForDashboardHealthy polls common dashboard locations until /api/health
+// returns 200 or the timeout is exceeded.
+func waitForDashboardHealthy(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	urls := []string{
+		"http://localhost:8765/api/health",
+		"http://127.0.0.1:8765/api/health",
+		"http://flume-dashboard:8765/api/health",
+	}
+
+	for time.Now().Before(deadline) {
+		for _, u := range urls {
+			client := &http.Client{Timeout: 400 * time.Millisecond}
+			if resp, err := client.Get(u); err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out after %s", timeout)
+}
+
 func init() {
 	ConfigCmd.Flags().BoolVarP(&configJSON, "json", "j", false, "Output raw JSON")
 	ConfigCmd.AddCommand(configShowCmd)
@@ -243,4 +445,5 @@ func init() {
 	ConfigCmd.AddCommand(configSetProviderCmd)
 	ConfigCmd.AddCommand(configSetESURLCmd)
 	ConfigCmd.AddCommand(configRestartCmd)
+	configRestartCmd.Flags().BoolVarP(&restartUIFlag, "ui", "u", false, "Rebuild frontend and restart only the dashboard (leaves workers/gateway running)")
 }

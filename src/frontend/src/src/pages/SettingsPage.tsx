@@ -505,7 +505,7 @@ export default function SettingsPage() {
                   Appearance
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {SKINS.find((s) => s.id === skin)?.name ?? skin} · {theme === 'dark' ? 'Dark' : 'Light'}
+                  {SKINS.find((s) => s.id === skin)?.name ?? skin}
                 </span>
               </div>
             </AccordionTrigger>
@@ -529,27 +529,7 @@ export default function SettingsPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label>Theme</Label>
-                  <div className="flex gap-2">
-                    <Button
-                      variant={theme === 'dark' ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => theme !== 'dark' && toggleTheme()}
-                    >
-                      <Moon className="h-4 w-4 mr-1" />
-                      Dark
-                    </Button>
-                    <Button
-                      variant={theme === 'light' ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => theme !== 'light' && toggleTheme()}
-                    >
-                      <Sun className="h-4 w-4 mr-1" />
-                      Light
-                    </Button>
-                  </div>
-                </div>
+
               </div>
             </AccordionContent>
           </AccordionItem>

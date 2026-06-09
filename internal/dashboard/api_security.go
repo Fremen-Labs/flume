@@ -249,6 +249,21 @@ func (s *Server) verifyAdminAccess(r *http.Request) bool {
 	return headerToken == token
 }
 
+// ─── GET /api/security/validate ─────────────────────────────────────────────
+
+// handleSecurityValidate checks if the provided admin token (via Authorization or X-Flume-Admin-Token)
+// is valid against the server's FLUME_ADMIN_TOKEN env. Safe no-op call for UI "test credentials".
+// Returns 200 {"valid": true} on success or 401 on failure.
+func (s *Server) handleSecurityValidate(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAccess(r) {
+		writeError(w, http.StatusUnauthorized, "invalid admin token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"valid": true,
+	})
+}
+
 // ─── POST /api/security/secrets/reveal ──────────────────────────────────────
 
 // handleSecuritySecretsReveal retrieves the plaintext value of a secret key from OpenBao.
