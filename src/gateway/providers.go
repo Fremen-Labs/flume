@@ -286,8 +286,10 @@ func (r *ProviderRouter) getManagedOllamaClient(baseURL string, timeout time.Dur
 //
 // Resolution order (highest to lowest priority):
 //  1. Credential-specific key from OpenBao (via credID)
-//  2. Global LLM_API_KEY from OpenBao
-//  3. LLM_API_KEY environment variable
+//  2. Provider-specific key from OpenBao (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY)
+//  3. Provider-specific key from environment variable
+//  4. Global LLM_API_KEY from OpenBao
+//  5. LLM_API_KEY environment variable
 //
 // Managed providers (OpenAI, Anthropic, Gemini) return an error when no key
 // is found — sending an empty Authorization header would result in an opaque
@@ -311,13 +313,36 @@ func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID str
 		if key != "" {
 			return key, nil
 		}
-		log.Warn("api_key: credential-specific key not found in OpenBao — trying global fallback",
+		log.Warn("api_key: credential-specific key not found in OpenBao — trying provider-specific fallback",
 			slog.String("provider", provider),
 			slog.String("cred_id", credID),
 		)
 	}
 
-	// 2. Global key from OpenBao
+	// 2. Provider-specific key from OpenBao (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY)
+	providerKeyName := providerToEnvKeyName(provider)
+	if providerKeyName != "" {
+		key := r.secrets.GetGlobalValue(ctx, providerKeyName)
+		if key != "" {
+			log.Debug("api_key: resolved provider-specific key from OpenBao",
+				slog.String("provider", provider),
+				slog.String("key_name", providerKeyName),
+			)
+			return key, nil
+		}
+
+		// 3. Provider-specific key from environment variable
+		key = os.Getenv(providerKeyName)
+		if key != "" {
+			log.Warn("api_key: using provider-specific key from environment variable — prefer OpenBao for secrets",
+				slog.String("provider", provider),
+				slog.String("key_name", providerKeyName),
+			)
+			return key, nil
+		}
+	}
+
+	// 4. Global key from OpenBao
 	key := r.secrets.GetGlobalValue(ctx, "LLM_API_KEY")
 	if key != "" {
 		return key, nil
@@ -326,7 +351,7 @@ func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID str
 		slog.String("provider", provider),
 	)
 
-	// 3. Environment variable fallback
+	// 5. Environment variable fallback
 	key = os.Getenv("LLM_API_KEY")
 	if key != "" {
 		log.Warn("api_key: using LLM_API_KEY from environment variable — prefer OpenBao for secrets",
@@ -347,7 +372,7 @@ func (r *ProviderRouter) resolveAPIKey(ctx context.Context, provider, credID str
 	// rather than propagating an empty Authorization header.
 	log.Error("api_key: no key found for managed provider — request will be rejected",
 		slog.String("provider", provider),
-		slog.String("hint", "set LLM_API_KEY in OpenBao or the container environment"),
+		slog.String("hint", "set "+providerKeyName+" or LLM_API_KEY in OpenBao or the container environment"),
 	)
 	return "", fmt.Errorf("no API key available for provider %q", provider)
 }

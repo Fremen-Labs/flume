@@ -280,8 +280,16 @@ func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) 
 	if apiKey == "" && cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
 		baoClient := secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, s.logger)
 		if baoData, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && baoData != nil {
-			if k, _ := baoData["LLM_API_KEY"].(string); k != "" {
+			// Multi-Frontier: Try provider-specific key first (e.g. OPENAI_API_KEY)
+			providerKeyName := strings.ToUpper(provider) + "_API_KEY"
+			if k, _ := baoData[providerKeyName].(string); k != "" {
 				apiKey = k
+			}
+			// Fallback to global LLM_API_KEY
+			if apiKey == "" {
+				if k, _ := baoData["LLM_API_KEY"].(string); k != "" {
+					apiKey = k
+				}
 			}
 		}
 	}

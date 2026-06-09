@@ -362,6 +362,27 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 		kvPayload["ADO_TOKEN"] = envCfg.ADOToken
 	}
 
+	// Multi-Frontier: Seed provider-specific API keys from CloudProviders.
+	// Each entry uses the standardized {PROVIDER}_API_KEY naming convention
+	// (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY) so the gateway can resolve
+	// the correct key per-provider without relying solely on the global LLM_API_KEY.
+	for _, cp := range envCfg.CloudProviders {
+		if cp.APIKey == "" {
+			continue
+		}
+		providerKeyName := providerToEnvKeyName(cp.Provider)
+		if providerKeyName != "" {
+			kvPayload[providerKeyName] = cp.APIKey
+			logger.WithContext(ctx).Debug("Multi-Frontier: seeding provider-specific API key",
+				"provider", cp.Provider, "key_name", providerKeyName)
+		}
+		// Also set as LLM_API_KEY if no global key was provided yet,
+		// preserving single-provider backwards compatibility.
+		if _, hasGlobal := kvPayload["LLM_API_KEY"]; !hasGlobal {
+			kvPayload["LLM_API_KEY"] = cp.APIKey
+		}
+	}
+
 	// Fetch existing configurations before injecting gracefully natively
 	existResp, eErr := doVaultRequest(ctx, "GET", fmt.Sprintf("%s/v1/secret/data/flume/keys", vaultURL), rootToken, nil)
 	if eErr == nil && existResp.StatusCode == 200 {
@@ -500,6 +521,30 @@ func ProvisionAppRole(ctx context.Context, vaultURL, rootToken string) (string, 
 
 	logger.WithContext(ctx).Debug("Successfully provisioned dynamic AppRole flume-worker.")
 	return secData.Data.SecretId, nil
+}
+
+// providerToEnvKeyName maps a cloud provider name to its standardized
+// environment-style key name for OpenBao storage.
+// Returns empty string for unrecognized providers.
+func providerToEnvKeyName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "xai", "grok":
+		return "XAI_API_KEY"
+	default:
+		// Fallback: generate a key name from the provider name
+		// (e.g. "mistral" -> "MISTRAL_API_KEY") for forward compatibility.
+		normalized := strings.ToUpper(strings.TrimSpace(provider))
+		if normalized == "" {
+			return ""
+		}
+		return normalized + "_API_KEY"
+	}
 }
 
 // DeployVaultTopology sequences the HTTP Client bootstrap without containerizing.

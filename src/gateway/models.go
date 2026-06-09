@@ -267,3 +267,32 @@ var FrontierProviderLabels = map[string]string{
 var AllAgentRoles = []string{
 	RolePlanner, RoleImplementer, RoleReviewer, RoleTester, RolePM, RoleCritic,
 }
+
+// ProviderEnvKeyNames maps provider IDs to their standardized environment-style
+// key names used for per-provider API key storage in OpenBao and env vars.
+var ProviderEnvKeyNames = map[string]string{
+	ProviderOpenAI:    "OPENAI_API_KEY",
+	ProviderAnthropic: "ANTHROPIC_API_KEY",
+	ProviderGemini:    "GEMINI_API_KEY",
+	ProviderXAI:       "XAI_API_KEY",
+	ProviderGrok:      "XAI_API_KEY", // Grok is xAI — same API, same key
+}
+
+// providerToEnvKeyName returns the standardized environment key name for a
+// provider (e.g. "openai" → "OPENAI_API_KEY"). Returns empty for unknown
+// providers. Used by resolveAPIKey for multi-frontier key resolution.
+func providerToEnvKeyName(provider string) string {
+	if name, ok := ProviderEnvKeyNames[provider]; ok {
+		return name
+	}
+	// Normalize: check lowercase match
+	lower := strings.ToLower(strings.TrimSpace(provider))
+	if name, ok := ProviderEnvKeyNames[lower]; ok {
+		return name
+	}
+	// Fallback: construct from provider name for forward compatibility
+	if lower != "" {
+		return strings.ToUpper(lower) + "_API_KEY"
+	}
+	return ""
+}

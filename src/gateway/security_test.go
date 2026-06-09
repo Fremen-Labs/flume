@@ -311,3 +311,72 @@ func TestResolveAPIKey_EnvFallback(t *testing.T) {
 		t.Errorf("expected env key, got %q", key)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fix 3: Multi-Frontier provider-specific key resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestResolveAPIKey_ProviderSpecificEnvKey verifies that provider-specific
+// environment variables (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY) are resolved
+// correctly and take priority over the global LLM_API_KEY.
+func TestResolveAPIKey_ProviderSpecificEnvKey(t *testing.T) {
+	testCases := []struct {
+		provider    string
+		envVarName  string
+		expectedKey string
+	}{
+		{ProviderOpenAI, "OPENAI_API_KEY", "sk-openai-test-key"},
+		{ProviderAnthropic, "ANTHROPIC_API_KEY", "sk-ant-test-key"},
+		{ProviderGemini, "GEMINI_API_KEY", "AIza-gemini-test-key"},
+		{ProviderXAI, "XAI_API_KEY", "xai-test-key"},
+		{ProviderGrok, "XAI_API_KEY", "grok-test-key"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.provider, func(t *testing.T) {
+			// Set provider-specific key and a DIFFERENT global key
+			t.Setenv(tc.envVarName, tc.expectedKey)
+			t.Setenv("LLM_API_KEY", "global-fallback-key-should-not-be-used")
+
+			config := NewConfig("", time.Minute)
+			secrets := NewSecretStore("", "", "", time.Minute) // no OpenBao
+			router := NewProviderRouter(config, secrets, nil)
+
+			key, err := router.resolveAPIKey(context.Background(), tc.provider, "")
+			if err != nil {
+				t.Fatalf("expected no error for provider %q with env key, got: %v", tc.provider, err)
+			}
+			if key != tc.expectedKey {
+				t.Errorf("expected provider-specific key %q for %q, got %q", tc.expectedKey, tc.provider, key)
+			}
+		})
+	}
+}
+
+// TestResolveAPIKey_ProviderSpecificFallbackToGlobal verifies that when a
+// provider-specific key is NOT set, the resolver correctly falls back to
+// the global LLM_API_KEY.
+func TestResolveAPIKey_ProviderSpecificFallbackToGlobal(t *testing.T) {
+	// Only set the global key — provider-specific keys are absent
+	t.Setenv("LLM_API_KEY", "global-shared-key-abc123")
+	// Ensure provider-specific vars are explicitly empty
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	managedProviders := []string{ProviderOpenAI, ProviderAnthropic, ProviderGemini}
+	for _, p := range managedProviders {
+		t.Run(p, func(t *testing.T) {
+			config := NewConfig("", time.Minute)
+			secrets := NewSecretStore("", "", "", time.Minute) // no OpenBao
+			router := NewProviderRouter(config, secrets, nil)
+
+			key, err := router.resolveAPIKey(context.Background(), p, "")
+			if err != nil {
+				t.Fatalf("expected no error for provider %q with global fallback, got: %v", p, err)
+			}
+			if key != "global-shared-key-abc123" {
+				t.Errorf("expected global fallback key for %q, got %q", p, key)
+			}
+		})
+	}
+}
