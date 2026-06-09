@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Shield, Key, Lock, Unlock, Eye, EyeOff, Activity, AlertCircle, Copy, Check, Plus, Trash2, Edit2, X } from 'lucide-react';
+import { Shield, Key, Lock, Unlock, Eye, EyeOff, Activity, AlertCircle, Copy, Check, Plus, Trash2, Edit2, X, ChevronDown } from 'lucide-react';
 import { GlassMetricCard } from '@/components/GlassMetricCard';
 
 import { createLogger } from '@/utils/logger';
@@ -17,6 +17,28 @@ interface SecurityData {
     keys_retrieved: string[];
   }>;
 }
+
+// ── Credential Type Definitions ─────────────────────────────────────────
+type CredentialType = 'llm' | 'repo';
+
+interface ProviderOption {
+  id: string;
+  label: string;
+  keyName: string;
+  valuePlaceholder: string;
+}
+
+const LLM_PROVIDERS: ProviderOption[] = [
+  { id: 'openai', label: 'OpenAI', keyName: 'OPENAI_API_KEY', valuePlaceholder: 'sk-...' },
+  { id: 'anthropic', label: 'Anthropic', keyName: 'ANTHROPIC_API_KEY', valuePlaceholder: 'sk-ant-...' },
+  { id: 'gemini', label: 'Google Gemini', keyName: 'GEMINI_API_KEY', valuePlaceholder: 'AIza...' },
+  { id: 'xai', label: 'xAI (Grok)', keyName: 'XAI_API_KEY', valuePlaceholder: 'xai-...' },
+];
+
+const REPO_PROVIDERS: ProviderOption[] = [
+  { id: 'github', label: 'GitHub', keyName: 'GH_TOKEN', valuePlaceholder: 'ghp_...' },
+  { id: 'ado', label: 'Azure DevOps', keyName: 'ADO_TOKEN', valuePlaceholder: 'Paste your ADO Personal Access Token...' },
+];
 
 export default function SecurityPage() {
   const [data, setData] = useState<SecurityData | null>(null);
@@ -41,6 +63,10 @@ export default function SecurityPage() {
   const [modalValue, setModalValue] = useState('');
   const [modalError, setModalError] = useState<string | null>(null);
   const [modalSubmitting, setModalSubmitting] = useState(false);
+
+  // New credential type states for the Add modal
+  const [credentialType, setCredentialType] = useState<CredentialType | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>('');
 
   const handleTokenChange = (val: string) => {
     setAdminToken(val);
@@ -152,10 +178,37 @@ export default function SecurityPage() {
     }
   };
 
+  // Resolve the correct vault key name from the selected credential type + provider
+  const resolveKeyName = (): string => {
+    if (!credentialType || !selectedProvider) return '';
+    const providers = credentialType === 'llm' ? LLM_PROVIDERS : REPO_PROVIDERS;
+    const match = providers.find(p => p.id === selectedProvider);
+    return match?.keyName || '';
+  };
+
+  // Get value placeholder for the selected provider
+  const getValuePlaceholder = (): string => {
+    if (!credentialType || !selectedProvider) return 'Enter the secure token/credentials...';
+    const providers = credentialType === 'llm' ? LLM_PROVIDERS : REPO_PROVIDERS;
+    const match = providers.find(p => p.id === selectedProvider);
+    return match?.valuePlaceholder || 'Enter the secure token/credentials...';
+  };
+
+  // Get value label for the selected credential type
+  const getValueLabel = (): string => {
+    if (credentialType === 'llm') return 'API Key';
+    if (credentialType === 'repo') return 'Access Token';
+    return 'Secret Plaintext Value';
+  };
+
   const handleSaveSecret = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!modalKey || !modalValue) {
-      setModalError('Key and value are required');
+
+    // For "Add" mode, resolve the key from the credential type + provider
+    const effectiveKey = showAddModal ? resolveKeyName() : modalKey;
+
+    if (!effectiveKey || !modalValue) {
+      setModalError(showAddModal ? 'Please select a provider and enter a value' : 'Key and value are required');
       return;
     }
     setModalSubmitting(true);
@@ -164,22 +217,29 @@ export default function SecurityPage() {
       const res = await fetch('/api/security/secrets/update', {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify({ key: modalKey, value: modalValue }),
+        body: JSON.stringify({ key: effectiveKey, value: modalValue }),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
       fetchSecurityData();
-      setShowAddModal(false);
-      setEditSecretKey(null);
-      setModalKey('');
-      setModalValue('');
+      closeModal();
     } catch (err: any) {
       setModalError(err.message);
     } finally {
       setModalSubmitting(false);
     }
+  };
+
+  const closeModal = () => {
+    setShowAddModal(false);
+    setEditSecretKey(null);
+    setModalKey('');
+    setModalValue('');
+    setModalError(null);
+    setCredentialType(null);
+    setSelectedProvider('');
   };
 
   const handleDeleteSecret = async (key: string) => {
@@ -235,6 +295,7 @@ export default function SecurityPage() {
 
   const { vault_active, openbao_keys, audit_logs } = data || {};
   const rootKeys = Object.keys(openbao_keys || {});
+  const computedKeyName = resolveKeyName();
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8 animate-fade-in pb-24">
@@ -259,15 +320,13 @@ export default function SecurityPage() {
               onClick={validateAdminToken}
               disabled={validatingToken || !adminToken}
               title={tokenValid === true ? "Token is valid" : tokenValid === false ? "Token is invalid" : "Click to validate token"}
-              className={`p-1 rounded-md flex-shrink-0 transition-all active:scale-95 disabled:opacity-50 ${
-                validatingToken ? 'animate-pulse' : ''
-              } ${
-                tokenValid === true
+              className={`p-1 rounded-md flex-shrink-0 transition-all active:scale-95 disabled:opacity-50 ${validatingToken ? 'animate-pulse' : ''
+                } ${tokenValid === true
                   ? 'text-emerald-500 hover:bg-emerald-500/10'
                   : tokenValid === false
                     ? 'text-destructive hover:bg-destructive/10'
                     : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-              }`}
+                }`}
             >
               {tokenValid === true ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
             </button>
@@ -320,6 +379,8 @@ export default function SecurityPage() {
                   setModalKey('');
                   setModalValue('');
                   setModalError(null);
+                  setCredentialType(null);
+                  setSelectedProvider('');
                   setShowAddModal(true);
                 }}
                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/95 transition-all shadow-sm"
@@ -340,7 +401,7 @@ export default function SecurityPage() {
                   <div key={key} className="p-3 border border-border/50 rounded-lg flex flex-col gap-2 bg-background/30 backdrop-blur-sm group hover:border-primary/30 transition-all">
                     <div className="flex items-center justify-between">
                       <div className="font-mono text-sm font-semibold truncate max-w-[160px]" title={key}>{key}</div>
-                      
+
                       {/* Action buttons */}
                       <div className="flex items-center gap-1.5 opacity-60 group-hover:opacity-100 transition-opacity">
                         <button
@@ -378,7 +439,7 @@ export default function SecurityPage() {
                         </button>
                       </div>
                     </div>
-                    
+
                     {/* Plaintext / Mask Display */}
                     <div className="font-mono text-xs p-1.5 bg-background/50 rounded border border-border/30 truncate flex items-center justify-between text-muted-foreground select-all">
                       {isRevealed ? (
@@ -400,7 +461,7 @@ export default function SecurityPage() {
             <Activity className="w-5 h-5 text-blue-400" />
             <h2 className="text-lg font-bold">Agent Access Telegraph</h2>
           </div>
-          
+
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
               <thead className="text-xs text-muted-foreground uppercase bg-muted/40 border-b border-border">
@@ -448,22 +509,155 @@ export default function SecurityPage() {
         </div>
       </div>
 
-      {/* Modal for Add/Edit Secret */}
-      {(showAddModal || editSecretKey !== null) && (
+      {/* ── Modal for Add Secret (Guided Credential Type Flow) ──────────── */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-md border border-border bg-card rounded-xl shadow-xl overflow-hidden flex flex-col p-6 animate-scale-in">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-lg font-bold text-foreground">Create New Vault Secret</h3>
+              <button
+                onClick={closeModal}
+                className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveSecret} className="space-y-5">
+              {modalError && (
+                <div className="p-3 border border-destructive/20 bg-destructive/5 rounded-lg text-destructive text-xs flex gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{modalError}</span>
+                </div>
+              )}
+
+              {/* Step 1: Credential Type */}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-muted-foreground tracking-wide uppercase">Credential Type</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => { setCredentialType('llm'); setSelectedProvider(''); }}
+                    className={`flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${credentialType === 'llm'
+                        ? 'border-primary bg-primary/5 shadow-sm shadow-primary/10'
+                        : 'border-border/50 bg-background/30 hover:border-border hover:bg-muted/30'
+                      }`}
+                  >
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${credentialType === 'llm' ? 'bg-primary/15 text-primary' : 'bg-muted/60 text-muted-foreground'
+                      }`}>
+                      <Key className="w-4.5 h-4.5" />
+                    </div>
+                    <span className={`text-xs font-semibold ${credentialType === 'llm' ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      LLM Provider
+                    </span>
+                    <span className="text-[10px] text-muted-foreground/70 text-center leading-tight">
+                      OpenAI, Anthropic, Gemini, xAI
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setCredentialType('repo'); setSelectedProvider(''); }}
+                    className={`flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${credentialType === 'repo'
+                        ? 'border-primary bg-primary/5 shadow-sm shadow-primary/10'
+                        : 'border-border/50 bg-background/30 hover:border-border hover:bg-muted/30'
+                      }`}
+                  >
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${credentialType === 'repo' ? 'bg-primary/15 text-primary' : 'bg-muted/60 text-muted-foreground'
+                      }`}>
+                      <Shield className="w-4.5 h-4.5" />
+                    </div>
+                    <span className={`text-xs font-semibold ${credentialType === 'repo' ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      Repo Provider
+                    </span>
+                    <span className="text-[10px] text-muted-foreground/70 text-center leading-tight">
+                      GitHub, Azure DevOps
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Step 2: Provider Dropdown (shown after credential type selected) */}
+              {credentialType && (
+                <div className="space-y-2 animate-fade-in">
+                  <label className="text-xs font-semibold text-muted-foreground tracking-wide uppercase">
+                    {credentialType === 'llm' ? 'LLM Provider' : 'Repository Provider'}
+                  </label>
+                  <div className="relative">
+                    <select
+                      id="provider-select"
+                      value={selectedProvider}
+                      onChange={(e) => setSelectedProvider(e.target.value)}
+                      className="w-full p-2.5 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary/50 appearance-none cursor-pointer pr-10"
+                      required
+                    >
+                      <option value="" disabled>
+                        Select a {credentialType === 'llm' ? 'frontier model provider' : 'repository platform'}...
+                      </option>
+                      {(credentialType === 'llm' ? LLM_PROVIDERS : REPO_PROVIDERS).map(p => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                  </div>
+                </div>
+              )}
+
+              {/* Step 3: Auto-generated Key Name (read-only display) */}
+              {computedKeyName && (
+                <div className="space-y-2 animate-fade-in">
+                  <label className="text-xs font-semibold text-muted-foreground tracking-wide uppercase">Vault Key Name</label>
+                  <div className="flex items-center gap-2 p-2.5 bg-muted/30 border border-border/50 rounded-lg">
+                    <Key className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                    <span className="font-mono text-sm font-semibold text-foreground">{computedKeyName}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground/70 italic">Auto-resolved</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Step 4: Secret Value (shown after provider selected) */}
+              {selectedProvider && (
+                <div className="space-y-2 animate-fade-in">
+                  <label className="text-xs font-semibold text-muted-foreground tracking-wide uppercase">{getValueLabel()}</label>
+                  <textarea
+                    placeholder={getValuePlaceholder()}
+                    value={modalValue}
+                    onChange={(e) => setModalValue(e.target.value)}
+                    rows={3}
+                    className="w-full p-2.5 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary/50 font-mono"
+                    required
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="px-4 py-2 border border-border rounded-lg text-xs font-semibold hover:bg-muted transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={modalSubmitting || !computedKeyName || !modalValue}
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:bg-primary/95 transition-all shadow-sm disabled:opacity-50"
+                >
+                  {modalSubmitting ? "Saving..." : "Save to Vault"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal for Edit Secret (simple key/value — key is immutable) ── */}
+      {editSecretKey !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm animate-fade-in">
           <div className="w-full max-w-md border border-border bg-card rounded-xl shadow-xl overflow-hidden flex flex-col p-6 animate-scale-in">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-foreground">
-                {showAddModal ? "Create New Vault Secret" : `Edit Secret Value`}
-              </h3>
+              <h3 className="text-lg font-bold text-foreground">Edit Secret Value</h3>
               <button
-                onClick={() => {
-                  setShowAddModal(false);
-                  setEditSecretKey(null);
-                  setModalKey('');
-                  setModalValue('');
-                  setModalError(null);
-                }}
+                onClick={closeModal}
                 className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
               >
                 <X className="w-4 h-4" />
@@ -480,15 +674,10 @@ export default function SecurityPage() {
 
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-muted-foreground">Secret Key Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g. OPENAI_API_KEY"
-                  value={modalKey}
-                  onChange={(e) => setModalKey(e.target.value.toUpperCase())}
-                  disabled={editSecretKey !== null} // Key is immutable on edit
-                  className="w-full p-2.5 bg-background border border-border rounded-lg text-sm outline-none focus:border-primary/50 disabled:opacity-50"
-                  required
-                />
+                <div className="flex items-center gap-2 p-2.5 bg-muted/30 border border-border/50 rounded-lg">
+                  <Key className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                  <span className="font-mono text-sm font-semibold text-foreground">{modalKey}</span>
+                </div>
               </div>
 
               <div className="space-y-1.5">
@@ -506,13 +695,7 @@ export default function SecurityPage() {
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowAddModal(false);
-                    setEditSecretKey(null);
-                    setModalKey('');
-                    setModalValue('');
-                    setModalError(null);
-                  }}
+                  onClick={closeModal}
                   className="px-4 py-2 border border-border rounded-lg text-xs font-semibold hover:bg-muted transition-all"
                 >
                   Cancel
@@ -532,3 +715,4 @@ export default function SecurityPage() {
     </div>
   );
 }
+
