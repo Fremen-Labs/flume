@@ -36,6 +36,17 @@ var configHTTPClient = &http.Client{
 	},
 }
 
+// managedProviderBaseURLs maps managed cloud LLM providers to their API base
+// URLs. Used by OverlayFromEnv to auto-resolve the correct endpoint when
+// LLM_BASE_URL is not explicitly set (avoiding the Ollama default).
+var managedProviderBaseURLs = map[string]string{
+	"openai":    "https://api.openai.com",
+	"anthropic": "https://api.anthropic.com",
+	"gemini":    "https://generativelanguage.googleapis.com/v1beta/openai",
+	"xai":       "https://api.x.ai",
+	"grok":      "https://api.x.ai",
+}
+
 // Config holds all Flume runtime configuration.
 // Mirrors Python's FlumeSettings(BaseSettings) from flume_secrets.py.
 type Config struct {
@@ -204,6 +215,18 @@ func (c *Config) OverlayFromEnv() {
 		c.TaskStateMachineShadowMode = true
 	} else {
 		c.TaskStateMachineShadowMode = shadowEnv != "false" && shadowEnv != "0"
+	}
+
+	// ── Multi-Frontier: resolve managed cloud provider base URLs ────────────
+	// When LLM_PROVIDER is a managed cloud provider (grok, gemini, openai,
+	// anthropic, xai) but LLM_BASE_URL was never explicitly set, the default
+	// Ollama URL persists. Detect this and resolve the correct API endpoint
+	// so the dashboard intake agent connects to the right host.
+	if os.Getenv("LLM_BASE_URL") == "" {
+		provider := strings.ToLower(strings.TrimSpace(c.LLMProvider))
+		if url, ok := managedProviderBaseURLs[provider]; ok {
+			c.LLMBaseURL = url
+		}
 	}
 }
 

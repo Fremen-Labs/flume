@@ -350,9 +350,14 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 		kvPayload["ES_API_KEY"] = esKey
 	}
 
-	// Explicit bindings properly stripped natively
+	// Legacy single-provider path: seed the API key under its correct provider name.
+	// When CloudProviders is populated, start.go clears envCfg.APIKey so this block
+	// is skipped and all keys are seeded by the CloudProviders loop below.
 	if envCfg.APIKey != "" {
-		kvPayload["OPENAI_API_KEY"] = envCfg.APIKey
+		keyName := providerToEnvKeyName(envCfg.Provider)
+		if keyName != "" {
+			kvPayload[keyName] = envCfg.APIKey
+		}
 		kvPayload["LLM_API_KEY"] = envCfg.APIKey
 	}
 	if envCfg.GithubToken != "" {
@@ -376,11 +381,12 @@ func ConfigureSecretsEngine(ctx context.Context, vaultURL, rootToken, esURL stri
 			logger.WithContext(ctx).Debug("Multi-Frontier: seeding provider-specific API key",
 				"provider", cp.Provider, "key_name", providerKeyName)
 		}
-		// Also set as LLM_API_KEY if no global key was provided yet,
-		// preserving single-provider backwards compatibility.
-		if _, hasGlobal := kvPayload["LLM_API_KEY"]; !hasGlobal {
-			kvPayload["LLM_API_KEY"] = cp.APIKey
-		}
+	}
+	// Single-provider backwards compatibility: set the global LLM_API_KEY
+	// only when exactly one provider is configured, so the Security page
+	// doesn't show a confusing duplicate key alongside the named ones.
+	if len(envCfg.CloudProviders) == 1 && envCfg.CloudProviders[0].APIKey != "" {
+		kvPayload["LLM_API_KEY"] = envCfg.CloudProviders[0].APIKey
 	}
 
 	// Fetch existing configurations before injecting gracefully natively

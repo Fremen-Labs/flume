@@ -55,11 +55,14 @@ func parseMeshConfig(path string) (orchestrator.EnvConfig, error) {
 			APIKey:   cp.APIKey,
 		})
 		
-		// Map the first element to the legacy singular fields for OpenBao initialization
+		// Map the first element to the legacy singular fields for GenerateEnv
+		// (LLM_PROVIDER, LLM_MODEL env vars). Do NOT set envCfg.APIKey here —
+		// let the CloudProviders loop in vault.go seed each key under its
+		// correct provider-specific name (e.g. XAI_API_KEY, GEMINI_API_KEY).
 		if i == 0 {
 			envCfg.Provider = cp.Provider
 			envCfg.Model = cp.Model
-			envCfg.APIKey = cp.APIKey
+			envCfg.APIKey = "" // Cleared: CloudProviders loop handles all key seeding
 		}
 	}
 

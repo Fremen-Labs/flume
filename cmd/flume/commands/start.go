@@ -176,13 +176,29 @@ var StartCmd = &cobra.Command{
 					envCfg.APIKey = ""
 				}
 
-				// Map wizard-collected nodes to EnvConfig.
+				// Map wizard-collected cloud providers to EnvConfig.
 				for _, cp := range promptCfg.CloudProviders {
 					envCfg.CloudProviders = append(envCfg.CloudProviders, orchestrator.CloudProviderEntry{
 						Provider: cp.Provider,
 						Model:    cp.Model,
 						APIKey:   cp.APIKey,
 					})
+				}
+
+				// When multi-frontier is configured, the legacy envCfg.Provider/APIKey
+				// fields retain the LAST wizard iteration's values. Override them with
+				// the first CloudProvider so that:
+				//   (a) GenerateEnv outputs the correct LLM_PROVIDER / LLM_MODEL env vars
+				//   (b) The legacy vault.go path (envCfg.APIKey) doesn't mislabel the key
+				// We clear APIKey entirely because the CloudProviders loop in vault.go
+				// now handles all provider-specific key seeding.
+				if len(envCfg.CloudProviders) > 0 {
+					first := envCfg.CloudProviders[0]
+					envCfg.Provider = first.Provider
+					envCfg.Model = first.Model
+					// Do NOT set envCfg.APIKey — let the CloudProviders loop in vault.go
+					// seed each key under its correct provider-specific name.
+					envCfg.APIKey = ""
 				}
 				
 				for _, n := range promptCfg.Nodes {

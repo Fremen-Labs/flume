@@ -280,8 +280,8 @@ func (s *Server) testPlannerConnection(ctx context.Context, cfg *config.Config) 
 	if apiKey == "" && cfg.OpenBaoAddr != "" && cfg.OpenBaoToken != "" {
 		baoClient := secrets.NewOpenBaoClient(cfg.OpenBaoAddr, cfg.OpenBaoToken, s.logger)
 		if baoData, err := baoClient.KVGet(ctx, "flume/keys"); err == nil && baoData != nil {
-			// Multi-Frontier: Try provider-specific key first (e.g. OPENAI_API_KEY)
-			providerKeyName := strings.ToUpper(provider) + "_API_KEY"
+			// Multi-Frontier: Try provider-specific key first (e.g. OPENAI_API_KEY, XAI_API_KEY)
+			providerKeyName := providerToVaultKeyName(provider)
 			if k, _ := baoData[providerKeyName].(string); k != "" {
 				apiKey = k
 			}
@@ -611,6 +611,23 @@ func hostFromBaseURL(baseURL string) string {
 		return u.Host
 	}
 	return baseURL
+}
+
+// providerToVaultKeyName maps a provider name to its standardized OpenBao key name.
+// Handles aliases like grok → XAI_API_KEY (since Grok is xAI's product).
+func providerToVaultKeyName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "xai", "grok":
+		return "XAI_API_KEY"
+	default:
+		return strings.ToUpper(strings.TrimSpace(provider)) + "_API_KEY"
+	}
 }
 
 // strFromMap safely extracts a string value from a telemetry map (or any map[string]interface{}).
