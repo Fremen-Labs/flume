@@ -30,6 +30,11 @@ dist/
 /tests/*.html
 
 # LogLoom build artifacts
+*logloom*
 logloom-graph.json
 *-enrichment.ndjson
 *-enrichment-mapping.json
+flume-analysis-logloom-graph.json
+flume-frontend-logloom-bulk-mapping.json
+.logloom-cache.json
+flume-robust-ast-graph.json

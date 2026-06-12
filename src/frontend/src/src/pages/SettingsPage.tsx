@@ -75,9 +75,9 @@ async function parseJsonBody<T>(res: Response): Promise<T> {
     if (!res.ok) {
       if (res.status === 404) {
         throw new Error(
-          'HTTP 404 with an empty response usually means the browser did not reach this Flume dashboard Python server ' +
-            '(wrong URL/port, or a proxy in front returned 404), or the dashboard is still running an old server.py. ' +
-            'Use the same host/port as the UI (e.g. :8765), restart the dashboard from your current checkout, and hard-refresh.',
+          'HTTP 404 with an empty response usually means the browser did not reach this Flume dashboard server. ' +
+          '(wrong URL/port, or a proxy in front returned 404), or the dashboard is still running an old server. ' +
+          'Use the same host/port as the UI (e.g. :8765), restart the dashboard from your current checkout, and hard-refresh.',
         );
       }
       throw new Error(`Empty response body (HTTP ${res.status}).`);
@@ -478,7 +478,7 @@ export default function SettingsPage() {
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
           <p className="text-sm text-muted-foreground">Configure LLM providers, models, and authentication.</p>
         </div>
-        
+
         <div className="w-48">
           <Select value={userPerspective} onValueChange={onPerspectiveChange}>
             <SelectTrigger className="h-8">
@@ -1054,7 +1054,7 @@ export default function SettingsPage() {
                 <div className="flex flex-wrap items-center gap-3 pt-4">
                   {repoSaveError && <span className="text-sm text-destructive">{repoSaveError}</span>}
                   {repoSaveSuccess && (
-                     <span className="text-sm text-green-600">Saved. Applied dynamically to all agents.</span>
+                    <span className="text-sm text-green-600">Saved. Applied dynamically to all agents.</span>
                   )}
                 </div>
               </div>
@@ -1081,7 +1081,7 @@ export default function SettingsPage() {
                 {sysError && (
                   <p className="text-sm text-destructive">{String(sysError)}</p>
                 )}
-                
+
                 <div className="space-y-4">
                   <div>
                     <Label>Elasticsearch Configuration</Label>
@@ -1155,7 +1155,7 @@ export default function SettingsPage() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-border/40">
-                  <Button 
+                  <Button
                     onClick={() => {
                       sysMutation.mutate({
                         es_url: effectiveSys.es_url ?? 'http://127.0.0.1:9200',
@@ -1164,7 +1164,7 @@ export default function SettingsPage() {
                         vault_token: sysForm.vault_token ?? (effectiveSys.vault_token ?? ''),
                         prometheus_enabled: sysForm.prometheus_enabled ?? effectiveSys.prometheus_enabled ?? true,
                       });
-                    }} 
+                    }}
                     disabled={sysMutation.isPending}
                   >
                     {sysMutation.isPending ? (
