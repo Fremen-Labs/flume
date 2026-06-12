@@ -1,6 +1,6 @@
 # Provider Architecture Interface
 
-The Flume Go Engine operates primarily as a hardened routing layer, protecting downstream Python execution pipelines from catastrophic API drift across divergent LLM Providers natively. To ensure mathematically exact function execution across isolated inference networks, Flume overrides and coerces multi-turn execution bounds transparently to your active agent.
+The Flume Go Engine operates primarily as a hardened routing layer, protecting downstream Go agent execution pipelines from catastrophic API drift across divergent LLM Providers natively. To ensure mathematically exact function execution across isolated inference networks, Flume overrides and coerces multi-turn execution bounds transparently to your active agent.
 
 ---
 
@@ -19,7 +19,7 @@ Flume intercepts the raw `ValidateChatRequest()` struct exactly before provider 
 
 ## 2. Anthropic Normalization Subsystems
 
-Claude models explicitly reject standard `OpenAI-compatible` metadata representations securely. Flume forces comprehensive array translation logic smoothly preserving the abstraction layers for downstream Python execution loops precisely.
+Claude models explicitly reject standard `OpenAI-compatible` metadata representations securely. Flume forces comprehensive array translation logic smoothly preserving the abstraction layers for downstream Go agent execution loops precisely.
 
 ### Translation Execution
 When `normalizeMessagesForAnthropic()` initializes via the network payload boundary:

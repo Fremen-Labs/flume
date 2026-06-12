@@ -19,7 +19,7 @@ The Flume orchestrator is governed by the compiled `flume` binary (`cmd/flume`).
 *   **Concurrency:** Heavy internal CLI execution MUST route through `sync.WaitGroup` goroutines. Sequential lag is strictly outlawed.
 
 ### 3. The Backend Matrices
-The Flume system runs via FastAPI Python architecture cleanly executing via Uvicorn. Ensure absolute execution structures properly parsing Pydantic abstractions directly inside `src/`. Do not pollute runtime arrays with trailing standard outputs.
+The Flume system runs via a unified Go architecture cleanly executing via native HTTP handlers. Ensure absolute execution structures properly parsing JSON abstractions directly inside `internal/`. Do not pollute runtime arrays with trailing standard outputs.
 
 ### 4. Submitting the PR (The Upload)
 1. Ensure your telemetry array compiles strictly (`go build -o flume cmd/flume/main.go`).

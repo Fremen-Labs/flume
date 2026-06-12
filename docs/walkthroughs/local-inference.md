@@ -6,7 +6,7 @@ We highly recommend [Exo](https://github.com/exo-explore/exo) for Apple Unified 
 
 ## 1. Configure Open-Weight Inference (The Bridge Caveat)
 
-Because the Flume ecosystem strictly containerizes its Python AI Workers inside a Docker network isolated from your host, the workers **cannot** simply ping `http://localhost:11434`. Inside the worker container, `localhost` means *the container itself*. 
+Because the Flume ecosystem strictly containerizes its Go AI Workers inside a Docker network isolated from your host, the workers **cannot** simply ping `http://localhost:11434`. Inside the worker container, `localhost` means *the container itself*. 
 
 To route out to your Mac/Linux bare-metal machine where Exo or Ollama is running, you must configure the LLM endpoints using the `host.docker.internal` DNS bridge.
 

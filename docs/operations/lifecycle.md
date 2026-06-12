@@ -4,7 +4,7 @@ The Flume V3 execution engine strictly orchestrates a native Go CLI bridging to 
 
 ## 1. Install & Cold Boot (Day 0)
 
-The Flume installation deliberately isolates execution logic away from your host OS by delegating python backends to containerized workers. 
+The Flume installation deliberately isolates execution logic away from your host OS by delegating backends to containerized Go workers. 
 
 **Prerequisites:**
 - **Go 1.21+** (for orchestrator compilation)
@@ -32,7 +32,7 @@ flume start --config ./flume-mesh.yml
 
 ## 2. Update & Synchronization (Day 2)
 
-Because the Python AI Workers and the Dashboard execute statelessly inside the Docker bridge, updating the ecosystem is completely non-destructive to your tasks or memory blocks.
+Because the Go AI Workers and the Dashboard execute statelessly inside the Docker bridge, updating the ecosystem is completely non-destructive to your tasks or memory blocks.
 
 ### The Sync Process
 1. Pull the latest commits from the repository: `git pull origin main`

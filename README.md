@@ -5,9 +5,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
 [![Elasticsearch: 8.x](https://img.shields.io/badge/Elasticsearch-8.x-blue.svg)](https://www.elastic.co/)
-[![Backend: Python 3.9+](https://img.shields.io/badge/Backend-Python_3.9+-yellow.svg)](https://www.python.org/)
+[![Backend: Go 1.24](https://img.shields.io/badge/Backend-Go_1.24-green.svg)](https://golang.org/)
 [![GUI: React & Vite](https://img.shields.io/badge/GUI-React_18-cyan.svg)](https://reactjs.org/)
-[![CLI: Go 1.21+](https://img.shields.io/badge/CLI-Go_1.21+-green.svg)](https://golang.org/)
+[![CLI: Go 1.24](https://img.shields.io/badge/CLI-Go_1.24-green.svg)](https://golang.org/)
 [![Docker: Required](https://img.shields.io/badge/Docker-Required-blue.svg)](https://www.docker.com/)
 
 *An AI-powered agent workflow platform for planning, implementing, testing, and reviewing codebase changes natively using local hardware clusters.*
@@ -16,7 +16,7 @@
 
 ---
 
-The Flume V3 ecosystem is managed entirely by a singular, high-performance Go CLI (`flume`). This executable provides a pristine, zero-dependency interface to your terminal while cleanly orchestrating a containerized matrix (Elasticsearch, OpenBao, Python Workers) protecting your absolute host OS entirely.
+The Flume V3 ecosystem is managed entirely by a singular, high-performance Go CLI (`flume`). This executable provides a pristine, zero-dependency interface to your terminal while cleanly orchestrating a containerized matrix (Elasticsearch, OpenBao, Go Workers) protecting your absolute host OS entirely.
 
 ### ✨ V3.2 Feature Highlights
 - **10+ Native CLI Mappings:** Deeply configure, execute RAG tasks, monitor statuses, and pull container logs directly through the `flume` terminal executable securely.

@@ -17,14 +17,14 @@ The Go Native Gateway natively manages an atomic mutex-driven Prometheus v0.0.4 
 
 ## 2. Telemetry Proxy Translation 
 
-To supply standard Javascript interfaces with text-exposition strings, Flume runs a Python daemon translation proxy at `GET /api/telemetry` directly on your Dashboard UI backends. 
+To supply standard Javascript interfaces with text-exposition strings, Flume runs a Go-based translation parser at `GET /api/telemetry` directly on the Dashboard backend. 
 
-This proxy shreds the raw text Prometheus array surgically and reconstructs a high-performance JSON structural map mapped seamlessly without any overhead.
+This parser parses the raw text Prometheus array surgically and reconstructs a high-performance JSON structural map mapped seamlessly without any overhead.
 
 ### Fault Tolerance & React UI Unreachable Mitigation
 In complex topologies, mapping node errors can easily deadlock standard frontend loops if handled poorly. When the underlying Prometheus gateway goes completely offline (e.g., executing the `flume doctor` or a dynamic compilation reset), the `GET /api/telemetry` natively intercepts these TCP thresholds gracefully. 
 
-Instead of spitting partial data arrays directly into React (which triggers catastrophic nested iteration null-render loops natively), the Python backend explicitly emits an `HTTP 503 Service Unavailable`. The React system catches this immediately and organically falls back to a clean **Gateway Unreachable** display pane safely, circumventing cyclic crashes reliably.
+Instead of spitting partial data arrays directly into React (which triggers catastrophic nested iteration null-render loops natively), the Go dashboard backend explicitly emits an `HTTP 503 Service Unavailable`. The React system catches this immediately and organically falls back to a clean **Gateway Unreachable** display pane safely, circumventing cyclic crashes reliably.
 
 ## 3. The Recharts Frontend Interface 
 
