@@ -402,6 +402,186 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string
 	return tool.Execute(ctx, args, repoPath)
 }
 
+// GetToolDefinitions returns OpenAI-compatible function definitions for all
+// registered tools. These are passed to the LLM via ChatWithTools so the model
+// can make structured tool calls instead of hallucinating tool names in text.
+// This is the bridge that was missing — without it, the LLM never received
+// tool schemas and could only emit text.
+func (r *ToolRegistry) GetToolDefinitions() []ToolDefinition {
+	defs := []ToolDefinition{}
+
+	// Static definitions for each tool type. We define them inline because the
+	// executors are simple and don't carry their own schema metadata.
+	schemas := map[string]ToolDefinition{
+		"list_directory": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "list_directory",
+				Description: "List files and subdirectories in a directory relative to the repository root. Use this to explore the project structure. Do NOT use ls or dir via run_shell.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "Relative path from repo root. Use '.' or '' for root.",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		"read_file": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "read_file",
+				Description: "Read the contents of a file at a path relative to the repository root. Always use this before modifying a file (Zero-Blind-Write Rule).",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "Relative file path from repo root.",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		"write_file": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "write_file",
+				Description: "Write content to a file at a path relative to the repository root. Parent directories are created automatically. You MUST read_file first (Zero-Blind-Write Rule) and you MUST have called elastro_query_ast or logloom_ast_query successfully before any writes.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "Relative file path from repo root.",
+						},
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "Full file content to write.",
+						},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+		},
+		"run_shell": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "run_shell",
+				Description: "Run a shell command in the repository directory. Use for grep, find, go build, go test, golangci-lint, and similar dev tools. Do NOT use for ls (use list_directory) or cat (use read_file).",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command": map[string]interface{}{
+							"type":        "string",
+							"description": "Shell command to execute (via sh -c).",
+						},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
+		"elastro_query_ast": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "elastro_query_ast",
+				Description: "Query the Elastro Graph RAG index (flume-elastro-graph) for semantic and structural codebase information. Use this for understanding code architecture, finding functions, classes, imports, and relationships. MANDATORY: call this or logloom_ast_query before any code edits.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "Natural language or keyword query about the codebase structure.",
+						},
+						"target_path": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional: scope results to a specific directory or file path.",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		"logloom_ast_query": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "logloom_ast_query",
+				Description: "Query the Logloom AST/enrichment indices for precise call-graph, log sites, function signatures, and model definitions. Use for structural questions like 'find all callers of X' or 'definition of Y'. MANDATORY: call this or elastro_query_ast before any code edits.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "Structural query about functions, call graphs, or code elements.",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		"implementation_complete": {
+			Type: "function",
+			Function: ToolFunctionDef{
+				Name:        "implementation_complete",
+				Description: "Signal that the task implementation is complete. Call this when you have finished all required work, including code changes, testing, and verification.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"status": map[string]interface{}{
+							"type":        "string",
+							"description": "Completion status: 'complete' or 'partial'.",
+							"enum":        []string{"complete", "partial"},
+						},
+						"summary": map[string]interface{}{
+							"type":        "string",
+							"description": "Summary of changes made and work completed.",
+						},
+						"modified_files": map[string]interface{}{
+							"type":        "array",
+							"description": "List of files that were modified.",
+							"items":       map[string]interface{}{"type": "string"},
+						},
+						"lint_passed": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Whether lint checks passed after changes.",
+						},
+					},
+					"required": []string{"summary"},
+				},
+			},
+		},
+	}
+
+	// Only include definitions for tools that are actually registered
+	for name := range r.tools {
+		if def, ok := schemas[name]; ok {
+			defs = append(defs, def)
+		}
+	}
+
+	// Always include implementation_complete (it's a meta-tool, not in the executor registry)
+	defs = append(defs, schemas["implementation_complete"])
+
+	return defs
+}
+
+// ToolDefinition is an OpenAI-compatible tool definition for LLM function calling.
+type ToolDefinition struct {
+	Type     string          `json:"type"`
+	Function ToolFunctionDef `json:"function"`
+}
+
+// ToolFunctionDef describes a callable function for the LLM.
+type ToolFunctionDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Parameters  interface{} `json:"parameters,omitempty"`
+}
+
 // ToolResultModifiedRepo checks if a tool result indicates repo changes.
 // Derived from Python: tools/executors.tool_result_modified_repo() (L613-623)
 func ToolResultModifiedRepo(toolName, result string) bool {

@@ -127,6 +127,18 @@ func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, t
 				slog.String("task_type", taskType),
 			)
 
+			// Phase 1: surface per-turn routing decision in task reasoning/thoughts for hybrid UX
+			if req.TaskID != "" {
+				flumelogger.LogAgentReasoning(ctx, req.TaskID, req.AgentRole, "hybrid routing decision",
+					map[string]any{
+						"decision":   "frontier",
+						"model":      model.Model,
+						"provider":   model.Provider,
+						"task_type":  taskType,
+						"reason":     "complexity or probability gate",
+					})
+			}
+
 			Metrics.RecordRoutingDecision("hybrid_frontier", taskType)
 
 			cloned := cloneChatRequest(req)
@@ -155,6 +167,16 @@ func (m *MultiNodeRouter) executeHybrid(ctx context.Context, req *ChatRequest, t
 		slog.String("task_type", taskType),
 	)
 	Metrics.RecordRoutingDecision("hybrid_local", taskType)
+
+	// Phase 1: surface per-turn routing decision in task reasoning/thoughts for hybrid UX
+	if req.TaskID != "" {
+		flumelogger.LogAgentReasoning(ctx, req.TaskID, req.AgentRole, "hybrid routing decision",
+			map[string]any{
+				"decision":  "local_mesh",
+				"task_type": taskType,
+				"reason":    "probability gate or complexity low",
+			})
+	}
 
 	resp, err := m.executeLocalOnly(ctx, req, taskType, withTools, log)
 	if err != nil {

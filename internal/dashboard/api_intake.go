@@ -85,6 +85,7 @@ COMPLEXITY-PROPORTIONAL PLANNING (critical):
 - Combine all verification steps (lint, test, visual check) into ONE task unless
   the project has distinct test suites requiring separate execution.
 - A single-file edit should NEVER produce more than 3 tasks total.
+- For documentation, README, help text, or "update the CLI commands in docs" style requests (pure-doc): produce 1-2 tasks MAX (one for the doc edit + optional verification). Use flat structure, no epics/features unless cross-cutting. Mark as low complexity and non-code.
 
 RAG CONTEXT (Elastro/Logloom contract #3):
 - Before/around this planning call, the system performs best-effort direct queries (using the same elastro_query_ast / logloom_ast_query executor patterns as ToolRegistry) against flume-elastro-graph and flume-logloom-ast.
@@ -162,6 +163,12 @@ type SessionDoc struct {
 	UpdatedAt       string           `json:"updated_at"`
 	CommittedAt     string           `json:"committed_at,omitempty"`
 	CommittedDocs   []string         `json:"committedDocs,omitempty"`
+
+	// RagContext persists the Elastro + Logloom RAG context fetched during the initial
+	// planning call. This ensures follow-up messages in the same session retain structural
+	// context (AST graph data) without re-fetching, which was the root cause of the agent
+	// claiming "no AST access" on subsequent turns.
+	RagContext string `json:"ragContext,omitempty"`
 
 	// Phase 2 budget enforcement (Enforcement Mechanics): per-plan hard limits + live counters.
 	// Populated at session creation with sane defaults; atomically updated via ES scripts on task creation,
@@ -871,6 +878,16 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 	}
 
 	status.Stage = "ready"
+
+	// Persist the initial user message + agent response together.
+	// Previously only the agent message was saved; the user prompt was built
+	// in a local sessDoc and never written to ES, which caused follow-up
+	// buildLLMMessages to lose the original user context.
+	userMsgPersist := SessionMessage{
+		From:      "user",
+		Text:      prompt,
+		Timestamp: now,
+	}
 	agentMsg := SessionMessage{
 		From:      "agent",
 		Text:      assistantMsg,
@@ -878,10 +895,17 @@ func (s *Server) runInitialPlanning(ctx context.Context, sessionID, repo, prompt
 		Timestamp: nowISO(),
 	}
 
-	_ = s.updateSessionStatus(ctx, sessionID, status, &agentMsg, planSrc)
+	_ = s.updateSessionStatusWithUserMsg(ctx, sessionID, status, &userMsgPersist, &agentMsg, planSrc, rag)
 }
 
 func (s *Server) updateSessionStatus(ctx context.Context, sessionID string, status PlanningStatus, agentMsg *SessionMessage, planSrc string) error {
+	return s.updateSessionStatusWithUserMsg(ctx, sessionID, status, nil, agentMsg, planSrc, "")
+}
+
+// updateSessionStatusWithUserMsg persists both user and agent messages, plus RAG context.
+// The original updateSessionStatus only saved the agent message, causing the user's initial
+// prompt and RAG structural context to be lost for follow-up LLM calls.
+func (s *Server) updateSessionStatusWithUserMsg(ctx context.Context, sessionID string, status PlanningStatus, userMsg, agentMsg *SessionMessage, planSrc, ragContext string) error {
 	sessBytes, err := s.es.GetDoc(ctx, planSessionsIndex, sessionID)
 	if err != nil || sessBytes == nil {
 		return fmt.Errorf("session not found")
@@ -895,10 +919,18 @@ func (s *Server) updateSessionStatus(ctx context.Context, sessionID string, stat
 	session.PlanningStatus = status
 	session.UpdatedAt = nowISO()
 
+	if userMsg != nil {
+		session.Messages = append(session.Messages, *userMsg)
+	}
 	if agentMsg != nil {
 		session.Messages = append(session.Messages, *agentMsg)
 		session.DraftPlan = agentMsg.Plan
 		session.DraftPlanSource = planSrc
+	}
+
+	// Persist RAG context from the initial call so follow-ups retain structural awareness.
+	if ragContext != "" && session.RagContext == "" {
+		session.RagContext = ragContext
 	}
 
 	return s.es.IndexDoc(ctx, planSessionsIndex, sessionID, session)
@@ -1023,8 +1055,17 @@ func (s *Server) handleIntakeMessage(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Call LLM
 	chatMsgs := buildLLMMessages(session)
-	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier)
-	if rag := s.fetchPlannerRAGContext(ctx, session.Repo, req.Text); rag != "" {
+	// Contract #3: pre-fetch RAG using executors and inject (before LLM, for local+frontier).
+	// Try fresh RAG for the follow-up question; if empty, fall back to the persisted RAG
+	// context from the initial call so the LLM retains structural awareness across turns.
+	rag := s.fetchPlannerRAGContext(ctx, session.Repo, req.Text)
+	if rag == "" && session.RagContext != "" {
+		rag = session.RagContext
+		s.logger.Info("follow-up: reusing persisted RAG context from initial call",
+			slog.String("session_id", sessionID),
+			slog.Int("rag_chars", len(rag)))
+	}
+	if rag != "" {
 		chatMsgs = s.injectRAGIntoMessages(chatMsgs, rag)
 	}
 	startReq := time.Now()

@@ -780,10 +780,12 @@ function TelemetryDashboard({ summary, elapsedMs }: { summary: any; elapsedMs: n
                 {summary.modelsList[0]}
               </span>
             ) : (
-              <span className="text-xs text-zinc-500">Local Only</span>
+              <span className="text-xs text-zinc-500">Awaiting inference…</span>
             )}
             <span className="text-[9px] text-zinc-500 font-mono">
-              {summary.nodesCount > 0 ? `${summary.nodesCount} nodes active` : "direct provider"}
+              {summary.providersCount > 0
+                ? summary.providersList.join(', ')
+                : summary.nodesCount > 0 ? `${summary.nodesCount} nodes active` : "direct provider"}
             </span>
           </div>
         </div>
@@ -998,6 +1000,7 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
     let errors = 0;
     const nodesUsed = new Set<string>();
     const modelsUsed = new Set<string>();
+    const providersUsed = new Set<string>();
 
     parsedThoughts.forEach((t) => {
       const meta = t.raw.meta || {};
@@ -1009,6 +1012,7 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
       }
 
       if (meta.model) modelsUsed.add(meta.model as string);
+      if (meta.provider) providersUsed.add(meta.provider as string);
       if (meta.node_id) nodesUsed.add(meta.node_id as string);
       else if (meta.node_host) nodesUsed.add(meta.node_host as string);
 
@@ -1044,6 +1048,8 @@ export function AgentThoughtDrawer({ taskId, taskTitle, taskStatus, isOpen, onOp
       modelsCount: modelsUsed.size,
       modelsList: Array.from(modelsUsed),
       nodesList: Array.from(nodesUsed),
+      providersCount: providersUsed.size,
+      providersList: Array.from(providersUsed),
     };
   }, [parsedThoughts]);
 

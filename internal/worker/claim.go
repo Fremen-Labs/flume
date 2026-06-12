@@ -165,7 +165,7 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 		if rawHit.PrimaryTerm != nil {
 			prim = *rawHit.PrimaryTerm
 		}
-		claimed := c.atomicClaim(ctx, task.ID, worker, seq, prim)
+		claimed := c.atomicClaim(ctx, task.ID, worker, task.Status, seq, prim)
 		if claimed {
 			c.logger.Info("task claimed",
 				slog.String("worker", worker.Name),
@@ -305,7 +305,7 @@ func (c *Claimer) loadRepoWIPLimits(ctx context.Context, repoID string) WIPLimit
 }
 
 // atomicClaim performs the ES _update to atomically claim a task.
-func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.Worker, seqNo, primaryTerm int64) bool {
+func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.Worker, prevStatus ftypes.TaskStatus, seqNo, primaryTerm int64) bool {
 	now := time.Now().UTC().Format(time.RFC3339)
 	update := map[string]interface{}{
 		"status":         "running",
@@ -320,8 +320,8 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 
 	// PR 2 + Phase 0: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
 	// In strict mode (default), abort the claim on violation instead of proceeding.
-	if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(""), "running", c.logger.Warn); enforceErr != nil {
-		flumelogger.LogTaskStateViolation(ctx, taskID, "", "running", enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode)
+	if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(prevStatus, "running", c.logger.Warn); enforceErr != nil {
+		flumelogger.LogTaskStateViolation(ctx, taskID, string(prevStatus), "running", enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode)
 		if !ftypes.DefaultTaskStateMachine.ShadowMode {
 			c.logger.Error("claim aborted due to TaskStateMachine violation (strict mode)",
 				slog.String("task_id", taskID), slog.String("error", enforceErr.Error()))

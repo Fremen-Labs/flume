@@ -546,6 +546,34 @@ the planner timeout before users hit "Plan New Work".`,
 
 		wg.Wait() // Block execution safely until all endpoints respond or trace out
 
+		// Phase 1 unification: prefer dashboard API view for Flume stack (ES, vault, tasks, workers)
+		// over pure native/direct probes. Native only for host docker daemon and direct LLM reachability.
+		// This fixes the "ES OFFLINE / Dispatcher offline" drift when the compose stack is healthy.
+		// Use a fresh client here (scope safe).
+		dashClient := ui.NewFlumeClient()
+		dashboardURL = "http://localhost:8765"
+		if report.ApiOnline || true { // always attempt for unification
+			if state, err := dashClient.Get(dashboardURL + "/api/system-state"); err == nil {
+				if es, ok := state["elasticsearch"].(map[string]interface{}); ok {
+					if h, ok := es["healthy"].(bool); ok && h {
+						report.ElasticOnline = true
+						report.ElasticStatus = "healthy (via dashboard API - unified stack view)"
+					}
+				}
+			}
+			if v, err := dashClient.Get(dashboardURL + "/api/vault/status"); err == nil {
+				if s, ok := v["sealed"].(bool); ok {
+					report.VaultSealed = s
+					report.VaultOnline = true
+				}
+			}
+			if snap, err := dashClient.Get(dashboardURL + "/api/snapshot"); err == nil {
+				if cw, ok := snap["completedWork"].(float64); ok {
+					report.CompletedWork = int(cw)
+				}
+			}
+		}
+
 		// Phase 0: Logloom graph baseline (when --logloom flag is passed).
 		// This is the start of the living CI gate. It runs logloom graph stats + targeted
 		// finds on the worker/dashboard packages and prints coverage + "guard" term status.

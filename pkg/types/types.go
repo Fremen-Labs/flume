@@ -41,7 +41,7 @@ const (
 // Note: The "inbox" state has been collapsed into "planned". New work enters the system
 // as "planned" (or directly "ready" for first tasks in a chain).
 var ValidTransitions = map[TaskStatus][]TaskStatus{
-	TaskStatusPlanned:         {TaskStatusReady, TaskStatusBlocked, TaskStatusArchived},
+	TaskStatusPlanned:         {TaskStatusReady, TaskStatusRunning, TaskStatusReview, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusReady:           {TaskStatusRunning, TaskStatusBlocked, TaskStatusArchived},
 	TaskStatusRunning:         {TaskStatusReview, TaskStatusReviewConsensus, TaskStatusDone, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},
 	TaskStatusReview:          {TaskStatusReviewConsensus, TaskStatusDone, TaskStatusRunning, TaskStatusBlocked, TaskStatusReady, TaskStatusArchived},

@@ -345,8 +345,18 @@ func canPromoteSiblingsTestHook(pt plannedTask, statusCache map[string]string) (
 			continue
 		}
 		dstatus := statusCache[depID]
-		if dstatus == "" || (dstatus != string(ftypes.TaskStatusDone) && dstatus != string(ftypes.TaskStatusArchived)) {
+		// A dependency is "met" when the dependent task has progressed beyond implementation:
+		// review, review-consensus, done, or archived all indicate the task's work is complete.
+		// Previously only done/archived were accepted, which caused tasks to stay stuck in
+		// planned when their dependency was in review (waiting for a reviewer to mark it done).
+		switch dstatus {
+		case string(ftypes.TaskStatusReview), string(ftypes.TaskStatusReviewConsensus),
+			string(ftypes.TaskStatusDone), string(ftypes.TaskStatusArchived):
+			// dependency met
+		default:
 			dependsOnMet = false
+		}
+		if !dependsOnMet {
 			break
 		}
 	}
@@ -523,9 +533,13 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 					slog.String("parent_id", task.ParentID),
 					slog.String("parent_status", pstatus),
 					slog.String("repo", repoFilter))
+				flumelogger.LogAgentReasoning(ctx, task.ID, "system", "promote skip: parent inactive",
+					map[string]any{"plan_session_id": task.PlanSessionID, "parent_id": task.ParentID, "parent_status": pstatus})
 			} else if skipReason == "dep_unmet" {
 				// (log would require re-walking; debug only on first fail in original, keep simple)
 				s.logger.Debug("promote skip (dep unmet)", slog.String("task_id", task.ID), slog.String("reason", skipReason))
+				flumelogger.LogAgentReasoning(ctx, task.ID, "system", "promote skip: unmet dependencies",
+					map[string]any{"plan_session_id": task.PlanSessionID, "depends_on": task.DependsOn})
 			}
 			continue
 		}

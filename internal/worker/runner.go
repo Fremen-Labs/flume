@@ -272,7 +272,7 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 				return nil // prevent bad state write
 			}
 		} else {
-			r.updateTaskStatus(ctx, taskID, result.NextStatus)
+			r.updateTaskStatus(ctx, taskID, task.Status, result.NextStatus)
 		}
 	}
 
@@ -290,18 +290,15 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		fmt.Sprintf("Starting implementation of task: %s", task.Title),
 		map[string]any{"phase": "start", "worker": worker.Name})
 
-	// Check if task requires code (Phase 0: non-code/doc tasks go to review for human/AI confirmation instead of direct done)
-	if !TaskRequiresCode(task) {
-		r.logger.Info("implementer: non-code task, routing to review",
-			slog.String("task_id", task.ID))
-		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Task does not require code changes (documentation-only or config). Routing to review for confirmation (no code diff evidence).",
-			map[string]any{"phase": "complete", "reason": "non_code_task", "no_code_diff": true})
-		return ftypes.AgentResult{
-			Success:    true,
-			NextStatus: ftypes.TaskStatusReview,
-		}, nil
-	}
+	// Classify task type for logging (no longer gates the agent loop — all tasks
+	// go through it so the LLM can use tools, query AST data, and decide whether
+	// code changes are needed). The old TaskRequiresCode bypass silently skipped
+	// the entire loop for tasks without keywords like "implement" or "fix", which
+	// prevented RAG access, tool use, git branching, and commits.
+	isCodeTask := TaskRequiresCode(task)
+	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+		fmt.Sprintf("Task classification: code_task=%v. Entering full agent loop.", isCodeTask),
+		map[string]any{"phase": "classification", "code_task": isCodeTask})
 
 	// 1. Ensure task branch exists
 	repoPath, branch, err := r.EnsureTaskBranch(ctx, task)
@@ -336,10 +333,12 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		slog.String("repo_path", repoPath))
 
 	flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-		"Starting real multi-turn LLM + tool agent loop (non-skeleton)",
+		"Starting multi-turn LLM + tool agent loop with structured tool calling",
 		map[string]any{
 			"phase":     "agent_loop_real",
 			"objective": task.Description,
+			"model":     worker.Model,
+			"provider":  worker.Provider,
 		})
 
 	systemPrompt := readSystemPrompt("implementer")
@@ -351,6 +350,27 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 			task.Title, task.Description, repoPath, branch)},
 	}
 
+	// Build tool definitions from the ToolRegistry so the LLM knows what tools
+	// are available and can make structured function calls. This was the critical
+	// missing piece — without these definitions, the LLM had no tool schemas and
+	// could only emit text, causing hallucination loops.
+	toolDefs := r.tools.GetToolDefinitions()
+	llmTools := make([]llm.Tool, len(toolDefs))
+	for i, td := range toolDefs {
+		llmTools[i] = llm.Tool{
+			Type: td.Type,
+			Function: llm.ToolFunction{
+				Name:        td.Function.Name,
+				Description: td.Function.Description,
+				Parameters:  td.Function.Parameters,
+			},
+		}
+	}
+
+	r.logger.Info("implementer: tool definitions wired for LLM",
+		slog.String("task_id", task.ID),
+		slog.Int("tool_count", len(llmTools)))
+
 	const maxTurns = 12
 	turns := 0
 	// MANDATORY state for Elastro/Logloom contract #4 (point 4):
@@ -359,12 +379,18 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 	// memory tool needed for the enforcement). Writes/edits are rejected until true.
 	astVerified := false
 
+	// Repetition detector: track the last 2 response texts. If the model emits
+	// the same content twice consecutively, break the loop to prevent the
+	// "Let me explore the repository..." infinite loop pattern.
+	var lastResponseText string
+	consecutiveDuplicates := 0
+
 	for turns < maxTurns {
 		turns++
 
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			fmt.Sprintf("Implementer LLM turn %d/%d (streaming for visibility)", turns, maxTurns),
-			map[string]any{"phase": "llm_turn", "turn": turns})
+			fmt.Sprintf("Implementer LLM turn %d/%d (ChatWithTools — structured tool calling)", turns, maxTurns),
+			map[string]any{"phase": "llm_turn", "turn": turns, "model": worker.Model, "provider": worker.Provider})
 
 		// Phase 2: acquire backpressure WIP before LLM (per plan/hierarchy; prevents herd on local LLM).
 		level := task.HierarchyDepth
@@ -380,55 +406,74 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 			break
 		}
 
-		streamReq := llm.ChatRequest{
-			Messages:       messages,
-			Model:          worker.Model,
-			Provider:       worker.Provider,
-			AgentRole:      "implementer",
-			TaskID:         task.ID,
-			WorkerName:     worker.Name,
-			TimeoutSeconds: 600, // generous per turn; overall bounded by maxTurns
+		// Use ChatWithTools instead of ChatStream — this sends tool definitions
+		// to the LLM so it can make structured function calls. The old ChatStream
+		// path had no tools field, causing the model to hallucinate tool names in
+		// text instead of making proper API-level tool calls.
+		toolReq := llm.ChatToolsRequest{
+			Messages:        messages,
+			Tools:           llmTools,
+			Model:           worker.Model,
+			Provider:        worker.Provider,
+			AgentRole:       "implementer",
+			TaskID:          task.ID,
+			PlanSessionID:   task.PlanSessionID,
+			WorkerName:      worker.Name,
 		}
 
-		streamCh, err := r.llm.ChatStream(ctx, streamReq)
+		resp, err := r.llm.ChatWithTools(ctx, toolReq)
+		r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level)
+
 		if err != nil {
-			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "LLM call failed in agent loop", map[string]any{"error": err.Error()})
-			r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level)
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+				fmt.Sprintf("LLM ChatWithTools call failed: %s", err.Error()),
+				map[string]any{"error": err.Error(), "model": worker.Model, "provider": worker.Provider})
 			break
 		}
 
-		var llmResponse strings.Builder
-		var pendingToolCalls []llm.ToolCall
+		responseText := strings.TrimSpace(resp.Message.Content)
+		pendingToolCalls := resp.Message.ToolCalls
 
-		for ch := range streamCh {
-			if ch.Error != "" {
-				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", "Stream error in agent loop", map[string]any{"error": ch.Error})
-				break
-			}
-			if ch.DeltaContent != "" {
-				llmResponse.WriteString(ch.DeltaContent)
-				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", ch.DeltaContent, map[string]any{
-					"phase": "implementer_thought", "turn": turns, "from_stream": true,
-				})
-			}
-			if len(ch.ToolCalls) > 0 {
-				pendingToolCalls = append(pendingToolCalls, ch.ToolCalls...)
-				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-					fmt.Sprintf("Received %d tool call(s) from LLM", len(ch.ToolCalls)),
-					map[string]any{"phase": "tool_call_received", "turn": turns, "tools": ch.ToolCalls})
-			}
-			if ch.Done {
-				break
-			}
+		// Log the LLM response with model/provider metadata for the Node Mesh display
+		if responseText != "" {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", responseText, map[string]any{
+				"phase":    "implementer_thought",
+				"turn":     turns,
+				"model":    worker.Model,
+				"provider": worker.Provider,
+			})
 		}
 
-		r.llm.ReleaseCommsWIP(task.PlanSessionID, "implementer", level) // release after stream
+		if len(pendingToolCalls) > 0 {
+			flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+				fmt.Sprintf("Received %d tool call(s) from LLM (structured)", len(pendingToolCalls)),
+				map[string]any{"phase": "tool_call_received", "turn": turns, "model": worker.Model, "provider": worker.Provider})
+		}
 
-		responseText := strings.TrimSpace(llmResponse.String())
+		// === Repetition detector ===
+		// If the model emits the same text 2+ times with no tool calls, it's stuck
+		// in a hallucination loop (e.g., "Let me explore the repository structure:")
+		if len(pendingToolCalls) == 0 && responseText != "" {
+			if responseText == lastResponseText || (len(responseText) > 50 && len(lastResponseText) > 50 &&
+				responseText[:50] == lastResponseText[:50]) {
+				consecutiveDuplicates++
+			} else {
+				consecutiveDuplicates = 0
+			}
+			lastResponseText = responseText
 
-		// Hardened tool call consumption (Task 1): always construct assistant message
-		// containing the ToolCalls from ChatStreamChunk (proper protocol; previously
-		// only naive text content was appended even on tool paths).
+			if consecutiveDuplicates >= 2 {
+				flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
+					fmt.Sprintf("Repetition detected (%d consecutive duplicates). Breaking loop to prevent infinite hallucination.", consecutiveDuplicates+1),
+					map[string]any{"phase": "repetition_break", "turn": turns})
+				break
+			}
+		} else {
+			consecutiveDuplicates = 0
+			lastResponseText = ""
+		}
+
+		// Construct assistant message with tool calls for conversation history
 		assistantMsg := llm.Message{
 			Role:      "assistant",
 			Content:   responseText,
@@ -436,20 +481,18 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		}
 		messages = append(messages, assistantMsg)
 
-		// Handle explicit tool calls received in the stream chunks (preferred + hardened path)
+		// Handle structured tool calls (preferred path — now always available)
 		if len(pendingToolCalls) > 0 {
 			for _, tc := range pendingToolCalls {
 				name := tc.Function.Name
 				if name == "implementation_complete" {
 					flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
 						"LLM called implementation_complete (structured tool call)",
-						map[string]any{"phase": "completion_signal", "turn": turns, "summary": tc.Function.Arguments})
+						map[string]any{"phase": "completion_signal", "turn": turns, "summary": tc.Function.Arguments, "model": worker.Model, "provider": worker.Provider})
 					goto afterLoop
 				}
 
-				// === Explicit enforcement of MANDATORY AST VERIFICATION (Task 2, contract #4) ===
-				// Before any write/edit, require successful prior call to elastro or logloom query
-				// in this task's agent loop context. Tracked via simple astVerified state.
+				// === Explicit enforcement of MANDATORY AST VERIFICATION (contract #4) ===
 				if isWriteTool(name) && !astVerified {
 					errMsg := fmt.Sprintf("ERROR: MANDATORY AST VERIFICATION required before %s. "+
 						"Per the Elastro/Logloom contract #4 for work queue implementer workers: you MUST successfully call "+
@@ -480,8 +523,7 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 						map[string]any{"phase": "ast_verified", "tool": name, "turn": turns})
 				}
 
-				// Hardened: append proper tool-role result message (with ToolCallID) instead of
-				// naive text "Tool results:" user message. This improves multi-turn fidelity (Task 3).
+				// Append proper tool-role result message (with ToolCallID)
 				messages = append(messages, llm.Message{
 					Role:       "tool",
 					ToolCallID: tc.ID,
@@ -516,6 +558,14 @@ afterLoop:
 		fmt.Sprintf("Implementer agent loop finished after %d turns", turns),
 		map[string]any{"phase": "loop_end", "turns": turns})
 
+	// Phase 1 hardening: always summarize outcome and force handoff to reviewer
+	// (even on no changes / turn limit / errors). This ensures automatic reviewer handoff.
+	summary := fmt.Sprintf("Loop ended after %d/%d turns. Will hand off to reviewer for assessment.", turns, maxTurns)
+	if turns >= maxTurns {
+		summary = "Turn limit reached. Forcing handoff to reviewer for final assessment and possible continuation."
+		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer", summary, map[string]any{"phase": "turn_limit", "turns": turns})
+	}
+
 	// 3. Auto-commit and push changes (real changes if the loop produced any)
 	commitSHA, err := r.AutoCommitAndPush(ctx, repoPath, branch,
 		fmt.Sprintf("[Flume] %s", task.Title), task.ID)
@@ -528,27 +578,21 @@ afterLoop:
 			map[string]any{"phase": "commit", "error": err.Error()})
 	}
 
-	// 4. Create PR if branch has new commits
 	if commitSHA != "" {
 		r.logger.Info("implementer: committed and pushed",
 			slog.String("task_id", task.ID),
 			slog.String("sha", commitSHA))
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			fmt.Sprintf("Changes committed and pushed (SHA: %s). Transitioning to review.", commitSHA[:min(len(commitSHA), 8)]),
+			fmt.Sprintf("Changes committed and pushed (SHA: %s). %s", commitSHA[:min(len(commitSHA), 8)], summary),
 			map[string]any{"phase": "complete", "commit_sha": commitSHA})
 	} else {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing). Routing to review for confirmation (documentation-only or no-op change; provides 'no code diff' evidence to reviewer).",
-			map[string]any{"phase": "complete", "had_commits": false, "no_code_diff": true})
-
-		// Phase 0: no-changes / doc-only tasks now correctly go to review (explicit handoff) instead of invalid direct done from planned.
-		// This prevents the observed planned->done FSM violation + restart loop.
-		return ftypes.AgentResult{
-			Success:    true,
-			NextStatus: ftypes.TaskStatusReview,
-		}, nil
+			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing). "+summary+" (provides 'no code diff' evidence to reviewer).",
+			map[string]any{"phase": "complete", "had_commits": false, "no_code_diff": true, "turn_limit": turns >= maxTurns})
 	}
 
+	// Phase 1: always return Review for automatic handoff (even on no changes or turn limit).
+	// Reviewer can decide done, more work, or block.
 	return ftypes.AgentResult{
 		Success:    true,
 		NextStatus: ftypes.TaskStatusReview,
@@ -1697,7 +1741,7 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 	}
 }
 
-func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status ftypes.TaskStatus) {
+func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, prevStatus, status ftypes.TaskStatus) {
 	// All status changes after handlers must go through the central guarded path
 	// (flume-go SKILL + Cross-cutting Writer Rule). This provides OCC (when seq/prim
 	// available), state machine Enforce, and mandatory dual logging.
@@ -1711,17 +1755,22 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, status fty
 		"queue_state":   "available",
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
+
+	// When transitioning to review, update worker_role so the reviewer claim query
+	// (which filters on worker_role=reviewer) can find the task. Without this, the
+	// task stays with worker_role=implementer and no reviewer ever claims it.
+	if status == ftypes.TaskStatusReview || status == ftypes.TaskStatusReviewConsensus {
+		update["worker_role"] = "reviewer"
+	}
 	if status == ftypes.TaskStatusDone {
 		now := time.Now().UTC().Format(time.RFC3339)
 		update["completed_at"] = now
 	}
 
-	// Use the guarded wrapper. prevStatus unknown here (future improvement: pass it in).
-	// workerRole is left empty; the important thing is that we stop doing bare UpdateDoc
-	// on the lease columns from the runner.
+	// Use the guarded wrapper with the actual previous status for correct FSM validation.
 	_ = updateTaskLeaseState(ctx, r.es, r.logger, taskID, update,
 		0, 0, // no seq/prim in this legacy path
-		"", status, // prev unknown
+		prevStatus, status,
 		"", // role not known at this callsite yet
 		fmt.Sprintf("post-handler transition to %s", status))
 }

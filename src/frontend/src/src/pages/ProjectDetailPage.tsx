@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, ChevronRight, ChevronDown, FolderOpen,
   GitBranch, GitCommit, GitPullRequest, Loader2, AlertCircle,
@@ -13,7 +13,7 @@ import { useAgentStatus, useAgentControls } from '@/hooks/useAgentStatus';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { StatusBadge } from '@/components/StatusBadge';
 import { FileExplorerModal } from '@/components/FileExplorerModal';
-import { IntakeModal } from '@/components/IntakeModal';
+import { IntakeView } from '@/components/IntakeView';
 import type { ApiTask } from '@/types';
 import {
   Dialog,
@@ -794,6 +794,29 @@ export default function ProjectDetailPage() {
 
   return (
     <div className="p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5">
+      <AnimatePresence mode="wait">
+      {intakeOpen ? (
+        <motion.div
+          key="intake-view"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <IntakeView
+            projectId={projectId}
+            projectName={project!.name}
+            onClose={() => setIntakeOpen(false)}
+          />
+        </motion.div>
+      ) : (
+        <motion.div
+          key="project-detail"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.3 }}
+        >
 
       {/* ── Header ── */}
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
@@ -1329,12 +1352,9 @@ export default function ProjectDetailPage() {
         projectName={project!.name}
         projectId={projectId}
       />
-      <IntakeModal
-        open={intakeOpen}
-        onOpenChange={setIntakeOpen}
-        projectId={projectId}
-        projectName={project!.name}
-      />
+        </motion.div>
+      )}
+      </AnimatePresence>
     </div>
   );
 }
