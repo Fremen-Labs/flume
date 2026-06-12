@@ -373,21 +373,21 @@ func NewTaskStateMachine(shadow bool) *TaskStateMachine {
 
 // DefaultTaskStateMachine is the process-wide enforcer singleton.
 //
-// Shadow mode (default) logs violations for audit but allows the write to proceed.
-// This was the safe rollout strategy for PR2 (flume-queue-planning-reliability).
+// Strict mode (default as of Phase 0) aborts writes on violation (after audit log).
+// Shadow mode (opt-in via env) logs violations for audit but allows the write to proceed.
+// This was the safe rollout strategy for PR2; Phase 0 flips the default per uplift plan.
 //
 // The mode can be controlled at startup via the environment variable:
-//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=false   → hard enforcement (strict mode)
-//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=true    → shadow mode (default)
+//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=true    → shadow mode (logs only, for transition)
+//   FLUME_TASK_STATE_MACHINE_SHADOW_MODE=false   → hard enforcement (strict, default)
 //
-// After an audit period with zero violations in production logs, operators
-// should flip to strict mode in non-critical environments first.
+// Callers must check the returned error from Enforce* and abort the write in strict mode.
 var DefaultTaskStateMachine = NewTaskStateMachine(defaultShadowMode())
 
 func defaultShadowMode() bool {
 	v := os.Getenv("FLUME_TASK_STATE_MACHINE_SHADOW_MODE")
 	if v == "" {
-		return true // safe default for rollout
+		return false // Phase 0: default to strict (hard enforcement) per uplift plan. Set env=true for shadow during transition.
 	}
 	return v != "false" && v != "0" && v != "off"
 }

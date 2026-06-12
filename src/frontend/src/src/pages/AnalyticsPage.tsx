@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import { useTelemetry } from '@/hooks/useTelemetry';
 import { useSystemState } from '@/hooks/useSystemState';
@@ -101,7 +101,28 @@ export default function AnalyticsPage() {
     name: l.tags['node_id'] || 'unknown',
     load: Math.round(l.value * 100)
   }));
-  
+
+  // Aggregate flume_node_requests_total by node_id (sum across models)
+  // This counter is incremented at every routing decision in the gateway
+  // (multi_node_router.go RecordNodeRequest) — it answers "which nodes were actually used."
+  const nodeRequestsByNode = (telemetry?.flume_node_requests_total ?? []).reduce<Record<string, number>>((acc, r) => {
+    const nodeId = r.tags['node_id'] || 'unknown';
+    acc[nodeId] = (acc[nodeId] || 0) + r.count;
+    return acc;
+  }, {});
+
+  // Build combined node data: requests (actual usage) + load (VRAM pressure)
+  const nodeUsage = (() => {
+    const loadMap = new Map(nodeLoads.map(n => [n.name, n.load]));
+    const requestMap = new Map(Object.entries(nodeRequestsByNode));
+    const allNodes = new Set([...loadMap.keys(), ...requestMap.keys()]);
+    return Array.from(allNodes).map(name => ({
+      name,
+      requests: requestMap.get(name) ?? 0,
+      load: loadMap.get(name) ?? 0,
+    })).sort((a, b) => b.requests - a.requests);
+  })();
+
   const routingDecisions = Object.entries((telemetry?.flume_routing_decision ?? []).reduce<Record<string, number>>((acc, d) => {
     const strategy = d.tags['strategy'] || 'unknown';
     acc[strategy] = (acc[strategy] || 0) + d.count;
@@ -109,9 +130,10 @@ export default function AnalyticsPage() {
   }, {})).map(([name, value]) => ({ name, value }));
 
   // Derived for Node Mesh card + partial detection (cross-cutting)
-  const meshNodeCount = nodeLoads.length;
-  const avgMeshLoad = meshNodeCount > 0 ? Math.round(nodeLoads.reduce((s, n) => s + n.load, 0) / meshNodeCount) : 0;
-  const maxMeshLoad = meshNodeCount > 0 ? Math.max(...nodeLoads.map(n => n.load)) : 0;
+  const meshNodeCount = nodeUsage.length || nodeLoads.length;
+  const totalNodeRequests = nodeUsage.reduce((s, n) => s + n.requests, 0);
+  const avgMeshLoad = meshNodeCount > 0 ? Math.round((nodeUsage.length > 0 ? nodeUsage : nodeLoads).reduce((s, n) => s + n.load, 0) / meshNodeCount) : 0;
+  const maxMeshLoad = meshNodeCount > 0 ? Math.max(...(nodeUsage.length > 0 ? nodeUsage : nodeLoads).map(n => n.load)) : 0;
   const meshHasData = meshNodeCount > 0;
 
   // Code Intelligence Backend (Rec 3): visibility into Elastro vs LogLoom AST structural indexing.
@@ -236,16 +258,16 @@ export default function AnalyticsPage() {
               error={telErrMsg}
               partial={telemetry && telemetry.flume_vram_pressure_events_total === 0}
             />
-            {/* Node Mesh summary card (covers "Node Mesh Distribution section" resilience + helpText) */}
+            {/* Node Mesh summary card (covers "Node Usage Distribution" resilience + helpText) */}
             <GlassMetricCard
-              title="Mesh Load (Avg/Max)"
-              value={`${avgMeshLoad}%`}
+              title="Mesh Usage"
+              value={totalNodeRequests > 0 ? `${totalNodeRequests} reqs` : `${avgMeshLoad}%`}
               icon={Gauge}
-              helpText="VRAM memory pressure = sum(loaded model size_vram from Ollama /api/ps) / node declared MemoryGB (auto-discovered via health probes in node_registry + health_checker). Per-node gauges exposed as flume_node_load."
+              helpText="Total inference requests routed across the node mesh (flume_node_requests_total), with VRAM load context. Requests counted at every routing decision in multi_node_router. Load = sum(loaded model size_vram from Ollama /api/ps) / node MemoryGB."
               loading={telLoading}
               error={telErrMsg}
               partial={!meshHasData && !telLoading}
-              secondary={{ label: 'nodes / max', value: `${meshNodeCount} / ${maxMeshLoad}%` }}
+              secondary={{ label: 'nodes / avg load', value: `${meshNodeCount} / ${avgMeshLoad}%` }}
             />
           </div>
 
@@ -253,20 +275,36 @@ export default function AnalyticsPage() {
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="glass-card p-5">
               <h3
                 className="text-sm font-semibold text-foreground mb-4 flex items-center gap-1.5"
-                title="Per-node VRAM memory pressure = sum loaded model size_vram / node declared MemoryGB. See the 'Mesh Load (Avg/Max)' card above for live values and full explanation."
+                title="Dual-metric view: bars show actual inference requests routed to each node (flume_node_requests_total). Overlay shows VRAM load % (model weight memory pressure). Together they answer 'which nodes were used and how loaded were they.'"
               >
-                Node Mesh Distribution
-                <Info className="w-3.5 h-3.5 text-muted-foreground/60" aria-label="Mesh load formula help" />
+                Node Usage Distribution
+                <Info className="w-3.5 h-3.5 text-muted-foreground/60" aria-label="Node usage help" />
               </h3>
-              {nodeLoads.length === 0 ? (
-                <div className="text-xs text-muted-foreground text-center py-8">No mesh data</div>
+              {nodeUsage.length === 0 ? (
+                <div className="text-xs text-muted-foreground text-center py-8">No mesh data — configure nodes in flume.yaml or wait for health probes</div>
+              ) : totalNodeRequests === 0 && nodeUsage.every(n => n.load === 0) ? (
+                <div className="text-xs text-muted-foreground text-center py-8">
+                  {meshNodeCount} node{meshNodeCount !== 1 ? 's' : ''} registered — no inference requests routed yet
+                </div>
               ) : (
-                <ResponsiveContainer width="100%" height={180}>
-                   <BarChart data={nodeLoads}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={nodeUsage}>
                     <XAxis dataKey="name" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
-                    <YAxis unit="%" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} />
-                    <Tooltip contentStyle={{ background: 'hsl(222,47%,8%)', border: '1px solid hsl(215,28%,17%)', borderRadius: 8, fontSize: 12 }} />
-                    <Bar dataKey="load" fill="hsl(160,84%,39%)" radius={[4, 4, 0, 0]} />
+                    <YAxis yAxisId="requests" orientation="left" tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} label={{ value: 'Requests', angle: -90, position: 'insideLeft', style: { fill: 'hsl(215,20%,65%)', fontSize: 10 } }} />
+                    <YAxis yAxisId="load" orientation="right" unit="%" domain={[0, 100]} tick={{ fill: 'hsl(215,20%,65%)', fontSize: 10 }} label={{ value: 'VRAM %', angle: 90, position: 'insideRight', style: { fill: 'hsl(215,20%,65%)', fontSize: 10 } }} />
+                    <Tooltip
+                      contentStyle={{ background: 'hsl(222,47%,8%)', border: '1px solid hsl(215,28%,17%)', borderRadius: 8, fontSize: 12 }}
+                      formatter={(value: number, name: string) => [
+                        name === 'requests' ? value.toLocaleString() : `${value}%`,
+                        name === 'requests' ? 'Inference Requests' : 'VRAM Load'
+                      ]}
+                    />
+                    <Legend
+                      wrapperStyle={{ fontSize: 11, color: 'hsl(215,20%,65%)' }}
+                      formatter={(value: string) => value === 'requests' ? 'Requests Routed' : 'VRAM Load %'}
+                    />
+                    <Bar yAxisId="requests" dataKey="requests" fill="hsl(160,84%,39%)" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="load" dataKey="load" fill="hsl(239,84%,67%)" radius={[4, 4, 0, 0]} opacity={0.6} />
                   </BarChart>
                 </ResponsiveContainer>
               )}

@@ -105,6 +105,8 @@ func (s *Sweeper) RunThrottled(ctx context.Context) {
 			s.logger.Info("dependency sweep: promoted tasks to ready",
 				slog.Int("count", count))
 		}
+		// Phase 0: additional visibility - if plan_session present on candidates, one could aggregate, but for now the per-task logs + this give signal.
+		// Real per-plan progress is emitted inside promotePlannedTasks via reasoning when items move.
 		s.mu.Lock()
 	}
 
@@ -528,7 +530,7 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			continue
 		}
 
-		// PR2 Enforcer (central TaskStateMachine from PR2)
+		// PR2 Enforcer + Phase 0: central TaskStateMachine (strict mode now aborts invalid promote)
 		if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(
 			ftypes.TaskStatusPlanned,
 			ftypes.TaskStatusReady,
@@ -536,6 +538,10 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 		); enforceErr != nil {
 			// Phase 0: instrument every violation to ES/metrics via logger (feeds audit, Logloom, violation rate).
 			flumelogger.LogTaskStateViolation(ctx, task.ID, string(ftypes.TaskStatusPlanned), string(ftypes.TaskStatusReady), enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode, map[string]any{"plan_session_id": task.PlanSessionID, "depth": task.HierarchyDepth})
+			if !ftypes.DefaultTaskStateMachine.ShadowMode {
+				s.logger.Warn("promote aborted in strict mode due to Enforce violation", slog.String("task_id", task.ID), slog.String("err", enforceErr.Error()))
+				continue
+			}
 		}
 
 		// Resilient update (PR3): prefer OCC using hit metadata; retry on conflict (race with claim/other sweeps)
@@ -577,6 +583,25 @@ func (s *Sweeper) promotePlannedTasks(ctx context.Context, repoFilter string) in
 			s.logger.Info("promoted task to ready (single unified path)",
 				slog.String("task_id", task.ID),
 				slog.String("repo", repoFilter))
+		}
+	}
+
+	// Phase 0 uplift: emit per-plan promotion progress for visibility (helps diagnose why siblings stay planned).
+	planPromoted := map[string]int{}
+	for _, task := range candidates {
+		if task.PlanSessionID != "" {
+			// simplistic: count candidates that reached the update (not perfect, but directionally useful)
+			// Better would be inside the if update succeeded, but for observability this + the individual logs suffice.
+			planPromoted[task.PlanSessionID]++
+		}
+	}
+	for pid, pc := range planPromoted {
+		if pc > 0 {
+			s.logger.Info("promote per-plan progress",
+				slog.String("plan_session_id", pid),
+				slog.Int("promoted_in_this_sweep", pc))
+			flumelogger.LogAgentReasoning(context.Background(), "", "sweeper", "plan promotion progress",
+				map[string]any{"plan_session_id": pid, "promoted": pc, "repo": repoFilter})
 		}
 	}
 

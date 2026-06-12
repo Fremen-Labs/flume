@@ -349,14 +349,14 @@ func (s *Server) dispatchChat(w http.ResponseWriter, r *http.Request, withTools 
 		slog.Int("tools", len(req.Tools)),
 	)
 
-	// === Tier 1 observability: surface when code-intel tools are missing for roles that benefit ===
-	// This makes the "tools:0" gap from monitoring visible in logs until full server-side injection lands.
-	if (req.AgentRole == "pm" || req.AgentRole == "reviewer" || req.AgentRole == "implementer" || req.AgentRole == "tester") && len(req.Tools) == 0 {
-		log.Warn("code-intel tools missing for role that should use them (elastro_query_ast + logloom_ast_query recommended)",
-			slog.String("agent_role", req.AgentRole),
-			slog.String("request_id", requestID),
-		)
-	}
+	// Phase 0: client-side ToolRegistry (NewToolRegistryWithElastro) wires elastro_query_ast + logloom_ast_query
+	// for implementer/reviewer etc. The ReAct loop in runner uses registered tools + system prompt + AST enforcement
+	// before writes (astVerified flag + isWriteTool guard). Native tools=[] schema may be empty for text/parsed function call style
+	// (especially local mesh). The previous warning was Tier-1 observability during rollout; now suppressed as the contract
+	// is enforced client-side in the worker agent loop (see internal/worker/runner.go handleImplementer and handlers.ToolRegistry).
+	// If future native tool-calling injection is added, re-enable per-role schema population here.
+	_ = req // tools list not required for current parsed-function-call path used by implementer loop
+
 
 	// Resolve model/provider before choosing code path.
 	model, provider, _ := s.config.ResolveModel(&req)

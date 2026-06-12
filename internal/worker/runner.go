@@ -57,8 +57,15 @@ func updateTaskLeaseState(
 	workerRole string,
 	reason string,
 ) error {
-	// 1. State machine enforcement (shadow mode supported)
-	_ = ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(prevStatus, targetStatus, logger.Warn)
+	// 1. State machine enforcement (Phase 0: strict mode aborts bad transitions)
+	if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(prevStatus, targetStatus, logger.Warn); enforceErr != nil {
+		flumelogger.LogTaskStateViolation(ctx, taskID, string(prevStatus), string(targetStatus), enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode)
+		if !ftypes.DefaultTaskStateMachine.ShadowMode {
+			logger.Error("lease state update aborted: TaskStateMachine violation in strict mode",
+				slog.String("task_id", taskID), slog.String("from", string(prevStatus)), slog.String("to", string(targetStatus)))
+			return enforceErr
+		}
+	}
 
 	// 2. Write with OCC preference when we have seq/prim from a prior search
 	var err error
@@ -251,7 +258,7 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 		return err
 	}
 
-	// 4. Transition task status
+	// 4. Transition task status (Phase 0: respect strict mode)
 	if result.NextStatus != "" && result.NextStatus != task.Status {
 		if validErr := ftypes.DefaultTaskStateMachine.EnforceTransition(task.Status, result.NextStatus); validErr != nil {
 			r.logger.Error("invalid state transition",
@@ -259,6 +266,11 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 				slog.String("from", string(task.Status)),
 				slog.String("to", string(result.NextStatus)),
 				slog.String("error", validErr.Error()))
+			if !ftypes.DefaultTaskStateMachine.ShadowMode {
+				// In strict mode, do not perform the invalid transition; log and return without updating
+				flumelogger.LogTaskStateViolation(ctx, taskID, string(task.Status), string(result.NextStatus), validErr, false)
+				return nil // prevent bad state write
+			}
 		} else {
 			r.updateTaskStatus(ctx, taskID, result.NextStatus)
 		}
@@ -278,16 +290,16 @@ func (r *Runner) handleImplementer(ctx context.Context, task ftypes.Task, worker
 		fmt.Sprintf("Starting implementation of task: %s", task.Title),
 		map[string]any{"phase": "start", "worker": worker.Name})
 
-	// Check if task requires code
+	// Check if task requires code (Phase 0: non-code/doc tasks go to review for human/AI confirmation instead of direct done)
 	if !TaskRequiresCode(task) {
-		r.logger.Info("implementer: non-code task, completing",
+		r.logger.Info("implementer: non-code task, routing to review",
 			slog.String("task_id", task.ID))
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Task does not require code changes. Marking as done.",
-			map[string]any{"phase": "complete", "reason": "non_code_task"})
+			"Task does not require code changes (documentation-only or config). Routing to review for confirmation (no code diff evidence).",
+			map[string]any{"phase": "complete", "reason": "non_code_task", "no_code_diff": true})
 		return ftypes.AgentResult{
 			Success:    true,
-			NextStatus: ftypes.TaskStatusDone,
+			NextStatus: ftypes.TaskStatusReview,
 		}, nil
 	}
 
@@ -526,12 +538,14 @@ afterLoop:
 			map[string]any{"phase": "complete", "commit_sha": commitSHA})
 	} else {
 		flumelogger.LogAgentReasoning(ctx, task.ID, "implementer",
-			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing).",
-			map[string]any{"phase": "complete", "had_commits": false})
+			"Agent loop completed. No code changes detected on disk after loop (or auto-commit had nothing). Routing to review for confirmation (documentation-only or no-op change; provides 'no code diff' evidence to reviewer).",
+			map[string]any{"phase": "complete", "had_commits": false, "no_code_diff": true})
 
+		// Phase 0: no-changes / doc-only tasks now correctly go to review (explicit handoff) instead of invalid direct done from planned.
+		// This prevents the observed planned->done FSM violation + restart loop.
 		return ftypes.AgentResult{
 			Success:    true,
-			NextStatus: ftypes.TaskStatusDone,
+			NextStatus: ftypes.TaskStatusReview,
 		}, nil
 	}
 

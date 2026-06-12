@@ -318,10 +318,15 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 		"updated_at":     now,
 	}
 
-	// PR 2: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
+	// PR 2 + Phase 0: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
+	// In strict mode (default), abort the claim on violation instead of proceeding.
 	if enforceErr := ftypes.DefaultTaskStateMachine.EnforceTransitionOrLog(ftypes.TaskStatus(""), "running", c.logger.Warn); enforceErr != nil {
-		// Phase 0 instrument
 		flumelogger.LogTaskStateViolation(ctx, taskID, "", "running", enforceErr, ftypes.DefaultTaskStateMachine.ShadowMode)
+		if !ftypes.DefaultTaskStateMachine.ShadowMode {
+			c.logger.Error("claim aborted due to TaskStateMachine violation (strict mode)",
+				slog.String("task_id", taskID), slog.String("error", enforceErr.Error()))
+			return false
+		}
 	}
 	err := c.es.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seqNo, primaryTerm)
 	if err != nil {
