@@ -203,6 +203,7 @@ func (s *Sweeper) requeueStuckImplementerTasks(ctx context.Context) int {
 		update := map[string]interface{}{
 			"status":        "ready",
 			"active_worker": nil,
+			"claim_nonce":   nil,
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
@@ -257,6 +258,7 @@ func (s *Sweeper) requeueStuckReviewTasks(ctx context.Context) int {
 		update := map[string]interface{}{
 			"status":        "review",
 			"active_worker": nil,
+			"claim_nonce":   nil,
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
@@ -930,6 +932,7 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 				"updated_at":    now.Format(time.RFC3339),
 				"feedback":      explanation.String(),
 				"active_worker": nil,
+				"claim_nonce":   nil,
 				"queue_state":   "available",
 			}
 			_ = s.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
@@ -952,6 +955,7 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 					"error_message": fmt.Sprintf("Consensus review failed after %d attempts", attempts),
 					"feedback":      explanation.String(),
 					"active_worker": nil,
+					"claim_nonce":   nil,
 					"queue_state":   "available",
 					"updated_at":    time.Now().UTC().Format(time.RFC3339),
 				}
@@ -961,6 +965,7 @@ func (s *Sweeper) evaluateReviewConsensus(ctx context.Context) {
 					"attempts":      attempts,
 					"feedback":      explanation.String(),
 					"active_worker": nil,
+					"claim_nonce":   nil,
 					"queue_state":   "available",
 					"updated_at":    time.Now().UTC().Format(time.RFC3339),
 				}

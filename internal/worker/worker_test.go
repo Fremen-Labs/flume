@@ -332,13 +332,13 @@ func TestFileToolExecutors(t *testing.T) {
 
 // TestIsWriteToolAndASTEnforcementHelper covers the gate logic used by runner.
 func TestIsWriteToolAndASTEnforcementHelper(t *testing.T) {
-	writes := []string{"write_file", "edit_file", "run_shell", "multi_replace_file_content"}
+	writes := []string{"write_file", "edit_file", "multi_replace_file_content"}
 	for _, w := range writes {
 		if !isWriteTool(w) {
 			t.Errorf("isWriteTool(%s) should be true", w)
 		}
 	}
-	reads := []string{"read_file", "list_directory", "elastro_query_ast", "logloom_ast_query", "foo"}
+	reads := []string{"read_file", "list_directory", "run_shell", "elastro_query_ast", "logloom_ast_query", "foo"}
 	for _, r := range reads {
 		if isWriteTool(r) {
 			t.Errorf("isWriteTool(%s) should be false", r)

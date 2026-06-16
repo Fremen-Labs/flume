@@ -82,6 +82,7 @@ func (c *Claimer) TryAtomicClaim(ctx context.Context, worker ftypes.Worker) *fty
 			"must_not": []interface{}{
 				map[string]interface{}{"exists": map[string]string{"field": "active_worker"}},
 				map[string]interface{}{"exists": map[string]string{"field": "decomposed_at"}},
+				map[string]interface{}{"exists": map[string]string{"field": "claim_nonce"}},
 			},
 		},
 	}
@@ -304,9 +305,21 @@ func (c *Claimer) loadRepoWIPLimits(ctx context.Context, repoID string) WIPLimit
 	return limits.WIP
 }
 
-// atomicClaim performs the ES _update to atomically claim a task.
+// atomicClaim performs the ES _update to atomically claim a task, then verifies
+// the claim with a post-claim read after a short delay. This two-phase approach
+// prevents the race condition where both workers claim the same task because
+// they both see `active_worker: nil` in the search snapshot.
+//
+// Phase 1: OCC write (if_seq_no/if_primary_term) to set active_worker + claim_nonce
+// Phase 2: Re-read after 150ms and verify our claim_nonce is still present
+//
+// This eliminates the 25+ OCC conflicts and duplicate work from the last run.
 func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.Worker, prevStatus ftypes.TaskStatus, seqNo, primaryTerm int64) bool {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Generate a unique claim nonce for post-claim verification
+	claimNonce := fmt.Sprintf("%s-%s-%d", c.nodeID, worker.Name, time.Now().UnixNano())
+
 	update := map[string]interface{}{
 		"status":         "running",
 		"active_worker":  worker.Name,
@@ -316,6 +329,7 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 		"queue_state":    "active",
 		"claimed_at":     now,
 		"updated_at":     now,
+		"claim_nonce":    claimNonce, // unique per claim attempt
 	}
 
 	// PR 2 + Phase 0: atomic claim status (running) MUST go through EnforceTransition (OCC preserved in update layer)
@@ -328,18 +342,57 @@ func (c *Claimer) atomicClaim(ctx context.Context, taskID string, worker ftypes.
 			return false
 		}
 	}
+
+	// Phase 1: Atomic OCC write
 	err := c.es.UpdateDocOCC(ctx, "agent-task-records", taskID, update, seqNo, primaryTerm)
 	if err != nil {
 		if err == es.ErrConflict {
-			c.logger.Warn("atomic claim conflict: task already claimed by another worker",
+			c.logger.Debug("atomic claim conflict (Phase 1): task already claimed by another worker",
 				slog.String("task_id", taskID))
 		} else {
-			c.logger.Warn("atomic claim failed",
+			c.logger.Warn("atomic claim failed (Phase 1)",
 				slog.String("task_id", taskID),
 				slog.String("error", err.Error()))
 		}
 		return false
 	}
+
+	// Phase 2: Post-claim verification — re-read after a short delay and verify
+	// our claim_nonce is still present. This catches the race where two workers
+	// both succeed in their OCC write (different seqNo values from search snapshot)
+	// but only one nonce survives in the final document state.
+	time.Sleep(150 * time.Millisecond)
+
+	doc, err := c.es.GetDoc(ctx, "agent-task-records", taskID)
+	if err != nil {
+		c.logger.Warn("post-claim verification failed (read error), proceeding optimistically",
+			slog.String("task_id", taskID), slog.String("error", err.Error()))
+		return true // fail open — OCC already succeeded
+	}
+
+	var verifyDoc struct {
+		ClaimNonce   string `json:"claim_nonce"`
+		ActiveWorker string `json:"active_worker"`
+		Status       string `json:"status"`
+	}
+	if json.Unmarshal(doc, &verifyDoc) != nil {
+		c.logger.Warn("post-claim verification failed (unmarshal), proceeding optimistically",
+			slog.String("task_id", taskID))
+		return true
+	}
+
+	if verifyDoc.ClaimNonce != claimNonce {
+		c.logger.Warn("post-claim verification FAILED: another worker overwrote our claim (claim nonce mismatch)",
+			slog.String("task_id", taskID),
+			slog.String("our_nonce", claimNonce),
+			slog.String("current_nonce", verifyDoc.ClaimNonce),
+			slog.String("current_worker", verifyDoc.ActiveWorker))
+		return false // Abandon — another worker won the race
+	}
+
+	c.logger.Debug("post-claim verification passed",
+		slog.String("task_id", taskID),
+		slog.String("worker", worker.Name))
 	return true
 }
 

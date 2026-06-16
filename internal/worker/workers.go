@@ -29,6 +29,9 @@ func BuildWorkers(cfg *config.Config, nodeID string, nodeCaps map[string]int) []
 	for _, role := range roles {
 		for i := 0; i < workersPerRole; i++ {
 			name := role
+			if nodeID != "" {
+				name = role + "-" + nodeID
+			}
 			if workersPerRole > 1 {
 				name = role + "-" + nodeID + "-" + string(rune('0'+i))
 			}

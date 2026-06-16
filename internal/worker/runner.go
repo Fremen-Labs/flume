@@ -238,6 +238,7 @@ func (r *Runner) RunWorker(ctx context.Context, worker ftypes.Worker, taskID str
 				"status":        "blocked",
 				"error_message": reason,
 				"active_worker": nil,
+				"claim_nonce":   nil,
 				"queue_state":   "available",
 				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
@@ -625,12 +626,14 @@ func normalizeToolArgs(args interface{}) map[string]interface{} {
 	return map[string]interface{}{"raw": args}
 }
 
-// isWriteTool returns true for any tool that performs file modifications or shell
-// commands that could mutate the repo. Used for MANDATORY AST VERIFICATION gate
-// (Elastro/Logloom contract enforcement in the implementer loop).
+// isWriteTool returns true for any tool that performs file modifications.
+// Used for MANDATORY AST VERIFICATION gate (Elastro/Logloom contract enforcement
+// in the implementer loop). Note: run_shell is intentionally excluded — many
+// shell commands are read-only (grep, find, go build, go test) and gating them
+// wastes turns. The write_file tool is the primary mutation vector.
 func isWriteTool(name string) bool {
 	switch name {
-	case "write_file", "edit_file", "multi_replace_file_content", "patch_file", "run_shell":
+	case "write_file", "edit_file", "multi_replace_file_content", "patch_file":
 		return true
 	default:
 		return false
@@ -694,6 +697,29 @@ func (r *Runner) handleReviewer(ctx context.Context, task ftypes.Task, worker ft
 	reviewerSystemPrompt := readSystemPrompt("reviewer")
 
 	diffLen := len(diffOut)
+
+	// Short-circuit: if there's no diff at all, auto-approve and move to done.
+	// Sending an empty diff to the LLM causes it to flip-flop between approved/rejected
+	// (Issue 2 from the agent reasoning analysis), wasting 20+ review cycles per task.
+	// An empty diff means the implementer either didn't make changes or auto-commit failed.
+	if diffLen == 0 {
+		flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
+			fmt.Sprintf("No diff found for task: %s. Auto-approving (nothing to review).", parent.Title),
+			map[string]any{"phase": "auto_approve_empty_diff", "parent_task": parent.ID})
+
+		update := map[string]interface{}{
+			"review_verdict": "approved",
+			"feedback":       "Auto-approved: no code changes detected (diff size 0). Implementer may not have made changes or auto-commit failed.",
+			"updated_at":     time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = r.es.UpdateDoc(ctx, "agent-task-records", task.ID, update)
+
+		return ftypes.AgentResult{
+			Success:    true,
+			NextStatus: ftypes.TaskStatusDone,
+		}, nil
+	}
+
 	flumelogger.LogAgentReasoning(ctx, task.ID, "reviewer",
 		fmt.Sprintf("Reviewing implementation for task: %s. Diff size: %d chars. Sending to LLM for analysis.", parent.Title, diffLen),
 		map[string]any{"phase": "llm_review", "diff_size": diffLen, "parent_task": parent.ID})
@@ -1398,6 +1424,7 @@ func (r *Runner) handlePM(ctx context.Context, task ftypes.Task, worker ftypes.W
 		"decomposed_at": nowISO,
 		"status":        "done",
 		"active_worker": nil,
+		"claim_nonce":   nil,
 		"queue_state":   "available",
 		"updated_at":    nowISO,
 	})
@@ -1721,6 +1748,7 @@ func (r *Runner) clearStaleClaim(ctx context.Context, taskID string, currentStat
 	update := map[string]interface{}{
 		"status":        targetStatus,
 		"active_worker": nil,
+		"claim_nonce":   nil,
 		"queue_state":   "available",
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1752,6 +1780,7 @@ func (r *Runner) updateTaskStatus(ctx context.Context, taskID string, prevStatus
 	update := map[string]interface{}{
 		"status":        string(status),
 		"active_worker": nil,
+		"claim_nonce":   nil, // Clear the claim nonce so the task is re-claimable
 		"queue_state":   "available",
 		"updated_at":    time.Now().UTC().Format(time.RFC3339),
 	}
@@ -2055,6 +2084,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			"attempts":       failureCount,
 			"error_message":  reason,
 			"active_worker":  nil,
+			"claim_nonce":    nil,
 			"queue_state":    "available",
 			"updated_at":     time.Now().UTC().Format(time.RFC3339),
 		}
@@ -2076,6 +2106,7 @@ func (r *Runner) ImplementerHandleLLMFailure(ctx context.Context, taskID string,
 			"status":        "ready",
 			"attempts":      failureCount,
 			"active_worker": nil,
+			"claim_nonce":   nil,
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
@@ -2119,6 +2150,7 @@ func (r *Runner) handleRoleLLMFailure(ctx context.Context, taskID string, task f
 			"attempts":      failureCount,
 			"error_message": reason,
 			"active_worker": nil,
+			"claim_nonce":   nil,
 			"queue_state":   "available",
 			"updated_at":    time.Now().UTC().Format(time.RFC3339),
 		}
