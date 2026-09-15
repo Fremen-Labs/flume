@@ -49,21 +49,4 @@ For single-node deployments, use 'flume start' which runs all services.`,
 	},
 }
 
-// WorkerManagerCmd runs only the worker-manager service.
-var WorkerManagerCmd = &cobra.Command{
-	Use:   "worker-manager",
-	Short: "Run the Worker Manager service (standalone)",
-	Long: `Starts only the Flume Worker Manager heartbeat loop. Use this for distributed deployments
-where services run as separate processes.
 
-For single-node deployments, use 'flume start' which runs all services.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx := cmd.Context()
-		log.Info("Starting Flume Worker Manager (standalone mode)")
-
-		logger := slog.Default()
-		cfg := config.Load(ctx, logger)
-		sup := services.NewSupervisor(cfg, logger)
-		return sup.StartWorkerOnly(ctx)
-	},
-}

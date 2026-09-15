@@ -10,6 +10,8 @@ package dashboard
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,21 +22,16 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Fremen-Labs/flume/internal/es"
 	flumelogger "github.com/Fremen-Labs/flume/internal/logger"
-	"github.com/Fremen-Labs/flume/internal/llm"
-	"github.com/Fremen-Labs/flume/pkg/types"
 )
 
 // Server is the Dashboard API HTTP server.
-// Derived from Python: server.py (FastAPI app instance + lifespan).
 type Server struct {
 	mux              *http.ServeMux
 	httpServer       *http.Server
 	es               *es.Client
-	llmClient        *llm.Client
 	logger           *slog.Logger
 	cfg              *Config
 	logLevel         *slog.LevelVar
@@ -64,7 +61,6 @@ func (s *Server) RegisterSettingsReload(cb func()) {
 }
 
 // Config holds dashboard server configuration.
-// Derived from Python: config.py get_settings().
 type Config struct {
 	Host           string
 	Port           int
@@ -78,7 +74,6 @@ type Config struct {
 }
 
 // DefaultConfig returns production-safe defaults, overridden by env vars.
-// Derived from Python: config.py get_settings() Pydantic model.
 func DefaultConfig() *Config {
 	host := envOr("DASHBOARD_HOST", "0.0.0.0")
 	port := envInt("DASHBOARD_PORT", 8765)
@@ -132,7 +127,6 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 	s := &Server{
 		mux:         http.NewServeMux(),
 		es:          esClient,
-		llmClient:   llm.New(logger),
 		logger:      logger,
 		cfg:         cfg,
 		startTime:   time.Now(),
@@ -141,8 +135,6 @@ func New(cfg *Config, logger *slog.Logger) *Server {
 
 	// Build merged list of exempted CIDRs (user config + standard private + dynamic Docker discovery)
 	s.rateLimitExemptions = buildRateLimitExemptions(cfg.InternalIPRanges)
-	// Phase 0: Wire reasoning bridge for any Go-side Log* calls that reach the dashboard
-	// (primarily benefits future admin/recovery paths and consistency with worker).
 	flumelogger.SetESBridge(esClient)
 
 	s.registerRoutes()
@@ -156,7 +148,7 @@ func (s *Server) ListenAndServe() error {
 		Addr:         addr,
 		Handler:      s.withMiddleware(s.mux),
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second, // allow Plan New Work intake planner (target <120s local LLM + RAG + status ES writes + response write)
+		WriteTimeout: 300 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 	s.logger.Info("Dashboard API starting",
@@ -175,99 +167,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ─── Route Registration ─────────────────────────────────────────────────────
 
 // registerRoutes wires all API endpoints to their handlers.
-// Each route maps directly to a Python @router.get/post/put/delete decorator.
 func (s *Server) registerRoutes() {
-	// Health + System (api/system.py — 21 nodes)
+	// Health + System
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/system-state", s.handleSystemState)
 	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
 	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
-	s.mux.HandleFunc("POST /api/logs/structured", s.handleStructuredLog) // wired for new frontend @/lib/logger transport + Logloom enrichment
+	s.mux.HandleFunc("POST /api/logs/structured", s.handleStructuredLog)
 	s.mux.HandleFunc("GET /ws/telemetry", s.handleWebSocketTelemetry)
 	s.mux.HandleFunc("GET /api/exo-status", s.handleExoStatus)
-	s.mux.HandleFunc("GET /api/autonomy/status", s.handleAutonomyStatus)
-	s.mux.HandleFunc("POST /api/autonomy/sweep/{sweep_name}", s.handleAutonomySweep)
-	s.mux.HandleFunc("GET /api/auto-unblock/status", s.handleAutoUnblockStatus)
-	s.mux.HandleFunc("POST /api/auto-unblock/sweep", s.handleAutoUnblockSweep)
 
-	// Tasks (api/tasks.py — 14 nodes)
-	s.mux.HandleFunc("GET /api/tasks/{task_id}/history", s.handleTaskHistory)
-	s.mux.HandleFunc("GET /api/tasks/{task_id}/diff", s.handleTaskDiff)
-	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts", s.handleTaskThoughts)
-	s.mux.HandleFunc("GET /api/tasks/{task_id}/thoughts/stream", s.handleTaskThoughtsStream)
-	s.mux.HandleFunc("GET /api/tasks/{task_id}/commits", s.handleTaskCommits)
-	s.mux.HandleFunc("POST /api/tasks/{task_id}/transition", s.handleTaskTransition)
-	s.mux.HandleFunc("POST /api/tasks/bulk-requeue", s.handleTasksBulkRequeue)
-	s.mux.HandleFunc("POST /api/tasks/bulk-update", s.handleTasksBulkUpdate)
-	s.mux.HandleFunc("POST /api/tasks/claim", s.handleTaskClaim)
-	s.mux.HandleFunc("POST /api/tasks/complete", s.handleTaskComplete)
-
-	// Security (api/security.py — 9 nodes)
+	// Security
 	s.mux.HandleFunc("GET /api/security", s.handleSecurity)
 	s.mux.HandleFunc("GET /api/security/validate", s.handleSecurityValidate)
 	s.mux.HandleFunc("GET /api/vault/status", s.handleVaultStatus)
-	s.mux.HandleFunc("POST /api/tasks/stop-all", s.handleTasksStopAll)
-	s.mux.HandleFunc("POST /api/tasks/resume-all", s.handleTasksResumeAll)
 	s.mux.HandleFunc("POST /api/security/secrets/reveal", s.handleSecuritySecretsReveal)
 	s.mux.HandleFunc("POST /api/security/secrets/update", s.handleSecuritySecretsUpdate)
 	s.mux.HandleFunc("POST /api/security/secrets/delete", s.handleSecuritySecretsDelete)
 
-	// Projects (api/projects.py — 6 nodes)
-	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
-	s.mux.HandleFunc("GET /api/projects/{project_id}/clone-status", s.handleProjectCloneStatus)
-	s.mux.HandleFunc("GET /api/projects/{project_id}/tasks", s.handleProjectTasks)
-	s.mux.HandleFunc("POST /api/projects/{project_id}/delete", s.handleProjectDelete)
-
-	// Repos (api/repos.py — 3 nodes)
-	s.mux.HandleFunc("GET /api/repos/{project_id}/branches", s.handleRepoBranches)
-	s.mux.HandleFunc("GET /api/repos/{project_id}/tree", s.handleRepoTree)
-	s.mux.HandleFunc("GET /api/repos/{project_id}/file", s.handleRepoFile)
-	s.mux.HandleFunc("GET /api/repos/{project_id}/diff", s.handleRepoDiff)
-
-	// Nodes (api/nodes.py — 18 nodes)
-	s.mux.HandleFunc("GET /api/nodes", s.handleNodesList)
-	s.mux.HandleFunc("POST /api/nodes", s.handleNodesAdd)
-	s.mux.HandleFunc("DELETE /api/nodes/{node_id}", s.handleNodesDelete)
-	s.mux.HandleFunc("POST /api/nodes/{node_id}/test", s.handleNodesTest)
-	s.mux.HandleFunc("GET /api/routing-policy", s.handleRoutingPolicyGet)
-	s.mux.HandleFunc("PUT /api/routing-policy", s.handleRoutingPolicyPut)
-	s.mux.HandleFunc("GET /api/frontier-models", s.handleFrontierModels)
-	s.mux.HandleFunc("GET /api/nodes/utilization", s.handleNodesUtilization)
-
-	// Settings (api/settings.py — 3 nodes)
-	s.mux.HandleFunc("POST /api/settings/log-level", s.handleSettingsLogLevel)
-	s.mux.HandleFunc("POST /api/logs/client", s.handleClientLogs)
-	s.mux.HandleFunc("GET /api/settings/llm", s.handleSettingsLLMGet)
-	s.mux.HandleFunc("POST /api/settings/llm", s.handleSettingsLLMUpdate)
-	s.mux.HandleFunc("PUT /api/settings/llm/credentials", s.handleSettingsLLMCredentialsPut)
-	s.mux.HandleFunc("POST /api/settings/llm/credentials", s.handleSettingsLLMCredentialsPost)
-	s.mux.HandleFunc("POST /api/settings/llm/oauth/refresh", s.handleSettingsLLMOAuthRefresh)
-	s.mux.HandleFunc("GET /api/settings/repos", s.handleSettingsReposGet)
-	s.mux.HandleFunc("PUT /api/settings/repos", s.handleSettingsReposUpdate)
-	s.mux.HandleFunc("GET /api/settings/system", s.handleSettingsSystemGet)
-	s.mux.HandleFunc("PUT /api/settings/system", s.handleSettingsSystemUpdate)
-	s.mux.HandleFunc("GET /api/settings/agent-models", s.handleSettingsAgentModelsGet)
-	s.mux.HandleFunc("PUT /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
-	s.mux.HandleFunc("POST /api/settings/agent-models", s.handleSettingsAgentModelsUpdate)
-	s.mux.HandleFunc("POST /api/settings/restart-services", s.handleSettingsRestartServices)
-	s.mux.HandleFunc("POST /api/settings/restart-dashboard", s.handleDashboardRestartForUI)
-
-	// Intake (api/intake.py — 4 nodes)
-	s.mux.HandleFunc("POST /api/intake/session", s.handleIntakeStartSession)
-	s.mux.HandleFunc("GET /api/intake/session/{session_id}", s.handleIntakeGetSession)
-	s.mux.HandleFunc("POST /api/intake/session/{session_id}/message", s.handleIntakeMessage)
-	s.mux.HandleFunc("POST /api/intake/session/{session_id}/commit", s.handleIntakeCommit)
-
-	// Workflow (api/workflow.py — 3 nodes)
-	s.mux.HandleFunc("GET /api/workflow/workers", s.handleWorkflowWorkers)
-	s.mux.HandleFunc("GET /api/workflow/agents/status", s.handleWorkflowAgentsStatus)
-	s.mux.HandleFunc("POST /api/workflow/agents/start", s.handleWorkflowAgentsStart)
-	s.mux.HandleFunc("POST /api/workflow/agents/stop", s.handleWorkflowAgentsStop)
-
-	// ─── SPA Static File Serving ─────────────────────────────────────────
-	// In Docker mode, FLUME_STATIC_ROOT points to the pre-built Vue SPA.
-	// Serves static assets and falls back to index.html for client-side routing.
+	// SPA Static File Serving
 	if s.cfg.StaticRoot != "" {
 		s.logger.Info("SPA static serving enabled", slog.String("root", s.cfg.StaticRoot))
 		s.mux.Handle("/", s.spaHandler(s.cfg.StaticRoot))
@@ -549,7 +468,20 @@ func (rl *rateLimiter) cleanup() {
 // isInternalIP returns true for private, loopback, and link-local addresses.
 // This is used to exempt internal Docker/Kubernetes/service-to-service traffic
 // from rate limiting (per reliable-go-systems principle of not breaking internal reliability).
+func nowISO() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func randomHex(n int) string {
+	bytes := make([]byte, n)
+	if _, err := rand.Read(bytes); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(bytes)
+}
+
 func isInternalIP(ipStr string) bool {
+
 	// Strip port if present (e.g. "10.0.0.5:12345")
 	if host, _, err := net.SplitHostPort(ipStr); err == nil {
 		ipStr = host
@@ -704,32 +636,4 @@ func (s *Server) logDecision(ctx context.Context, component, action string, meta
 	}
 }
 
-// ─── Type aliases for request bodies ────────────────────────────────────────
 
-// TaskTransitionRequest is the request body for POST /api/tasks/{id}/transition.
-// Derived from Python: api/models.py TaskTransitionRequest(BaseModel).
-type TaskTransitionRequest struct {
-	Status              string `json:"status"`
-	Instruction         string `json:"instruction,omitempty"`
-	AutoRecoveryPrompt  *bool  `json:"auto_recovery_prompt,omitempty"`
-	// Phase 1+ recovery support: allow ops/manual transitions (e.g. review -> blocked under LLM outage)
-	// without requiring full terminal evidence. When set, AuditReason is recorded in agent_log + execution_thoughts.
-	ForceAudit  bool   `json:"force_audit,omitempty"`
-	AuditReason string `json:"audit_reason,omitempty"`
-}
-
-// BulkRequeueRequest is the request body for POST /api/tasks/bulk-requeue.
-type BulkRequeueRequest struct {
-	TaskIDs []string `json:"task_ids"`
-}
-
-// BulkUpdateRequest is the request body for POST /api/tasks/bulk-update.
-type BulkUpdateRequest struct {
-	IDs    []string `json:"ids"`
-	Action string   `json:"action"`
-	Repo   string   `json:"repo,omitempty"`
-}
-
-// Compile-time check that types are referenced.
-var _ = types.TaskStatusReady
-var _ = utf8.RuneLen

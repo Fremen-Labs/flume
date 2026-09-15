@@ -167,65 +167,7 @@ func (s *Server) handleVaultStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ─── POST /api/tasks/stop-all ───────────────────────────────────────────────
 
-// handleTasksStopAll activates the kill switch — pauses all agent work.
-// Derived from Python: api/security.py api_tasks_stop_all().
-// Requires admin access (FLUME_ADMIN_TOKEN header validation).
-func (s *Server) handleTasksStopAll(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAccess(r) {
-		writeError(w, http.StatusForbidden, "admin access required")
-		return
-	}
-
-	ctx := r.Context()
-	now := nowISO()
-
-	// Set kill switch in ES
-	if err := s.es.Post(ctx, "flume-system-settings/_update/kill-switch", map[string]interface{}{
-		"doc":           map[string]interface{}{"active": true, "activated_at": now},
-		"doc_as_upsert": true,
-	}); err != nil {
-		s.logger.Error("stop-all: kill switch failed", slog.String("error", err.Error()))
-		writeError(w, http.StatusInternalServerError, "failed to activate kill switch")
-		return
-	}
-
-	s.logger.Warn("kill switch activated — all agents paused")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":      true,
-		"message":      "Kill switch activated — all agents paused",
-		"activated_at": now,
-	})
-}
-
-// ─── POST /api/tasks/resume-all ─────────────────────────────────────────────
-
-// handleTasksResumeAll deactivates the kill switch — resumes agents.
-// Derived from Python: api/security.py api_tasks_resume_all().
-func (s *Server) handleTasksResumeAll(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAccess(r) {
-		writeError(w, http.StatusForbidden, "admin access required")
-		return
-	}
-
-	ctx := r.Context()
-	now := nowISO()
-
-	if err := s.es.Post(ctx, "flume-system-settings/_update/kill-switch", map[string]interface{}{
-		"doc": map[string]interface{}{"active": false, "deactivated_at": now},
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to deactivate kill switch")
-		return
-	}
-
-	s.logger.Info("kill switch deactivated — agents resuming")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":        true,
-		"message":        "Kill switch deactivated — agents resuming",
-		"deactivated_at": now,
-	})
-}
 
 // ─── Admin Access Verification ──────────────────────────────────────────────
 

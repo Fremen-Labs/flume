@@ -25,20 +25,13 @@ func init() {
     rootCmd.AddCommand(commands.StartCmd)
     rootCmd.AddCommand(commands.DestroyCmd)
     rootCmd.AddCommand(commands.DoctorCmd)
-    rootCmd.AddCommand(commands.DispatchCmd)
     rootCmd.AddCommand(commands.StatusCmd)
     rootCmd.AddCommand(commands.LogsCmd)
-    rootCmd.AddCommand(commands.TasksCmd)
-    rootCmd.AddCommand(commands.WorkersCmd)
     rootCmd.AddCommand(commands.ConfigCmd)
-    rootCmd.AddCommand(commands.ProjectsCmd)
-    rootCmd.AddCommand(commands.UpgradeCmd)
-    rootCmd.AddCommand(commands.SkillsCmd)
 
-    // Phase 5: Standalone service subcommands for distributed deployments
+    // Service subcommands
     rootCmd.AddCommand(commands.GatewayCmd)
     rootCmd.AddCommand(commands.DashboardCmd)
-    rootCmd.AddCommand(commands.WorkerManagerCmd)
 }
 
 func main() {

@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import {
-  LayoutDashboard, FolderKanban, ListTodo, Bot, Activity, BarChart3,
-  Settings, ChevronLeft, ChevronRight, Zap, Radar, Shield, ServerCog, MessageSquareCode, Server
+  LayoutDashboard, Shield, ChevronLeft, ChevronRight, Zap
 } from 'lucide-react';
 import { SidebarNavItem } from '@/components/SidebarNavItem';
 import { MeshBackground } from '@/components/MeshBackground';
@@ -11,13 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
-  { to: '/mission-control', icon: Radar, label: 'Mission Control' },
-  { to: '/projects', icon: FolderKanban, label: 'Projects' },
-  { to: '/queue', icon: ListTodo, label: 'Work Queue' },
-  { to: '/analytics', icon: BarChart3, label: 'Analytics' },
-
-  { to: '/nodes', icon: Server, label: 'Node Mesh' },
-  { to: '/security', icon: Shield, label: 'Security' },
+  { to: '/security', icon: Shield, label: 'OpenBao Security' },
 ];
 
 export function AppLayout() {
@@ -50,7 +43,7 @@ export function AppLayout() {
                 exit={{ opacity: 0, width: 0 }}
                 className="text-sm font-bold tracking-tight text-foreground overflow-hidden whitespace-nowrap"
               >
-                Flume
+                Flume Gateway
               </motion.span>
             )}
           </AnimatePresence>
@@ -62,11 +55,6 @@ export function AppLayout() {
             <SidebarNavItem key={item.to} {...item} collapsed={collapsed} />
           ))}
         </nav>
-
-        {/* Bottom - always visible */}
-        <div className="px-2 py-3 border-t border-border space-y-1 flex-shrink-0">
-          <SidebarNavItem to="/settings" icon={Settings} label="Settings" collapsed={collapsed} />
-        </div>
 
         {/* Collapse button */}
         <button
@@ -84,7 +72,7 @@ export function AppLayout() {
           <Outlet />
         </div>
         <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center text-center">
-          <span>Flume: multi-agent planning, implementation, and review.</span>
+          <span>Flume Gateway & OpenBao Security Telemetry</span>
         </footer>
       </main>
     </div>

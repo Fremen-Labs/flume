@@ -140,40 +140,8 @@ services:
       retries: 5
       start_period: 10s
 
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        ELASTR0_INSTALL: public
-        LOGLOOM_INSTALL: public
-    depends_on:
-      dashboard:
-        condition: service_healthy
-      gateway:
-        condition: service_healthy
-    environment:
-      - ES_URL=${ES_URL}
-      - ES_API_KEY=${ES_API_KEY:-}
-      - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD}
-      - OPENBAO_ADDR=http://openbao:8200
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
-      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
-      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-}
-      - LLM_PROVIDER=${LLM_PROVIDER:-}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-}
-      - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
-      - GATEWAY_URL=http://gateway:8090
-      - DASHBOARD_URL=http://dashboard:8765
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
-      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
-    command: ["worker-manager"]
-    deploy:
-      replicas: ${FLUME_WORKER_COUNT:-2}
 
 volumes:
   es_data:
   openbao_data:
+

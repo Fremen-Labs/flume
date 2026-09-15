@@ -1,17 +1,4 @@
 // Package services orchestrates in-process Flume service lifecycle.
-//
-// Phase 5: CLI Unification — merges gateway, dashboard, and worker-manager
-// into a single binary. All three services run as goroutines coordinated
-// by errgroup.Group with context-based cancellation for clean shutdown.
-//
-// Before Phase 5:
-//   flume start → docker compose up dashboard worker (Python containers)
-//                 + exec.Command("uv", "run", "src/dashboard/server.py")
-//
-// After Phase 5:
-//   flume start → go gateway.Start(ctx)
-//                 + go dashboard.ListenAndServe()
-//                 + go workerManager.Run(ctx)
 package services
 
 import (
@@ -25,24 +12,18 @@ import (
 
 	"github.com/Fremen-Labs/flume/internal/config"
 	"github.com/Fremen-Labs/flume/internal/dashboard"
-	"github.com/Fremen-Labs/flume/internal/es"
-	"github.com/Fremen-Labs/flume/internal/worker"
 	"github.com/Fremen-Labs/flume/src/gateway"
 )
 
-// Supervisor manages the lifecycle of all in-process services.
-// It replaces the Docker Compose orchestration for the application layer
-// (gateway, dashboard, worker-manager) while infra services (ES, OpenBao)
-// remain as Docker containers.
+// Supervisor manages the lifecycle of in-process services (Gateway and Dashboard).
 type Supervisor struct {
 	cfg    *config.Config
 	logger *slog.Logger
 	mu     sync.Mutex
 
 	// Service handles for graceful shutdown
-	dashServer   *dashboard.Server
-	workerMgr    *worker.Manager
-	gatewayAddr  string
+	dashServer  *dashboard.Server
+	gatewayAddr string
 }
 
 // NewSupervisor creates a new service supervisor.
@@ -56,15 +37,12 @@ func NewSupervisor(cfg *config.Config, logger *slog.Logger) *Supervisor {
 	}
 }
 
-// StartAll launches gateway, dashboard, and worker-manager as goroutines.
-// Blocks until ctx is cancelled or any service returns a fatal error.
-// This replaces the Python subprocess spawning in start.go:243-266 (native)
-// and docker compose up dashboard worker in start.go:340-354 (Docker).
+// StartAll launches gateway and dashboard as goroutines.
 func (s *Supervisor) StartAll(ctx context.Context) error {
 	s.logger.Info("starting in-process service mesh",
 		slog.Bool("native_mode", s.cfg.NativeMode))
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
 
 	// 1. Gateway
@@ -80,12 +58,8 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 	}()
 
 	// Brief delay to let gateway bind its port before dashboard starts
-	// (dashboard proxies node/routing requests to gateway)
 	time.Sleep(500 * time.Millisecond)
 
-	// Export the gateway URL so LLM clients in workers can reach it.
-	// Without this, the LLM client defaults to "http://gateway:8090" (Docker DNS)
-	// which doesn't resolve in native mode, causing 404s on the legacy fallback path.
 	s.mu.Lock()
 	if s.gatewayAddr != "" {
 		gwURL := "http://localhost" + s.gatewayAddr
@@ -93,7 +67,6 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 			gwURL = "http://" + s.gatewayAddr
 		}
 		os.Setenv("FLUME_GATEWAY_URL", gwURL)
-		s.logger.Info("exported FLUME_GATEWAY_URL for in-process workers", slog.String("url", gwURL))
 	}
 	s.mu.Unlock()
 
@@ -109,18 +82,6 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 		}
 	}()
 
-	// 3. Worker Manager
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.logger.Info("starting worker manager service")
-		if err := s.startWorkerManager(ctx); err != nil {
-			s.logger.Error("worker manager service exited with error",
-				slog.String("error", err.Error()))
-			errCh <- fmt.Errorf("worker-manager: %w", err)
-		}
-	}()
-
 	// Wait for first error or context cancellation
 	select {
 	case err := <-errCh:
@@ -131,13 +92,11 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 		s.logger.Info("shutdown signal received, draining services")
 	}
 
-	// Graceful shutdown with 25s timeout (matches K8s terminationGracePeriodSeconds)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
 	s.shutdown(shutdownCtx)
 
-	// Wait for all goroutines to finish
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -155,24 +114,15 @@ func (s *Supervisor) StartAll(ctx context.Context) error {
 }
 
 // StartGatewayOnly runs only the gateway service.
-// Used by `flume gateway` subcommand for distributed deployments.
 func (s *Supervisor) StartGatewayOnly(ctx context.Context) error {
 	s.logger.Info("starting gateway service (standalone)")
 	return s.startGateway(ctx)
 }
 
 // StartDashboardOnly runs only the dashboard service.
-// Used by `flume dashboard` subcommand.
 func (s *Supervisor) StartDashboardOnly(ctx context.Context) error {
 	s.logger.Info("starting dashboard service (standalone)")
 	return s.startDashboard(ctx)
-}
-
-// StartWorkerOnly runs only the worker manager service.
-// Used by `flume worker` subcommand.
-func (s *Supervisor) StartWorkerOnly(ctx context.Context) error {
-	s.logger.Info("starting worker manager service (standalone)")
-	return s.startWorkerManager(ctx)
 }
 
 // ─── Service Starters ───────────────────────────────────────────────────────
@@ -190,7 +140,6 @@ func (s *Supervisor) startGateway(ctx context.Context) error {
 func (s *Supervisor) startDashboard(ctx context.Context) error {
 	cfg := dashboard.DefaultConfig()
 
-	// Override config from the unified Config struct
 	if s.cfg.DashboardHost != "" {
 		cfg.Host = s.cfg.DashboardHost
 	}
@@ -205,9 +154,6 @@ func (s *Supervisor) startDashboard(ctx context.Context) error {
 	}
 	cfg.NativeMode = s.cfg.NativeMode
 
-	// For local `flume dashboard` (or after `flume config restart --ui`) make the
-	// production UI bundle available without requiring the user to manually set
-	// FLUME_STATIC_ROOT. This greatly improves the "edit UI → test at :8765" loop.
 	if cfg.StaticRoot == "" {
 		if d := discoverLocalFrontendDist(); d != "" {
 			cfg.StaticRoot = d
@@ -216,29 +162,6 @@ func (s *Supervisor) startDashboard(ctx context.Context) error {
 	}
 
 	srv := dashboard.New(cfg, s.logger.With(slog.String("component", "dashboard")))
-
-	srv.RegisterSettingsReload(func() {
-		s.mu.Lock()
-		mgr := s.workerMgr
-		s.mu.Unlock()
-		if mgr != nil {
-			s.logger.Info("Supervisor: waking worker manager due to settings reload")
-			mgr.Wake()
-		}
-	})
-
-	srv.RegisterSweepTrigger(func(sweepName string) error {
-		s.mu.Lock()
-		mgr := s.workerMgr
-		s.mu.Unlock()
-		if mgr != nil {
-			s.logger.Info("Supervisor: triggering manual sweep on worker manager", slog.String("sweep", sweepName))
-			sweepCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			return mgr.TriggerSweep(sweepCtx, sweepName)
-		}
-		return fmt.Errorf("worker manager not running or unavailable")
-	})
 
 	s.mu.Lock()
 	s.dashServer = srv
@@ -251,24 +174,12 @@ func (s *Supervisor) startDashboard(ctx context.Context) error {
 	return nil
 }
 
-func (s *Supervisor) startWorkerManager(ctx context.Context) error {
-	esClient := es.New(s.cfg.ESURL, s.cfg.ESAPIKey, s.logger)
-	mgr := worker.NewManager(s.cfg, esClient, s.logger)
-
-	s.mu.Lock()
-	s.workerMgr = mgr
-	s.mu.Unlock()
-
-	return mgr.Run(ctx)
-}
-
 // ─── Shutdown ───────────────────────────────────────────────────────────────
 
 func (s *Supervisor) shutdown(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Dashboard has graceful HTTP shutdown
 	if s.dashServer != nil {
 		s.logger.Info("shutting down dashboard server")
 		if err := s.dashServer.Shutdown(ctx); err != nil {
@@ -277,8 +188,6 @@ func (s *Supervisor) shutdown(ctx context.Context) {
 		}
 	}
 
-	// Gateway handles its own SIGTERM/SIGINT internally
-	// Worker manager drains via context cancellation
 	s.logger.Info("service shutdown sequence complete")
 }
 
@@ -286,7 +195,7 @@ func (s *Supervisor) shutdown(ctx context.Context) {
 func (s *Supervisor) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.dashServer != nil || s.workerMgr != nil
+	return s.dashServer != nil
 }
 
 // GatewayURL returns the gateway's listen URL.
@@ -304,7 +213,6 @@ func (s *Supervisor) GatewayURL() string {
 }
 
 // SetEnvForServices sets environment variables that services read on startup.
-// This replaces the generatedEnv slice that was passed to exec.Command.
 func SetEnvForServices(envPairs []string) {
 	for _, pair := range envPairs {
 		parts := splitFirst(pair, "=")
@@ -323,10 +231,6 @@ func splitFirst(s, sep string) []string {
 	return []string{s}
 }
 
-// discoverLocalFrontendDist attempts to find a pre-built (or `npm run build`
-// produced) React dist directory next to the source tree or the running binary.
-// Used to automatically enable the SPA when running `flume dashboard` locally
-// during frontend development.
 func discoverLocalFrontendDist() string {
 	candidates := []string{
 		"src/frontend/dist",
@@ -354,3 +258,4 @@ func discoverLocalFrontendDist() string {
 	}
 	return ""
 }
+

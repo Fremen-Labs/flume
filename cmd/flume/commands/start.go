@@ -394,14 +394,7 @@ var StartCmd = &cobra.Command{
 				fmt.Println(ui.WarningGold(fmt.Sprintf("LLM config seed: %v (non-fatal)", err)))
 			}
 
-			// Start application containers (dashboard, gateway, workers).
-			// Workers scale via FLUME_WORKER_COUNT env var → compose deploy.replicas.
-			workerCount := orchestrator.ResolveWorkerCount(WorkersFlag)
-			fullEnv = append(fullEnv,
-				fmt.Sprintf("FLUME_WORKER_COUNT=%d", workerCount),
-			)
-
-			appServices := orchestrator.BuildWorkerServiceNames(workerCount)
+			appServices := []string{"dashboard", "gateway"}
 			appArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
 				appArgs = append(appArgs, "--profile", "managed_elastic")
