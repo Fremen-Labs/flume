@@ -113,7 +113,7 @@ func runStartSequence(ctx context.Context, envCfg orchestrator.EnvConfig, worker
 	fullEnv := append(os.Environ(), generatedEnv...)
 
 	// Boot data grid first
-	dataArgs := []string{"compose", "--profile", "managed_elastic", "up", "-d", "--wait", "elasticsearch", "openbao"}
+	dataArgs := []string{"compose", "--profile", "full", "up", "-d", "--wait", "elasticsearch", "openbao"}
 	dataCmd := exec.CommandContext(ctx, "docker", dataArgs...)
 	dataCmd.Env = fullEnv
 	dataCmd.Stdout = os.Stdout
@@ -137,7 +137,7 @@ func runStartSequence(ctx context.Context, envCfg orchestrator.EnvConfig, worker
 	fullEnv = append(fullEnv, fmt.Sprintf("FLUME_WORKER_COUNT=%d", workerCount))
 
 	upServices := orchestrator.BuildWorkerServiceNames(workerCount)
-	upArgs := append([]string{"compose", "--profile", "managed_elastic", "up", "-d", "--build", "--wait"}, upServices...)
+	upArgs := append([]string{"compose", "--profile", "full", "up", "-d", "--build", "--wait"}, upServices...)
 	upCmd := exec.CommandContext(ctx, "docker", upArgs...)
 	upCmd.Env = fullEnv
 	upCmd.Stdout = os.Stdout

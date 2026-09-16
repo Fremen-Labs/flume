@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"crypto/tls"
 	"net/http"
 	"sync"
 	"time"
@@ -106,7 +105,7 @@ func (m *NodeConnManager) GetTransportForNode(node *Node) *http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ForceAttemptHTTP2:     true, // Phase 1: HTTP/2 where Ollama advertises (ALPN). See report consideration of gRPC/HTTP2.
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, // Matches existing node health / ES patterns; tighten in Phase 5 mTLS.
+		TLSClientConfig:       tlsClientConfig(),
 	}
 
 	// ForceAttemptHTTP2 set above. For plain http:// Ollama (common in mesh), Go will attempt h2c

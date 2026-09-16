@@ -27,6 +27,10 @@ import (
 // HandleSkillExecute looks up and executes a registered skill by name.
 func HandleSkillExecute(registry *SkillRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if registry == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "skill registry is not ready"})
+			return
+		}
 		start := time.Now()
 		requestID := fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
 
@@ -110,6 +114,10 @@ func HandleSkillExecute(registry *SkillRegistry) http.HandlerFunc {
 // HandleSkillsList returns metadata for all registered skills.
 func HandleSkillsList(registry *SkillRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if registry == nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"skills": []interface{}{}, "total": 0})
+			return
+		}
 		log := skillslog.Log().With(slog.String("component", "skill_endpoint"))
 		log.Debug("listing registered skills")
 
@@ -124,6 +132,10 @@ func HandleSkillsList(registry *SkillRegistry) http.HandlerFunc {
 // HandleSkillsReload triggers a hot-reload of all skills from disk.
 func HandleSkillsReload(registry *SkillRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if registry == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "skill registry is not ready"})
+			return
+		}
 		log := skillslog.Log().With(slog.String("component", "skill_endpoint"))
 		log.Info("skill hot-reload triggered via API")
 

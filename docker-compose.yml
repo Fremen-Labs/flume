@@ -1,33 +1,47 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Flume core stack — OpenBao, Elasticsearch, Gateway, console
+# Flume Core — OpenBao, Elasticsearch, Gateway, console
 #
-# Default `docker compose up` starts only these four services.
-# The heavy dashboard + workers remain behind profile `full` for flume start.
-#
-# Usage:
 #   docker compose up -d --build --wait
-#   open http://localhost:8765
+#   open http://127.0.0.1:8765
+#
+# Agent mesh (dashboard + workers) is opt-in: --profile full
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
   openbao:
     image: hashicorp/vault:1.15
     container_name: flume-openbao
-    command: server -dev -dev-listen-address=0.0.0.0:8200
+    command: server
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${OPENBAO_TOKEN:-flume-dev-root}
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       VAULT_ADDR: http://127.0.0.1:8200
     ports:
-      - "${VAULT_PORT:-8200}:8200"
+      - "127.0.0.1:${VAULT_PORT:-8200}:8200"
     cap_add:
       - IPC_LOCK
+    volumes:
+      - openbao_data:/vault/file
+      - ./config:/vault/config:ro
     healthcheck:
-      test: ["CMD", "vault", "status"]
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 >/dev/null 2>&1; rc=$$?; if [ $$rc -eq 0 ] || [ $$rc -eq 2 ]; then exit 0; else exit 1; fi"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 5s
+
+  openbao-init:
+    image: hashicorp/vault:1.15
+    container_name: flume-openbao-init
+    user: "0:0"
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://openbao:8200
+    volumes:
+      - openbao_init:/init
+      - ./scripts/openbao-init.sh:/openbao-init.sh:ro
+    entrypoint: ["/bin/sh", "/openbao-init.sh"]
+    restart: "no"
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
@@ -39,7 +53,7 @@ services:
       - ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD:-flume-dev-elastic}
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
-      - "${ES_PORT:-9200}:9200"
+      - "127.0.0.1:${ES_PORT:-9200}:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
@@ -53,19 +67,20 @@ services:
     build:
       context: .
       dockerfile: src/gateway/Dockerfile
-    image: flume-gateway:stub
+    image: flume-gateway:core
     container_name: flume-gateway
     depends_on:
       elasticsearch:
         condition: service_healthy
-      openbao:
-        condition: service_healthy
+      openbao-init:
+        condition: service_completed_successfully
     environment:
       - ES_URL=http://elasticsearch:9200
       - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD:-flume-dev-elastic}
       - OPENBAO_ADDR=http://openbao:8200
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-root}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-flume-dev-admin}
       - LLM_PROVIDER=${LLM_PROVIDER:-}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-}
@@ -74,10 +89,12 @@ services:
       - GATEWAY_PORT=8090
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - openbao_init:/openbao-init:ro
     ports:
-      - "${GATEWAY_PORT:-8090}:8090"
+      - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8090/health"]
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8090/health"]
       interval: 10s
       timeout: 5s
       retries: 8
@@ -94,16 +111,17 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+    environment:
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-flume-dev-admin}
     ports:
-      - "${DASHBOARD_PORT:-8765}:8765"
+      - "127.0.0.1:${DASHBOARD_PORT:-8765}:8765"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8765/"]
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8765/health"]
       interval: 10s
       timeout: 5s
       retries: 8
       start_period: 10s
 
-  # ── Full agent mesh (opt-in) ──────────────────────────────────────────────
   dashboard:
     profiles: ["full"]
     build:
@@ -120,24 +138,14 @@ services:
         condition: service_healthy
     environment:
       - ES_URL=${ES_URL:-http://elasticsearch:9200}
-      - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD:-flume-dev-elastic}
       - OPENBAO_ADDR=http://openbao:8200
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-root}
-      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
-      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-flume-dev-admin}
       - FLUME_STATIC_ROOT=/app/frontend/dist
-      - LLM_PROVIDER=${LLM_PROVIDER:-}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-}
-      - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
       - GATEWAY_URL=http://gateway:8090
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
-      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     ports:
-      - "8766:8765"
+      - "127.0.0.1:8766:8765"
     command: ["dashboard"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8765/api/health"]
@@ -159,25 +167,15 @@ services:
         condition: service_healthy
     environment:
       - ES_URL=${ES_URL:-http://elasticsearch:9200}
-      - ES_API_KEY=${ES_API_KEY:-}
       - FLUME_ELASTIC_PASSWORD=${FLUME_ELASTIC_PASSWORD:-flume-dev-elastic}
       - OPENBAO_ADDR=http://openbao:8200
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-flume-dev-root}
-      - BAO_SECRET_ID=${BAO_SECRET_ID:-}
-      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-}
-      - LLM_PROVIDER=${LLM_PROVIDER:-}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-}
-      - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LOCAL_OLLAMA_BASE_URL=${LOCAL_OLLAMA_BASE_URL:-}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-}
+      - FLUME_ADMIN_TOKEN=${FLUME_ADMIN_TOKEN:-flume-dev-admin}
       - GATEWAY_URL=http://gateway:8090
       - DASHBOARD_URL=http://dashboard:8765
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - ADO_PERSONAL_ACCESS_TOKEN=${ADO_PERSONAL_ACCESS_TOKEN:-}
-      - FLUME_PLANNER_TIMEOUT_SECONDS=${FLUME_PLANNER_TIMEOUT_SECONDS:-}
     command: ["worker-manager"]
-    deploy:
-      replicas: ${FLUME_WORKER_COUNT:-2}
 
 volumes:
   es_data:
+  openbao_data:
+  openbao_init:

@@ -68,7 +68,7 @@ export default function CoreOverview() {
           icon={Radio}
           loading={isLoading}
           error={error ? String(error) : data?.gateway?.error}
-          helpText="LLM router on :8090. This console proxies /api and /v1 to it."
+          helpText="This console proxies /api and /v1 to the gateway."
           glow={data?.gateway?.status === 'ok'}
         />
         <GlassMetricCard
@@ -85,7 +85,7 @@ export default function CoreOverview() {
           icon={KeyRound}
           loading={isLoading}
           error={data?.openbao?.error}
-          helpText="Secret backend for LLM credentials. Dev token is injected at compose time."
+          helpText="Secret backend for LLM credentials. Keys persist in the OpenBao volume."
         />
         <GlassMetricCard
           title="Node mesh"

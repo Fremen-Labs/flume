@@ -34,7 +34,7 @@ This is a hard reset that requires explicit confirmation.`,
 		// --- Standard destroy: stop ALL Flume containers ---
 		// docker compose down removes all services defined in the compose file.
 		fmt.Println(ui.CyberGradient("Removing Flume containers and volumes (openbao, workers, dashboard, elasticsearch)..."))
-		downArgs := []string{"compose", "--profile", "managed_elastic", "down", "-v"}
+		downArgs := []string{"compose", "--profile", "full", "down", "-v"}
 		c := exec.CommandContext(ctx, "docker", downArgs...)
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
@@ -55,8 +55,8 @@ This is a hard reset that requires explicit confirmation.`,
 
 			fmt.Println(ui.WarningGold("⚡ PURGE MODE: Removing all Flume Docker images..."))
 			// Remove the unified Go flume image (used by dashboard, gateway, worker services)
-			for _, img := range []string{"flume-dashboard", "flume-gateway", "flume-worker"} {
-				rmiCmd := exec.CommandContext(ctx, "docker", "rmi", img+":latest")
+			for _, img := range []string{"flume-gateway:core", "flume-frontend:core", "flume-dashboard", "flume-worker"} {
+				rmiCmd := exec.CommandContext(ctx, "docker", "rmi", img)
 				rmiCmd.Stderr = os.Stderr
 				if err := rmiCmd.Run(); err != nil {
 					fmt.Println(ui.WarningGold(fmt.Sprintf("  Image %s not found (skipped)", img)))

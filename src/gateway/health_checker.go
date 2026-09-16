@@ -45,6 +45,7 @@ type HealthChecker struct {
 	httpClient *http.Client
 	breakers   sync.Map // map[string]*nodeBreaker
 	stopCh     chan struct{}
+	stopOnce   sync.Once
 }
 
 // nodeBreaker tracks per-node circuit breaker state.
@@ -100,7 +101,12 @@ func (hc *HealthChecker) Start(ctx context.Context) {
 
 // Stop signals the health checker to shut down.
 func (hc *HealthChecker) Stop() {
-	close(hc.stopCh)
+	if hc == nil {
+		return
+	}
+	hc.stopOnce.Do(func() {
+		close(hc.stopCh)
+	})
 }
 
 // probeAll iterates all registered nodes and probes each one.

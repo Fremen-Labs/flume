@@ -12,13 +12,16 @@ export default defineConfig(({ mode }) => ({
     },
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8765',
+        target: 'http://127.0.0.1:8090',
         changeOrigin: true,
       },
-      '/ws': {
-        target: 'http://127.0.0.1:8765',
+      '/v1': {
+        target: 'http://127.0.0.1:8090',
         changeOrigin: true,
-        ws: true,
+      },
+      '/health': {
+        target: 'http://127.0.0.1:8090',
+        changeOrigin: true,
       },
     },
   },

@@ -18,7 +18,7 @@ FROM nginx:1.27-alpine
 # wget is used by the compose/image healthcheck.
 RUN apk add --no-cache wget
 
-COPY src/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY src/frontend/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /dist /usr/share/nginx/html
 
 EXPOSE 8765

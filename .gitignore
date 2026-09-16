@@ -1,6 +1,7 @@
 # Secrets / local config
 .env
 .env.*
+var/
 
 # Logs
 *.log

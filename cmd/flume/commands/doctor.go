@@ -150,13 +150,24 @@ func fetchElasticsearch(client *http.Client, esURL string, report *DiagnosticsRe
 	report.mu.Lock()
 	defer report.mu.Unlock()
 
-	respES, err := client.Get(esURL + "/_stats/docs")
+	req, reqErr := http.NewRequest(http.MethodGet, strings.TrimRight(esURL, "/")+"/_cluster/health", nil)
+	if reqErr != nil {
+		return
+	}
+	pass := os.Getenv("FLUME_ELASTIC_PASSWORD")
+	if pass == "" {
+		pass = "flume-dev-elastic"
+	}
+	req.SetBasicAuth("elastic", pass)
+	respES, err := client.Do(req)
 	if err == nil {
 		defer respES.Body.Close()
-		report.ElasticOnline = true
-		var e ESStatsData
-		if json.NewDecoder(respES.Body).Decode(&e) == nil {
-			report.ElasticASTCount = e.All.Primaries.Docs.Count
+		report.ElasticOnline = respES.StatusCode == 200
+		if report.ElasticOnline {
+			var h ESHealthData
+			if json.NewDecoder(respES.Body).Decode(&h) == nil {
+				report.ElasticStatus = h.Status
+			}
 		}
 	}
 }
@@ -166,13 +177,28 @@ func fetchDashboard(client *http.Client, apiURL string, report *DiagnosticsRepor
 	report.mu.Lock()
 	defer report.mu.Unlock()
 
-	// Query both system-state and snapshot efficiently.
+	if health, err := client.Get(apiURL + "/health"); err == nil {
+		health.Body.Close()
+		if health.StatusCode == 200 {
+			report.ApiOnline = true
+		}
+	}
+	if stack, err := client.Get(apiURL + "/api/stack"); err == nil {
+		stack.Body.Close()
+		if stack.StatusCode == 200 {
+			report.ApiOnline = true
+		}
+	}
+
+	// Query both system-state and snapshot efficiently (full mesh only).
 	statResp, errStat := client.Get(apiURL + "/api/system-state")
 	snapResp, errSnap := client.Get(apiURL + "/api/snapshot")
 
 	if errStat == nil {
 		defer statResp.Body.Close()
-		report.ApiOnline = true
+		if statResp.StatusCode == 200 {
+			report.ApiOnline = true
+		}
 		var s SystemState
 		if json.NewDecoder(statResp.Body).Decode(&s) == nil {
 			report.AgentsReady = s.StandbyNodes
@@ -559,11 +585,11 @@ the planner timeout before users hit "Plan New Work".`,
 }
 
 func init() {
-	DoctorCmd.Flags().StringP("es-url", "e", "https://localhost:9200", "Elasticsearch Diagnostic Endpoint")
+	DoctorCmd.Flags().StringP("es-url", "e", "http://127.0.0.1:9200", "Elasticsearch Diagnostic Endpoint")
 	DoctorCmd.Flags().StringP("vault-url", "v", "http://localhost:8200", "OpenBao Telemetry Endpoint")
-	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://localhost:8765", "Flume API Dashboard Endpoint")
+	DoctorCmd.Flags().StringP("dashboard-url", "d", "http://127.0.0.1:8765", "Flume core console / API")
 	DoctorCmd.Flags().StringP("llm-url", "l", "http://host.docker.internal:52415/v1", "Local LLM Inference Engine Endpoint")
-	DoctorCmd.Flags().StringP("gateway-url", "g", "http://localhost:8090", "Flume Gateway Endpoint (used by --deep)")
+	DoctorCmd.Flags().StringP("gateway-url", "g", "http://127.0.0.1:8090", "Flume Gateway Endpoint (used by --deep)")
 	DoctorCmd.Flags().BoolP("json", "j", false, "Output explicit raw JSON payload without any rendering")
 	DoctorCmd.Flags().Bool("deep", false, "Run a timed LLM inference probe to measure model speed")
 	DoctorCmd.Flags().Bool("logloom", false, "Run Logloom graph diagnostics on worker/dashboard packages (Phase 0 baseline + coverage gate); also verifies elastro+logloom binary presence via native + /opt/venv paths for container worker consistency")

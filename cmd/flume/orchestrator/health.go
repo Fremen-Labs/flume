@@ -39,7 +39,7 @@ func PollHealth(url string) <-chan HealthStatus {
 func AwaitOrchestration() error {
 	healthUrl := os.Getenv("FLUME_HEALTH_URL")
 	if healthUrl == "" {
-		healthUrl = "http://localhost:8765/api/health"
+		healthUrl = "http://127.0.0.1:8765/health"
 	}
 
 	fmt.Print(ui.WarningGold("Awaiting Flume Ecosystem Convergence "))
@@ -47,7 +47,7 @@ func AwaitOrchestration() error {
 	statusCh := PollHealth(healthUrl)
 	for status := range statusCh {
 		if status.Active {
-			fmt.Println(ui.SuccessBlue("\n[FLUME ACTIVE] Dashboard & Workers globally synchronized."))
+			fmt.Println(ui.SuccessBlue("\n[FLUME ACTIVE] Core stack healthy."))
 			return nil
 		}
 		if status.Timeout {

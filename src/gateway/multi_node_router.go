@@ -3,7 +3,6 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -287,7 +286,7 @@ func (m *MultiNodeRouter) executeLocalOnly(ctx context.Context, req *ChatRequest
 			client := &http.Client{
 				Timeout: 3 * time.Second,
 				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+					TLSClientConfig: tlsClientConfig(),
 				},
 			}
 			resp, err := client.Do(reqES)

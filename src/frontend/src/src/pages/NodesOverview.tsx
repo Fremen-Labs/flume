@@ -463,11 +463,12 @@ export default function NodesOverview() {
   });
 
   // ── Routing Policy queries ─────────────────────────────────────────────
-  const { data: policy, isLoading: policyLoading } = useQuery<RoutingPolicy>({
+  const { data: policy, isLoading: policyLoading, isError: policyError, isSuccess: policyReady } = useQuery<RoutingPolicy>({
     queryKey: ['routing-policy'],
     queryFn: fetchRoutingPolicy,
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: false,
   });
 
   const { data: frontierCatalog } = useQuery<FrontierModelsResponse>({
@@ -499,11 +500,13 @@ export default function NodesOverview() {
   };
 
   const handleModeChange = (mode: RoutingMode) => {
+    if (!policyReady || policyError) return;
     const updated = { ...currentPolicy, mode };
     savePolicyMut.mutate(updated);
   };
 
   const handleWeightChange = (idx: number, weight: number) => {
+    if (!policyReady || policyError) return;
     const mix = [...currentPolicy.frontier_mix];
     mix[idx] = { ...mix[idx], weight };
     const updated = { ...currentPolicy, frontier_mix: mix };
@@ -511,6 +514,7 @@ export default function NodesOverview() {
   };
 
   const handleBudgetChange = (idx: number, budget: number) => {
+    if (!policyReady || policyError) return;
     const mix = [...currentPolicy.frontier_mix];
     mix[idx] = { ...mix[idx], budget_usd: budget };
     const updated = { ...currentPolicy, frontier_mix: mix };

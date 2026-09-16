@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -138,7 +137,7 @@ func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 		httpClient: &http.Client{
 			Timeout: 3 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: tlsClientConfig(),
 			},
 		},
 		EnsembleTimeout: 90 * time.Second,
@@ -164,29 +163,51 @@ func (c *Config) Refresh(ctx context.Context) {
 	}
 	defer c.refreshing.Store(0)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Double-check after acquiring write lock (another goroutine may have just finished)
+	c.mu.RLock()
 	if time.Since(c.lastRefresh) < c.cacheTTL {
+		c.mu.RUnlock()
 		return
 	}
+	c.mu.RUnlock()
 
 	log := WithContext(ctx)
 	defer LogDuration(ctx, "config_refresh")()
 
-	c.loadSystemConfig(ctx, log)
-	c.loadGlobalConfig(ctx, log)
-	c.loadAgentModels(ctx, log)
-	c.loadCredentials(ctx, log)
-	c.loadRoutingPolicy(ctx, log)
+	work := Config{
+		esURL:             c.esURL,
+		httpClient:        c.httpClient,
+		cacheTTL:          c.cacheTTL,
+		EnsembleTimeout:   c.EnsembleTimeout,
+		PrometheusEnabled: true,
+		AgentModels:       make(map[string]AgentModelConfig),
+		Credentials:       make(map[string]CredentialMeta),
+	}
+	work.loadSystemConfig(ctx, log)
+	work.loadGlobalConfig(ctx, log)
+	work.loadAgentModels(ctx, log)
+	work.loadCredentials(ctx, log)
+	work.loadRoutingPolicy(ctx, log)
 
+	c.mu.Lock()
+	c.PrometheusEnabled = work.PrometheusEnabled
+	c.DefaultProvider = work.DefaultProvider
+	c.DefaultModel = work.DefaultModel
+	c.DefaultBaseURL = work.DefaultBaseURL
+	c.EnsembleEnabled = work.EnsembleEnabled
+	c.EnsembleSize = work.EnsembleSize
+	c.EnsembleTimeout = work.EnsembleTimeout
+	c.FrontierFallbackModel = work.FrontierFallbackModel
+	c.AgentModels = work.AgentModels
+	c.Credentials = work.Credentials
+	c.RoutingPolicy = work.RoutingPolicy
 	c.lastRefresh = time.Now()
+	c.mu.Unlock()
+
 	log.Debug("configuration refreshed",
-		slog.String("provider", c.DefaultProvider),
-		slog.String("model", c.DefaultModel),
-		slog.Int("agent_models", len(c.AgentModels)),
-		slog.Int("credentials", len(c.Credentials)),
+		slog.String("provider", work.DefaultProvider),
+		slog.String("model", work.DefaultModel),
+		slog.Int("agent_models", len(work.AgentModels)),
+		slog.Int("credentials", len(work.Credentials)),
 	)
 }
 
@@ -512,6 +533,77 @@ func (c *Config) esGet(ctx context.Context, path string) (map[string]interface{}
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return result, nil
+}
+
+func (c *Config) esPut(ctx context.Context, path string, body []byte) error {
+	if c.esURL == "" {
+		return fmt.Errorf("elasticsearch url is empty")
+	}
+	url := c.esURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	esSetAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("es request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Config) ensureIndex(ctx context.Context, name, mapping string) error {
+	url := c.esURL + "/" + name
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return err
+	}
+	esSetAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	return c.esPut(ctx, "/"+name, []byte(mapping))
+}
+
+// EnsureCoreIndexes creates the indexes the core gateway writes if they are missing.
+func (c *Config) EnsureCoreIndexes(ctx context.Context) error {
+	if c.esURL == "" {
+		return nil
+	}
+	replica0 := `{"settings":{"number_of_replicas":0}}`
+	indexes := []struct {
+		name string
+		body string
+	}{
+		{"flume-agent-models", `{"settings":{"number_of_replicas":0},"mappings":{"properties":{"roles":{"type":"object","enabled":false},"updated_at":{"type":"date"}}}}`},
+		{"flume-llm-config", replica0},
+		{"flume-llm-credentials", replica0},
+		{"flume-routing-policy", replica0},
+		{"flume-settings", replica0},
+		{"agent-token-telemetry", replica0},
+		{"agent-security-audits", replica0},
+	}
+	var first error
+	for _, idx := range indexes {
+		if err := c.ensureIndex(ctx, idx.name, idx.body); err != nil {
+			if first == nil {
+				first = fmt.Errorf("%s: %w", idx.name, err)
+			}
+			Log().Warn("core index ensure failed", slog.String("index", idx.name), slog.String("error", err.Error()))
+		}
+	}
+	return first
 }
 
 // extractSource pulls the _source field from an ES GET response.

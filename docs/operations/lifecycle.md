@@ -20,15 +20,13 @@ cd flume
 go build -o flume cmd/flume/main.go
 sudo cp ./flume /usr/local/bin/flume
 
-# 3. Boot the Ecosystem via Hub-and-Spoke Wizard
-flume start
-
-# OR - Programmatically Boot via declarative IaC
-flume start --config ./flume-mesh.yml
+# 3. Boot Flume Core
+flume up
+# or: docker compose up -d --build --wait
 ```
 
 > [!NOTE]
-> During a cold boot, Flume automatically provisions the OpenBao KMS instance and stores Unseal Keys and Root Tokens natively. The interactive `flume start` wizard utilizes a **Menu-Driven Hub** that allows you to continuously append external Cloud Frontier models (Anthropic, Grok, Gemini) onto the exact same topological plane securely alongside your local GPU nodes (Ollama/Exo). All bindings natively parse array matrices directly down onto Elasticsearch without writing a single local configuration file manually.
+> Core is OpenBao, Elasticsearch, Gateway, and the console at http://127.0.0.1:8765. The agent mesh is not started by default. `flume start` without `--full` now refuses so it cannot boot the old stack by accident.
 
 ## 2. Update & Synchronization (Day 2)
 
@@ -38,10 +36,10 @@ Because the Python AI Workers and the Dashboard execute statelessly inside the D
 1. Pull the latest commits from the repository: `git pull origin main`
 2. If `cmd/flume/main.go` or other orchestrator binaries have changed, recompile:
    `go build -o flume cmd/flume/main.go && sudo cp ./flume /usr/local/bin/flume`
-3. Execute `flume start` (or gracefully restart the containers `docker compose restart`).
+3. Execute `flume up` (or `docker compose up -d --build --wait`). The legacy agent mesh is `flume start --full`, not the default.
 
 > [!TIP]
-> Executing `flume start` over an existing active installation behaves as an **idempotent sync**. It applies new environment variables or container configurations without tearing down your persistent volumes.
+> Executing `flume up` over an existing installation is idempotent: compose reapplies container configuration without deleting OpenBao or Elasticsearch volumes.
 
 ## 3. Destruction (The Annihilation Protocol)
 

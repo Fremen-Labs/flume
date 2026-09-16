@@ -31,25 +31,23 @@ The Flume V3 ecosystem is managed entirely by a singular, high-performance Go CL
 > **Docker Desktop or OrbStack is mandatory.** The Go CLI only orchestrates containers—zero host pollution.
 
 ```bash
-# 1. Download the ecosystem
+# 1. Clone
 git clone https://github.com/Fremen-Labs/flume.git
 cd flume
 
-# 2. Compile and Install the CLI Native Engine 
+# 2. Optional: install the CLI
 go build -o flume cmd/flume/main.go
-sudo cp ./flume /usr/local/bin/flume
 
-# 3. Boot the Matrix
-# Start the Hub-and-Spoke interactive configuration wizard
-flume start 
-
-# OR - Boot programmatically using Infrastructure-as-Code (IaC) YAML
-flume start --config ./flume-mesh.yml
+# 3. Start Flume Core (OpenBao, Elasticsearch, Gateway, console)
+flume up
+# or: docker compose up -d --build --wait
 ```
 
-> **Note on Configuration:** The interactive wizard loops infinitely, allowing you to seamlessly integrate both public Frontier API endpoints (Grok, Anthropic, Gemini) and Local hardware nodes (Ollama/Exo) on the exact same topological plane securely.
+The console is at [http://127.0.0.1:8765](http://127.0.0.1:8765). Ports bind to loopback by default.
 
-*The Flume orchestrator dashboard will initialize concurrently at [http://localhost:8765](http://localhost:8765).*
+The agent mesh (dashboard + workers) is not the default stack. Use `docker compose --profile full up` only when you explicitly want it. `flume start` without `--full` now refuses so it cannot boot the old mesh by accident.
+
+Add local Ollama nodes on the Nodes page. Frontier API keys are stored in OpenBao via the gateway (`POST /api/credentials`).
 
 ---
 

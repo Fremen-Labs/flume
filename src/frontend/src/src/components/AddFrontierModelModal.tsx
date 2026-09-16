@@ -26,6 +26,7 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
   const [isNewCredential, setIsNewCredential] = useState(false);
   const [newApiKey, setNewApiKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [budget, setBudget] = useState(50);
   const [isHoveringBudget, setIsHoveringBudget] = useState(false);
 
@@ -52,10 +53,11 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
     
     let finalCredId = credentialId ?? '';
     setIsSubmitting(true);
-    
+    setSubmitError(null);
+
     try {
       if (isNewCredential && newApiKey) {
-        const res = await fetch('/api/settings/llm/credentials', {
+        const res = await fetch('/api/credentials', {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({
@@ -65,7 +67,7 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
              apiKey: newApiKey,
            }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Failed to save credential');
         if (data.credential_id) {
           finalCredId = data.credential_id;
@@ -83,8 +85,11 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
       });
       onClose();
     } catch (err) {
-      log.error('handleAdd', 'Failed to add frontier model', { provider: providerId, model, error: String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      log.error('handleAdd', 'Failed to add frontier model', { provider: providerId, model, error: message });
+      setSubmitError(message);
       setIsSubmitting(false);
+      return;
     }
   };
 
@@ -276,12 +281,16 @@ export function AddFrontierModelModal({ catalog, onClose, onAdd }: Props) {
                               className="overflow-hidden pt-2"
                             >
                               <input
-                                type="text"
+                                type="password"
+                                autoComplete="off"
                                 placeholder={`Enter ${selectedProvider?.label || providerId} API Key...`}
                                 value={newApiKey}
                                 onChange={(e) => setNewApiKey(e.target.value)}
                                 className="w-full bg-slate-900/50 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500/50 placeholder:text-slate-600 font-mono"
                               />
+                              {submitError && (
+                                <p className="text-xs text-red-400 mt-2">{submitError}</p>
+                              )}
                             </motion.div>
                           )}
                         </AnimatePresence>

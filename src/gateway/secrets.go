@@ -297,6 +297,35 @@ func (s *SecretStore) readKV(ctx context.Context, path string) (map[string]inter
 	return result.Data.Data, nil
 }
 
+// WriteKV writes a KV v2 secret. Values are never logged.
+func (s *SecretStore) WriteKV(ctx context.Context, path string, data map[string]string) error {
+	if s.token == "" {
+		return fmt.Errorf("OPENBAO_TOKEN is empty")
+	}
+	payload, err := json.Marshal(map[string]interface{}{"data": data})
+	if err != nil {
+		return fmt.Errorf("marshal secret: %w", err)
+	}
+	url := fmt.Sprintf("%s/v1/%s", s.addr, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", s.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("openbao request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // auditAccess writes a security audit record to Elasticsearch.
 // Only logs key NAMES, never values.
 func (s *SecretStore) auditAccess(ctx context.Context, secretPath string, data map[string]interface{}) {

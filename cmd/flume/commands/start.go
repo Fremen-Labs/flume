@@ -26,6 +26,7 @@ var (
 	WorkersFlag        string
 	ConfigFlag         string
 	PlannerTimeoutFlag int
+	StartFullFlag      bool
 )
 
 func isHeadlessEnv(getenv func(string) string, getstat func() (os.FileInfo, error)) bool {
@@ -40,6 +41,9 @@ var StartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Initiate Flume V3 Edge Orchestrator",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !StartFullFlag {
+			return fmt.Errorf("the default product is Flume Core — run `flume up` (docker compose). The legacy agent mesh is `flume start --full` and is not the default stack")
+		}
 		ctx := cmd.Context()
 		fmt.Println(ui.BootPhase("Booting Flume orchestrator..."))
 
@@ -214,7 +218,7 @@ var StartCmd = &cobra.Command{
 
 			dockerArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
-				dockerArgs = append(dockerArgs, "--profile", "managed_elastic")
+				dockerArgs = append(dockerArgs, "--profile", "full")
 			}
 			dockerArgs = append(dockerArgs, "up", "-d", "--wait")
 			if !envCfg.ExternalElastic {
@@ -302,7 +306,7 @@ var StartCmd = &cobra.Command{
 
 			dockerArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
-				dockerArgs = append(dockerArgs, "--profile", "managed_elastic")
+				dockerArgs = append(dockerArgs, "--profile", "full")
 			}
 			dockerArgs = append(dockerArgs, "up", "-d", "--build", "--wait")
 			if !envCfg.ExternalElastic {
@@ -388,7 +392,7 @@ var StartCmd = &cobra.Command{
 			appServices := orchestrator.BuildWorkerServiceNames(workerCount)
 			appArgs := []string{"compose"}
 			if !envCfg.ExternalElastic {
-				appArgs = append(appArgs, "--profile", "managed_elastic")
+				appArgs = append(appArgs, "--profile", "full")
 			}
 			appArgs = append(appArgs, "up", "-d", "--build", "--wait")
 			appArgs = append(appArgs, appServices...)
@@ -507,4 +511,5 @@ func init() {
 	StartCmd.Flags().StringVar(&WorkersFlag, "workers", "", `Number of workers: "2" (default), "4", "auto" (detect from hardware)`)
 	StartCmd.Flags().StringVarP(&ConfigFlag, "config", "c", "", "Path to flume-mesh.yml IaC document for programmatic booting")
 	StartCmd.Flags().IntVar(&PlannerTimeoutFlag, "planner-timeout", 0, "Override the LLM planner timeout in seconds (default: 300). Increase for slow local models.")
+	StartCmd.Flags().BoolVar(&StartFullFlag, "full", false, "Boot the legacy agent mesh (dashboard + workers) in addition to core")
 }

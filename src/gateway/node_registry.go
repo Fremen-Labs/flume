@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -115,7 +114,7 @@ type NodeRegistry struct {
 // secrets may be nil (auth load becomes a no-op for all nodes — the normal
 // path for unauthenticated local meshes).
 func NewNodeRegistry(esURL string, secrets *SecretStore) *NodeRegistry {
-	if esURL == "" {
+	if esURL == "" && !GatewayStubMode() {
 		esURL = "http://elasticsearch:9200"
 	}
 	return &NodeRegistry{
@@ -125,7 +124,7 @@ func NewNodeRegistry(esURL string, secrets *SecretStore) *NodeRegistry {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: tlsClientConfig(),
 			},
 		},
 	}

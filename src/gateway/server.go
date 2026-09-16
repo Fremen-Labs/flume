@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	crypto_rand "crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -73,6 +72,7 @@ type Server struct {
 	// The /readyz probe returns 503 while this is true so that
 	// Kubernetes removes the pod from Service endpoints before drain.
 	shuttingDown atomic.Bool
+	cancelRun   context.CancelFunc
 }
 
 // globalMaxConcurrent is the total cross-provider cap. Override via
@@ -106,6 +106,7 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 		planPMRateLimiter:   NewPlanPMRateLimiter(3), // 3 PM decomp attempts per plan per minute (tunable)
 		secrets:             secrets,
 		connMgr:             connMgr,
+		skills:              skills.NewSkillRegistry(),
 	}
 	s.mux.HandleFunc("POST /v1/chat", s.handleChat)
 	s.mux.HandleFunc("POST /v1/chat/tools", s.handleChatTools)
@@ -116,16 +117,20 @@ func NewServer(config *Config, secrets *SecretStore) *Server {
 	s.mux.HandleFunc("POST /internal/level", s.handleLogLevel)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
-	// Inception Skills endpoints
 	s.mux.HandleFunc("POST /skills/execute/", skills.HandleSkillExecute(s.skills))
 	s.mux.HandleFunc("GET /skills", skills.HandleSkillsList(s.skills))
 	s.mux.HandleFunc("POST /skills/reload", skills.HandleSkillsReload(s.skills))
+	s.mux.HandleFunc("POST /api/credentials", s.handleCredentials)
+	s.mux.HandleFunc("POST /api/settings/llm/credentials", s.handleCredentials)
 
 	return s
 }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -172,6 +177,15 @@ func (s *Server) ListenAndServe(addr string) error {
 
 	// Mark as shutting down so /readyz returns 503 immediately.
 	s.shuttingDown.Store(true)
+	if s.cancelRun != nil {
+		s.cancelRun()
+	}
+	if s.healthChecker != nil {
+		s.healthChecker.Stop()
+	}
+	if s.connMgr != nil {
+		s.connMgr.CloseAll()
+	}
 
 	// Allow 25s for in-flight requests (K8s default terminationGracePeriodSeconds=30).
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
@@ -746,26 +760,21 @@ func StartGateway(addr string) error {
 	config := NewConfig("", 5*time.Second)
 	secrets := NewSecretStore("", "", "", 60*time.Second)
 
-	ctx := ContextWithLogger(context.Background(), log)
+	baseCtx, cancelRun := context.WithCancel(ContextWithLogger(context.Background(), log))
+	ctx := baseCtx
 
 	if stub {
 		log.Info("gateway stub mode: skipping Elasticsearch and OpenBao bootstrap")
 	} else {
-		// Pre-warm config from ES
 		config.Refresh(ctx)
-
-		// Hydrate global secrets from OpenBao on startup
 		secrets.GetGlobalSecrets(ctx)
-
-		// Ensure agent-models index exists
-		if err := config.EnsureAgentModelsIndex(ctx); err != nil {
-			log.Warn("flume-agent-models index verification failed — index should be pre-created by `flume start`",
-				slog.String("error", err.Error()),
-			)
+		if err := config.EnsureCoreIndexes(ctx); err != nil {
+			log.Warn("core index bootstrap incomplete", slog.String("error", err.Error()))
 		}
 	}
 
 	server := NewServer(config, secrets)
+	server.cancelRun = cancelRun
 
 	// ── Distributed Node Mesh initialization ────────────────────────────
 	esURL := os.Getenv("ES_URL")
@@ -831,8 +840,6 @@ func StartGateway(addr string) error {
 	server.mux.HandleFunc("PUT /api/routing-policy", server.handlePutRoutingPolicy)
 	server.mux.HandleFunc("GET /api/frontier-models", server.handleGetFrontierModels)
 
-	// Initialize Inception Skill Registry
-	server.skills = skills.NewSkillRegistry()
 	if err := server.skills.LoadAll(ctx); err != nil {
 		log.Warn("skill registry initialization failed (non-fatal)",
 			slog.String("error", err.Error()),
@@ -1435,7 +1442,7 @@ func (s *Server) persistTokenTelemetry(workerName, workerRole, provider, model s
 	}
 
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: tlsClientConfig(),
 	}
 	client := &http.Client{
 		Timeout:   5 * time.Second,
