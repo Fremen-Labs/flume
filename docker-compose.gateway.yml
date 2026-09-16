@@ -1,0 +1,3 @@
+# Back-compat alias for the core stack defined in docker-compose.yml.
+include:
+  - path: docker-compose.yml

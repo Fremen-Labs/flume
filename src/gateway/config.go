@@ -107,12 +107,23 @@ type CredentialMeta struct {
 	HasKey   bool   `json:"hasKey"`
 }
 
+// GatewayStubMode reports whether the process is running as a gateway-only
+// stub with no Elasticsearch or OpenBao. Enabled by FLUME_GATEWAY_STUB=1.
+func GatewayStubMode() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FLUME_GATEWAY_STUB"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // NewConfig creates a Config with the given ES URL and cache TTL.
 func NewConfig(esURL string, cacheTTL time.Duration) *Config {
 	if esURL == "" {
 		esURL = os.Getenv("ES_URL")
 	}
-	if esURL == "" {
+	if esURL == "" && !GatewayStubMode() {
 		esURL = "http://elasticsearch:9200"
 	}
 	if cacheTTL == 0 {
@@ -527,16 +538,32 @@ func (c *Config) EnsureAgentModelsIndex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	esSetAuth(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		return nil // index exists
+		return nil
 	}
 
-	Log().Warn("flume-agent-models index not found — expected to be pre-created by `flume start`")
-	return fmt.Errorf("flume-agent-models index missing — run `flume start` to bootstrap")
+	body := `{"settings":{"number_of_replicas":0},"mappings":{"properties":{"roles":{"type":"object","enabled":false},"updated_at":{"type":"date"}}}}`
+	put, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	put.Header.Set("Content-Type", "application/json")
+	esSetAuth(put)
+	putResp, err := c.httpClient.Do(put)
+	if err != nil {
+		return err
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(putResp.Body, 512))
+		return fmt.Errorf("create flume-agent-models: HTTP %d: %s", putResp.StatusCode, string(b))
+	}
+	Log().Info("created flume-agent-models index")
+	return nil
 }

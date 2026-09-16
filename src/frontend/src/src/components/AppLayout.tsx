@@ -1,25 +1,33 @@
 import { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import {
-  LayoutDashboard, FolderKanban, ListTodo, Bot, Activity, BarChart3,
-  Settings, ChevronLeft, ChevronRight, Zap, Radar, Sun, Moon, Shield, ServerCog, MessageSquareCode, Server
+  LayoutDashboard, FolderKanban, ListTodo, BarChart3,
+  Settings, ChevronLeft, ChevronRight, Zap, Radar, Sun, Moon, Shield, MessageSquareCode, Server
 } from 'lucide-react';
 import { SidebarNavItem } from '@/components/SidebarNavItem';
 import { MeshBackground } from '@/components/MeshBackground';
 import { SnapshotErrorBanner } from '@/components/SnapshotErrorBanner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTheme } from '@/hooks/useTheme';
+import { isCoreUI } from '@/lib/core';
 
-const navItems = [
+const fullNavItems = [
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
   { to: '/mission-control', icon: Radar, label: 'Mission Control' },
   { to: '/projects', icon: FolderKanban, label: 'Projects' },
   { to: '/queue', icon: ListTodo, label: 'Work Queue' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
-
   { to: '/nodes', icon: Server, label: 'Node Mesh' },
   { to: '/security', icon: Shield, label: 'Security' },
 ];
+
+const coreNavItems = [
+  { to: '/', icon: LayoutDashboard, label: 'Overview' },
+  { to: '/nodes', icon: Server, label: 'Nodes' },
+  { to: '/chat', icon: MessageSquareCode, label: 'Chat' },
+];
+
+const navItems = isCoreUI ? coreNavItems : fullNavItems;
 
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
@@ -99,12 +107,16 @@ export function AppLayout() {
 
       {/* Main */}
       <main className="flex-1 relative z-10 overflow-auto flex flex-col">
-        <SnapshotErrorBanner />
+        {!isCoreUI && <SnapshotErrorBanner />}
         <div className="flex-1">
           <Outlet />
         </div>
         <footer className="px-6 py-3 border-t border-border text-xs text-muted-foreground flex items-center justify-center text-center">
-          <span>Flume: multi-agent planning, implementation, and review.</span>
+          <span>
+            {isCoreUI
+              ? 'Flume core: OpenBao, Elasticsearch, Gateway, console.'
+              : 'Flume: multi-agent planning, implementation, and review.'}
+          </span>
         </footer>
       </main>
     </div>

@@ -1,12 +1,17 @@
 import { createRoot } from "react-dom/client";
-import App from "./App.tsx";
 import "./index.css";
 import { flushLogs, createLogger } from "@/utils/logger";
 
 const log = createLogger('main');
 
-// Flush buffered LogLoom entries before the page unloads to prevent data loss.
 window.addEventListener('beforeunload', flushLogs);
 
-log.info('bootstrap', 'Flume Dashboard initializing');
-createRoot(document.getElementById("root")!).render(<App />);
+async function boot() {
+  const mod = import.meta.env.VITE_CORE_UI === "true"
+    ? await import("./App.core")
+    : await import("./App");
+  log.info('bootstrap', import.meta.env.VITE_CORE_UI === "true" ? 'Flume core console initializing' : 'Flume Dashboard initializing');
+  createRoot(document.getElementById("root")!).render(<mod.default />);
+}
+
+void boot();

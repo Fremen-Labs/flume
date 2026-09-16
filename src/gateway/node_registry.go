@@ -655,11 +655,27 @@ func (r *NodeRegistry) EnsureIndex(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		return nil // index exists
+		return nil
 	}
 
-	log.Warn("flume-node-registry index not found — expected to be pre-created by `flume start`")
-	return fmt.Errorf("flume-node-registry index missing — run `flume start` to bootstrap")
+	body := `{"settings":{"number_of_replicas":0},"mappings":{"properties":{"id":{"type":"keyword"},"host":{"type":"keyword"},"model_tag":{"type":"keyword"},"capabilities":{"type":"object","enabled":true},"health":{"type":"object","enabled":true},"concurrency_cap":{"type":"integer"},"auth_secret_path":{"type":"keyword"},"updated_at":{"type":"date"}}}}`
+	put, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	put.Header.Set("Content-Type", "application/json")
+	esSetAuth(put)
+	putResp, err := r.httpClient.Do(put)
+	if err != nil {
+		return err
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(putResp.Body, 512))
+		return fmt.Errorf("create flume-node-registry: HTTP %d: %s", putResp.StatusCode, string(b))
+	}
+	log.Info("created flume-node-registry index")
+	return nil
 }
 
 // AutoRepairModelTag atomically corrects the primary model tag of a node

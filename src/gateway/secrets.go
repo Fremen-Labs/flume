@@ -122,6 +122,10 @@ func (s *SecretStore) GetGlobalSecrets(ctx context.Context) map[string]string {
 	log := WithContext(ctx)
 	data, err := s.readKV(ctx, "secret/data/flume/keys")
 	if err != nil {
+		if strings.Contains(err.Error(), "secret not found") {
+			log.Info("no global secrets stored in OpenBao yet")
+			return nil
+		}
 		log.Warn("failed to read global secrets from OpenBao",
 			slog.String("error", err.Error()),
 		)

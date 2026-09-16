@@ -734,7 +734,11 @@ func (s *Server) writeStreamingChat(w http.ResponseWriter, ctx context.Context, 
 func StartGateway(addr string) error {
 	InitLogger()
 	log := Log()
-	log.Info("initializing flume-gateway", slog.String("version", "1.0.0"))
+	stub := GatewayStubMode()
+	log.Info("initializing flume-gateway",
+		slog.String("version", "1.0.0"),
+		slog.Bool("stub", stub),
+	)
 
 	// Inject the secure gateway logger into the skills bridge
 	skillslog.SetLogger(log)
@@ -744,37 +748,43 @@ func StartGateway(addr string) error {
 
 	ctx := ContextWithLogger(context.Background(), log)
 
-	// Pre-warm config from ES
-	config.Refresh(ctx)
+	if stub {
+		log.Info("gateway stub mode: skipping Elasticsearch and OpenBao bootstrap")
+	} else {
+		// Pre-warm config from ES
+		config.Refresh(ctx)
 
-	// Hydrate global secrets from OpenBao on startup
-	secrets.GetGlobalSecrets(ctx)
+		// Hydrate global secrets from OpenBao on startup
+		secrets.GetGlobalSecrets(ctx)
 
-	// Ensure agent-models index exists
-	if err := config.EnsureAgentModelsIndex(ctx); err != nil {
-		log.Warn("flume-agent-models index verification failed — index should be pre-created by `flume start`",
-			slog.String("error", err.Error()),
-		)
+		// Ensure agent-models index exists
+		if err := config.EnsureAgentModelsIndex(ctx); err != nil {
+			log.Warn("flume-agent-models index verification failed — index should be pre-created by `flume start`",
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	server := NewServer(config, secrets)
 
 	// ── Distributed Node Mesh initialization ────────────────────────────
 	esURL := os.Getenv("ES_URL")
-	if esURL == "" {
+	if esURL == "" && !stub {
 		esURL = "http://elasticsearch:9200"
 	}
 	server.nodeRegistry = NewNodeRegistry(esURL, secrets)
 
-	// Ensure the node registry ES index exists.
-	if err := server.nodeRegistry.EnsureIndex(ctx); err != nil {
-		log.Warn("failed to ensure node-registry index",
-			slog.String("error", err.Error()),
-		)
-	}
+	if !stub {
+		// Ensure the node registry ES index exists.
+		if err := server.nodeRegistry.EnsureIndex(ctx); err != nil {
+			log.Warn("failed to ensure node-registry index",
+				slog.String("error", err.Error()),
+			)
+		}
 
-	// Load nodes from ES.
-	server.nodeRegistry.RefreshFromES(ctx)
+		// Load nodes from ES.
+		server.nodeRegistry.RefreshFromES(ctx)
+	}
 	nodeCount := server.nodeRegistry.Count()
 	log.Info("node mesh initialized",
 		slog.Int("registered_nodes", nodeCount),
@@ -805,6 +815,7 @@ func StartGateway(addr string) error {
 	server.multiRouter = NewMultiNodeRouter(server.router, server.nodeRegistry, config)
 
 	// Register node mesh API endpoints.
+	server.mux.HandleFunc("GET /api/stack", server.handleStack)
 	server.mux.HandleFunc("GET /api/nodes", server.handleGetNodes)
 	server.mux.HandleFunc("POST /api/nodes", server.handleAddNode)
 	server.mux.HandleFunc("POST /api/nodes/{id}/test", server.handleTestNode)
@@ -885,6 +896,73 @@ func shortID() string {
 // ─────────────────────────────────────────────────────────────────────────────
 // Node Mesh API Handlers
 // ─────────────────────────────────────────────────────────────────────────────
+
+type stackDep struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// handleStack reports reachability of the core dependencies (ES + OpenBao).
+// Used by the stripped console overview. Failures are returned as status=down
+// rather than HTTP 5xx so the UI can render a degraded stack without treating
+// the gateway itself as unhealthy.
+func (s *Server) handleStack(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	nodes := 0
+	if s.nodeRegistry != nil {
+		nodes = s.nodeRegistry.Count()
+	}
+
+	es := stackDep{Status: "skipped"}
+	if s.config != nil && s.config.esURL != "" {
+		if _, err := s.config.esGet(ctx, "/_cluster/health"); err != nil {
+			es = stackDep{Status: "down", Error: err.Error()}
+		} else {
+			es = stackDep{Status: "ok"}
+		}
+	}
+
+	bao := stackDep{Status: "skipped"}
+	addr := strings.TrimSpace(os.Getenv("OPENBAO_ADDR"))
+	if addr == "" && !GatewayStubMode() {
+		addr = "http://openbao:8200"
+	}
+	if addr != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(addr, "/")+"/v1/sys/health", nil)
+		if err != nil {
+			bao = stackDep{Status: "down", Error: err.Error()}
+		} else {
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				bao = stackDep{Status: "down", Error: err.Error()}
+			} else {
+				io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+				resp.Body.Close()
+				switch resp.StatusCode {
+				case http.StatusOK, http.StatusTooManyRequests, 473:
+					bao = stackDep{Status: "ok"}
+				case 501:
+					bao = stackDep{Status: "uninitialized"}
+				case http.StatusServiceUnavailable:
+					bao = stackDep{Status: "sealed"}
+				default:
+					bao = stackDep{Status: "down", Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+				}
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"service":        "flume-core",
+		"gateway":        stackDep{Status: "ok"},
+		"elasticsearch":  es,
+		"openbao":        bao,
+		"nodes":          nodes,
+	})
+}
 
 // handleGetNodes returns the list of all registered nodes (AuthToken redacted).
 func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {

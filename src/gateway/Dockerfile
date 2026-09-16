@@ -16,8 +16,11 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy gateway source
+# Gateway imports internal/logger (which imports internal/es) in addition to
+# src/gateway. Both packages must be in the build context or `go build` fails.
 COPY src/gateway/ ./src/gateway/
+COPY internal/logger/ ./internal/logger/
+COPY internal/es/ ./internal/es/
 
 # Build static binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
