@@ -18,7 +18,7 @@ COPY src/frontend/src/ ./
 RUN npm run build
 
 # ── Stage 2: Build the Go binary ────────────────────────────────────────────
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 # hadolint ignore=DL3018
 RUN apk add --no-cache git ca-certificates

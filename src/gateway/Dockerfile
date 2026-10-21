@@ -5,7 +5,7 @@
 # Alpine base provides wget for healthcheck without adding bloat.
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM golang:1.24.2-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 # hadolint ignore=DL3018
 RUN apk add --no-cache git
